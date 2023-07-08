@@ -1,0 +1,4 @@
+[paths]
+db_path = "/path/to/db"
+blk_dir = "/path/to/block/files"
+ldb_dir = "/path/to/blocks/index"

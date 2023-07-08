@@ -1,20 +1,20 @@
 use std::fs;
-use fs2::FileExt;
-use std::fs::{File};
-use std::io::{self, Read, BufRead, SeekFrom, Seek, Cursor};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::convert::TryInto;
 use std::fmt;
-use hex::ToHex;
+
+use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
 use rocksdb::{DB, Options};
-use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
+
 use bitcoin::consensus::encode::{Decodable, VarInt};
-use bitcoin::consensus::deserialize;
-use bitcoin::Transaction;
+use config::{Config, File as ConfigFile};
+use fs2::FileExt;
+use leveldb::database::Database;
 use leveldb::iterator::Iterable;
-use leveldb::{database::Database, kv::KV};
-use leveldb::{options::Options as LevelDBOptions, options::ReadOptions as LevelDBReadOptions};
+use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOptions};
 struct Hash([u8; 32]);
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
@@ -206,15 +206,27 @@ impl std::fmt::Debug for VShieldOutput {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load the configuration file
+    let mut config = Config::default();
+    config.merge(ConfigFile::with_name("config.toml"))?;
+    let paths = config.get_table("paths")?;
+
     // Open DB
-    let db_path = "/Users/liquid369/Projects/blkparser-db";
+    let db_path: &str = &paths
+        .get("db_path")
+        .and_then(|value| value.to_owned().into_string().ok())
+        .ok_or("Missing or invalid db_path in config.toml")?;
+
     let _db = DB::open_default(db_path)?;
 
-    // Path/Directory for blk files
-    let blk_dir = "/Users/liquid369/Library/Application Support/PIVX1/blocks";
+    // Path for blk files
+    let blk_dir: &str = &paths
+        .get("blk_dir")
+        .and_then(|value| value.to_owned().into_string().ok())
+        .ok_or("Invalid blk_dir in config.toml")?;
 
-    // Read directory entries
-    let dir = fs::read_dir(blk_dir)?;
+    let dir = fs::read_dir(blk_dir)
+    .map_err(|err| format!("Failed to read directory entries: {}", err))?;
 
     // Keep track of processed files
     let mut processed_files = Vec::new();
@@ -243,11 +255,9 @@ fn process_blk_file(file_path: impl AsRef<Path>) -> io::Result<()> {
     let mut file = File::open(file_path)?;
     // Set buffers for prefix, size
     let mut prefix_buffer = [0u8; 4];
-    let mut next_prefix_position: Option<u64> = None;
     let mut size_buffer = [0u8; 4];
     // Counting positions for loop
     let mut stream_position = 0;
-    let mut stream_count = 0;
 
     loop {
         let mut reader = io::BufReader::new(&file);
@@ -262,7 +272,7 @@ fn process_blk_file(file_path: impl AsRef<Path>) -> io::Result<()> {
         // Check if the prefix matches
         if prefix_buffer != PREFIX {
             // Find the next prefix
-            let mut next_prefix = [0u8; 4];
+            let _next_prefix = [0u8; 4];
             let mut prefix_found = false;
 
             while !prefix_found {
@@ -505,7 +515,7 @@ fn read_varint<R: Read>(reader: &mut R) -> io::Result<u64> {
 
 fn read_4_bytes(reader: &mut dyn BufRead) -> io::Result<[u8; 4]> {
     let mut buffer = [0u8; 4];
-    let mut peek_buffer = reader.fill_buf()?;
+    let peek_buffer = reader.fill_buf()?;
     if peek_buffer.len() < 4 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -657,7 +667,13 @@ fn parse_payload_data(reader: &mut io::BufReader<&File>) -> Result<Option<Vec<u8
 }
 
 fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Option<u32> {
-    let ldb_files_dir = "/Users/liquid369/Library/Application Support/PIVX1/blocks/index";
+    let mut config = Config::default();
+    config.merge(ConfigFile::with_name("config.toml")).ok()?;
+
+    let paths = config.get_table("paths").ok()?;
+    let ldb_files_dir = paths.get("ldb_files_dir")
+        .and_then(|value| value.to_owned().into_string().ok())
+        .ok_or("Missing or invalid ldb_files_dir in config.toml").ok()?;
 
     let lock_file = File::create(&format!("{}.lock", ldb_files_dir)).expect("Failed to create lock file");
 
