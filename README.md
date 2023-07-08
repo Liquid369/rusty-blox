@@ -6,8 +6,10 @@ This repository contains code for parsing and processing PIVX block data. It inc
 
 Before running the code, make sure you have the following installed:
 
-- Rust (Programming language)
-- RocksDB (Database)
+- Rust (version 1.51 or higher)
+- Cargo (Rust's package manager)
+- LevelDB (dependency for reading LevelDB database files)
+- RocksDB (dependency for accessing RocksDB databases)
 
 ## Installation
 
@@ -23,6 +25,15 @@ Build the project using Cargo:
 `cargo build --release`
 
 ## Usage
+
+The program requires a configuration file named config.toml to be present in the same directory. The configuration file specifies the paths to the block files and database files.
+
+`# config.toml
+
+[paths]
+db_path = "/path/to/database.db"
+blk_dir = "/path/to/block/files"
+ldb_files_dir = "/path/to/leveldb/files"`
 
 To use the block parser, follow these steps:
 
@@ -45,3 +56,11 @@ The program uses a RocksDB database to store the parsed block data. The database
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Contributing
+
+Contributions are welcome! If you find any issues or have suggestions for improvements, please open an issue or submit a pull request.
+
+```
+Please make sure to update the installation instructions, usage information, and license section as needed.
+```
