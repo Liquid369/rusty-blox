@@ -646,7 +646,7 @@ fn parse_payload_data(reader: &mut io::BufReader<&File>) -> Result<Option<Vec<u8
     }
 
     // Adjust the byte count to exclude the PREFIX sequence
-    if prefix_found {
+    if prefix_found && byte_count >= PREFIX.len() {
         byte_count -= PREFIX.len();
     }
 
