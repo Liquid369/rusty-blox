@@ -473,7 +473,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         };
 
         // Only transaction version 2's have extra_payloads
-        let payload_data: Option<Vec<u8>> = if tx_ver_out == 2 {
+        let payload_data: Option<Vec<u8>> = if tx_ver_out == 2 && block_version >=8 {
             parse_payload_data(reader)?
         } else {
             None
