@@ -108,6 +108,7 @@ impl std::fmt::Debug for CBlockHeader {
     // Formatting for CBlockHeader
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Block Header {{")?;
+        writeln!(f, "Block Height {}", self.block_height)?;
         writeln!(f, "Block Version: {}", self.n_version)?;
         writeln!(f, "Previous Block Hash: {:x}", Hash(self.hash_prev_block))?;
         writeln!(f, "Merkle Root: {:x}", Hash(self.hash_merkle_root))?;
