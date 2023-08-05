@@ -667,77 +667,44 @@ fn parse_payload_data(reader: &mut io::BufReader<&File>) -> Result<Option<Vec<u8
     }
 }
 
-fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Option<u32> {
+fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<u32>, Box<dyn Error>> {
+    // Load the configuration
     let mut config = Config::default();
-    config.merge(ConfigFile::with_name("config.toml")).ok()?;
+    config.merge(ConfigFile::with_name("config.toml"))?;
+    let ldb_files_dir = config.get::<String>("paths.ldb_files_dir")?;
+    let ldb_files_path = std::path::Path::new(&ldb_files_dir);
 
-    let paths = config.get_table("paths").ok()?;
-    let ldb_files_dir = paths.get("ldb_files_dir")
-        .and_then(|value| value.to_owned().into_string().ok())
-        .ok_or("Missing or invalid ldb_files_dir in config.toml").ok()?;
+    // Open the LevelDB database
+    let options = LevelDBOptions::new();
+    let database: Database<i32> = Database::open(ldb_files_path, options)?;
 
-    let lock_file = File::create(&format!("{}.lock", ldb_files_dir)).expect("Failed to create lock file");
+    // Create the prefix
+    let mut prefix = vec![b'b'];
+    prefix.extend_from_slice(hash_prev_block);
 
-    // Acquire an exclusive lock on the lock file
-    lock_file.lock_exclusive().expect("Failed to acquire lock");
-    // Get a list of .ldb files in the directory
-    let ldb_files = fs::read_dir(ldb_files_dir)
-        .expect("Failed to read directory")
-        .filter_map(|entry| {
-            let path = entry.expect("Failed to read directory entry").path();
-            if path.is_file() && path.extension().map(|ext| ext == "ldb").unwrap_or(false) {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+    // Get a LevelDB iterator
+    let read_options = LevelDBReadOptions::new();
+    let mut iter = database.iter(read_options);
 
-    println!("Found {} .ldb files:", ldb_files.len());
-    for ldb_file in &ldb_files {
-        println!("{}", ldb_file.display());
-    }
-
-    // Iterate over each .ldb file and perform the lookup
-    for ldb_file in ldb_files {
-        //let ldb_path = ldb_file.path();
-        println!("Processing file: {}", ldb_file.display());
-
-        // Open the LevelDB database
-        let mut options = LevelDBOptions::new();
-        options.create_if_missing = false; // Set to true if you want to create the database if it doesn't exist
-        let database: Database<i32> = Database::open(&ldb_file, options).unwrap();
-
-        // Construct the prefix for LevelDB
-        let mut prefix = vec![b'b'];
-        prefix.extend_from_slice(hash_prev_block);
-
-        // Lookup the value from LevelDB
-        let read_options = LevelDBReadOptions::new();
-        let iterator = database.iter(read_options);
-        for (key, value) in iterator {
-            // Filter based on prefix
-            let key_bytes = key.to_ne_bytes();
-            let prefix_bytes = &prefix[..];
-
-            if key_bytes.starts_with(prefix_bytes) {
-                // Process pair found
-                let mut cursor = Cursor::new(value);
-                // Read header to get to height serialized
-                let mut header_bytes = vec![0u8; header_size];
-                if cursor.read_exact(&mut header_bytes).is_ok() {
-                    // Read the block height and return
-                    if let Ok(block_height) = cursor.read_u32::<LittleEndian>() {
-                        return Some(block_height);
-                    }
-                }
+    // Process each key-value pair
+    for (key, value) in iter {
+        if key.to_le_bytes().starts_with(&prefix) {
+            // Parse the value as a block and get the block height
+            let block_height = parse_ldb_block(&value, header_size)?;
+            if block_height.is_some() {
+                return Ok(block_height);
             }
         }
     }
-    // Release the lock on the lock file
-    lock_file.unlock().expect("Failed to release lock");
 
-    // Return None if no matching pair is found in any database
-    None
+    Ok(None)
+}
+
+fn parse_ldb_block(block: &[u8], header_size: usize) -> Result<Option<u32>, Box<dyn Error>> {
+    let mut cursor = Cursor::new(block);
+    let mut header_bytes = vec![0; header_size];
+    cursor.read_exact(&mut header_bytes)?;
+    let block_height = cursor.read_u32::<LittleEndian>();
+
+    Ok(Some(block_height.unwrap_or(0)))
 }
