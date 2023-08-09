@@ -676,7 +676,13 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
 
     // Open the LevelDB database
     let options = LevelDBOptions::new();
-    let database: Database<i32> = Database::open(ldb_files_path, options)?;
+    let database = match Database::<i32>::open(ldb_files_path, options) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Error opening database: {:?}", e);
+            return Err(Box::new(e));
+        }
+    };
 
     // Create the prefix
     let mut prefix = vec![b'b'];
