@@ -1,11 +1,13 @@
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::convert::TryInto;
 use std::fmt;
+use std::error::Error;
+use core::borrow::Borrow;
 
-use byteorder::{LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian, ReadBytesExt, ByteOrder};
 use hex;
 use rocksdb::{DB, Options};
 
@@ -14,11 +16,46 @@ use config::{Config, File as ConfigFile};
 use fs2::FileExt;
 use leveldb::database::Database;
 use leveldb::iterator::Iterable;
+use leveldb::iterator::LevelDBIterator;
+use leveldb::kv::KV;
 use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOptions};
 struct Hash([u8; 32]);
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 const MAX_PAYLOAD_SIZE: usize = 10000;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Byte32([u8; 32]);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Byte33([u8; 33]);
+
+impl Borrow<Byte32> for Byte33 {
+    fn borrow(&self) -> &Byte32 {
+        // SAFETY: Transmuting a &Byte32 from &[u8; 32] slice from &[u8; 33] is safe.
+        unsafe { &*(self.0[1..].as_ptr() as *const Byte32) }
+    }
+}
+
+impl std::fmt::Debug for Byte32 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // For simplicity, just format it as bytes for now.
+        write!(f, "Byte32({:x?})", &self.0)
+    }
+}
+
+impl db_key::Key for Byte32 {
+    fn from_u8(key: &[u8]) -> Self {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(key);
+        Byte32(arr)
+    }
+
+    fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
+        let Byte32(inner) = self;
+        f(&inner[..])
+    }
+}
 
 impl fmt::LowerHex for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -365,7 +402,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         reader.read_exact(&mut buf).unwrap();
         buf
     };
-    let block_height = read_ldb_block(&hash_prev_block, header_size).unwrap_or(0);
+    let block_height = read_ldb_block(&hash_prev_block, header_size).unwrap_or(None);
     // Read merkle root
     let hash_merkle_root = {
         let mut buf = [0u8; 32];
@@ -391,6 +428,8 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => (None, None), // Default case
     };
 
+    let block_height = block_height.unwrap_or(0);
+
     // Create CBlockHeader
     CBlockHeader {
         n_version,
@@ -408,7 +447,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
 fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32) -> Result<(), io::Error> {
     // Read Tx Amount
     let tx_amt = read_varint(reader)?;
-    println!("TxAmt: {:?}", tx_amt);
+    //println!("TxAmt: {:?}", tx_amt);
     for _ in 0..tx_amt {
         // Tx Version
         let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
@@ -438,7 +477,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
 
         // Read the output count
         let output_count = read_varint(reader)?;
-        println!("Outputs: {:?}", output_count);
+        //println!("Outputs: {:?}", output_count);
 
         // Read the outputs
         let mut outputs = Vec::new();
@@ -491,7 +530,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
             extra_payload: extra_payload,
         };
 
-        println!("{:?}", transaction);
+        //println!("{:?}", transaction);
     }
     Ok(())
 }
@@ -671,12 +710,12 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
     // Load the configuration
     let mut config = Config::default();
     config.merge(ConfigFile::with_name("config.toml"))?;
-    let ldb_files_dir = config.get::<String>("paths.ldb_files_dir")?;
+    let ldb_files_dir = config.get::<String>("paths.ldb_dir")?;
     let ldb_files_path = std::path::Path::new(&ldb_files_dir);
 
     // Open the LevelDB database
     let options = LevelDBOptions::new();
-    let database = match Database::<i32>::open(ldb_files_path, options) {
+    let database = match Database::<Byte32>::open(ldb_files_path, options) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("Error opening database: {:?}", e);
@@ -684,23 +723,35 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
         }
     };
 
-    // Create the prefix
-    let mut prefix = vec![b'b'];
-    prefix.extend_from_slice(hash_prev_block);
+    // Create the key
+    let hex_string: String = hash_prev_block.iter()
+    .map(|byte| format!("{:02x}", byte))
+    .collect();
 
-    // Get a LevelDB iterator
+    let bytes = hex::decode(&hex_string).expect("Decoding hex failed");
+
+    // Adjust to the correct size
+    let mut key: [u8; 33] = [0; 33];
+    key[0] = b'b';
+    key[1..].copy_from_slice(&bytes);
+
+    // Take the last 32 bytes, and reverse them for little endian format
+    let little_endian_key: Vec<u8> = key[1..].to_vec().into_iter().rev().collect();
+
+    // Use the prefixed bytes to look up the value in the LevelDB database.
+    let key = Byte33(key);
     let read_options = LevelDBReadOptions::new();
-    let mut iter = database.iter(read_options);
-
-    // Process each key-value pair
-    for (key, value) in iter {
-        if key.to_le_bytes().starts_with(&prefix) {
-            // Parse the value as a block and get the block height
-            let block_height = parse_ldb_block(&value, header_size)?;
-            if block_height.is_some() {
-                return Ok(block_height);
-            }
+    match database.get(read_options, key.clone()) {
+        Ok(Some(value)) => {
+            println!("Key: {:x?}\nValue: {:?}", key, value);
         }
+        Ok(None) => {
+            println!("Block not found for key: {:x?}", key);
+        }
+        Err(e) => {
+            println!("Error reading from database: {:?}", e);
+            return Err(Box::new(e));
+        },
     }
 
     Ok(None)
