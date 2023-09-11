@@ -25,9 +25,6 @@ struct Hash([u8; 32]);
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 const MAX_PAYLOAD_SIZE: usize = 10000;
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct Byte32([u8; 32]);
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Byte33([u8; 33]);
 
@@ -63,7 +60,7 @@ impl fmt::LowerHex for Hash {
 
 pub struct CBlockHeader {
     pub n_version: u32,
-    pub block_height: u32,
+    pub block_height: Option<i32>,
     pub hash_prev_block: [u8; 32],
     pub hash_merkle_root: [u8; 32],
     pub n_time: u32,
@@ -140,7 +137,11 @@ impl std::fmt::Debug for CBlockHeader {
     // Formatting for CBlockHeader
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Block Header {{")?;
-        writeln!(f, "Block Height {}", self.block_height)?;
+        if let Some(block_height) = &self.block_height {
+            writeln!(f, "Block Height: {}", block_height)?;
+        } else {
+            writeln!(f, "Block Height: None")?;
+        }
         writeln!(f, "Block Version: {}", self.n_version)?;
         writeln!(f, "Previous Block Hash: {:x}", Hash(self.hash_prev_block))?;
         writeln!(f, "Merkle Root: {:x}", Hash(self.hash_merkle_root))?;
@@ -423,7 +424,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => (None, None), // Default case
     };
 
-    let block_height = block_height.unwrap_or(0);
+    let block_height = block_height;
 
     // Create CBlockHeader
     CBlockHeader {
@@ -701,7 +702,7 @@ fn parse_payload_data(reader: &mut io::BufReader<&File>) -> Result<Option<Vec<u8
     }
 }
 
-fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<u32>, Box<dyn Error>> {
+fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
     // Load the configuration
     let mut config = Config::default();
     config.merge(ConfigFile::with_name("config.toml"))?;
@@ -725,26 +726,93 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
 
     // Get the value from the database.
     let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
-    match database.get(read_options, key) {
+    let height = match database.get(read_options, key) {
         Ok(Some(value)) => {
-            println!("Found value: {:?}", &value);
+            let value_str = hex::encode(&value);
+            match parse_ldb_block(&value) {
+                Ok(Some(height)) => {
+                    Some(height)
+                },
+                Ok(None) => {
+                    None
+                },
+                Err(e) => {
+                    println!("Error while parsing block: {:?}", e);
+                    return Err(e);
+                }
+            }
         }
         Ok(None) => {
             println!("Key not found in database.");
+            None
         }
         Err(e) => {
             println!("Error reading from database: {:?}", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    Ok(height)
+}
+
+// Bitcoin normal varint
+pub fn read_varint2<R: Read + ?Sized>(reader: &mut R) -> io::Result<u64> {
+    let first = reader.read_u8()?; // read first length byte
+    let value = match first {
+        0x00..=0xfc => u64::from(first),
+        0xfd => u64::from(reader.read_u16::<LittleEndian>()?),
+        0xfe => u64::from(reader.read_u32::<LittleEndian>()?),
+        0xff => reader.read_u64::<LittleEndian>()?,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid varint")),
+    };
+    Ok(value)
+}
+
+// Bitcoin varint128
+fn read_varint128(data: &[u8]) -> (usize, u64) {
+    let mut index = 0;
+    let mut value: u64 = 0;
+    let mut byte: u8;
+
+    loop {
+        byte = data[index];
+        index += 1;
+        
+        value = (value << 7) | (byte & 0x7F) as u64;
+        
+        if (byte & 0x80) != 0 {
+            value += 1;
+        }
+
+        if (byte & 0x80) == 0 {
+            break;
         }
     }
 
-    Ok(None)
+    (index, value)
 }
 
-fn parse_ldb_block(block: &[u8], header_size: usize) -> Result<Option<u32>, Box<dyn Error>> {
-    let mut cursor = Cursor::new(block);
-    let mut header_bytes = vec![0; header_size];
-    cursor.read_exact(&mut header_bytes)?;
-    let block_height = cursor.read_u32::<LittleEndian>();
+fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, Box<dyn Error>> {
+    // Get the slice starting from the 0 position
+    let remaining_data = &block[0..];
 
-    Ok(Some(block_height.unwrap_or(0)))
+    // Read version
+    let (bytes_consumed_for_version, version) = read_varint128(remaining_data);
+
+    // After reading the version, move to the next unread part of remaining_data
+    let next_data = &remaining_data[bytes_consumed_for_version..];
+
+    // Read block height using read_varint128 function
+    let (_, block_height) = read_varint128(next_data);
+
+    // Increment the block height
+    let incremented_block_height = match block_height.checked_add(1) {
+        Some(val) => val,
+        None => return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Block height overflow when incremented.",
+        ))),
+    };
+
+    Ok(Some(incremented_block_height.try_into()?))
 }
