@@ -18,6 +18,7 @@ use leveldb::database::Database;
 use leveldb::iterator::Iterable;
 use leveldb::iterator::LevelDBIterator;
 use leveldb::kv::KV;
+use db_key::Key;
 use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOptions};
 struct Hash([u8; 32]);
 
@@ -30,29 +31,23 @@ pub struct Byte32([u8; 32]);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Byte33([u8; 33]);
 
-impl Borrow<Byte32> for Byte33 {
-    fn borrow(&self) -> &Byte32 {
-        // SAFETY: Transmuting a &Byte32 from &[u8; 32] slice from &[u8; 33] is safe.
-        unsafe { &*(self.0[1..].as_ptr() as *const Byte32) }
+impl Borrow<Byte33> for [u8; 33] {
+    fn borrow(&self) -> &Byte33 {
+        // SAFETY: This transmutes a &[u8; 33] slice into a &Byte33.
+        // This is safe as the memory layouts are identical.
+        unsafe { &*(self.as_ptr() as *const Byte33) }
     }
 }
 
-impl std::fmt::Debug for Byte32 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // For simplicity, just format it as bytes for now.
-        write!(f, "Byte32({:x?})", &self.0)
-    }
-}
-
-impl db_key::Key for Byte32 {
+impl db_key::Key for Byte33 {
     fn from_u8(key: &[u8]) -> Self {
-        let mut arr = [0u8; 32];
+        let mut arr = [0u8; 33];
         arr.copy_from_slice(key);
-        Byte32(arr)
+        Byte33(arr)
     }
 
     fn as_slice<T, F: Fn(&[u8]) -> T>(&self, f: F) -> T {
-        let Byte32(inner) = self;
+        let Byte33(inner) = self;
         f(&inner[..])
     }
 }
@@ -715,7 +710,7 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
 
     // Open the LevelDB database
     let options = LevelDBOptions::new();
-    let database = match Database::<Byte32>::open(ldb_files_path, options) {
+    let database: Database<Byte33> = match Database::open(ldb_files_path, options) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("Error opening database: {:?}", e);
@@ -724,34 +719,22 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
     };
 
     // Create the key
-    let hex_string: String = hash_prev_block.iter()
-    .map(|byte| format!("{:02x}", byte))
-    .collect();
-
-    let bytes = hex::decode(&hex_string).expect("Decoding hex failed");
-
-    // Adjust to the correct size
-    let mut key: [u8; 33] = [0; 33];
+    let mut key = [0u8; 33];  // 'b' + 32 bytes
     key[0] = b'b';
-    key[1..].copy_from_slice(&bytes);
+    key[1..].copy_from_slice(&hash_prev_block[..]);
 
-    // Take the last 32 bytes, and reverse them for little endian format
-    let little_endian_key: Vec<u8> = key[1..].to_vec().into_iter().rev().collect();
-
-    // Use the prefixed bytes to look up the value in the LevelDB database.
-    let key = Byte33(key);
-    let read_options = LevelDBReadOptions::new();
-    match database.get(read_options, key.clone()) {
+    // Get the value from the database.
+    let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
+    match database.get(read_options, key) {
         Ok(Some(value)) => {
-            println!("Key: {:x?}\nValue: {:?}", key, value);
+            println!("Found value: {:?}", &value);
         }
         Ok(None) => {
-            println!("Block not found for key: {:x?}", key);
+            println!("Key not found in database.");
         }
         Err(e) => {
             println!("Error reading from database: {:?}", e);
-            return Err(Box::new(e));
-        },
+        }
     }
 
     Ok(None)
