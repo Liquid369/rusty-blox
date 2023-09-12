@@ -411,6 +411,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     if let Err(e) = reader.read_exact(&mut header_buffer) {
         eprintln!("Error while reading header buffer: {:?}", e);
     }
+    println!("Header Buffer: {:?}", hex::encode(&header_buffer));
     // Start hashing header for block_hash
     let first_hash = Sha256::digest(&header_buffer);
     let block_hash = Sha256::digest(&first_hash);
