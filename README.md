@@ -28,12 +28,13 @@ Build the project using Cargo:
 
 The program requires a configuration file named config.toml to be present in the same directory. The configuration file specifies the paths to the block files and database files.
 
-`# config.toml
+## config.toml
 
-[paths]
+```[paths]
 db_path = "/path/to/database.db"
 blk_dir = "/path/to/block/files"
-ldb_files_dir = "/path/to/leveldb/files"`
+ldb_files_dir = "/path/to/leveldb/files"
+```
 
 To use the block parser, follow these steps:
 
