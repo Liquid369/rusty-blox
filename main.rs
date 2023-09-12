@@ -61,6 +61,7 @@ impl fmt::LowerHex for Hash {
 
 pub struct CBlockHeader {
     pub n_version: u32,
+    pub block_hash: [u8; 32],
     pub block_height: Option<i32>,
     pub hash_prev_block: [u8; 32],
     pub hash_merkle_root: [u8; 32],
@@ -246,7 +247,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.merge(ConfigFile::with_name("config.toml"))?;
     let paths = config.get_table("paths")?;
 
-    // Open DB
+    // Open RocksDB
     let db_path: &str = &paths
         .get("db_path")
         .and_then(|value| value.to_owned().into_string().ok())
@@ -254,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _db = DB::open_default(db_path)?;
 
-    // Path for blk files
+    // Path for blk files "blocks" folder
     let blk_dir: &str = &paths
         .get("blk_dir")
         .and_then(|value| value.to_owned().into_string().ok())
@@ -275,7 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if processed_files.contains(&file_path) {
                         continue; // Skip already processed files
                     }
-                    process_blk_file(&file_path)?;
+                    process_blk_file(&file_path, &_db)?;
                     processed_files.push(file_path.clone());
                 }
             }
@@ -285,7 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn process_blk_file(file_path: impl AsRef<Path>) -> io::Result<()> {
+fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
     // Open file
     let mut file = File::open(file_path)?;
     // Set buffers for prefix, size
@@ -375,6 +376,11 @@ fn process_blk_file(file_path: impl AsRef<Path>) -> io::Result<()> {
         let block_header = parse_block_header(&header_buffer, header_size);
         println!("{:?}", block_header);
 
+        // Write to RocksDB
+        let mut key = vec![b'b'];
+        key.extend_from_slice(&block_header.block_hash);
+        _db.put(&key, &header_buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
         // Process and print tx data
         process_transaction(&mut reader, ver_as_int)?;
 
@@ -408,8 +414,10 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Start hashing header for block_hash
     let first_hash = Sha256::digest(&header_buffer);
     let block_hash = Sha256::digest(&first_hash);
+    // Reverse final hash
+    let reversed_hash: Vec<_> = block_hash.iter().rev().cloned().collect();
     // Test print hash
-    println!("Block hash: {:?}", hex::encode(&block_hash));
+    println!("Block hash: {:?}", hex::encode(&reversed_hash));
     // Return to original position to start breaking down header
     if let Err(e) = reader.seek(SeekFrom::Start(current_position)) {
         eprintln!("Error while seeking: {:?}", e);
@@ -454,6 +462,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Create CBlockHeader
     CBlockHeader {
         n_version,
+        block_hash: block_hash.into(),
         block_height,
         hash_prev_block,
         hash_merkle_root,
