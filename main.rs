@@ -6,6 +6,7 @@ use std::convert::TryInto;
 use std::fmt;
 use std::error::Error;
 use core::borrow::Borrow;
+use sha2::{Sha256, Digest};
 
 use byteorder::{LittleEndian, ReadBytesExt, ByteOrder};
 use hex;
@@ -389,6 +390,30 @@ fn process_blk_file(file_path: impl AsRef<Path>) -> io::Result<()> {
 fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Grab header bytes
     let mut reader = io::Cursor::new(slice);
+
+    // Set buffer
+    let mut header_buffer = vec![0u8; header_size];
+    // Set position
+    let current_position = match reader.seek(SeekFrom::Current(0)) {
+        Ok(pos) => pos,
+        Err(e) => {
+            eprintln!("Error while setting current position: {:?}", e);
+            0 // or some other default value or action
+        }
+    };
+    // Read buffer
+    if let Err(e) = reader.read_exact(&mut header_buffer) {
+        eprintln!("Error while reading header buffer: {:?}", e);
+    }
+    // Start hashing header for block_hash
+    let first_hash = Sha256::digest(&header_buffer);
+    let block_hash = Sha256::digest(&first_hash);
+    // Test print hash
+    println!("Block hash: {:?}", hex::encode(&block_hash));
+    // Return to original position to start breaking down header
+    if let Err(e) = reader.seek(SeekFrom::Start(current_position)) {
+        eprintln!("Error while seeking: {:?}", e);
+    }
 
     // Read block version
     let n_version = reader.read_u32::<LittleEndian>().unwrap();
