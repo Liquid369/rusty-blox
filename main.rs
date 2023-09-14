@@ -1,25 +1,21 @@
 use std::fs;
 use std::fs::File;
-use std::io::{self, BufRead, Cursor, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::io::{self, BufRead, Read, Seek, SeekFrom};
+use std::path::{Path};
 use std::convert::TryInto;
 use std::fmt;
 use std::error::Error;
 use core::borrow::Borrow;
 use sha2::{Sha256, Digest};
 
-use byteorder::{LittleEndian, ReadBytesExt, ByteOrder};
+use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
-use rocksdb::{DB, Options};
+use rocksdb::{DB};
 
 use bitcoin::consensus::encode::{Decodable, VarInt};
 use config::{Config, File as ConfigFile};
-use fs2::FileExt;
 use leveldb::database::Database;
-use leveldb::iterator::Iterable;
-use leveldb::iterator::LevelDBIterator;
 use leveldb::kv::KV;
-use db_key::Key;
 use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOptions};
 struct Hash([u8; 32]);
 
@@ -377,12 +373,19 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
         println!("{:?}", block_header);
 
         // Write to RocksDB
+        // 'b' + block_hash -> block_data
         let mut key = vec![b'b'];
         key.extend_from_slice(&block_header.block_hash);
         _db.put(&key, &header_buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // 'h' + block_height -> block_hash
+        let mut key_height = vec![b'h'];
+        let height = block_header.block_height.unwrap_or(0);
+        let height_bytes = height.to_le_bytes();
+        key_height.extend_from_slice(&height_bytes);
+        _db.put(&key_height, &block_header.block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // Process and print tx data
-        process_transaction(&mut reader, ver_as_int)?;
+        process_transaction(&mut reader, ver_as_int, &block_header.block_hash, _db)?;
 
         // Move to the next position in the stream
         let next_position = stream_position + block_size as u64 + 8; // 8 bytes for the prefix and size
@@ -475,11 +478,13 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     }
 }
 
-fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32) -> Result<(), io::Error> {
+fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32, block_hash: &[u8], _db: &DB) -> Result<(), io::Error> {
+
     // Read Tx Amount
     let tx_amt = read_varint(reader)?;
     //println!("TxAmt: {:?}", tx_amt);
     for _ in 0..tx_amt {
+        let start_pos = reader.stream_position()?;
         // Tx Version
         let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
         // Read the input count
@@ -560,6 +565,30 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
             sapling_tx_data: sapling_tx_data,
             extra_payload: extra_payload,
         };
+
+        // Read position in stream to look back and store entire tx_bytes
+        let end_pos = reader.stream_position()?;
+        reader.seek(SeekFrom::Start(start_pos))?;
+        let tx_size = (end_pos - start_pos) as usize;
+        let mut tx_bytes = vec![0u8; tx_size];
+        reader.read_exact(&mut tx_bytes)?;
+
+        let first_hash = Sha256::digest(&tx_bytes);
+        let txid = Sha256::digest(&first_hash);
+        let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
+        println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
+
+        // 't' + txid -> tx_bytes
+        let mut key = vec![b't'];
+        key.extend_from_slice(&reversed_txid);
+        _db.put(&key, &tx_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        // 'r' + txid -> block_hash
+        let mut key_block = vec![b'r'];
+        key_block.extend_from_slice(&reversed_txid);
+        _db.put(&key_block, block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        reader.seek(SeekFrom::Start(end_pos))?;
 
         //println!("{:?}", transaction);
     }
@@ -812,9 +841,8 @@ fn read_varint128(data: &[u8]) -> (usize, u64) {
     loop {
         byte = data[index];
         index += 1;
-        
         value = (value << 7) | (byte & 0x7F) as u64;
-        
+
         if (byte & 0x80) != 0 {
             value += 1;
         }
