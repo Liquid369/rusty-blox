@@ -7,6 +7,8 @@ use std::fmt;
 use std::error::Error;
 use core::borrow::Borrow;
 use sha2::{Sha256, Digest};
+use ripemd160::{Ripemd160, Digest as Ripemd160Digest};
+use serde_json::{Value, json};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
@@ -21,6 +23,19 @@ struct Hash([u8; 32]);
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 const MAX_PAYLOAD_SIZE: usize = 10000;
+
+enum AddressType {
+    Nonstandard,
+    P2PKH(String),
+    P2PK(String),
+    P2SH(String),
+    ZerocoinMint,
+    ZerocoinSpend,
+    ZerocoinPublicSpend,
+    Staking(String, String),
+    Sapling(String),
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Byte33([u8; 33]);
@@ -81,12 +96,14 @@ pub struct CTxIn {
     pub prevout: COutPoint,
     pub script_sig: CScript,
     pub sequence: u32,
+    pub index: u64,
 }
 
 pub struct CTxOut {
     pub value: i64,
     pub script_length: i32,
     pub script_pubkey: CScript,
+    pub index: u64,
 }
 
 #[derive(Debug)]
@@ -483,7 +500,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
     // Read Tx Amount
     let tx_amt = read_varint(reader)?;
     //println!("TxAmt: {:?}", tx_amt);
-    for _ in 0..tx_amt {
+    for i in 0..tx_amt {
         let start_pos = reader.stream_position()?;
         // Tx Version
         let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
@@ -491,7 +508,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         let input_count = read_varint(reader)?;
         // Read the inputs
         let mut inputs = Vec::new();
-        for _ in 0..input_count {
+        for i in 0..input_count {
             // Read previous outputs
             let prev_output = read_outpoint(reader)?;
             // Determine script sig length for reading script sig below
@@ -507,6 +524,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
                 prevout: prev_output,
                 script_sig: CScript { script },
                 sequence,
+                index: i,
             };
             inputs.push(tx_in);
         }
@@ -517,7 +535,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
 
         // Read the outputs
         let mut outputs = Vec::new();
-        for _ in 0..output_count {
+        for i in 0..output_count {
             // Read tx value
             let value = reader.read_i64::<LittleEndian>()?;
             // Get script pubkey length
@@ -531,6 +549,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
                 value: value.try_into().unwrap(),
                 script_length: script_length.try_into().unwrap(),
                 script_pubkey: CScript { script },
+                index: i,
             };
             outputs.push(tx_out);
         }
@@ -577,6 +596,45 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         let txid = Sha256::digest(&first_hash);
         let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
         println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
+
+        for tx_out in &transaction.outputs { 
+            if let Some(address_type) = scriptpubkey_to_address(&tx_out.script_pubkey) {
+                match address_type {
+                    AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
+                    AddressType::P2SH(address) => println!("P2SH Address: {}", address),
+                    AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
+                    AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
+                    AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
+                    AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
+                    AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
+                    AddressType::Sapling(address) => println!("Sapling Address: {}", address),
+                    AddressType::Nonstandard => println!("Nonstandard/Coinbase Tx"),
+                }
+
+                // 'p' + scriptpubkey -> list of (txid, output_index)
+                let mut key_pubkey = vec![b'p'];
+                key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
+
+                // Fetch existing UTXOs
+                let existing_data_option = _db.get(&key_pubkey);
+                if let Ok(Some(existing_data)) = existing_data_option {
+                    let mut existing_utxos = deserialize_utxos(&existing_data);
+                    // Add new UTXO
+                    existing_utxos.push((reversed_txid.clone(), tx_out.index));
+
+                    // Store the updated UTXOs
+                    let serialized_utxos = serialize_utxos(&existing_utxos);
+                    _db.put(&key_pubkey, &serialized_utxos).unwrap();
+                }
+
+            }
+        }
+
+        /*// 'p' + scriptpubkey -> txid, output_index
+        let mut key_pubkey = vec![b'p'];
+        key_pubkey.extend_from_slice(&tx_out.script_pubkey);
+        add_utxo_to_pubkey(_db, &outputs.script_pubkey, &hex::encode(&reversed_txid), &outputs.index);
+        */
 
         // 't' + txid -> tx_bytes
         let mut key = vec![b't'];
@@ -878,4 +936,204 @@ fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, Box<dyn Error>> {
     };
 
     Ok(Some(incremented_block_height.try_into()?))
+}
+
+fn compute_address_hash(data: &[u8]) -> Vec<u8> {
+    let sha = Sha256::digest(data);
+    Ripemd160::digest(&sha).to_vec()
+}
+
+// Function to convert hash to P2PKH Bitcoin address (with prefix 0x00 for mainnet)
+fn hash_address(hash: &[u8], prefix: u8) -> String {
+    let mut extended_hash = vec![prefix]; // This is 30 in hex, the P2PKH prefix you provided
+    extended_hash.extend_from_slice(hash);
+
+    let checksum = sha256d(&extended_hash);
+    extended_hash.extend_from_slice(&checksum[0..4]);
+
+    bs58::encode(extended_hash).into_string()
+}
+
+fn sha256(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
+fn ripemd160_hash(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Ripemd160::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
+fn sha256d(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let first = hasher.finalize();
+
+    let mut hasher = Sha256::new();
+    hasher.update(&first);
+    hasher.finalize().to_vec()
+}
+
+// Function to parse script_pubkey to a P2PKH address
+fn scriptpubkey_to_p2pkh_address(script: &CScript) -> Option<String> {
+    if script.script.len() == 25 && 
+       script.script[0] == 0x76 && 
+       script.script[1] == 0xa9 && 
+       script.script[2] == 0x14 && 
+       script.script[23] == 0x88 && 
+       script.script[24] == 0xac {
+           let address_hash = &script.script[3..23];
+           Some(hash_address(address_hash, 30))
+    } else {
+        None
+    }
+}
+
+fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
+    // OP_HASH160 = 0xa9, followed by a length byte of 20 (0x14 in hexadecimal) and then OP_EQUAL = 0x87
+    if script.script.len() == 23 && script.script[0] == 0xa9 && script.script[1] == 0x14 && script.script[22] == 0x87 {
+        let address_hash = &script.script[2..22];
+        let prefix: Vec<u8> = vec![13];
+        Some(hash_address(address_hash, 13))
+    } else {
+        None
+    }
+}
+
+fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
+    const OP_CHECKSIG: u8 = 0xAC;
+    const OP_DUP: u8 = 0x76;
+
+    // Check if the script contains OP_CHECKSIG but not OP_DUP
+    if script.script.contains(&OP_CHECKSIG) && !script.script.contains(&OP_DUP) {
+        // Extract the public key (assuming it's pushed onto the stack before OP_CHECKSIG)
+        let pubkey = &script.script[..script.script.len()-1];  // Exclude the OP_CHECKSIG
+
+        // Here, converting a pubkey directly to an address is a bit more complex than P2PKH,
+        // because traditionally, you don't convert P2PK to an address. Instead, 
+        // you might want to hash the pubkey to get a P2PKH address or simply represent
+        // the pubkey in hex or some other format.
+        // For simplicity, let's represent it in hex:
+        let pubkey_hex = hex::encode(pubkey);
+        return Some(pubkey_hex);
+    }
+
+    None
+}
+
+fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)> {
+    const OP_ROT: u8 = 0x7b;
+    const OP_IF: u8 = 0x63;
+    const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
+    const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
+    const OP_ELSE: u8 = 0x67;
+
+    // Check if the script has the minimum length for staking
+    if script.script.len() < (2 + 2 * 20 + 7) {  // Adjust for the expected length
+        return None;
+    }
+
+    let pos_checkcoldstakeverify = script.script.iter().position(|&x| x == OP_CHECKCOLDSTAKEVERIFY || x == OP_CHECKCOLDSTAKEVERIFY_LOF);
+
+    match pos_checkcoldstakeverify {
+        Some(pos) => {
+            let staker_key_hash = &script.script[(pos + 1)..(pos + 21)];
+            let pos_else = script.script.iter().position(|&x| x == OP_ELSE).unwrap_or(0);
+            let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 21)];
+
+            let staker_address = hash_address(staker_key_hash, 63);  // 30 is the prefix for P2PKH
+            let owner_address = hash_address(owner_key_hash, 30);  // 30 is the prefix for P2PKH
+
+            Some((staker_address, owner_address))
+        },
+        None => None,
+    }
+}
+
+fn is_zerocoinmint(script: &CScript) -> bool {
+    script.script.len() > 0 && script.script[0] == 0xc1
+}
+
+fn is_zerocoinspend(script: &CScript) -> bool {
+    script.script.len() > 0 && script.script[0] == 0xc2
+}
+
+fn is_zerocoinpublicspend(script: &CScript) -> bool {
+    script.script.len() > 0 && script.script[0] == 0xc3
+}
+
+fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
+    if let Some(address) = scriptpubkey_to_p2pkh_address(script) {
+        return Some(AddressType::P2PKH(address));
+    }
+    
+    if let Some(address) = scriptpubkey_to_p2sh_address(script) {
+        return Some(AddressType::P2SH(address));
+    }
+
+    if let Some(pubkey) = scriptpubkey_to_p2pk(script) {
+        return Some(AddressType::P2PK(pubkey));
+    }
+
+    if script.script.contains(&0xc1) {
+        return Some(AddressType::ZerocoinMint);
+    }
+
+    if script.script.contains(&0xc2) {
+        return Some(AddressType::ZerocoinSpend);
+    }
+
+    if script.script.contains(&0xc3) {
+        return Some(AddressType::ZerocoinPublicSpend);
+    }
+
+    if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script) {
+        return Some(AddressType::Staking(staker_address, owner_address));
+    }
+
+    Some(AddressType::Nonstandard)
+}
+
+fn add_utxo_to_pubkey(db: &DB, pubkey: &[u8], txid: &str, index: u32) {
+    let key = format!("pubkey_{}", hex::encode(pubkey));
+
+    // Fetch existing data, if any.
+    let existing_data = db.get(&key).unwrap_or(None);
+
+    let mut utxos = match existing_data {
+        Some(data) => serde_json::from_slice::<Vec<Value>>(&data).expect("Failed to parse JSON"),
+        None => vec![],
+    };
+
+    // Append the new UTXO.
+    utxos.push(json!({
+        "txid": txid,
+        "index": index,
+    }));
+
+    // Serialize and store back in RocksDB.
+    let serialized_data = serde_json::to_vec(&utxos).expect("Failed to serialize JSON");
+    db.put(key, serialized_data).expect("Failed to write to RocksDB");
+}
+
+fn serialize_utxos(utxos: &Vec<(Vec<u8>, u64)>) -> Vec<u8> {
+    let mut serialized = Vec::new();
+    for (txid, index) in utxos {
+        serialized.extend(txid);
+        serialized.extend(&index.to_le_bytes());
+    }
+    serialized
+}
+
+fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
+    let mut utxos = Vec::new();
+    let mut iter = data.chunks_exact(40); // 32 bytes for txid and 8 bytes for index
+    while let Some(chunk) = iter.next() {
+        let txid = chunk[0..32].to_vec();
+        let index = u64::from_le_bytes(chunk[32..40].try_into().unwrap());
+        utxos.push((txid, index));
+    }
+    utxos
 }
