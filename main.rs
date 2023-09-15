@@ -1052,48 +1052,38 @@ fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)>
     }
 }
 
-fn is_zerocoinmint(script: &CScript) -> bool {
-    script.script.len() > 0 && script.script[0] == 0xc1
-}
-
-fn is_zerocoinspend(script: &CScript) -> bool {
-    script.script.len() > 0 && script.script[0] == 0xc2
-}
-
-fn is_zerocoinpublicspend(script: &CScript) -> bool {
-    script.script.len() > 0 && script.script[0] == 0xc3
-}
-
 fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
-    if let Some(address) = scriptpubkey_to_p2pkh_address(script) {
-        return Some(AddressType::P2PKH(address));
+    // First, make sure the script isn't empty.
+    if script.script.is_empty() {
+        return Some(AddressType::Nonstandard);
     }
+
+    // Check the first byte.
+    match script.script[0] {
+        0xc1 => Some(AddressType::ZerocoinMint),
+        0xc2 => Some(AddressType::ZerocoinSpend),
+        0xc3 => Some(AddressType::ZerocoinPublicSpend),
+        _ => {
+            // If no byte matches were found, proceed with other checks.
+            if let Some(address) = scriptpubkey_to_p2pkh_address(script) {
+                return Some(AddressType::P2PKH(address));
+            }
     
-    if let Some(address) = scriptpubkey_to_p2sh_address(script) {
-        return Some(AddressType::P2SH(address));
-    }
+            if let Some(address) = scriptpubkey_to_p2sh_address(script) {
+                return Some(AddressType::P2SH(address));
+            }
+    
+            if let Some(pubkey) = scriptpubkey_to_p2pk(script) {
+                return Some(AddressType::P2PK(pubkey));
+            }
+    
+            if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script) {
+                return Some(AddressType::Staking(staker_address, owner_address));
+            }
 
-    if let Some(pubkey) = scriptpubkey_to_p2pk(script) {
-        return Some(AddressType::P2PK(pubkey));
+            Some(AddressType::Nonstandard)
+        }
     }
-
-    if script.script.contains(&0xc1) {
-        return Some(AddressType::ZerocoinMint);
-    }
-
-    if script.script.contains(&0xc2) {
-        return Some(AddressType::ZerocoinSpend);
-    }
-
-    if script.script.contains(&0xc3) {
-        return Some(AddressType::ZerocoinPublicSpend);
-    }
-
-    if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script) {
-        return Some(AddressType::Staking(staker_address, owner_address));
-    }
-
-    Some(AddressType::Nonstandard)
 }
 
 fn add_utxo_to_pubkey(db: &DB, pubkey: &[u8], txid: &str, index: u32) {
