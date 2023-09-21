@@ -24,7 +24,10 @@ struct Hash([u8; 32]);
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 const MAX_PAYLOAD_SIZE: usize = 10000;
 
+#[derive(Clone)]
 enum AddressType {
+    CoinStakeTx,
+    CoinBaseTx,
     Nonstandard,
     P2PKH(String),
     P2PK(String),
@@ -36,6 +39,9 @@ enum AddressType {
     Sapling(String),
 }
 
+fn from_rocksdb_error(err: rocksdb::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, err.to_string())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Byte33([u8; 33]);
@@ -99,6 +105,7 @@ pub struct CTxIn {
     pub index: u64,
 }
 
+#[derive(Clone)]
 pub struct CTxOut {
     pub value: i64,
     pub script_length: i32,
@@ -112,6 +119,7 @@ pub struct COutPoint {
     pub n: u32,
 }
 
+#[derive(Clone)]
 pub struct CScript {
     pub script: Vec<u8>,
 }
@@ -496,93 +504,82 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
 }
 
 fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32, block_hash: &[u8], _db: &DB) -> Result<(), io::Error> {
+    
+    fn read_script(reader: &mut io::BufReader<&File>) -> Result<Vec<u8>, io::Error> {
+        let script_length = read_varint(reader)?;
+        let mut script = vec![0u8; script_length as usize];
+        reader.read_exact(&mut script)?;
+        Ok(script)
+    }
 
-    // Read Tx Amount
+    fn handle_address(_db: &DB, address_type: &AddressType, reversed_txid: &Vec<u8>, tx_out_index: u32) -> Result<(), io::Error> {
+        let address_keys = match address_type {
+            AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
+            AddressType::P2PK(pubkey) => vec![pubkey.clone()],
+            AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
+            _ => return Ok(()),
+        };
+        
+        for address_key in &address_keys {
+            let existing_data = _db.get(&format!("address-{}", &address_key)).map_err(from_rocksdb_error)?;
+            let mut existing_utxos = existing_data.as_deref().map_or(Vec::new(), deserialize_utxos);
+            existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
+            _db.put(&format!("address-{}", &address_key), &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
+        }
+
+        Ok(())
+    }
+
     let tx_amt = read_varint(reader)?;
-    //println!("TxAmt: {:?}", tx_amt);
-    for i in 0..tx_amt {
+    for _ in 0..tx_amt {
         let start_pos = reader.stream_position()?;
-        // Tx Version
+        
         let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
-        // Read the input count
         let input_count = read_varint(reader)?;
-        // Read the inputs
-        let mut inputs = Vec::new();
-        for i in 0..input_count {
-            // Read previous outputs
-            let prev_output = read_outpoint(reader)?;
-            // Determine script sig length for reading script sig below
-            let script_length = read_varint(reader)?;
-            // Read script sig
-            let mut script = vec![0u8; script_length as usize];
-            reader.read_exact(&mut script)?;
-            // Read sequence
-            let sequence = reader.read_u32::<LittleEndian>()?;
 
-            // Create CTxIn struct and add it to the inputs vector
-            let tx_in = CTxIn {
-                prevout: prev_output,
-                script_sig: CScript { script },
-                sequence,
-                index: i,
-            };
-            inputs.push(tx_in);
-        }
+        let inputs = (0..input_count)
+            .map(|i| {
+                let prev_output = read_outpoint(reader)?;
+                let script = read_script(reader)?;
+                let sequence = reader.read_u32::<LittleEndian>()?;
+                Ok(CTxIn {
+                    prevout: prev_output,
+                    script_sig: CScript { script },
+                    sequence,
+                    index: i,
+                })
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
 
-        // Read the output count
         let output_count = read_varint(reader)?;
-        //println!("Outputs: {:?}", output_count);
+        let outputs = (0..output_count)
+            .map(|i| {
+                let value = reader.read_i64::<LittleEndian>()?;
+                let script = read_script(reader)?;
+                Ok(CTxOut {
+                    value: value.try_into().unwrap(),
+                    script_length: script.len().try_into().unwrap(),
+                    script_pubkey: CScript { script },
+                    index: i,
+                })
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
 
-        // Read the outputs
-        let mut outputs = Vec::new();
-        for i in 0..output_count {
-            // Read tx value
-            let value = reader.read_i64::<LittleEndian>()?;
-            // Get script pubkey length
-            let script_length = read_varint(reader)?;
-            // Set size to read the scriptpubkey
-            let mut script = vec![0u8; script_length.try_into().unwrap()];
-            reader.read_exact(&mut script)?;
-
-            // Create CTxOut struct and add it to the outputs vector
-            let tx_out = CTxOut {
-                value: value.try_into().unwrap(),
-                script_length: script_length.try_into().unwrap(),
-                script_pubkey: CScript { script },
-                index: i,
-            };
-            outputs.push(tx_out);
-        }
-        // Read tx lock time
-        let mut lock_time_buff = 0;
-        lock_time_buff = reader.read_u32::<LittleEndian>()?;
-
-        // Only blocks above version 8 MAY contain saplingtxdata
-        let sapling_tx_data = if block_version >= 8 {
-            match parse_sapling_tx_data(&mut reader) {
-                Ok(data) => Some(data),
-                Err(err) => return Err(err),
-            }
+        let lock_time_buff = reader.read_u32::<LittleEndian>()?;
+        let sapling_tx_data = if block_version >= 8 { parse_sapling_tx_data(&mut reader).ok() } else { None };
+        let extra_payload = if tx_ver_out == 2 && block_version >= 8 {
+            parse_payload_data(reader)?.map(|data| String::from_utf8_lossy(&data).into_owned())
         } else {
             None
         };
 
-        // Only transaction version 2's have extra_payloads
-        let payload_data: Option<Vec<u8>> = if tx_ver_out == 2 && block_version >=8 {
-            parse_payload_data(reader)?
-        } else {
-            None
-        };
-        let extra_payload = payload_data.map(|data| String::from_utf8_lossy(&data).into_owned());
-
-        // Create the CTransaction struct
         let transaction = CTransaction {
             version: tx_ver_out, 
             inputs,
-            outputs,
+            outputs: outputs.clone(),
             lock_time: lock_time_buff, 
-            sapling_tx_data: sapling_tx_data,
-            extra_payload: extra_payload,
+            sapling_tx_data,
+            extra_payload,
         };
 
         // Read position in stream to look back and store entire tx_bytes
@@ -597,44 +594,65 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
         println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
 
-        for tx_out in &transaction.outputs { 
-            if let Some(address_type) = scriptpubkey_to_address(&tx_out.script_pubkey) {
-                match address_type {
-                    AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
-                    AddressType::P2SH(address) => println!("P2SH Address: {}", address),
-                    AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
-                    AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
-                    AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
-                    AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
-                    AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
-                    AddressType::Sapling(address) => println!("Sapling Address: {}", address),
-                    AddressType::Nonstandard => println!("Nonstandard/Coinbase Tx"),
-                }
-
-                // 'p' + scriptpubkey -> list of (txid, output_index)
-                let mut key_pubkey = vec![b'p'];
-                key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
-
-                // Fetch existing UTXOs
-                let existing_data_option = _db.get(&key_pubkey);
-                if let Ok(Some(existing_data)) = existing_data_option {
-                    let mut existing_utxos = deserialize_utxos(&existing_data);
-                    // Add new UTXO
-                    existing_utxos.push((reversed_txid.clone(), tx_out.index));
-
-                    // Store the updated UTXOs
-                    let serialized_utxos = serialize_utxos(&existing_utxos);
-                    _db.put(&key_pubkey, &serialized_utxos).unwrap();
-                }
-
+        let mut general_address_type = if input_count == 1 && outputs.len() == 1 && outputs[0].index == 0 {
+            AddressType::CoinBaseTx
+        } else if outputs.len() > 1 {
+            AddressType::CoinStakeTx
+        } else {
+            AddressType::Nonstandard
+        };
+        
+        for tx_out in &transaction.outputs {
+            let address_type = if !tx_out.script_pubkey.script.is_empty() {
+                scriptpubkey_to_address(&tx_out.script_pubkey).unwrap_or_else(|| general_address_type.clone())
+            } else {
+                general_address_type.clone()
+            };
+            match &address_type {
+                AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
+                AddressType::P2SH(address) => println!("P2SH Address: {}", address),
+                AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
+                AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
+                AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
+                AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
+                AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
+                AddressType::Sapling(address) => println!("Sapling Address: {}", address),
+                AddressType::CoinStakeTx => println!("CoinStake Transaction"),
+                AddressType::CoinBaseTx => println!("CoinBase Transaction"),
+                AddressType::Nonstandard => println!("Nonstandard"),
             }
+
+            // Associate by these with UTXO set
+            handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
+
+            // 'p' + scriptpubkey -> list of (txid, output_index)
+            let mut key_pubkey = vec![b'p'];
+            key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
+
+            // Fetch existing UTXOs
+            let existing_data_option = _db.get(&key_pubkey);
+            if let Ok(Some(existing_data)) = existing_data_option {
+                let mut existing_utxos = deserialize_utxos(&existing_data);
+                // Add new UTXO
+                existing_utxos.push((reversed_txid.clone(), tx_out.index));
+
+                // Store the updated UTXOs
+                let serialized_utxos = serialize_utxos(&existing_utxos);
+                _db.put(&key_pubkey, &serialized_utxos).unwrap();
+            }
+            // Create a UTXO identifier (txid + output index)
+            let utxo_id = format!("{}-{}", hex::encode(&reversed_txid), tx_out.index);
+            let utxos_to_serialize = vec![(reversed_txid.clone(), tx_out.index)];
+            _db.put(&format!("utxo-{}", utxo_id), &serialize_utxos(&utxos_to_serialize)).unwrap();
+
+
         }
 
-        /*// 'p' + scriptpubkey -> txid, output_index
-        let mut key_pubkey = vec![b'p'];
-        key_pubkey.extend_from_slice(&tx_out.script_pubkey);
-        add_utxo_to_pubkey(_db, &outputs.script_pubkey, &hex::encode(&reversed_txid), &outputs.index);
-        */
+        for tx_in in &transaction.inputs {
+            // For each input, the referenced output becomes spent, so it should be removed from the UTXO set
+            let referenced_utxo_id = format!("{}-{}", hex::encode(&tx_in.prevout.hash), tx_in.prevout.n);
+            _db.delete(&format!("utxo-{}", referenced_utxo_id)).unwrap();
+        }
 
         // 't' + txid -> tx_bytes
         let mut key = vec![b't'];
@@ -995,32 +1013,59 @@ fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
     // OP_HASH160 = 0xa9, followed by a length byte of 20 (0x14 in hexadecimal) and then OP_EQUAL = 0x87
     if script.script.len() == 23 && script.script[0] == 0xa9 && script.script[1] == 0x14 && script.script[22] == 0x87 {
         let address_hash = &script.script[2..22];
-        let prefix: Vec<u8> = vec![13];
         Some(hash_address(address_hash, 13))
     } else {
         None
     }
 }
 
-fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
+fn compress_pubkey(pub_key_bytes: &[u8]) -> Option<Vec<u8>> {
+    match pub_key_bytes.len() {
+        64 if pub_key_bytes[0] == 0x04 => {
+            let x = &pub_key_bytes[1..33];
+            let y = &pub_key_bytes[33..65];
+            let parity = if y[31] % 2 == 0 { 2 } else { 3 };
+            let mut compressed_key: Vec<u8> = vec![parity];
+            compressed_key.extend_from_slice(x);
+            Some(compressed_key)
+        },
+        33 if pub_key_bytes[0] == 0x02 || pub_key_bytes[0] == 0x03 => {
+            // Already compressed, just return as is
+            Some(pub_key_bytes.to_vec())
+        },
+        _ => None
+    }
+}
+
+fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
     const OP_CHECKSIG: u8 = 0xAC;
-    const OP_DUP: u8 = 0x76;
 
-    // Check if the script contains OP_CHECKSIG but not OP_DUP
-    if script.script.contains(&OP_CHECKSIG) && !script.script.contains(&OP_DUP) {
-        // Extract the public key (assuming it's pushed onto the stack before OP_CHECKSIG)
-        let pubkey = &script.script[..script.script.len()-1];  // Exclude the OP_CHECKSIG
-
-        // Here, converting a pubkey directly to an address is a bit more complex than P2PKH,
-        // because traditionally, you don't convert P2PK to an address. Instead, 
-        // you might want to hash the pubkey to get a P2PKH address or simply represent
-        // the pubkey in hex or some other format.
-        // For simplicity, let's represent it in hex:
-        let pubkey_hex = hex::encode(pubkey);
-        return Some(pubkey_hex);
+    if script.last()? != &OP_CHECKSIG {
+        return None;
     }
 
-    None
+    match script.len() {
+        66 => Some(&script[1..65]), // skip the OP_PUSHDATA, then take uncompressed pubkey
+        35 => Some(&script[1..34]), // skip the OP_PUSHDATA, then take compressed pubkey
+        _ => None,
+    }
+}
+
+fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
+    const OP_DUP: u8 = 0x76;
+
+    if script.script.contains(&OP_DUP) {
+        return None; // Not a P2PK script.
+    }
+
+    let pubkey = extract_pubkey_from_script(&script.script)?;
+
+    let pubkey_compressed = compress_pubkey(pubkey)?;
+    let pubkey_hex: Vec<u8> = hex::encode(&pubkey_compressed).into();
+    let pubkey_hash = compute_address_hash(&pubkey_compressed);
+    let pubkey_addr = hash_address(&pubkey_hash, 30);
+
+    Some(pubkey_addr)
 }
 
 fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)> {
@@ -1043,8 +1088,8 @@ fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)>
             let pos_else = script.script.iter().position(|&x| x == OP_ELSE).unwrap_or(0);
             let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 21)];
 
-            let staker_address = hash_address(staker_key_hash, 63);  // 30 is the prefix for P2PKH
-            let owner_address = hash_address(owner_key_hash, 30);  // 30 is the prefix for P2PKH
+            let staker_address = hash_address(staker_key_hash, 63);  // 63 is the prefix for staker P2PKH
+            let owner_address = hash_address(owner_key_hash, 30);  // 30 is the prefix for owner P2PKH
 
             Some((staker_address, owner_address))
         },
