@@ -426,7 +426,8 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let mut reader = io::Cursor::new(slice);
 
     // Set buffer
-    let mut header_buffer = vec![0u8; header_size];
+    let max_size = 112;
+    let mut header_buffer = vec![0u8; header_size.min(max_size)];
     // Set position
     let current_position = match reader.seek(SeekFrom::Current(0)) {
         Ok(pos) => pos,
@@ -1020,8 +1021,9 @@ fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
 }
 
 fn compress_pubkey(pub_key_bytes: &[u8]) -> Option<Vec<u8>> {
+    println!("Pub_Key_Bytes length: {}", pub_key_bytes.len());
     match pub_key_bytes.len() {
-        64 if pub_key_bytes[0] == 0x04 => {
+        65 if pub_key_bytes[0] == 0x04 => {
             let x = &pub_key_bytes[1..33];
             let y = &pub_key_bytes[33..65];
             let parity = if y[31] % 2 == 0 { 2 } else { 3 };
@@ -1044,8 +1046,9 @@ fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
         return None;
     }
 
+    println!("Script length: {}", script.len());
     match script.len() {
-        66 => Some(&script[1..65]), // skip the OP_PUSHDATA, then take uncompressed pubkey
+        67 => Some(&script[1..66]), // skip the OP_PUSHDATA, then take uncompressed pubkey
         35 => Some(&script[1..34]), // skip the OP_PUSHDATA, then take compressed pubkey
         _ => None,
     }
