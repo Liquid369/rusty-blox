@@ -87,6 +87,8 @@ pub struct CBlockHeader {
     pub n_nonce: u32,
     pub n_accumulator_checkpoint: Option<[u8; 32]>,
     pub hash_final_sapling_root: Option<[u8; 32]>,
+    pub chain_value: Option<i64>,
+    pub value_delta: Option<i64>,
 }
 
 pub struct CTransaction {
@@ -181,6 +183,18 @@ impl std::fmt::Debug for CBlockHeader {
             writeln!(f, "Final Sapling Root: {:x}", Hash(*final_sapling_root))?;
         } else {
             writeln!(f, "Final Sapling Root: None")?;
+        }
+
+        if let Some(chain_val) = self.chain_value {
+            writeln!(f, "Chain Value: {}", chain_val)?;
+        } else {
+            writeln!(f, "Chain Value: None")?;
+        }
+
+        if let Some(val_delta) = self.value_delta {
+            writeln!(f, "Value Delta: {}", val_delta)?;
+        } else {
+            writeln!(f, "Value Delta: None")?;
         }
         write!(f, "}}")
     }
@@ -487,6 +501,17 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => (None, None), // Default case
     };
 
+    // Read chain value for Sapling
+    let (chain_value, value_delta): (Option<i64>, Option<i64>) = match header_size {
+        144 => {
+            // Read the CAmount values.
+            let chain_value = reader.read_i64::<LittleEndian>().unwrap();
+            let value_delta = reader.read_i64::<LittleEndian>().unwrap();
+            (Some(chain_value), Some(value_delta))
+        }
+        _ => (None, None),
+    };
+
     let block_height = block_height;
 
     // Create CBlockHeader
@@ -501,6 +526,8 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         n_nonce,
         n_accumulator_checkpoint,
         hash_final_sapling_root,
+        chain_value,
+        value_delta,
     }
 }
 
