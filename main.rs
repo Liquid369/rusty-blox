@@ -36,7 +36,7 @@ enum AddressType {
     ZerocoinSpend,
     ZerocoinPublicSpend,
     Staking(String, String),
-    Sapling(String),
+    Sapling,
 }
 
 fn from_rocksdb_error(err: rocksdb::Error) -> io::Error {
@@ -87,8 +87,6 @@ pub struct CBlockHeader {
     pub n_nonce: u32,
     pub n_accumulator_checkpoint: Option<[u8; 32]>,
     pub hash_final_sapling_root: Option<[u8; 32]>,
-    pub chain_value: Option<i64>,
-    pub value_delta: Option<i64>,
 }
 
 pub struct CTransaction {
@@ -96,8 +94,6 @@ pub struct CTransaction {
     pub inputs: Vec<CTxIn>,
     pub outputs: Vec<CTxOut>,
     pub lock_time: u32,
-    pub sapling_tx_data: Option<SaplingTxData>,
-    pub extra_payload: Option<String>,
 }
 
 pub struct CTxIn {
@@ -184,18 +180,6 @@ impl std::fmt::Debug for CBlockHeader {
         } else {
             writeln!(f, "Final Sapling Root: None")?;
         }
-
-        if let Some(chain_val) = self.chain_value {
-            writeln!(f, "Chain Value: {}", chain_val)?;
-        } else {
-            writeln!(f, "Chain Value: None")?;
-        }
-
-        if let Some(val_delta) = self.value_delta {
-            writeln!(f, "Value Delta: {}", val_delta)?;
-        } else {
-            writeln!(f, "Value Delta: None")?;
-        }
         write!(f, "}}")
     }
 }
@@ -208,8 +192,6 @@ impl std::fmt::Debug for CTransaction {
         writeln!(f, "    inputs: {:?}", self.inputs)?;
         writeln!(f, "    outputs: {:?}", self.outputs)?;
         writeln!(f, "    lock_time: {}", self.lock_time)?;
-        writeln!(f, "    sapling_tx_data: {:?}", self.sapling_tx_data)?;
-        writeln!(f, "    extra_payload: {:?}", self.extra_payload)?;
         write!(f, "}}")
     }
 }
@@ -501,17 +483,6 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => (None, None), // Default case
     };
 
-    // Read chain value for Sapling
-    let (chain_value, value_delta): (Option<i64>, Option<i64>) = match header_size {
-        144 => {
-            // Read the CAmount values.
-            let chain_value = reader.read_i64::<LittleEndian>().unwrap();
-            let value_delta = reader.read_i64::<LittleEndian>().unwrap();
-            (Some(chain_value), Some(value_delta))
-        }
-        _ => (None, None),
-    };
-
     let block_height = block_height;
 
     // Create CBlockHeader
@@ -526,8 +497,6 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         n_nonce,
         n_accumulator_checkpoint,
         hash_final_sapling_root,
-        chain_value,
-        value_delta,
     }
 }
 
@@ -594,20 +563,12 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
             .collect::<Result<Vec<_>, std::io::Error>>()?;
 
         let lock_time_buff = reader.read_u32::<LittleEndian>()?;
-        let sapling_tx_data = if block_version >= 8 { parse_sapling_tx_data(&mut reader).ok() } else { None };
-        let extra_payload = if tx_ver_out == 2 && block_version >= 8 {
-            parse_payload_data(reader)?.map(|data| String::from_utf8_lossy(&data).into_owned())
-        } else {
-            None
-        };
 
         let transaction = CTransaction {
             version: tx_ver_out, 
             inputs,
             outputs: outputs.clone(),
             lock_time: lock_time_buff, 
-            sapling_tx_data,
-            extra_payload,
         };
 
         // Read position in stream to look back and store entire tx_bytes
@@ -644,7 +605,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
                 AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
                 AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
                 AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
-                AddressType::Sapling(address) => println!("Sapling Address: {}", address),
+                AddressType::Sapling => println!("Shielded TX"),
                 AddressType::CoinStakeTx => println!("CoinStake Transaction"),
                 AddressType::CoinBaseTx => println!("CoinBase Transaction"),
                 AddressType::Nonstandard => println!("Nonstandard"),
