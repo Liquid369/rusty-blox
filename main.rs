@@ -500,164 +500,195 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     }
 }
 
-fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32, block_hash: &[u8], _db: &DB) -> Result<(), io::Error> {
+fn read_script(reader: &mut io::BufReader<&File>) -> Result<Vec<u8>, io::Error> {
+    let script_length = read_varint(reader)?;
+    let mut script = vec![0u8; script_length as usize];
+    reader.read_exact(&mut script)?;
+    Ok(script)
+}
+
+fn handle_address(_db: &DB, address_type: &AddressType, reversed_txid: &Vec<u8>, tx_out_index: u32) -> Result<(), io::Error> {
+    let address_keys = match address_type {
+        AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
+        AddressType::P2PK(pubkey) => vec![pubkey.clone()],
+        AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
+        _ => return Ok(()),
+    };
     
-    fn read_script(reader: &mut io::BufReader<&File>) -> Result<Vec<u8>, io::Error> {
-        let script_length = read_varint(reader)?;
-        let mut script = vec![0u8; script_length as usize];
-        reader.read_exact(&mut script)?;
-        Ok(script)
+    for address_key in &address_keys {
+        let existing_data = _db.get(&format!("address-{}", &address_key)).map_err(from_rocksdb_error)?;
+        let mut existing_utxos = existing_data.as_deref().map_or(Vec::new(), deserialize_utxos);
+        existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
+        _db.put(&format!("address-{}", &address_key), &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
     }
 
-    fn handle_address(_db: &DB, address_type: &AddressType, reversed_txid: &Vec<u8>, tx_out_index: u32) -> Result<(), io::Error> {
-        let address_keys = match address_type {
-            AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
-            AddressType::P2PK(pubkey) => vec![pubkey.clone()],
-            AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
-            _ => return Ok(()),
-        };
-        
-        for address_key in &address_keys {
-            let existing_data = _db.get(&format!("address-{}", &address_key)).map_err(from_rocksdb_error)?;
-            let mut existing_utxos = existing_data.as_deref().map_or(Vec::new(), deserialize_utxos);
-            existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
-            _db.put(&format!("address-{}", &address_key), &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
-        }
+    Ok(())
+}
 
-        Ok(())
-    }
-
+fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32, block_hash: &[u8], _db: &DB) -> Result<(), io::Error> {
     let tx_amt = read_varint(reader)?;
     for _ in 0..tx_amt {
         let start_pos = reader.stream_position()?;
         
         let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
-        let input_count = read_varint(reader)?;
-
-        let inputs = (0..input_count)
-            .map(|i| {
-                let prev_output = read_outpoint(reader)?;
-                let script = read_script(reader)?;
-                let sequence = reader.read_u32::<LittleEndian>()?;
-                Ok(CTxIn {
-                    prevout: prev_output,
-                    script_sig: CScript { script },
-                    sequence,
-                    index: i,
-                })
-            })
-            .collect::<Result<Vec<_>, std::io::Error>>()?;
-
-        let output_count = read_varint(reader)?;
-        let outputs = (0..output_count)
-            .map(|i| {
-                let value = reader.read_i64::<LittleEndian>()?;
-                let script = read_script(reader)?;
-                Ok(CTxOut {
-                    value: value.try_into().unwrap(),
-                    script_length: script.len().try_into().unwrap(),
-                    script_pubkey: CScript { script },
-                    index: i,
-                })
-            })
-            .collect::<Result<Vec<_>, std::io::Error>>()?;
-
-        let lock_time_buff = reader.read_u32::<LittleEndian>()?;
-
-        let transaction = CTransaction {
-            version: tx_ver_out, 
-            inputs,
-            outputs: outputs.clone(),
-            lock_time: lock_time_buff, 
-        };
-
-        // Read position in stream to look back and store entire tx_bytes
-        let end_pos = reader.stream_position()?;
-        reader.seek(SeekFrom::Start(start_pos))?;
-        let tx_size = (end_pos - start_pos) as usize;
-        let mut tx_bytes = vec![0u8; tx_size];
-        reader.read_exact(&mut tx_bytes)?;
-
-        let first_hash = Sha256::digest(&tx_bytes);
-        let txid = Sha256::digest(&first_hash);
-        let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
-        println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
-
-        let mut general_address_type = if input_count == 1 && outputs.len() == 1 && outputs[0].index == 0 {
-            AddressType::CoinBaseTx
-        } else if outputs.len() > 1 {
-            AddressType::CoinStakeTx
-        } else {
-            AddressType::Nonstandard
-        };
-        
-        for tx_out in &transaction.outputs {
-            let address_type = if !tx_out.script_pubkey.script.is_empty() {
-                scriptpubkey_to_address(&tx_out.script_pubkey).unwrap_or_else(|| general_address_type.clone())
-            } else {
-                general_address_type.clone()
-            };
-            match &address_type {
-                AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
-                AddressType::P2SH(address) => println!("P2SH Address: {}", address),
-                AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
-                AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
-                AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
-                AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
-                AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
-                AddressType::Sapling => println!("Shielded TX"),
-                AddressType::CoinStakeTx => println!("CoinStake Transaction"),
-                AddressType::CoinBaseTx => println!("CoinBase Transaction"),
-                AddressType::Nonstandard => println!("Nonstandard"),
-            }
-
-            // Associate by these with UTXO set
-            handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
-
-            // 'p' + scriptpubkey -> list of (txid, output_index)
-            let mut key_pubkey = vec![b'p'];
-            key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
-
-            // Fetch existing UTXOs
-            let existing_data_option = _db.get(&key_pubkey);
-            if let Ok(Some(existing_data)) = existing_data_option {
-                let mut existing_utxos = deserialize_utxos(&existing_data);
-                // Add new UTXO
-                existing_utxos.push((reversed_txid.clone(), tx_out.index));
-
-                // Store the updated UTXOs
-                let serialized_utxos = serialize_utxos(&existing_utxos);
-                _db.put(&key_pubkey, &serialized_utxos).unwrap();
-            }
-            // Create a UTXO identifier (txid + output index)
-            let utxo_id = format!("{}-{}", hex::encode(&reversed_txid), tx_out.index);
-            let utxos_to_serialize = vec![(reversed_txid.clone(), tx_out.index)];
-            _db.put(&format!("utxo-{}", utxo_id), &serialize_utxos(&utxos_to_serialize)).unwrap();
-
-
+        if tx_ver_out == 1 {
+            println!("Tx Version: {}", tx_ver_out);
+            process_transaction_v1(reader, tx_ver_out, block_version, block_hash, _db, start_pos)?;
+        } else if tx_ver_out > 1 {
+            println!("Tx Version: {}", tx_ver_out);
+            parse_sapling_tx_data(reader, start_pos)?;
         }
-
-        for tx_in in &transaction.inputs {
-            // For each input, the referenced output becomes spent, so it should be removed from the UTXO set
-            let referenced_utxo_id = format!("{}-{}", hex::encode(&tx_in.prevout.hash), tx_in.prevout.n);
-            _db.delete(&format!("utxo-{}", referenced_utxo_id)).unwrap();
-        }
-
-        // 't' + txid -> tx_bytes
-        let mut key = vec![b't'];
-        key.extend_from_slice(&reversed_txid);
-        _db.put(&key, &tx_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        // 'r' + txid -> block_hash
-        let mut key_block = vec![b'r'];
-        key_block.extend_from_slice(&reversed_txid);
-        _db.put(&key_block, block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-        reader.seek(SeekFrom::Start(end_pos))?;
-
-        //println!("{:?}", transaction);
     }
     Ok(())
+}
+
+fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: u32, block_version: u32, block_hash: &[u8], _db: &DB, start_pos: u64) -> Result<(), io::Error> {
+    let input_count = read_varint(reader)?;
+
+    let inputs = (0..input_count)
+        .map(|i| {
+            let prev_output = read_outpoint(reader)?;
+            let script = read_script(reader)?;
+            let sequence = reader.read_u32::<LittleEndian>()?;
+            Ok(CTxIn {
+                prevout: prev_output,
+                script_sig: CScript { script },
+                sequence,
+                index: i,
+            })
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+    let output_count = read_varint(reader)?;
+    let outputs = (0..output_count)
+        .map(|i| {
+            let value = reader.read_i64::<LittleEndian>()?;
+            let script = read_script(reader)?;
+            Ok(CTxOut {
+                value: value.try_into().unwrap(),
+                script_length: script.len().try_into().unwrap(),
+                script_pubkey: CScript { script },
+                index: i,
+            })
+        })
+        .collect::<Result<Vec<_>, std::io::Error>>()?;
+
+    let lock_time_buff = reader.read_u32::<LittleEndian>()?;
+
+    let transaction = CTransaction {
+        version: tx_ver_out, 
+        inputs,
+        outputs: outputs.clone(),
+        lock_time: lock_time_buff, 
+    };
+
+    let end_pos: u64 = set_end_pos(reader, start_pos)?;
+    let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos)?;
+    //println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
+    let reversed_txid: Vec<u8> = hash_txid(&tx_bytes)?;
+
+    println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
+
+    let mut general_address_type = if input_count == 1 && outputs.len() == 1 && outputs[0].index == 0 {
+        AddressType::CoinBaseTx
+    } else if outputs.len() > 1 {
+        AddressType::CoinStakeTx
+    } else {
+        AddressType::Nonstandard
+    };
+    
+    for tx_out in &transaction.outputs {
+        let address_type = if !tx_out.script_pubkey.script.is_empty() {
+            scriptpubkey_to_address(&tx_out.script_pubkey).unwrap_or_else(|| general_address_type.clone())
+        } else {
+            general_address_type.clone()
+        };
+        match &address_type {
+            AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
+            AddressType::P2SH(address) => println!("P2SH Address: {}", address),
+            AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
+            AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
+            AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
+            AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
+            AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
+            AddressType::Sapling => println!("Shielded TX"),
+            AddressType::CoinStakeTx => println!("CoinStake Transaction"),
+            AddressType::CoinBaseTx => println!("CoinBase Transaction"),
+            AddressType::Nonstandard => println!("Nonstandard"),
+        }
+
+        // Associate by these with UTXO set
+        handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
+
+        // 'p' + scriptpubkey -> list of (txid, output_index)
+        let mut key_pubkey = vec![b'p'];
+        key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
+
+        // Fetch existing UTXOs
+        let existing_data_option = _db.get(&key_pubkey);
+        if let Ok(Some(existing_data)) = existing_data_option {
+            let mut existing_utxos = deserialize_utxos(&existing_data);
+            // Add new UTXO
+            existing_utxos.push((reversed_txid.clone(), tx_out.index));
+
+            // Store the updated UTXOs
+            let serialized_utxos = serialize_utxos(&existing_utxos);
+            _db.put(&key_pubkey, &serialized_utxos).unwrap();
+        }
+        // Create a UTXO identifier (txid + output index)
+        let utxo_id = format!("{}-{}", hex::encode(&reversed_txid), tx_out.index);
+        let utxos_to_serialize = vec![(reversed_txid.clone(), tx_out.index)];
+        _db.put(&format!("utxo-{}", utxo_id), &serialize_utxos(&utxos_to_serialize)).unwrap();
+
+
+    }
+
+    for tx_in in &transaction.inputs {
+        // For each input, the referenced output becomes spent, so it should be removed from the UTXO set
+        let referenced_utxo_id = format!("{}-{}", hex::encode(&tx_in.prevout.hash), tx_in.prevout.n);
+        _db.delete(&format!("utxo-{}", referenced_utxo_id)).unwrap();
+    }
+
+    // 't' + txid -> tx_bytes
+    let mut key = vec![b't'];
+    key.extend_from_slice(&reversed_txid);
+    _db.put(&key, &tx_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // 'r' + txid -> block_hash
+    let mut key_block = vec![b'r'];
+    key_block.extend_from_slice(&reversed_txid);
+    _db.put(&key_block, block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    reader.seek(SeekFrom::Start(end_pos))?;
+
+    //println!("{:?}", transaction);
+    Ok(())
+}
+
+fn get_txid_bytes<R: Read>(reader: &mut R, start_pos: u64, end_pos: u64) -> Result<Vec<u8>, io::Error> where R: Seek {
+    // Calculate tx_size
+    let tx_size = (end_pos - start_pos) as usize;
+    let mut tx_bytes = vec![0u8; tx_size];
+    // Read the transaction bytes
+    reader.seek(SeekFrom::Start(start_pos))?;
+    reader.read_exact(&mut tx_bytes)?;
+
+    Ok(tx_bytes)
+}
+
+fn set_end_pos<R: Read + Seek>(reader: &mut R, start_pos: u64) -> Result<u64, io::Error> {
+    let end_pos = reader.stream_position()?;
+    reader.seek(SeekFrom::Start(start_pos))?;
+    Ok(end_pos)
+}
+
+fn hash_txid(tx_bytes: &[u8]) -> Result<Vec<u8>, io::Error> {
+    //Create TXID by hashing twice and reversing result
+    let first_hash = Sha256::digest(&tx_bytes);
+    let txid = Sha256::digest(&first_hash);
+    let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
+
+    Ok(reversed_txid)
 }
 
 fn read_outpoint(reader: &mut dyn Read) -> io::Result<COutPoint> {
@@ -693,7 +724,7 @@ fn read_4_bytes(reader: &mut dyn BufRead) -> io::Result<[u8; 4]> {
     Ok(buffer)
 }
 
-fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>) -> Result<SaplingTxData, io::Error> {
+fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64) -> Result<SaplingTxData, io::Error> {
     // Read the SaplingTxData
     let value = reader.read_i64::<LittleEndian>()?;
     let vshield_spend = parse_vshield_spends(reader)?;
@@ -706,14 +737,21 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>) -> Result<SaplingTxD
     let binding_sig_str = hex::encode(binding_sig);
 
     // Create and return the SaplingTxData struct
-    let sapling_tx_data = Some(SaplingTxData {
+    let sapling_tx_data = SaplingTxData {
         value,
         vshield_spend,
         vshield_output,
         binding_sig: binding_sig_str,
-    });
+    };
 
-    Ok(sapling_tx_data.unwrap())
+    let end_pos: u64 = set_end_pos(reader, start_pos)?;
+    let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos)?;
+    println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
+    let reversed_txid: Vec<u8> = hash_txid(&tx_bytes)?;
+    println!("Sapling TXID: {:?}", hex::encode(&reversed_txid));
+    println!("Sapling TX: {:?}", sapling_tx_data);
+
+    Ok(sapling_tx_data)
 }
 
 fn parse_vshield_spends(reader: &mut io::BufReader<&File>) -> Result<Vec<VShieldSpend>, io::Error> {
