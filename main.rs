@@ -90,7 +90,7 @@ pub struct CBlockHeader {
 }
 
 pub struct CTransaction {
-    pub version: u32,
+    pub version: i16,
     pub inputs: Vec<CTxIn>,
     pub outputs: Vec<CTxOut>,
     pub lock_time: u32,
@@ -380,8 +380,8 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
 
         // Variable header size based on block versions
         let header_size = match ver_as_int {
-            4 | 5 | 6 => 112, // Version 4, 5, 6: 112 bytes header
-            8..=u32::MAX => 144, // Version 8 and above: 144 bytes header
+            4 | 5 | 6 | 8 => 112, // Version 4, 5, 6, 8: 112 bytes header
+            //8..=u32::MAX => 144, // Version 8 and above: 144 bytes header
             _ => 80, // Default: Version 1 to 3: 80 bytes header
         };
 
@@ -469,18 +469,20 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let n_bits = reader.read_u32::<LittleEndian>().unwrap();
     let n_nonce = reader.read_u32::<LittleEndian>().unwrap();
     // Handle the expanded header size based on the params given
-    let (n_accumulator_checkpoint, hash_final_sapling_root) = match header_size {
-        112 => {
-            let mut acc_checkpoint = [0u8; 32];
-            reader.read_exact(&mut acc_checkpoint).unwrap();
-            (Some(acc_checkpoint), None)
+    let (hash_final_sapling_root, n_accumulator_checkpoint) = if n_version >= 8 {
+        let mut final_sapling_root = [0u8; 32];
+        match reader.read_exact(&mut final_sapling_root) {
+            Ok(_) => (None, Some(final_sapling_root)),
+            Err(_) => (None, None),
         }
-        144 => {
-            let mut final_sapling_root = [0u8; 32];
-            reader.read_exact(&mut final_sapling_root).unwrap();
-            (None, Some(final_sapling_root))
+    } else if n_version > 3 && n_version < 7 {
+        let mut accumulator_checkpoint = [0u8; 32];
+        match reader.read_exact(&mut accumulator_checkpoint) {
+            Ok(_) => (Some(accumulator_checkpoint), None),
+            Err(_) => (None, None),
         }
-        _ => (None, None), // Default case
+    } else {
+        (None, None)
     };
 
     let block_height = block_height;
@@ -529,8 +531,12 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
     let tx_amt = read_varint(reader)?;
     for _ in 0..tx_amt {
         let start_pos = reader.stream_position()?;
-        
-        let tx_ver_out = reader.read_u32::<LittleEndian>().unwrap();
+
+        let mut buffer = [0; 4];
+        reader.read_exact(&mut buffer);
+        let tx_ver_out = i16::from_le_bytes([buffer[0], buffer[1]]);
+        let tx_type = i16::from_le_bytes([buffer[2], buffer[3]]);
+        println!("Tx Type: {}", tx_type);
         if tx_ver_out == 1 {
             println!("Tx Version: {}", tx_ver_out);
             process_transaction_v1(reader, tx_ver_out, block_version, block_hash, _db, start_pos)?;
@@ -542,7 +548,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
     Ok(())
 }
 
-fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: u32, block_version: u32, block_hash: &[u8], _db: &DB, start_pos: u64) -> Result<(), io::Error> {
+fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, block_version: u32, block_hash: &[u8], _db: &DB, start_pos: u64) -> Result<(), io::Error> {
     let input_count = read_varint(reader)?;
 
     let inputs = (0..input_count)
