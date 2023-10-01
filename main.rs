@@ -381,6 +381,7 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
         // Variable header size based on block versions
         let header_size = match ver_as_int {
             4 | 5 | 6 | 8 => 112, // Version 4, 5, 6, 8: 112 bytes header
+            7 => 80, // Version 7 is 80 bytes
             //8..=u32::MAX => 144, // Version 8 and above: 144 bytes header
             _ => 80, // Default: Version 1 to 3: 80 bytes header
         };
