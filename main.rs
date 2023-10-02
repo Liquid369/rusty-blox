@@ -473,13 +473,13 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let (hash_final_sapling_root, n_accumulator_checkpoint) = if n_version >= 8 {
         let mut final_sapling_root = [0u8; 32];
         match reader.read_exact(&mut final_sapling_root) {
-            Ok(_) => (None, Some(final_sapling_root)),
+            Ok(_) => (Some(final_sapling_root), None),
             Err(_) => (None, None),
         }
     } else if n_version > 3 && n_version < 7 {
         let mut accumulator_checkpoint = [0u8; 32];
         match reader.read_exact(&mut accumulator_checkpoint) {
-            Ok(_) => (Some(accumulator_checkpoint), None),
+            Ok(_) => (None, Some(accumulator_checkpoint)),
             Err(_) => (None, None),
         }
     } else {
