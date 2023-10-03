@@ -533,16 +533,14 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
     for _ in 0..tx_amt {
         let start_pos = reader.stream_position()?;
 
-        let mut buffer = [0; 4];
-        reader.read_exact(&mut buffer);
-        let tx_ver_out = i16::from_le_bytes([buffer[0], buffer[1]]);
-        let tx_type = i16::from_le_bytes([buffer[2], buffer[3]]);
+        let tx_ver_out = reader.read_u16::<LittleEndian>()?;
+        let tx_type = reader.read_u16::<LittleEndian>()?;
+
+        println!("Tx Version: {}", tx_ver_out);
         println!("Tx Type: {}", tx_type);
         if tx_ver_out == 1 {
-            println!("Tx Version: {}", tx_ver_out);
-            process_transaction_v1(reader, tx_ver_out, block_version, block_hash, _db, start_pos)?;
+            process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
         } else if tx_ver_out > 1 {
-            println!("Tx Version: {}", tx_ver_out);
             parse_sapling_tx_data(reader, start_pos)?;
         }
     }
