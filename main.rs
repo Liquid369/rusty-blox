@@ -730,46 +730,99 @@ fn read_4_bytes(reader: &mut dyn BufRead) -> io::Result<[u8; 4]> {
 }
 
 fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64) -> Result<SaplingTxData, io::Error> {
-    // Read the SaplingTxData
+    // Potential Vin Vector
+    let input_count = read_varint2(reader)? as u64;
+    println!("Input Count: {}", input_count);
+
+    if input_count > 0 {
+        let inputs: Vec<CTxIn> = (0..input_count)
+            .map(|i| {
+                let prev_output = read_outpoint(reader)?;
+                let script = read_script(reader)?;
+                let sequence = reader.read_u32::<LittleEndian>()?;
+                Ok(CTxIn {
+                    prevout: prev_output,
+                    script_sig: CScript { script },
+                    sequence,
+                    index: i,
+                })
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+    
+        for tx_in in &inputs {
+            println!("{:?}", tx_in);
+        }
+    }
+
+    let output_count = read_varint(reader)?;
+    println!("Output Count: {}", output_count);
+
+    if output_count > 0 {
+        let outputs: Vec<CTxOut> = (0..output_count)
+            .map(|i| {
+                let value = reader.read_i64::<LittleEndian>()?;
+                let script = read_script(reader)?;
+                Ok(CTxOut {
+                    value,
+                    script_length: script.len().try_into().unwrap(),
+                    script_pubkey: CScript { script },
+                    index: i,
+                })
+            })
+            .collect::<Result<Vec<_>, std::io::Error>>()?;
+    
+        for tx_out in &outputs {
+            println!("{:?}", tx_out);
+        }
+    }
+    let lock_time_buff = reader.read_u32::<LittleEndian>()?;
+    println!("Lock Time: {}", lock_time_buff);
+    // Hacky fix for getting proper values/spends/outputs for Sapling
+    let value_count = read_varint(reader)?;
     let value = reader.read_i64::<LittleEndian>()?;
+    println!("Value: {}", value);
+    // Read the SaplingTxData
     let vshield_spend = parse_vshield_spends(reader)?;
     let vshield_output = parse_vshield_outputs(reader)?;
     // Read the binding_sig as an array of unsigned chars max size 64
     let mut binding_sig = [0u8; 64];
     reader.read_exact(&mut binding_sig)?;
 
-    // Convert the binding_sig to a String (or any other representation as needed)
-    let binding_sig_str = hex::encode(binding_sig);
-
     // Create and return the SaplingTxData struct
     let sapling_tx_data = SaplingTxData {
         value,
         vshield_spend,
         vshield_output,
-        binding_sig: binding_sig_str,
+        binding_sig,
     };
 
+    let serialized_data = bincode::serialize(&sapling_tx_data)?;
     let end_pos: u64 = set_end_pos(reader, start_pos)?;
     let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos)?;
-    println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
+    //println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
     let reversed_txid: Vec<u8> = hash_txid(&tx_bytes)?;
     println!("Sapling TXID: {:?}", hex::encode(&reversed_txid));
-    println!("Sapling TX: {:?}", sapling_tx_data);
+    println!("{:?}", sapling_tx_data);
 
     Ok(sapling_tx_data)
 }
 
 fn parse_vshield_spends(reader: &mut io::BufReader<&File>) -> Result<Vec<VShieldSpend>, io::Error> {
     // Read the number of vShieldSpend entries
-    let count = read_varint(reader)?;
+    let count = read_varint(reader)? as usize;
+    //println!("vShieldSpend Count: {}", count);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Define buffer sizes for respective fields
+    let buff_32 = [0u8; 32];
+    let buff_64 = [0u8; 64];
+    let buff_192 = [0u8; 192];
 
     // Read each vShieldSpend entry
-    let mut vshield_spends = Vec::with_capacity(count as usize);
+    let mut vshield_spends = Vec::with_capacity(count.try_into().unwrap());
     for _ in 0..count {
-        // Define buffer sizes for respective fields
-        let buff_32 = [0u8; 32];
-        let buff_64 = [0u8; 64];
-        let buff_192 = [0u8; 192];
         // Read each field
         let mut cv = buff_32;
         reader.read_exact(&mut cv)?;
@@ -794,23 +847,28 @@ fn parse_vshield_spends(reader: &mut io::BufReader<&File>) -> Result<Vec<VShield
             spend_auth_sig,
         };
         vshield_spends.push(vshield_spend);
+        //println!("{:?}", vshield_spends);
     }
-
     Ok(vshield_spends)
 }
 
 fn parse_vshield_outputs(reader: &mut io::BufReader<&File>) -> Result<Vec<VShieldOutput>, io::Error> {
     // Read the number of vShieldOutput entries
-    let count = read_varint(reader)?;
+    let count = read_varint(reader)? as usize;
+    //println!("vShieldOutput Count: {}", count);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Define buffer sizes for respective fields
+    let buff_32 = [0u8; 32];
+    let buff_80 = [0u8; 80];
+    let buff_192 = [0u8; 192];
+    let buff_580 = [0u8; 580];
 
     // Read each vShieldOutput entry
-    let mut vshield_outputs = Vec::with_capacity(count as usize);
+    let mut vshield_outputs = Vec::with_capacity(count);
     for _ in 0..count {
-        // Define buffer sizes for respective fields
-        let buff_32 = [0u8; 32];
-        let buff_80 = [0u8; 80];
-        let buff_192 = [0u8; 192];
-        let buff_580 = [0u8; 580];
         // Read each field
         let mut cv = buff_32;
         reader.read_exact(&mut cv)?;
@@ -835,6 +893,7 @@ fn parse_vshield_outputs(reader: &mut io::BufReader<&File>) -> Result<Vec<VShiel
             proof,
         };
         vshield_outputs.push(vshield_output);
+        //println!("{:?}", vshield_outputs);
     }
 
     Ok(vshield_outputs)
