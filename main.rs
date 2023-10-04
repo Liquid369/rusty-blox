@@ -126,7 +126,7 @@ pub struct SaplingTxData {
     pub value: i64,
     pub vshield_spend: Vec<VShieldSpend>,
     pub vshield_output: Vec<VShieldOutput>,
-    pub binding_sig: String,
+    pub binding_sig: [u8; 64],
 }
 
 pub struct VShieldSpend {
@@ -233,7 +233,7 @@ impl std::fmt::Debug for SaplingTxData {
 impl fmt::Debug for VShieldSpend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Formatting vShieldSpend
-        writeln!(f, "VShieldSpend {{")?;
+        writeln!(f, "{{")?;
         writeln!(f, "    cv: {:?}", hex::encode(&self.cv))?;
         writeln!(f, "    anchor: {:?}", hex::encode(&self.anchor))?;
         writeln!(f, "    nullifier: {:?}", hex::encode(&self.nullifier))?;
@@ -247,7 +247,7 @@ impl fmt::Debug for VShieldSpend {
 impl std::fmt::Debug for VShieldOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Formatting vShieldOutput
-        writeln!(f, "VShieldOutput {{")?;
+        writeln!(f, "{{")?;
         writeln!(f, "    cv: {:?}", hex::encode(&self.cv))?;
         writeln!(f, "    cmu: {:?}", hex::encode(&self.cmu))?;
         writeln!(f, "    ephemeral_key: {:?}", hex::encode(&self.ephemeral_key))?;
@@ -380,7 +380,7 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
 
         // Variable header size based on block versions
         let header_size = match ver_as_int {
-            4 | 5 | 6 | 8 => 112, // Version 4, 5, 6, 8: 112 bytes header
+            4 | 5 | 6 | 8 | 9 => 112, // Version 4, 5, 6, 8: 112 bytes header
             7 => 80, // Version 7 is 80 bytes
             //8..=u32::MAX => 144, // Version 8 and above: 144 bytes header
             _ => 80, // Default: Version 1 to 3: 80 bytes header
