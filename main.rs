@@ -380,7 +380,7 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
 
         // Variable header size based on block versions
         let header_size = match ver_as_int {
-            4 | 5 | 6 | 8 | 9 => 112, // Version 4, 5, 6, 8: 112 bytes header
+            4 | 5 | 6 | 8 | 9 | 10 | 11 => 112, // Version 4, 5, 6, 8: 112 bytes header
             7 => 80, // Version 7 is 80 bytes
             //8..=u32::MAX => 144, // Version 8 and above: 144 bytes header
             _ => 80, // Default: Version 1 to 3: 80 bytes header
@@ -470,20 +470,19 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let n_bits = reader.read_u32::<LittleEndian>().unwrap();
     let n_nonce = reader.read_u32::<LittleEndian>().unwrap();
     // Handle the expanded header size based on the params given
-    let (hash_final_sapling_root, n_accumulator_checkpoint) = if n_version >= 8 {
-        let mut final_sapling_root = [0u8; 32];
-        match reader.read_exact(&mut final_sapling_root) {
-            Ok(_) => (Some(final_sapling_root), None),
-            Err(_) => (None, None),
-        }
-    } else if n_version > 3 && n_version < 7 {
-        let mut accumulator_checkpoint = [0u8; 32];
-        match reader.read_exact(&mut accumulator_checkpoint) {
-            Ok(_) => (None, Some(accumulator_checkpoint)),
-            Err(_) => (None, None),
-        }
-    } else {
-        (None, None)
+    let (hash_final_sapling_root, n_accumulator_checkpoint) = match n_version {
+        7 => (None, None),
+        8..=11 => {
+            let mut final_sapling_root = [0u8; 32];
+            reader.read_exact(&mut final_sapling_root).expect("Failed to read final sapling root");
+            (Some(final_sapling_root), None)
+        },
+        4..=6 => {
+            let mut accumulator_checkpoint = [0u8; 32];
+            reader.read_exact(&mut accumulator_checkpoint).expect("Failed to read accumulator checkpoint");
+            (None, Some(accumulator_checkpoint))
+        },
+        _ => (None, None),
     };
 
     let block_height = block_height;
