@@ -702,9 +702,10 @@ fn read_outpoint(reader: &mut dyn Read) -> io::Result<COutPoint> {
     reader.read_exact(&mut hash)?;
     // Read output index
     let n = reader.read_u32::<LittleEndian>()?;
-    let hex_hash = hex::encode(&hash);
+    let reversed_bytes = reverse_bytes(&hash);
+    let hex_hash = hex::encode(&reversed_bytes);
 
-    Ok(COutPoint { hash: reverse_bytes(&hex_hash), n })
+    Ok(COutPoint { hash: hex_hash, n })
 }
 
 fn read_varint<R: Read>(reader: &mut R) -> io::Result<u64> {
