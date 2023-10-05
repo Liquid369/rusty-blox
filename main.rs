@@ -109,6 +109,7 @@ pub struct CTxOut {
     pub script_length: i32,
     pub script_pubkey: CScript,
     pub index: u64,
+    pub address: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -214,6 +215,7 @@ impl fmt::Debug for CTxOut {
         writeln!(f, "    value: {:?}", self.value)?;
         writeln!(f, "    script_pubkey: {:?}", self.script_pubkey)?;
         writeln!(f, "    script_length: {:?}", self.script_length)?;
+        writeln!(f, "    address: {:?}", self.address)?;
         writeln!(f, "}}")
     }
 }
@@ -564,15 +566,37 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
         .collect::<Result<Vec<_>, std::io::Error>>()?;
 
     let output_count = read_varint(reader)?;
+    let mut general_address_type = if input_count == 1 && output_count == 1 {
+        AddressType::CoinBaseTx
+    } else if output_count > 1 {
+        AddressType::CoinStakeTx
+    } else {
+        AddressType::Nonstandard
+    };
     let outputs = (0..output_count)
         .map(|i| {
             let value = reader.read_i64::<LittleEndian>()?;
             let script = read_script(reader)?;
+            let address_type = get_address_type(&CTxOut {
+                value,
+                script_length: script.len().try_into().unwrap(),
+                script_pubkey: CScript { script: script.clone() }, // Cloned because we need it again
+                index: i,
+                address: Vec::new(), // Temporary dummy value
+            }, &general_address_type);
+            let address_type_option = Some(address_type.clone());
+            let address_opt = address_type_to_string(address_type_option);
+
+            let address = match address_opt {
+                Some(addr) => vec![addr],
+                None => Vec::new(),
+            };
             Ok(CTxOut {
-                value: value.try_into().unwrap(),
+                value: value,
                 script_length: script.len().try_into().unwrap(),
                 script_pubkey: CScript { script },
                 index: i,
+                address,
             })
         })
         .collect::<Result<Vec<_>, std::io::Error>>()?;
@@ -593,33 +617,8 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
 
     println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
 
-    let mut general_address_type = if input_count == 1 && outputs.len() == 1 && outputs[0].index == 0 {
-        AddressType::CoinBaseTx
-    } else if outputs.len() > 1 {
-        AddressType::CoinStakeTx
-    } else {
-        AddressType::Nonstandard
-    };
-    
     for tx_out in &transaction.outputs {
-        let address_type = if !tx_out.script_pubkey.script.is_empty() {
-            scriptpubkey_to_address(&tx_out.script_pubkey).unwrap_or_else(|| general_address_type.clone())
-        } else {
-            general_address_type.clone()
-        };
-        match &address_type {
-            AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
-            AddressType::P2SH(address) => println!("P2SH Address: {}", address),
-            AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
-            AddressType::ZerocoinMint => println!("This is a Zerocoin Mint"),
-            AddressType::ZerocoinSpend => println!("This is a Zerocoin Spend"),
-            AddressType::ZerocoinPublicSpend => println!("This is a Zerocoin Public Spend"),
-            AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
-            AddressType::Sapling => println!("Shielded TX"),
-            AddressType::CoinStakeTx => println!("CoinStake Transaction"),
-            AddressType::CoinBaseTx => println!("CoinBase Transaction"),
-            AddressType::Nonstandard => println!("Nonstandard"),
-        }
+        let address_type = get_address_type(tx_out, &general_address_type);
 
         // Associate by these with UTXO set
         handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
@@ -667,6 +666,28 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
 
     //println!("{:?}", transaction);
     Ok(())
+}
+
+fn get_address_type(tx_out: &CTxOut, general_address_type: &AddressType) -> AddressType {
+    let address_type = if !tx_out.script_pubkey.script.is_empty() {
+        scriptpubkey_to_address(&tx_out.script_pubkey).unwrap_or_else(|| general_address_type.clone())
+    } else {
+        general_address_type.clone()
+    };
+    match &address_type {
+        AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
+        AddressType::P2SH(address) => println!("P2SH Address: {}", address),
+        AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
+        AddressType::ZerocoinMint => println!("Zerocoin Mint"),
+        AddressType::ZerocoinSpend => println!("Zerocoin Spend"),
+        AddressType::ZerocoinPublicSpend => println!("Zerocoin Public Spend"),
+        AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
+        AddressType::Sapling => println!("Shielded TX"),
+        AddressType::CoinStakeTx => println!("CoinStake Transaction"),
+        AddressType::CoinBaseTx => println!("CoinBase Transaction"),
+        AddressType::Nonstandard => println!("Nonstandard"),
+    }
+    address_type
 }
 
 fn get_txid_bytes<R: Read>(reader: &mut R, start_pos: u64, end_pos: u64) -> Result<Vec<u8>, io::Error> where R: Seek {
@@ -756,17 +777,40 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64) -> R
 
     let output_count = read_varint(reader)?;
     println!("Output Count: {}", output_count);
+    let mut general_address_type = if input_count == 1 && output_count == 1 {
+        AddressType::CoinBaseTx
+    } else if output_count > 1 {
+        AddressType::CoinStakeTx
+    } else {
+        AddressType::Nonstandard
+    };
 
     if output_count > 0 {
         let outputs: Vec<CTxOut> = (0..output_count)
             .map(|i| {
                 let value = reader.read_i64::<LittleEndian>()?;
                 let script = read_script(reader)?;
+                let address_type = get_address_type(&CTxOut {
+                    value,
+                    script_length: script.len().try_into().unwrap(),
+                    script_pubkey: CScript { script: script.clone() },
+                    index: i,
+                    address: Vec::new(),
+                }, &general_address_type);
+                let address_type_option = Some(address_type.clone());
+                let address_opt = address_type_to_string(address_type_option);
+
+                let address = match address_opt {
+                    Some(addr) => vec![addr],
+                    None => Vec::new(),
+                };
+
                 Ok(CTxOut {
                     value,
                     script_length: script.len().try_into().unwrap(),
                     script_pubkey: CScript { script },
                     index: i,
+                    address,
                 })
             })
             .collect::<Result<Vec<_>, std::io::Error>>()?;
@@ -984,6 +1028,12 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
     };
 
     Ok(height)
+}
+
+fn reverse_bytes(array: &[u8]) -> Vec<u8> {
+    let mut vec = Vec::from(array);
+    vec.reverse();
+    vec
 }
 
 // Bitcoin normal varint
@@ -1221,6 +1271,23 @@ fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
 
             Some(AddressType::Nonstandard)
         }
+    }
+}
+
+fn address_type_to_string(address: Option<AddressType>) -> Option<String> {
+    match address {
+        Some(AddressType::CoinStakeTx) => Some("CoinStakeTx".to_string()),
+        Some(AddressType::CoinBaseTx) => Some("CoinBaseTx".to_string()),
+        Some(AddressType::Nonstandard) => Some("Nonstandard".to_string()),
+        Some(AddressType::P2PKH(addr)) => Some(addr),
+        Some(AddressType::P2PK(pubkey)) => Some(pubkey),
+        Some(AddressType::P2SH(addr)) => Some(addr),
+        Some(AddressType::ZerocoinMint) => Some("ZerocoinMint".to_string()),
+        Some(AddressType::ZerocoinSpend) => Some("ZerocoinSpend".to_string()),
+        Some(AddressType::ZerocoinPublicSpend) => Some("ZerocoinPublicSpend".to_string()),
+        Some(AddressType::Staking(staker, owner)) => Some(format!("Staking({}, {})", staker, owner)),
+        Some(AddressType::Sapling) => Some("Sapling".to_string()),
+        None => None,
     }
 }
 
