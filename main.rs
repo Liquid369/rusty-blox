@@ -9,6 +9,7 @@ use core::borrow::Borrow;
 use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160, Digest as Ripemd160Digest};
 use serde_json::{Value, json};
+use serde::Serialize;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
@@ -123,29 +124,32 @@ pub struct CScript {
     pub script: Vec<u8>,
 }
 
+#[derive(Serialize)]
 pub struct SaplingTxData {
     pub value: i64,
     pub vshield_spend: Vec<VShieldSpend>,
     pub vshield_output: Vec<VShieldOutput>,
-    pub binding_sig: [u8; 64],
+    pub binding_sig: Vec<u8>,
 }
 
+#[derive(Serialize)]
 pub struct VShieldSpend {
-    pub cv: [u8; 32],
-    pub anchor: [u8; 32],
-    pub nullifier: [u8; 32],
-    pub rk: [u8; 32],
-    pub proof: [u8; 192],
-    pub spend_auth_sig: [u8; 64],
+    pub cv: Vec<u8>,
+    pub anchor: Vec<u8>,
+    pub nullifier: Vec<u8>,
+    pub rk: Vec<u8>,
+    pub proof: Vec<u8>,
+    pub spend_auth_sig: Vec<u8>,
 }
 
+#[derive(Serialize)]
 pub struct VShieldOutput {
-    pub cv: [u8; 32],
-    pub cmu: [u8; 32],
-    pub ephemeral_key: [u8; 32],
-    pub enc_ciphertext: [u8; 580],
-    pub out_ciphertext: [u8; 80],
-    pub proof: [u8; 192],
+    pub cv: Vec<u8>,
+    pub cmu: Vec<u8>,
+    pub ephemeral_key: Vec<u8>,
+    pub enc_ciphertext: Vec<u8>,
+    pub out_ciphertext: Vec<u8>,
+    pub proof: Vec<u8>,
 }
 
 impl std::fmt::Debug for CScript {
@@ -542,7 +546,7 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         if tx_ver_out == 1 {
             process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
         } else if tx_ver_out > 1 {
-            parse_sapling_tx_data(reader, start_pos)?;
+            parse_sapling_tx_data(reader, start_pos, _db)?;
         }
     }
     Ok(())
@@ -750,7 +754,7 @@ fn read_4_bytes(reader: &mut dyn BufRead) -> io::Result<[u8; 4]> {
     Ok(buffer)
 }
 
-fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64) -> Result<SaplingTxData, io::Error> {
+fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db: &DB) -> Result<SaplingTxData, io::Error> {
     // Potential Vin Vector
     let input_count = read_varint2(reader)? as u64;
     println!("Input Count: {}", input_count);
@@ -837,10 +841,11 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64) -> R
         value,
         vshield_spend,
         vshield_output,
-        binding_sig,
+        binding_sig: binding_sig.to_vec(),
     };
 
-    let serialized_data = bincode::serialize(&sapling_tx_data)?;
+    let serialized_data = bincode::serialize(&sapling_tx_data)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     let end_pos: u64 = set_end_pos(reader, start_pos)?;
     let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos)?;
     //println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
@@ -883,12 +888,12 @@ fn parse_vshield_spends(reader: &mut io::BufReader<&File>) -> Result<Vec<VShield
 
         // Create and return the VShieldSpend struct
         let vshield_spend = VShieldSpend {
-            cv,
-            anchor,
-            nullifier,
-            rk,
-            proof,
-            spend_auth_sig,
+            cv: reverse_bytes(&cv),
+            anchor: reverse_bytes(&anchor),
+            nullifier: reverse_bytes(&nullifier),
+            rk: reverse_bytes(&rk),
+            proof: proof.to_vec(),
+            spend_auth_sig: spend_auth_sig.to_vec(),
         };
         vshield_spends.push(vshield_spend);
         //println!("{:?}", vshield_spends);
@@ -929,12 +934,12 @@ fn parse_vshield_outputs(reader: &mut io::BufReader<&File>) -> Result<Vec<VShiel
 
         // Create and return the VShieldOutput struct
         let vshield_output = VShieldOutput {
-            cv,
-            cmu,
-            ephemeral_key,
-            enc_ciphertext,
-            out_ciphertext,
-            proof,
+            cv: reverse_bytes(&cv),
+            cmu: reverse_bytes(&cmu),
+            ephemeral_key: reverse_bytes(&ephemeral_key),
+            enc_ciphertext: enc_ciphertext.to_vec(),
+            out_ciphertext: out_ciphertext.to_vec(),
+            proof: proof.to_vec(),
         };
         vshield_outputs.push(vshield_output);
         //println!("{:?}", vshield_outputs);
