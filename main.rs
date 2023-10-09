@@ -1,7 +1,8 @@
 use std::fs;
 use std::fs::File;
-use std::io::{self, BufRead, Read, Seek, SeekFrom};
-use std::path::{Path};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, ErrorKind, Cursor};
+use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::fmt;
 use std::error::Error;
@@ -13,7 +14,7 @@ use serde::Serialize;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
-use rocksdb::{DB};
+use rocksdb::{DB, Options, ColumnFamilyDescriptor};
 
 use bitcoin::consensus::encode::{Decodable, VarInt};
 use config::{Config, File as ConfigFile};
@@ -98,10 +99,11 @@ pub struct CTransaction {
 }
 
 pub struct CTxIn {
-    pub prevout: COutPoint,
+    pub prevout: Option<COutPoint>,
     pub script_sig: CScript,
     pub sequence: u32,
     pub index: u64,
+    pub coinbase: Option<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -113,7 +115,7 @@ pub struct CTxOut {
     pub address: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct COutPoint {
     pub hash: String,
     pub n: u32,
@@ -208,6 +210,7 @@ impl std::fmt::Debug for CTxIn {
         writeln!(f, "    prevout: {:?}", self.prevout)?;
         writeln!(f, "    script_sig: {:?}", self.script_sig)?;
         writeln!(f, "    sequence: {}", self.sequence)?;
+        writeln!(f, "    coinbase: {:?}", self.coinbase)?;
         write!(f, "}}")
     }
 }
@@ -264,6 +267,13 @@ impl std::fmt::Debug for VShieldOutput {
     }
 }
 
+const COLUMN_FAMILIES: [&str; 7] = [
+    "blocks", "transactions",
+    "addr_index", "utxo",
+    "chain_metadata", "pubkey",
+    "chain_state",
+];
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load the configuration file
     let mut config = Config::default();
@@ -275,8 +285,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get("db_path")
         .and_then(|value| value.to_owned().into_string().ok())
         .ok_or("Missing or invalid db_path in config.toml")?;
+    let mut cf_descriptors = vec![ColumnFamilyDescriptor::new("default", Options::default())];
+    for cf in COLUMN_FAMILIES.iter() {
+        cf_descriptors.push(ColumnFamilyDescriptor::new(cf.to_string(), Options::default()));
+    }
 
-    let _db = DB::open_default(db_path)?;
+    let mut db_options = Options::default();
+    db_options.create_if_missing(true);
+    db_options.create_missing_column_families(true);
+    let db = DB::open_cf_descriptors(&db_options, db_path, cf_descriptors)?;
 
     // Path for blk files "blocks" folder
     let blk_dir: &str = &paths
@@ -284,13 +301,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|value| value.to_owned().into_string().ok())
         .ok_or("Invalid blk_dir in config.toml")?;
 
-    let dir = fs::read_dir(blk_dir)
-    .map_err(|err| format!("Failed to read directory entries: {}", err))?;
-
-    // Keep track of processed files
-    let mut processed_files = Vec::new();
+    // Load processed files from the default column family
+    let mut processed_files = load_processed_files_from_db(&db).unwrap_or_default();
 
     // Process each file in the directory
+    let dir = fs::read_dir(blk_dir)
+        .map_err(|err| format!("Failed to read directory entries: {}", err))?;
+
     for entry in dir {
         if let Ok(entry) = entry {
             if let Some(file_name) = entry.file_name().to_str() {
@@ -299,13 +316,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if processed_files.contains(&file_path) {
                         continue; // Skip already processed files
                     }
-                    process_blk_file(&file_path, &_db)?;
-                    processed_files.push(file_path.clone());
+                    process_blk_file(&file_path, &db)?;
+
+                    // Save updated processed files to the default column family
+                    processed_files.insert(file_path.clone());
+                    let _ = save_processed_files_to_db(&db, &processed_files);
                 }
             }
         }
     }
 
+    Ok(())
+}
+
+fn load_processed_files_from_db(db: &DB) -> Result<HashSet<PathBuf>, String> {
+    let read_options = rocksdb::ReadOptions::default();
+    let cf = db.cf_handle("chain_metadata").expect("Chain metadata column family not found."); // Using chain_metadata for this
+    let data = db.get_cf_opt(cf, b"processed_files", &read_options)?;
+    if let Some(data) = data {
+        let files: HashSet<PathBuf> = bincode::deserialize(&data)
+            .map_err(|e| format!("Bincode deserialization error: {}", e))?;
+        Ok(files)
+    } else {
+        Ok(HashSet::new())
+    }
+}
+
+fn save_processed_files_to_db(db: &DB, processed_files: &HashSet<PathBuf>) -> Result<(), String> {
+    let cf = db.cf_handle("chain_metadata").expect("Chain metadata column family not found.");
+    let data = bincode::serialize(processed_files)
+        .map_err(|e| format!("Bincode serialization error: {}", e))?;
+    db.put_cf(cf, b"processed_files", &data)?;
     Ok(())
 }
 
@@ -402,15 +443,16 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
 
         // Write to RocksDB
         // 'b' + block_hash -> block_data
+        let cf_blocks = _db.cf_handle("blocks").expect("Blocks column family not found.");
         let mut key = vec![b'b'];
         key.extend_from_slice(&block_header.block_hash);
-        _db.put(&key, &header_buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        _db.put_cf(cf_blocks, &key, &header_buffer).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         // 'h' + block_height -> block_hash
         let mut key_height = vec![b'h'];
         let height = block_header.block_height.unwrap_or(0);
         let height_bytes = height.to_le_bytes();
         key_height.extend_from_slice(&height_bytes);
-        _db.put(&key_height, &block_header.block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        _db.put_cf(cf_blocks, &key_height, &block_header.block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // Process and print tx data
         process_transaction(&mut reader, ver_as_int, &block_header.block_hash, _db)?;
@@ -475,6 +517,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let n_time = reader.read_u32::<LittleEndian>().unwrap();
     let n_bits = reader.read_u32::<LittleEndian>().unwrap();
     let n_nonce = reader.read_u32::<LittleEndian>().unwrap();
+
     // Handle the expanded header size based on the params given
     let (hash_final_sapling_root, n_accumulator_checkpoint) = match n_version {
         7 => (None, None),
@@ -508,7 +551,7 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     }
 }
 
-fn read_script(reader: &mut io::BufReader<&File>) -> Result<Vec<u8>, io::Error> {
+fn read_script<R: io::Read>(reader: &mut R) -> Result<Vec<u8>, io::Error> {
     let script_length = read_varint(reader)?;
     let mut script = vec![0u8; script_length as usize];
     reader.read_exact(&mut script)?;
@@ -524,10 +567,13 @@ fn handle_address(_db: &DB, address_type: &AddressType, reversed_txid: &Vec<u8>,
     };
     
     for address_key in &address_keys {
-        let existing_data = _db.get(&format!("address-{}", &address_key)).map_err(from_rocksdb_error)?;
+        let cf_addr = _db.cf_handle("addr_index").expect("Address_index column family not found");
+        let mut key_address = vec![b'a']; 
+        key_address.extend_from_slice(address_key.as_bytes());
+        let existing_data = _db.get_cf(cf_addr, &key_address).map_err(from_rocksdb_error)?;
         let mut existing_utxos = existing_data.as_deref().map_or(Vec::new(), deserialize_utxos);
         existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
-        _db.put(&format!("address-{}", &address_key), &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
+        _db.put_cf(cf_addr, &key_address, &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
     }
 
     Ok(())
@@ -543,9 +589,9 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
 
         println!("Tx Version: {}", tx_ver_out);
         println!("Tx Type: {}", tx_type);
-        if tx_ver_out == 1 {
+        if tx_ver_out <= 2 && block_version < 3 {
             process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
-        } else if tx_ver_out > 1 {
+        } else if tx_ver_out > 1 && block_version > 7 {
             parse_sapling_tx_data(reader, start_pos, _db)?;
         }
     }
@@ -553,21 +599,38 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
 }
 
 fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, block_version: u32, block_hash: &[u8], _db: &DB, start_pos: u64) -> Result<(), io::Error> {
+    let cf_transactions = _db.cf_handle("transactions").expect("Transaction column family not found");
+    let cf_pubkey = _db.cf_handle("pubkey").expect("Pubkey column family not found");
+    let cf_utxo = _db.cf_handle("utxo").expect("UTXO column family not found");
     let input_count = read_varint(reader)?;
 
     let inputs = (0..input_count)
-        .map(|i| {
-            let prev_output = read_outpoint(reader)?;
-            let script = read_script(reader)?;
-            let sequence = reader.read_u32::<LittleEndian>()?;
-            Ok(CTxIn {
-                prevout: prev_output,
-                script_sig: CScript { script },
-                sequence,
-                index: i,
-            })
+    .map(|i| {
+        let mut coinbase = None;
+        let mut prev_output = None;
+        let mut script = None;
+
+        if block_version < 3 && tx_ver_out == 2 {
+            let mut buffer = [0; 26];
+            reader.read_exact(&mut buffer)?;
+            coinbase = Some(buffer.to_vec());
+        }
+
+        if block_version > 3 && tx_ver_out == 1 {
+            prev_output = Some(read_outpoint(reader)?);
+            script = Some(read_script(reader)?);
+        }
+
+        let sequence = reader.read_u32::<LittleEndian>()?;
+        Ok(CTxIn {
+            prevout: prev_output,
+            script_sig: CScript { script: script.unwrap_or_default() }, 
+            sequence,
+            index: i,
+            coinbase,
         })
-        .collect::<Result<Vec<_>, std::io::Error>>()?;
+    })
+    .collect::<Result<Vec<_>, std::io::Error>>()?;
 
     let output_count = read_varint(reader)?;
     let mut general_address_type = if input_count == 1 && output_count == 1 {
@@ -621,6 +684,7 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
 
     println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
 
+    let mut key_pubkey = vec![b'p'];
     for tx_out in &transaction.outputs {
         let address_type = get_address_type(tx_out, &general_address_type);
 
@@ -628,7 +692,6 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
         handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
 
         // 'p' + scriptpubkey -> list of (txid, output_index)
-        let mut key_pubkey = vec![b'p'];
         key_pubkey.extend_from_slice(&tx_out.script_pubkey.script); 
 
         // Fetch existing UTXOs
@@ -640,31 +703,64 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
 
             // Store the updated UTXOs
             let serialized_utxos = serialize_utxos(&existing_utxos);
-            _db.put(&key_pubkey, &serialized_utxos).unwrap();
+            _db.put_cf(cf_pubkey, &key_pubkey, &serialized_utxos).unwrap();
         }
         // Create a UTXO identifier (txid + output index)
-        let utxo_id = format!("{}-{}", hex::encode(&reversed_txid), tx_out.index);
+        let mut key_utxo = vec![b'u'];
+        key_utxo.extend_from_slice(&hex::encode(&reversed_txid).into_bytes());
         let utxos_to_serialize = vec![(reversed_txid.clone(), tx_out.index)];
-        _db.put(&format!("utxo-{}", utxo_id), &serialize_utxos(&utxos_to_serialize)).unwrap();
-
-
+        _db.put_cf(cf_utxo, &key_utxo, &serialize_utxos(&utxos_to_serialize)).unwrap();
     }
 
     for tx_in in &transaction.inputs {
-        // For each input, the referenced output becomes spent, so it should be removed from the UTXO set
-        let referenced_utxo_id = format!("{}-{}", hex::encode(&tx_in.prevout.hash), tx_in.prevout.n);
-        _db.delete(&format!("utxo-{}", referenced_utxo_id)).unwrap();
+        let mut key = vec![b't'];
+        if let Some(actual_prevout) = &tx_in.prevout {
+            key.extend_from_slice(&actual_prevout.hash.as_bytes());
+        }
+        let spent_output: Option<&CTxOut> = None;
+        let tx_data_option = _db.get_cf(cf_transactions, &key).unwrap();
+        if let Some(tx_data) = tx_data_option {
+            let referenced_transaction = deserialize_transaction(&tx_data, block_version).unwrap();
+        
+            if let Some(prevout) = &tx_in.prevout {
+                let output = &referenced_transaction.outputs[prevout.n as usize];
+                let address_type = get_address_type(output, &general_address_type);
+        
+                let _ = remove_utxo_addr(_db, &address_type, &prevout.hash, prevout.n);
+            }
+        }
+        let mut key_utxo = vec![b'u'];
+        if let Some(actual_prevout) = &tx_in.prevout {
+            key.extend_from_slice(&actual_prevout.hash.as_bytes());
+        }
+        if let Ok(Some(data)) = _db.get_cf(cf_pubkey, &key_utxo) {
+            let mut utxos = deserialize_utxos(&data);
+    
+            // Remove the UTXO that matches the current transaction's input
+            if let Some(prevout) = &tx_in.prevout {
+                let _hash = &prevout.hash;
+                let _n = prevout.n;
+                if let Some(pos) = utxos.iter().position(|(txid, index)| *txid == _hash.as_bytes() && *index == _n as u64) {
+                    utxos.remove(pos);
+                }
+            }
+    
+            // Serialize the updated list of UTXOs and store it back in the database
+            if !utxos.is_empty() {
+                _db.put_cf(cf_pubkey, &key_pubkey, &serialize_utxos(&utxos)).unwrap();
+            } else {
+                _db.delete_cf(cf_pubkey, &key_pubkey);
+            }
+        }
+    
+        // Remove the referenced UTXO from the UTXO set
+        _db.delete_cf(cf_utxo, &key_utxo).unwrap();
     }
 
     // 't' + txid -> tx_bytes
     let mut key = vec![b't'];
     key.extend_from_slice(&reversed_txid);
-    _db.put(&key, &tx_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    // 'r' + txid -> block_hash
-    let mut key_block = vec![b'r'];
-    key_block.extend_from_slice(&reversed_txid);
-    _db.put(&key_block, block_hash).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    _db.put_cf(cf_transactions, &key, &tx_bytes).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     reader.seek(SeekFrom::Start(end_pos))?;
 
@@ -755,28 +851,33 @@ fn read_4_bytes(reader: &mut dyn BufRead) -> io::Result<[u8; 4]> {
 }
 
 fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db: &DB) -> Result<SaplingTxData, io::Error> {
+    let cf_transactions = _db.cf_handle("transactions").expect("Transaction column family not found");
+    let cf_pubkey = _db.cf_handle("pubkey").expect("Pubkey column family not found");
+    let cf_utxo = _db.cf_handle("utxo").expect("UTXO column family not found");
+
+    // Set empty vectors for later access
+    let mut inputs: Vec<CTxIn> = Vec::new();
+    let mut outputs: Vec<CTxOut> = Vec::new();
     // Potential Vin Vector
     let input_count = read_varint2(reader)? as u64;
     println!("Input Count: {}", input_count);
 
     if input_count > 0 {
-        let inputs: Vec<CTxIn> = (0..input_count)
+        inputs = (0..input_count)
             .map(|i| {
+                let coinbase = None;
                 let prev_output = read_outpoint(reader)?;
                 let script = read_script(reader)?;
                 let sequence = reader.read_u32::<LittleEndian>()?;
                 Ok(CTxIn {
-                    prevout: prev_output,
+                    prevout: Some(prev_output),
                     script_sig: CScript { script },
                     sequence,
                     index: i,
+                    coinbase,
                 })
             })
             .collect::<Result<Vec<_>, std::io::Error>>()?;
-    
-        for tx_in in &inputs {
-            println!("{:?}", tx_in);
-        }
     }
 
     let output_count = read_varint(reader)?;
@@ -790,7 +891,7 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db:
     };
 
     if output_count > 0 {
-        let outputs: Vec<CTxOut> = (0..output_count)
+        outputs = (0..output_count)
             .map(|i| {
                 let value = reader.read_i64::<LittleEndian>()?;
                 let script = read_script(reader)?;
@@ -818,11 +919,8 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db:
                 })
             })
             .collect::<Result<Vec<_>, std::io::Error>>()?;
-    
-        for tx_out in &outputs {
-            println!("{:?}", tx_out);
-        }
     }
+
     let lock_time_buff = reader.read_u32::<LittleEndian>()?;
     println!("Lock Time: {}", lock_time_buff);
     // Hacky fix for getting proper values/spends/outputs for Sapling
@@ -852,6 +950,62 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db:
     let reversed_txid: Vec<u8> = hash_txid(&tx_bytes)?;
     println!("Sapling TXID: {:?}", hex::encode(&reversed_txid));
     println!("{:?}", sapling_tx_data);
+
+    let mut key_utxo = vec![b'u'];
+    let mut referenced_utxo_id: Option<String> = None;
+    for tx_in in &inputs {
+        let mut key_pubkey = vec![b'p'];
+        if let Some(prevout) = &tx_in.prevout {
+            key_pubkey.extend_from_slice(&prevout.hash.as_bytes());
+            referenced_utxo_id = Some(hex::encode(&prevout.hash));
+        }
+
+        if let Ok(Some(data)) = _db.get_cf(cf_pubkey, &key_pubkey) {
+            let mut utxos = deserialize_utxos(&data);
+
+
+            if let Some(prevout) = &tx_in.prevout {
+                if let Some(pos) = utxos.iter().position(|(txid, index)| *txid == prevout.hash.as_bytes() && *index == prevout.n as u64) {
+                    utxos.remove(pos);
+                }
+            }
+
+            if !utxos.is_empty() {
+                _db.put_cf(cf_pubkey, &key_pubkey, &serialize_utxos(&utxos)).unwrap();
+            } else {
+                _db.delete_cf(cf_pubkey, &key_pubkey).unwrap();
+            }
+        }
+
+        key_utxo.extend_from_slice(referenced_utxo_id.as_ref().unwrap().as_bytes());
+        _db.delete_cf(cf_utxo, &key_utxo).unwrap();
+    }
+
+    for tx_out in &outputs {
+        let address_type = get_address_type(tx_out, &general_address_type);
+        handle_address(_db, &address_type, &reversed_txid, tx_out.index.try_into().unwrap())?;
+
+        let mut key_pubkey = vec![b'p'];
+        key_pubkey.extend_from_slice(&tx_out.script_pubkey.script);
+
+        let existing_data_option = _db.get(&key_pubkey);
+        if let Ok(Some(existing_data)) = existing_data_option {
+            let mut existing_utxos = deserialize_utxos(&existing_data);
+            existing_utxos.push((reversed_txid.clone(), tx_out.index));
+
+            let serialized_utxos = serialize_utxos(&existing_utxos);
+            _db.put_cf(cf_pubkey, &key_pubkey, &serialized_utxos).unwrap();
+        }
+
+        key_utxo.extend_from_slice(&reversed_txid);
+        let utxos_to_serialize = vec![(reversed_txid.clone(), tx_out.index)];
+        _db.put_cf(cf_utxo, &key_utxo, &serialize_utxos(&utxos_to_serialize)).unwrap();
+    }
+
+    // 't' + txid -> serialized_data
+    let mut key = vec![b't'];
+    key.extend_from_slice(&reversed_txid);
+    _db.put_cf(cf_transactions, &key, &serialized_data).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     Ok(sapling_tx_data)
 }
@@ -1166,7 +1320,6 @@ fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
 }
 
 fn compress_pubkey(pub_key_bytes: &[u8]) -> Option<Vec<u8>> {
-    println!("Pub_Key_Bytes length: {}", pub_key_bytes.len());
     match pub_key_bytes.len() {
         65 if pub_key_bytes[0] == 0x04 => {
             let x = &pub_key_bytes[1..33];
@@ -1191,7 +1344,6 @@ fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
         return None;
     }
 
-    println!("Script length: {}", script.len());
     match script.len() {
         67 => Some(&script[1..66]), // skip the OP_PUSHDATA, then take uncompressed pubkey
         35 => Some(&script[1..34]), // skip the OP_PUSHDATA, then take compressed pubkey
