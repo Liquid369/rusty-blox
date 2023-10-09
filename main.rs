@@ -1337,3 +1337,127 @@ fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
     }
     utxos
 }
+
+fn deserialize_transaction(data: &[u8], block_version: u32) -> Result<CTransaction, std::io::Error> {
+    let mut cursor = Cursor::new(data);
+
+    let version = cursor.read_i16::<LittleEndian>().unwrap();
+    let input_count = read_varint(&mut cursor)?;
+    let mut inputs = Vec::new();
+    for _ in 0..input_count {
+        inputs.push(deserialize_tx_in(&mut cursor, version.try_into().unwrap(), block_version));
+    }
+
+    let output_count = read_varint(&mut cursor)?;
+    let mut outputs = Vec::new();
+    for _ in 0..output_count {
+        outputs.push(deserialize_tx_out(&mut cursor));
+    }
+
+    let lock_time = cursor.read_u32::<LittleEndian>().unwrap();
+
+    Ok(CTransaction {
+        version: version,
+        inputs: inputs,
+        outputs: outputs,
+        lock_time: lock_time,
+    })
+}
+
+fn deserialize_tx_in(cursor: &mut Cursor<&[u8]>, tx_ver_out: u32, block_version: u32) -> CTxIn {
+    if block_version < 3 && tx_ver_out == 2 {
+        // It's a coinbase transaction
+        let mut buffer = [0; 26];
+        cursor.read_exact(&mut buffer).unwrap();
+        let coinbase = buffer.to_vec();
+        let sequence = cursor.read_u32::<LittleEndian>().unwrap();
+
+        CTxIn {
+            prevout: None,
+            script_sig: CScript { script: Vec::new() },
+            sequence: sequence,
+            index: 0,
+            coinbase: Some(coinbase),
+        }
+    } else {
+        // It's a regular transaction
+        let prevout = deserialize_out_point(cursor);
+        let script_sig = read_script(cursor).unwrap();
+        let sequence = cursor.read_u32::<LittleEndian>().unwrap();
+        let index = cursor.read_u64::<LittleEndian>().unwrap();
+
+        CTxIn {
+            prevout: Some(prevout),
+            script_sig: CScript { script: script_sig },
+            sequence: sequence,
+            index: index,
+            coinbase: None,
+        }
+    }
+}
+
+
+fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>) -> CTxOut {
+    let value = cursor.read_i64::<LittleEndian>().unwrap();
+    let script_length = read_varint(cursor);
+    let mut script_pubkey = vec![0; script_length.unwrap() as usize];
+    cursor.read_exact(&mut script_pubkey).unwrap();
+    let index = cursor.read_u64::<LittleEndian>().unwrap();
+
+    let mut address_data = Vec::new();
+    cursor.read_to_end(&mut address_data).unwrap();
+    let address = String::from_utf8(address_data).unwrap();
+
+    CTxOut {
+        value: value,
+        script_length: script_pubkey.len() as i32,
+        script_pubkey: CScript { script: script_pubkey },
+        index: index,
+        address: vec![address],
+    }
+}
+
+fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {
+    let mut hash_bytes = [0u8; 32];
+    cursor.read_exact(&mut hash_bytes).unwrap();
+    let hash = hex::encode(hash_bytes);
+    let n = cursor.read_u32::<LittleEndian>().unwrap();
+
+    COutPoint {
+        hash: hash,
+        n: n,
+    }
+}
+
+fn remove_utxo_addr(_db: &DB, address_type: &AddressType, txid: &str, index: u32) -> Result<(), io::Error> {
+    let address_keys = match address_type {
+        AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
+        AddressType::P2PK(pubkey) => vec![pubkey.clone()],
+        AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
+        _ => return Ok(()),
+    };
+
+    for address_key in &address_keys {
+        let cf_addr = _db.cf_handle("addr_index").expect("Address_index column family not found");
+        let mut key_address = vec![b'a']; 
+        key_address.extend_from_slice(address_key.as_bytes());
+
+        // Fetch existing UTXOs associated with this address
+        let existing_data = _db.get_cf(cf_addr, &key_address).map_err(from_rocksdb_error)?;
+        let mut existing_utxos = existing_data.as_deref().map_or(Vec::new(), deserialize_utxos);
+
+        // Find the UTXO to remove
+        if let Some(pos) = existing_utxos.iter().position(|(stored_txid, stored_index)| stored_txid.as_slice() == txid.as_bytes() && *stored_index == index as u64) {
+            existing_utxos.remove(pos);
+        }
+
+        // Update or delete the UTXO entry for this address
+        if !existing_utxos.is_empty() {
+            _db.put_cf(cf_addr, &key_address, &serialize_utxos(&existing_utxos)).map_err(from_rocksdb_error)?;
+        } else {
+            _db.delete_cf(cf_addr, &key_address).map_err(from_rocksdb_error)?;
+        }
+    }
+
+    Ok(())
+}
