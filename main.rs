@@ -1369,32 +1369,32 @@ fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
 }
 
 fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)> {
-    const OP_ROT: u8 = 0x7b;
-    const OP_IF: u8 = 0x63;
-    const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
+    const HASH_LEN: usize = 20; // Length of public key hash
     const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
+    const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
     const OP_ELSE: u8 = 0x67;
 
-    // Check if the script has the minimum length for staking
-    if script.script.len() < (2 + 2 * 20 + 7) {  // Adjust for the expected length
+    let pos_checkcoldstakeverify = script.script.iter().position(|&x| x == OP_CHECKCOLDSTAKEVERIFY || x == OP_CHECKCOLDSTAKEVERIFY_LOF)?;
+
+    // Boundary check to avoid panic during slicing
+    if script.script.len() < pos_checkcoldstakeverify + 1 + HASH_LEN {
         return None;
     }
 
-    let pos_checkcoldstakeverify = script.script.iter().position(|&x| x == OP_CHECKCOLDSTAKEVERIFY || x == OP_CHECKCOLDSTAKEVERIFY_LOF);
+    let staker_key_hash = &script.script[(pos_checkcoldstakeverify + 1)..(pos_checkcoldstakeverify + 1 + HASH_LEN)];
 
-    match pos_checkcoldstakeverify {
-        Some(pos) => {
-            let staker_key_hash = &script.script[(pos + 1)..(pos + 21)];
-            let pos_else = script.script.iter().position(|&x| x == OP_ELSE).unwrap_or(0);
-            let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 21)];
-
-            let staker_address = hash_address(staker_key_hash, 63);  // 63 is the prefix for staker P2PKH
-            let owner_address = hash_address(owner_key_hash, 30);  // 30 is the prefix for owner P2PKH
-
-            Some((staker_address, owner_address))
-        },
-        None => None,
+    // Find the position of OP_ELSE
+    let pos_else = script.script.iter().position(|&x| x == OP_ELSE)?;
+    if script.script.len() < pos_else + 1 + HASH_LEN {
+        return None;
     }
+
+    let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 1 + HASH_LEN)];
+
+    let staker_address = hash_address(staker_key_hash, 63); // 63 is the prefix for staker P2PKH
+    let owner_address = hash_address(owner_key_hash, 30); // 30 is the prefix for owner P2PKH
+
+    Some((staker_address, owner_address))
 }
 
 fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
