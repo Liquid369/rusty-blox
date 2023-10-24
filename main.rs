@@ -774,19 +774,6 @@ fn get_address_type(tx_out: &CTxOut, general_address_type: &AddressType) -> Addr
     } else {
         general_address_type.clone()
     };
-    match &address_type {
-        AddressType::P2PKH(address) => println!("P2PKH Address: {}", address),
-        AddressType::P2SH(address) => println!("P2SH Address: {}", address),
-        AddressType::P2PK(pubkey) => println!("P2PK PubKey: {}", pubkey),
-        AddressType::ZerocoinMint => println!("Zerocoin Mint"),
-        AddressType::ZerocoinSpend => println!("Zerocoin Spend"),
-        AddressType::ZerocoinPublicSpend => println!("Zerocoin Public Spend"),
-        AddressType::Staking(staker, owner) => println!("Staking Address (Staker: {}, Owner: {})", staker, owner),
-        AddressType::Sapling => println!("Shielded TX"),
-        AddressType::CoinStakeTx => println!("CoinStake Transaction"),
-        AddressType::CoinBaseTx => println!("CoinBase Transaction"),
-        AddressType::Nonstandard => println!("Nonstandard"),
-    }
     address_type
 }
 
