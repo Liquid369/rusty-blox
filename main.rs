@@ -1431,20 +1431,20 @@ fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
     }
 }
 
-fn address_type_to_string(address: Option<AddressType>) -> Option<String> {
+fn address_type_to_string(address: Option<AddressType>) -> Vec<String> {
     match address {
-        Some(AddressType::CoinStakeTx) => Some("CoinStakeTx".to_string()),
-        Some(AddressType::CoinBaseTx) => Some("CoinBaseTx".to_string()),
-        Some(AddressType::Nonstandard) => Some("Nonstandard".to_string()),
-        Some(AddressType::P2PKH(addr)) => Some(addr),
-        Some(AddressType::P2PK(pubkey)) => Some(pubkey),
-        Some(AddressType::P2SH(addr)) => Some(addr),
-        Some(AddressType::ZerocoinMint) => Some("ZerocoinMint".to_string()),
-        Some(AddressType::ZerocoinSpend) => Some("ZerocoinSpend".to_string()),
-        Some(AddressType::ZerocoinPublicSpend) => Some("ZerocoinPublicSpend".to_string()),
-        Some(AddressType::Staking(staker, owner)) => Some(format!("Staking({}, {})", staker, owner)),
-        Some(AddressType::Sapling) => Some("Sapling".to_string()),
-        None => None,
+        Some(AddressType::CoinStakeTx) => vec!["CoinStakeTx".to_string()],
+        Some(AddressType::CoinBaseTx) => vec!["CoinBaseTx".to_string()],
+        Some(AddressType::Nonstandard) => vec!["Nonstandard".to_string()],
+        Some(AddressType::P2PKH(addr)) => vec![addr],
+        Some(AddressType::P2PK(pubkey)) => vec![pubkey],
+        Some(AddressType::P2SH(addr)) => vec![addr],
+        Some(AddressType::ZerocoinMint) => vec!["ZerocoinMint".to_string()],
+        Some(AddressType::ZerocoinSpend) => vec!["ZerocoinSpend".to_string()],
+        Some(AddressType::ZerocoinPublicSpend) => vec!["ZerocoinPublicSpend".to_string()],
+        Some(AddressType::Staking(staker, owner)) => vec![format!("Staking({}, {})", staker, owner)],
+        Some(AddressType::Sapling) => vec!["Sapling".to_string()],
+        None => Vec::new(),
     }
 }
 
