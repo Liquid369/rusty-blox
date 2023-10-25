@@ -658,19 +658,14 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
                 index: i,
                 address: Vec::new(), // Temporary dummy value
             }, &general_address_type);
-            let address_type_option = Some(address_type.clone());
-            let address_opt = address_type_to_string(address_type_option);
+            let addresses = address_type_to_string(Some(address_type.clone()));
 
-            let address = match address_opt {
-                Some(addr) => vec![addr],
-                None => Vec::new(),
-            };
             Ok(CTxOut {
-                value: value,
+                value,
                 script_length: script.len().try_into().unwrap(),
                 script_pubkey: CScript { script },
                 index: i,
-                address,
+                address: addresses, // directly assign the Vec<String>
             })
         })
         .collect::<Result<Vec<_>, std::io::Error>>()?;
@@ -771,7 +766,6 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
 
     reader.seek(SeekFrom::Start(end_pos))?;
 
-    //println!("{:?}", transaction);
     Ok(())
 }
 
@@ -1386,36 +1380,54 @@ fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)>
 }
 
 fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
-    // First, make sure the script isn't empty.
+    // Verify non-empty script
     if script.script.is_empty() {
         return Some(AddressType::Nonstandard);
     }
 
-    // Check the first byte.
-    match script.script[0] {
-        0xc1 => Some(AddressType::ZerocoinMint),
-        0xc2 => Some(AddressType::ZerocoinSpend),
-        0xc3 => Some(AddressType::ZerocoinPublicSpend),
-        _ => {
-            // If no byte matches were found, proceed with other checks.
-            if let Some(address) = scriptpubkey_to_p2pkh_address(script) {
-                return Some(AddressType::P2PKH(address));
-            }
-    
-            if let Some(address) = scriptpubkey_to_p2sh_address(script) {
-                return Some(AddressType::P2SH(address));
-            }
-    
-            if let Some(pubkey) = scriptpubkey_to_p2pk(script) {
-                return Some(AddressType::P2PK(pubkey));
-            }
-    
-            if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script) {
-                return Some(AddressType::Staking(staker_address, owner_address));
-            }
+    // Define op_codes
+    const OP_DUP: u8 = 0x76;
+    const OP_HASH160: u8 = 0xa9;
+    const OP_EQUAL: u8 = 0x87;
+    const OP_EQUALVERIFY: u8 = 0x88;
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
+    const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
 
-            Some(AddressType::Nonstandard)
+    // Check the first byte and script length
+    match script.script.as_slice() {
+        [OP_DUP, OP_HASH160, 0x14, .., OP_EQUALVERIFY, OP_CHECKSIG] if script.script.len() == 25 => {
+            if let Some(address) = scriptpubkey_to_p2pkh_address(script) {
+                Some(AddressType::P2PKH(address))
+            } else {
+                Some(AddressType::Nonstandard)
+            }
         }
+        [OP_HASH160, 0x14, .., OP_EQUAL] if script.script.len() == 23 => {
+            if let Some(address) = scriptpubkey_to_p2sh_address(script) {
+                Some(AddressType::P2SH(address))
+            } else {
+                Some(AddressType::Nonstandard)
+            }
+        }
+        [0xc1, ..] => Some(AddressType::ZerocoinMint),
+        [0xc2, ..] => Some(AddressType::ZerocoinSpend),
+        [0xc3, ..] => Some(AddressType::ZerocoinPublicSpend),
+        [.., OP_CHECKSIG] if !script.script.contains(&OP_DUP) && script.script.len() > 1 && !script.script.contains(&OP_CHECKCOLDSTAKEVERIFY) && !script.script.contains(&OP_CHECKCOLDSTAKEVERIFY_LOF) => {
+            if let Some(pubkey) = scriptpubkey_to_p2pk(script) {
+                Some(AddressType::P2PK(pubkey))
+            } else {
+                Some(AddressType::Nonstandard)
+            }
+        }
+        _ if script.script.contains(&OP_CHECKCOLDSTAKEVERIFY) || script.script.contains(&OP_CHECKCOLDSTAKEVERIFY_LOF) => {
+            if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script) {
+                Some(AddressType::Staking(staker_address, owner_address))
+            } else {
+                Some(AddressType::Nonstandard)
+            }
+        }
+        _ => Some(AddressType::Nonstandard), // Doesn't match non-standard
     }
 }
 
