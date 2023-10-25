@@ -587,12 +587,18 @@ fn process_transaction(mut reader: &mut io::BufReader<&File>, block_version: u32
         let tx_ver_out = reader.read_u16::<LittleEndian>()?;
         let tx_type = reader.read_u16::<LittleEndian>()?;
 
-        println!("Tx Version: {}", tx_ver_out);
-        println!("Tx Type: {}", tx_type);
-        if tx_ver_out <= 2 && block_version < 3 {
-            process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
-        } else if tx_ver_out > 1 && block_version > 7 {
-            parse_sapling_tx_data(reader, start_pos, _db)?;
+        if block_version == 11 {
+            if tx_ver_out < 3 {
+                process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
+            } else {
+                parse_sapling_tx_data(reader, start_pos, _db)?;
+            }
+        } else if (tx_ver_out <= 2 && block_version < 11) || (tx_ver_out > 1 && block_version > 7) {
+            if tx_ver_out <= 2 {
+                process_transaction_v1(reader, tx_ver_out.try_into().unwrap(), block_version, block_hash, _db, start_pos)?;
+            } else {
+                parse_sapling_tx_data(reader, start_pos, _db)?;
+            }
         }
     }
     Ok(())
@@ -610,15 +616,16 @@ fn process_transaction_v1(reader: &mut io::BufReader<&File>, tx_ver_out: i16, bl
         let mut prev_output = None;
         let mut script = None;
 
-        if block_version < 3 && tx_ver_out == 2 {
-            let mut buffer = [0; 26];
-            reader.read_exact(&mut buffer)?;
-            coinbase = Some(buffer.to_vec());
-        }
-
-        if block_version > 3 && tx_ver_out == 1 {
-            prev_output = Some(read_outpoint(reader)?);
-            script = Some(read_script(reader)?);
+        match (block_version, tx_ver_out) {
+            (ver, 2) if ver < 3 => {
+                let mut buffer = [0; 26];
+                reader.read_exact(&mut buffer)?;
+                coinbase = Some(buffer.to_vec());
+            }
+            _ => {
+                prev_output = Some(read_outpoint(reader)?);
+                script = Some(read_script(reader)?);
+            }
         }
 
         let sequence = reader.read_u32::<LittleEndian>()?;
@@ -889,20 +896,14 @@ fn parse_sapling_tx_data(reader: &mut io::BufReader<&File>, start_pos: u64, _db:
                     index: i,
                     address: Vec::new(),
                 }, &general_address_type);
-                let address_type_option = Some(address_type.clone());
-                let address_opt = address_type_to_string(address_type_option);
-
-                let address = match address_opt {
-                    Some(addr) => vec![addr],
-                    None => Vec::new(),
-                };
+                let addresses = address_type_to_string(Some(address_type.clone()));
 
                 Ok(CTxOut {
                     value,
                     script_length: script.len().try_into().unwrap(),
                     script_pubkey: CScript { script },
                     index: i,
-                    address,
+                    address: addresses, // directly assign the Vec<String>
                 })
             })
             .collect::<Result<Vec<_>, std::io::Error>>()?;
