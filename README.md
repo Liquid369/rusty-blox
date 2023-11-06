@@ -8,6 +8,8 @@ Before running the code, make sure you have the following installed:
 
 - Rust (version 1.51 or higher)
 - Cargo (Rust's package manager)
+- CMake
+- Clang
 - LevelDB (dependency for reading LevelDB database files)
 - RocksDB (dependency for accessing RocksDB databases)
 
