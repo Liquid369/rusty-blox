@@ -15,6 +15,29 @@ pub struct sph_blake_big_context {
 
 extern "C" {
     pub fn quark_hash(input: *const u8, output: *mut u8, len: u32);
+    pub fn sph_blake512_init(cc: *mut c_void);
+    pub fn sph_blake512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_blake512_close(cc: *mut c_void, dst: *mut c_void);
+
+    pub fn sph_bmw512_init(cc: *mut c_void);
+    pub fn sph_bmw512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_bmw512_close(cc: *mut c_void, dst: *mut c_void);
+
+    pub fn sph_groestl512_init(cc: *mut c_void);
+    pub fn sph_groestl512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_groestl512_close(cc: *mut c_void, dst: *mut c_void);
+
+    pub fn sph_skein512_init(cc: *mut c_void);
+    pub fn sph_skein512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_skein512_close(cc: *mut c_void, dst: *mut c_void);
+
+    pub fn sph_jh512_init(cc: *mut c_void);
+    pub fn sph_jh512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_jh512_close(cc: *mut c_void, dst: *mut c_void);
+
+    pub fn sph_keccak512_init(cc: *mut c_void);
+    pub fn sph_keccak512(cc: *mut c_void, data: *const c_void, len: usize);
+    pub fn sph_keccak512_close(cc: *mut c_void, dst: *mut c_void);
 }
 
 fn call_quark_hash(data: &[u8]) -> [u8; 32] {
