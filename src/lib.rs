@@ -41,7 +41,7 @@ extern "C" {
     pub fn sph_keccak512_close(cc: *mut c_void, dst: *mut c_void);
 }
 
-fn call_quark_hash(data: &[u8]) -> [u8; 32] {
+pub fn call_quark_hash(data: &[u8]) -> [u8; 32] {
     let mut output_hash = [0u8; 32]; // Buffer for the hash result
 
     unsafe {
