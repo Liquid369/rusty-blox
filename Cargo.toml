@@ -6,7 +6,7 @@ edition = "2021"
 
 [[bin]]
 name = "rustyblox"
-path = "main.rs"
+path = "src/main.rs"
 
 [dependencies]
 hex = "0.4.3"

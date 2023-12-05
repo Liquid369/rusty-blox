@@ -27,6 +27,7 @@ use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOpti
 //use pivx_rpc_rs::FullBlock;
 //use pivx_rpc_rs::BitcoinRpcClient;
 use rusty_piv::BitcoinRpcClient;
+use rustyblox::quark_hash;
 
 use once_cell::sync::OnceCell;
 
@@ -570,6 +571,10 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Test print hash
     println!("Block hash: {:?}", hex::encode(&reversed_hash));
 
+    let reversed_hash_array: [u8; 32] = match reversed_hash.try_into() {
+        Ok(arr) => arr,
+        Err(_) => panic!("Expected a Vec<u8> of length 32"),
+    };
     // Determine the block height
     let block_height = match n_version {
         0..=3 if hash_prev_block.iter().all(|&b| b == 0) => {
@@ -577,13 +582,10 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
             0
         },
         0..=3 => {
-            // For version less than 4 with a non-zero previous block hash
-            println!("Used BlockHash: {}", hex::encode(hash_prev_block));
-            get_block_height(&hash_prev_block).await.unwrap_or(Some(0)).map(|height| height + 1).unwrap_or(0)
+            get_block_height(&reversed_hash_array).await.unwrap_or(Some(0)).unwrap_or(0)
         },
         _ => {
-            // For version 4 or greater, use reversed_hash to get block height
-            get_block_height(&reversed_hash).await.unwrap_or(Some(0)).unwrap_or(0)
+            get_block_height(&reversed_hash_array).await.unwrap_or(Some(0)).unwrap_or(0)
         },
     };
 
@@ -621,7 +623,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Create CBlockHeader
     CBlockHeader {
         n_version,
-        block_hash: block_hash.into(),
+        block_hash: reversed_hash_array,
         block_height: Some(block_height),
         hash_prev_block,
         hash_merkle_root,
