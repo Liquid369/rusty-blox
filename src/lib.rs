@@ -14,18 +14,17 @@ pub struct sph_blake_big_context {
 }
 
 extern "C" {
-    pub fn HashQuark(pbegin: *const u8, pend: *const u8, output: *mut u8);
+    pub fn quark_hash(input: *const u8, output: *mut u8, len: u32);
 }
 
+fn call_quark_hash(data: &[u8]) -> [u8; 32] {
+    let mut output_hash = [0u8; 32]; // Buffer for the hash result
 
-fn call_hash_quark(data: &[u8]) -> [u8; 32] {
-    let data_ptr = data.as_ptr();
-    let data_len = data.len();
+    unsafe {
+        quark_hash(data.as_ptr(), output_hash.as_mut_ptr(), data.len() as u32);
+    }
 
-    let begin = data_ptr as *const _;
-    let end = unsafe { data_ptr.add(data_len) as *const _ };
-
-    unsafe { HashQuark(begin, end) }
+    output_hash
 }
 
 pub fn sha512_hash(input: &[u8]) -> [u8; 64] {
