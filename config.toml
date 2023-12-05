@@ -1,4 +1,9 @@
 [paths]
-db_path = "/path/to/db"
-blk_dir = "/path/to/block/files"
-ldb_dir = "/path/to/blocks/index"
+db_path = "/Users/liquid369/Projects/blkparser-db"
+blk_dir = "/Users/liquid369/Library/Application Support/PIVX1/blocks/"
+ldb_dir = "/Users/liquid369/Library/Application Support/PIVX1/blocks/index/"
+
+[rpc]
+host = "http://127.0.0.1:51473"
+user = "fnhgiash743whpo94hy7a9f"
+pass = "dfskgjp95ut9p8why789seghusufhg7589phgsu"

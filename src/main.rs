@@ -1,6 +1,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom, ErrorKind, Cursor};
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -21,6 +22,18 @@ use config::{Config, File as ConfigFile};
 use leveldb::database::Database;
 use leveldb::kv::KV;
 use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOptions};
+//use pivx_rpc_rs;
+
+//use pivx_rpc_rs::FullBlock;
+//use pivx_rpc_rs::BitcoinRpcClient;
+use rusty_piv::BitcoinRpcClient;
+
+use once_cell::sync::OnceCell;
+
+static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
+
+mod parser;
+mod api;
 struct Hash([u8; 32]);
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
@@ -274,14 +287,26 @@ const COLUMN_FAMILIES: [&str; 7] = [
     "chain_state",
 ];
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load the configuration file
+fn init_global_config() -> Result<(), Box<dyn Error>> {
     let mut config = Config::default();
     config.merge(ConfigFile::with_name("config.toml"))?;
+    GLOBAL_CONFIG.set(config).map_err(|_| "Config already set")?;
+    Ok(())
+}
+
+fn get_global_config() -> &'static Config {
+    GLOBAL_CONFIG.get().expect("Config not initialized")
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load the configuration file
+    init_global_config()?;
+    let config = get_global_config();
     let paths = config.get_table("paths")?;
 
     // Open RocksDB
-    let db_path: &str = &paths
+    let db_path = paths
         .get("db_path")
         .and_then(|value| value.to_owned().into_string().ok())
         .ok_or("Missing or invalid db_path in config.toml")?;
@@ -294,36 +319,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     db_options.create_if_missing(true);
     db_options.create_missing_column_families(true);
     let db = DB::open_cf_descriptors(&db_options, db_path, cf_descriptors)?;
+    let db = Arc::new(db);
 
     // Path for blk files "blocks" folder
-    let blk_dir: &str = &paths
+    let blk_dir = paths
         .get("blk_dir")
         .and_then(|value| value.to_owned().into_string().ok())
         .ok_or("Invalid blk_dir in config.toml")?;
 
     // Load processed files from the default column family
-    let mut processed_files = load_processed_files_from_db(&db).unwrap_or_default();
+    let processed_files = load_processed_files_from_db(&db)?; 
+    let processed_files = Arc::new(Mutex::new(processed_files));
 
     // Process each file in the directory
-    let dir = fs::read_dir(blk_dir)
-        .map_err(|err| format!("Failed to read directory entries: {}", err))?;
+    let entries = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, std::io::Error> {
+        fs::read_dir(blk_dir)?
+            .map(|res| res.map(|e| e.path())) // Transform DirEntry to Result<PathBuf, std::io::Error>
+            .collect() // Collects into Result<Vec<PathBuf>, std::io::Error>
+    }).await??;
 
-    for entry in dir {
-        if let Ok(entry) = entry {
-            if let Some(file_name) = entry.file_name().to_str() {
+    let futures = entries.into_iter().map(|file_path| {
+        let db_clone = Arc::clone(&db);
+        let processed_files_clone = Arc::clone(&processed_files);
+
+        tokio::task::spawn(async move {
+            if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
                 if file_name.starts_with("blk") && file_name.ends_with(".dat") {
-                    let file_path = entry.path();
-                    if processed_files.contains(&file_path) {
-                        continue; // Skip already processed files
+                    let should_process = {
+                        let processed_files = processed_files_clone.lock().unwrap();
+                        !processed_files.contains(&file_path)
+                    };
+    
+                    if should_process {
+                        match process_blk_file(&file_path, &db_clone).await {
+                            Ok(_) => {
+                                let mut processed_files_guard = processed_files_clone.lock().unwrap();
+                                processed_files_guard.insert(file_path);
+                
+                                if let Err(save_err) = save_processed_files_to_db(&db_clone, &*processed_files_guard) {
+                                    eprintln!("Failed to save processed files to the database: {}", save_err);
+                                }
+                            },
+                            Err(process_err) => {
+                                eprintln!("Failed to process blk file: {}", process_err);
+                            }
+                        }
                     }
-                    process_blk_file(&file_path, &db)?;
-
-                    // Save updated processed files to the default column family
-                    processed_files.insert(file_path.clone());
-                    let _ = save_processed_files_to_db(&db, &processed_files);
                 }
             }
-        }
+            Ok::<(), String>(())
+        })
+    });
+
+    // Wait for all tasks to complete
+    for future in futures {
+        future.await?;
     }
 
     Ok(())
@@ -350,7 +400,7 @@ fn save_processed_files_to_db(db: &DB, processed_files: &HashSet<PathBuf>) -> Re
     Ok(())
 }
 
-fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
+async fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
     // Open file
     let mut file = File::open(file_path)?;
     // Set buffers for prefix, size
@@ -438,7 +488,7 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
         reader.read_exact(&mut header_buffer)?;
 
         // Process and print the block header
-        let block_header = parse_block_header(&header_buffer, header_size);
+        let block_header = parse_block_header(&header_buffer, header_size).await;
         println!("{:?}", block_header);
 
         // Write to RocksDB
@@ -466,7 +516,7 @@ fn process_blk_file(file_path: impl AsRef<Path>, _db: &DB) -> io::Result<()> {
     Ok(())
 }
 
-fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
+async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     // Grab header bytes
     let mut reader = io::Cursor::new(slice);
 
@@ -486,27 +536,61 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         eprintln!("Error while reading header buffer: {:?}", e);
     }
     println!("Header Buffer: {:?}", hex::encode(&header_buffer));
-    // Start hashing header for block_hash
-    let first_hash = Sha256::digest(&header_buffer);
-    let block_hash = Sha256::digest(&first_hash);
-    // Reverse final hash
-    let reversed_hash: Vec<_> = block_hash.iter().rev().cloned().collect();
-    // Test print hash
-    println!("Block hash: {:?}", hex::encode(&reversed_hash));
     // Return to original position to start breaking down header
     if let Err(e) = reader.seek(SeekFrom::Start(current_position)) {
         eprintln!("Error while seeking: {:?}", e);
     }
-
     // Read block version
     let n_version = reader.read_u32::<LittleEndian>().unwrap();
     // Read previous block hash
-    let hash_prev_block = {
+    let mut hash_prev_block = {
         let mut buf = [0u8; 32];
         reader.read_exact(&mut buf).unwrap();
+        if n_version < 4 {
+            buf.reverse(); // Reverse the hash for n_version less than 4
+        }
         buf
     };
-    let block_height = read_ldb_block(&hash_prev_block, header_size).unwrap_or(None);
+    // Calculate the hash based on the version
+    let reversed_hash = match n_version {
+        0..=3 => {
+            // Use quark_hash for n_version less than 4
+            let mut output_hash = [0u8; 32];
+            unsafe {
+                quark_hash(header_buffer.as_ptr() as *const _, output_hash.as_mut_ptr() as *mut _, header_buffer.len() as u32);
+            }
+            output_hash.iter().rev().cloned().collect::<Vec<_>>()
+        },
+        _ => {
+            // Use SHA-256 based hashing for n_version 4 or greater
+            Sha256::digest(&Sha256::digest(&header_buffer)).iter().rev().cloned().collect::<Vec<_>>()
+        },
+    };
+
+    // Test print hash
+    println!("Block hash: {:?}", hex::encode(&reversed_hash));
+
+    // Determine the block height
+    let block_height = match n_version {
+        0..=3 if hash_prev_block.iter().all(|&b| b == 0) => {
+            // If hash_prev_block is all zeros for version less than 4, assign 0
+            0
+        },
+        0..=3 => {
+            // For version less than 4 with a non-zero previous block hash
+            println!("Used BlockHash: {}", hex::encode(hash_prev_block));
+            get_block_height(&hash_prev_block).await.unwrap_or(Some(0)).map(|height| height + 1).unwrap_or(0)
+        },
+        _ => {
+            // For version 4 or greater, use reversed_hash to get block height
+            get_block_height(&reversed_hash).await.unwrap_or(Some(0)).unwrap_or(0)
+        },
+    };
+
+    // Reverse hash_prev_block back to its original order if n_version is less than 4
+    if n_version < 4 {
+        hash_prev_block.reverse();
+    }
     // Read merkle root
     let hash_merkle_root = {
         let mut buf = [0u8; 32];
@@ -534,13 +618,11 @@ fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => (None, None),
     };
 
-    let block_height = block_height;
-
     // Create CBlockHeader
     CBlockHeader {
         n_version,
         block_hash: block_hash.into(),
-        block_height,
+        block_height: Some(block_height),
         hash_prev_block,
         hash_merkle_root,
         n_time,
@@ -1118,57 +1200,35 @@ fn parse_payload_data(reader: &mut io::BufReader<&File>) -> Result<Option<Vec<u8
     }
 }
 
-fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
-    // Load the configuration
-    let mut config = Config::default();
-    config.merge(ConfigFile::with_name("config.toml"))?;
-    let ldb_files_dir = config.get::<String>("paths.ldb_dir")?;
-    let ldb_files_path = std::path::Path::new(&ldb_files_dir);
+async fn get_block_height(hash_block: &[u8; 32]) -> Result<Option<i32>, Box<dyn Error>> {
+    let config = get_global_config();
+    let rpc_host = config.get::<String>("rpc.host")?;
+    let rpc_user = config.get::<String>("rpc.user")?;
+    let rpc_pass = config.get::<String>("rpc.pass")?;
+    
+    let client = BitcoinRpcClient::new(
+        rpc_host,
+        Some(rpc_user),
+        Some(rpc_pass),
+        3,   // Max retries
+        10,  // Connection timeout
+        1000 // Read/write timeout
+    );
 
-    // Open the LevelDB database
-    let options = LevelDBOptions::new();
-    let database: Database<Byte33> = match Database::open(ldb_files_path, options) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("Error opening database: {:?}", e);
-            return Err(Box::new(e));
-        }
-    };
+    let hash_block_hex = hex::encode(hash_block);
 
-    // Create the key
-    let mut key = [0u8; 33];  // 'b' + 32 bytes
-    key[0] = b'b';
-    key[1..].copy_from_slice(&hash_prev_block[..]);
-
-    // Get the value from the database.
-    let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
-    let height = match database.get(read_options, key) {
-        Ok(Some(value)) => {
-            let value_str = hex::encode(&value);
-            match parse_ldb_block(&value) {
-                Ok(Some(height)) => {
-                    Some(height)
-                },
-                Ok(None) => {
-                    None
-                },
-                Err(e) => {
-                    println!("Error while parsing block: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
-        Ok(None) => {
-            println!("Key not found in database.");
+    let block_height = match client.getblock(hash_block_hex) {
+        Ok(block_info) => Some(
+            block_info.height.try_into()
+                             .expect("Block height is too large for i32")
+        ),
+        Err(err) => {
+            println!("Failed to get block height {:?}: {:?}", hash_block, err);
             None
         }
-        Err(e) => {
-            println!("Error reading from database: {:?}", e);
-            return Err(Box::new(e));
-        }
     };
 
-    Ok(height)
+    Ok(block_height)
 }
 
 fn reverse_bytes(array: &[u8]) -> Vec<u8> {
