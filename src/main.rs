@@ -27,7 +27,7 @@ use leveldb::options::{Options as LevelDBOptions, ReadOptions as LevelDBReadOpti
 //use pivx_rpc_rs::FullBlock;
 //use pivx_rpc_rs::BitcoinRpcClient;
 use rusty_piv::BitcoinRpcClient;
-use rustyblox::quark_hash;
+use rustyblox::call_quark_hash;
 
 use once_cell::sync::OnceCell;
 
