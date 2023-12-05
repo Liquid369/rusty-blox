@@ -1,6 +1,7 @@
 extern crate sha2;
 
 use sha2::{Sha512, Digest};
+use std::ffi::c_void;
 
 #[repr(C)]
 pub struct sph_blake_big_context {
