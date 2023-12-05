@@ -556,10 +556,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     let reversed_hash = match n_version {
         0..=3 => {
             // Use quark_hash for n_version less than 4
-            let mut output_hash = [0u8; 32];
-            unsafe {
-                quark_hash(header_buffer.as_ptr() as *const _, output_hash.as_mut_ptr() as *mut _, header_buffer.len() as u32);
-            }
+            let output_hash = call_quark_hash(&header_buffer);
             output_hash.iter().rev().cloned().collect::<Vec<_>>()
         },
         _ => {
