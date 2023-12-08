@@ -628,7 +628,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
             eprintln!("Error occurred: {}", e);
             // Handle the error, possibly return or take corrective action
         }
-    }
+    };
 
     // Reverse hash_prev_block back to its original order if n_version is less than 4
     if n_version < 4 {
