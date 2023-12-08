@@ -170,6 +170,27 @@ pub struct VShieldOutput {
     pub proof: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub struct CustomError {
+    message: String,
+}
+
+impl CustomError {
+    pub fn new(message: &str) -> CustomError {
+        CustomError {
+            message: message.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for CustomError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Error: {}", self.message)
+    }
+}
+
+impl Error for CustomError {}
+
 impl std::fmt::Debug for CScript {
     // Formatting for CScript
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -625,7 +646,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     CBlockHeader {
         n_version,
         block_hash: reversed_hash_array,
-        block_height: block_height.unwrap_or_default(),
+        block_height: block_height,
         hash_prev_block,
         hash_merkle_root,
         n_time,
@@ -1280,34 +1301,31 @@ lazy_static! {
     static ref DB_MUTEX: Mutex<()> = Mutex::new(());
 }
 
-async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
+async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, CustomError> {
     let _lock = DB_MUTEX.lock().unwrap();
     let hash_clone = hash_prev_block.to_owned();
 
     // Offload the blocking operation to a separate thread
     let result = task::spawn_blocking(move || {
-        read_ldb_block(hash_clone, header_size)
+        read_ldb_block(&hash_clone, header_size)
     }).await?;
 
     result
 }
 
-fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
+fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, CustomError> {
     // Load the configuration
     let mut config = Config::default();
-    config.merge(ConfigFile::with_name("config.toml"))?;
-    let ldb_files_dir = config.get::<String>("paths.ldb_dir")?;
+    config.merge(ConfigFile::with_name("config.toml"))
+          .map_err(|e| CustomError::new(&format!("Error loading config: {}", e)))?;
+    let ldb_files_dir = config.get::<String>("paths.ldb_dir")
+                             .map_err(|e| CustomError::new(&format!("Error getting ldb_files_dir: {}", e)))?;
     let ldb_files_path = std::path::Path::new(&ldb_files_dir);
 
     // Open the LevelDB database
     let options = LevelDBOptions::new();
-    let database: Database<Byte33> = match Database::open(ldb_files_path, options) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("Error opening database: {:?}", e);
-            return Err(Box::new(e));
-        }
-    };
+    let database: Database<Byte33> = Database::open(ldb_files_path, options)
+                                         .map_err(|e| CustomError::new(&format!("Error opening database: {}", e)))?;
 
     // Create the key
     let mut key = [0u8; 33];  // 'b' + 32 bytes
@@ -1316,36 +1334,25 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
 
     // Get the value from the database.
     let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
-    let height = match database.get(read_options, key) {
+    let height = match database.get(read_options, &key) {
         Ok(Some(value)) => {
-            let value_str = hex::encode(&value);
-            match parse_ldb_block(&value) {
-                Ok(Some(height)) => {
-                    Some(height)
-                },
-                Ok(None) => {
-                    None
-                },
-                Err(e) => {
-                    println!("Error while parsing block: {:?}", e);
-                    return Err(e);
-                }
-            }
-        }
+            // Process the value to get the height, and handle potential errors with new error handling
+            parse_ldb_block(&value).map_err(|e| CustomError::new(&format!("Error parsing block: {}", e)))
+        },
         Ok(None) => {
             println!("Key not found in database.");
-            None
-        }
+            Ok(None)
+        },
         Err(e) => {
             println!("Error reading from database: {:?}", e);
-            return Err(Box::new(e));
+            Err(CustomError::new(&format!("Error reading from database: {}", e)))
         }
     };
 
     Ok(height)
 }
 
-fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, Box<dyn Error>> {
+fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, CustomError> {
     // Get the slice starting from the 0 position
     let remaining_data = &block[0..];
 
@@ -1361,13 +1368,11 @@ fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, Box<dyn Error>> {
     // Increment the block height
     let incremented_block_height = match block_height.checked_add(1) {
         Some(val) => val,
-        None => return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Block height overflow when incremented.",
-        ))),
+        None => return Err(CustomError::new("Block height overflow when incremented.")),
     };
 
-    Ok(Some(incremented_block_height.try_into()?))
+    Ok(Some(incremented_block_height.try_into()
+        .map_err(|_| CustomError::new("Failed to convert block height to i32"))?))
 }
 
 fn compute_address_hash(data: &[u8]) -> Vec<u8> {
