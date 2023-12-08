@@ -15,7 +15,7 @@ use serde::Serialize;
 use lazy_static::lazy_static;
 use tokio::task;
 use tokio::task::JoinError;
-use tokio::sync::Mutex
+use tokio::sync::Mutex;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
