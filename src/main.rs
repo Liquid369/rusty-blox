@@ -1349,7 +1349,7 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
         }
     };
 
-    Ok(height)
+    height
 }
 
 fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, CustomError> {
