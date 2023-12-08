@@ -1,7 +1,7 @@
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom, ErrorKind, Cursor};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::path::{Path, PathBuf};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -15,6 +15,7 @@ use serde::Serialize;
 use lazy_static::lazy_static;
 use tokio::task;
 use tokio::task::JoinError;
+use tokio::sync::Mutex
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
