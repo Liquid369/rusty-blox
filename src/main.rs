@@ -372,13 +372,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let futures = entries.into_iter().map(|file_path| {
         let db_clone = Arc::clone(&db);
         let processed_files_clone = Arc::clone(&processed_files);
-
+    
         tokio::task::spawn(async move {
             if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
                 if file_name.starts_with("blk") && file_name.ends_with(".dat") {
                     let should_process = {
                         let processed_files = processed_files_clone.lock().unwrap();
-                        !processed_files.contains(&file_path)
+                        let result = !processed_files.contains(&file_path);
+                        drop(processed_files); // Explicitly drop the lock
+                        result
                     };
     
                     if should_process {
@@ -386,10 +388,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(_) => {
                                 let mut processed_files_guard = processed_files_clone.lock().unwrap();
                                 processed_files_guard.insert(file_path);
-                
+                    
                                 if let Err(save_err) = save_processed_files_to_db(&db_clone, &*processed_files_guard) {
                                     eprintln!("Failed to save processed files to the database: {}", save_err);
                                 }
+                                drop(processed_files_guard); // Explicitly drop the lock
                             },
                             Err(process_err) => {
                                 eprintln!("Failed to process blk file: {}", process_err);
