@@ -1319,13 +1319,17 @@ lazy_static! {
 }
 
 async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, CustomError> {
-    let _lock = DB_MUTEX.lock().unwrap();
     let hash_clone = hash_prev_block.to_owned();
-
+    
     // Offload the blocking operation to a separate thread
-    let result = task::spawn_blocking(move || {
-        read_ldb_block(&hash_clone, header_size)
-    }).await?;
+    let result = {
+        // Lock the mutex only for the duration of cloning the data
+        let _lock = DB_MUTEX.lock().unwrap();
+
+        task::spawn_blocking(move || {
+            read_ldb_block(&hash_clone, header_size)
+        }).await?
+    };
 
     result
 }
