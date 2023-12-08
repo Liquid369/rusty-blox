@@ -383,26 +383,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     false
                 }
             }; 
-    
+
             if should_process {
                 match process_blk_file(&file_path, &db_clone).await {
                     Ok(_) => {
-                        // Lock the mutex to modify processed_files and immediately drop it
+                        // Lock the mutex to modify processed_files and use it within this scope
                         let mut processed_files_guard = processed_files_clone.lock().await;
-                        processed_files_guard.insert(file_path);
-                        drop(processed_files_guard); // Explicitly drop the MutexGuard
-                        
-                        // Now it's safe to call async operations
+                        processed_files_guard.insert(file_path.clone());
+    
+                        // Save processed files to the database
                         if let Err(save_err) = save_processed_files_to_db(&db_clone, &*processed_files_guard) {
                             eprintln!("Failed to save processed files to the database: {}", save_err);
                         }
+
                     },
                     Err(process_err) => {
                         eprintln!("Failed to process blk file: {}", process_err);
                     }
                 }
             }
-    
+
             Ok::<(), String>(())
         })
     }).collect();
