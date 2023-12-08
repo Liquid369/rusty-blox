@@ -12,6 +12,7 @@ use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160, Digest as Ripemd160Digest};
 use serde_json::{Value, json};
 use serde::Serialize;
+use lazy_static::lazy_static;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
@@ -573,7 +574,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         Err(_) => panic!("Expected a Vec<u8> of length 32"),
     };
     // Determine the block height
-    let block_height = match n_version {
+    /*let block_height = match n_version {
         0..=3 if hash_prev_block.iter().all(|&b| b == 0) => {
             // If hash_prev_block is all zeros for version less than 4, assign 0
             0
@@ -584,7 +585,9 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         _ => {
             get_block_height(&reversed_hash_array).await.unwrap_or(Some(0)).unwrap_or(0)
         },
-    };
+    };*/
+
+    let block_height = read_ldb_block_async(&hash_prev_block, header_size).await.unwrap_or(None);
 
     // Reverse hash_prev_block back to its original order if n_version is less than 4
     if n_version < 4 {
@@ -1270,6 +1273,74 @@ fn read_varint128(data: &[u8]) -> (usize, u64) {
     }
 
     (index, value)
+}
+
+lazy_static! {
+    static ref DB_MUTEX: Mutex<()> = Mutex::new(());
+}
+
+async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
+    let _lock = DB_MUTEX.lock().unwrap();
+
+    // Offload the blocking operation to a separate thread
+    let result = task::spawn_blocking(move || {
+        read_ldb_block(hash_prev_block, header_size)
+    }).await?;
+
+    result
+}
+
+fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
+    // Load the configuration
+    let mut config = Config::default();
+    config.merge(ConfigFile::with_name("config.toml"))?;
+    let ldb_files_dir = config.get::<String>("paths.ldb_dir")?;
+    let ldb_files_path = std::path::Path::new(&ldb_files_dir);
+
+    // Open the LevelDB database
+    let options = LevelDBOptions::new();
+    let database: Database<Byte33> = match Database::open(ldb_files_path, options) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Error opening database: {:?}", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    // Create the key
+    let mut key = [0u8; 33];  // 'b' + 32 bytes
+    key[0] = b'b';
+    key[1..].copy_from_slice(&hash_prev_block[..]);
+
+    // Get the value from the database.
+    let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
+    let height = match database.get(read_options, key) {
+        Ok(Some(value)) => {
+            let value_str = hex::encode(&value);
+            match parse_ldb_block(&value) {
+                Ok(Some(height)) => {
+                    Some(height)
+                },
+                Ok(None) => {
+                    None
+                },
+                Err(e) => {
+                    println!("Error while parsing block: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(None) => {
+            println!("Key not found in database.");
+            None
+        }
+        Err(e) => {
+            println!("Error reading from database: {:?}", e);
+            return Err(Box::new(e));
+        }
+    };
+
+    Ok(height)
 }
 
 fn parse_ldb_block(block: &[u8]) -> Result<Option<i32>, Box<dyn Error>> {
