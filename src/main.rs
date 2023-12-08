@@ -377,7 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let should_process = {
                 if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
                     if file_name.starts_with("blk") && file_name.ends_with(".dat") {
-                        // Lock the mutex and immediately drop it after use
+                        // Lock the mutex to check processed_files and immediately drop it
                         let processed_files = processed_files_clone.lock().unwrap();
                         let result = !processed_files.contains(&file_path);
                         drop(processed_files); // Explicitly drop the MutexGuard
@@ -393,14 +393,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if should_process {
                 match process_blk_file(&file_path, &db_clone).await {
                     Ok(_) => {
+                        // Lock the mutex to modify processed_files and immediately drop it
                         let mut processed_files_guard = processed_files_clone.lock().unwrap();
                         processed_files_guard.insert(file_path);
-    
-                        // Drop the lock before any async operation
-                        drop(processed_files_guard);
-    
-                        // Save processed files to the database
-                        if let Err(save_err) = save_processed_files_to_db(&db_clone, &processed_files_guard) {
+                        drop(processed_files_guard); // Explicitly drop the MutexGuard
+                        
+                        // Now it's safe to call async operations
+                        if let Err(save_err) = save_processed_files_to_db(&db_clone, &*processed_files_guard) {
                             eprintln!("Failed to save processed files to the database: {}", save_err);
                         }
                     },
