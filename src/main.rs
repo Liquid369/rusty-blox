@@ -1318,7 +1318,7 @@ async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) ->
     // Offload the blocking operation to a separate thread
     let result = {
         // Lock the mutex only for the duration of cloning the data
-        let _lock = DB_MUTEX.lock().unwrap();
+        let _lock = DB_MUTEX.lock().await;
 
         task::spawn_blocking(move || {
             read_ldb_block(&hash_clone, header_size)
