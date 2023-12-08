@@ -413,7 +413,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = future.await?;
     }
 
-    OK(())
+    Ok(())
 }
 fn load_processed_files_from_db(db: &DB) -> Result<HashSet<PathBuf>, String> {
     let read_options = rocksdb::ReadOptions::default();
