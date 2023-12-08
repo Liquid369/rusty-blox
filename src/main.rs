@@ -388,7 +388,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match process_blk_file(&file_path, &db_clone).await {
                     Ok(_) => {
                         // Lock the mutex to modify processed_files and immediately drop it
-                        let mut processed_files_guard = processed_files_clone.lock().unwrap();
+                        let mut processed_files_guard = processed_files_clone.lock().await;
                         processed_files_guard.insert(file_path);
                         drop(processed_files_guard); // Explicitly drop the MutexGuard
                         
