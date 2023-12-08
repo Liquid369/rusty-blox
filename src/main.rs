@@ -620,7 +620,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         },
     };*/
 
-    let block_height = read_ldb_block_async(&hash_prev_block, header_size).await.unwrap_or(None);
+    let block_height = read_ldb_block_async(&hash_prev_block, header_size).await;
 
     // Reverse hash_prev_block back to its original order if n_version is less than 4
     if n_version < 4 {
