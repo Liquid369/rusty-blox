@@ -377,9 +377,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
                 if file_name.starts_with("blk") && file_name.ends_with(".dat") {
                     let should_process = {
+                        // Lock the mutex and immediately drop it after use
                         let processed_files = processed_files_clone.lock().unwrap();
                         let result = !processed_files.contains(&file_path);
-                        drop(processed_files); // Explicitly drop the lock
+                        drop(processed_files);
                         result
                     };
     
@@ -388,11 +389,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(_) => {
                                 let mut processed_files_guard = processed_files_clone.lock().unwrap();
                                 processed_files_guard.insert(file_path);
-                    
-                                if let Err(save_err) = save_processed_files_to_db(&db_clone, &*processed_files_guard) {
+    
+                                // Ensure to drop the lock
+                                drop(processed_files_guard);
+    
+                                if let Err(save_err) = save_processed_files_to_db(&db_clone, &processed_files_guard) {
                                     eprintln!("Failed to save processed files to the database: {}", save_err);
                                 }
-                                drop(processed_files_guard); // Explicitly drop the lock
                             },
                             Err(process_err) => {
                                 eprintln!("Failed to process blk file: {}", process_err);
@@ -407,12 +410,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for all tasks to complete
     for future in futures {
-        future.await?;
+        let _ = future.await?;
     }
 
-    Ok(())
+    OK(())
 }
-
 fn load_processed_files_from_db(db: &DB) -> Result<HashSet<PathBuf>, String> {
     let read_options = rocksdb::ReadOptions::default();
     let cf = db.cf_handle("chain_metadata").expect("Chain metadata column family not found."); // Using chain_metadata for this
