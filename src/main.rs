@@ -13,6 +13,7 @@ use ripemd160::{Ripemd160, Digest as Ripemd160Digest};
 use serde_json::{Value, json};
 use serde::Serialize;
 use lazy_static::lazy_static;
+use tokio::task;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
@@ -624,7 +625,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
     CBlockHeader {
         n_version,
         block_hash: reversed_hash_array,
-        block_height: Some(block_height),
+        block_height: block_height.unwrap_or_default(),
         hash_prev_block,
         hash_merkle_root,
         n_time,
@@ -1281,10 +1282,11 @@ lazy_static! {
 
 async fn read_ldb_block_async(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
     let _lock = DB_MUTEX.lock().unwrap();
+    let hash_clone = hash_prev_block.to_owned();
 
     // Offload the blocking operation to a separate thread
     let result = task::spawn_blocking(move || {
-        read_ldb_block(hash_prev_block, header_size)
+        read_ldb_block(hash_clone, header_size)
     }).await?;
 
     result
