@@ -29,6 +29,7 @@ tokio = { version = "1.0", features = ["full"] }
 rusty_piv = { path = "../rusty-piv/rusty_piv", version = "0.1.0" }
 json_rpc = { path = "../rusty-piv/json_rpc", version = "0.1.0" }
 once_cell = "1.8.0"
+lazy_static = "1.4.0"
 
 [build-dependencies]
 cc = "1.0"
