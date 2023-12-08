@@ -369,44 +369,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect() // Collects into Result<Vec<PathBuf>, std::io::Error>
     }).await??;
 
-    let futures = entries.into_iter().map(|file_path| {
+    let futures: Vec<_> = entries.into_iter().map(|file_path| {
         let db_clone = Arc::clone(&db);
         let processed_files_clone = Arc::clone(&processed_files);
     
         tokio::task::spawn(async move {
-            if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("blk") && file_name.ends_with(".dat") {
-                    let should_process = {
+            let should_process = {
+                if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with("blk") && file_name.ends_with(".dat") {
                         // Lock the mutex and immediately drop it after use
                         let processed_files = processed_files_clone.lock().unwrap();
                         let result = !processed_files.contains(&file_path);
-                        drop(processed_files);
+                        drop(processed_files); // Explicitly drop the MutexGuard
                         result
-                    };
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
     
-                    if should_process {
-                        match process_blk_file(&file_path, &db_clone).await {
-                            Ok(_) => {
-                                let mut processed_files_guard = processed_files_clone.lock().unwrap();
-                                processed_files_guard.insert(file_path);
+            if should_process {
+                match process_blk_file(&file_path, &db_clone).await {
+                    Ok(_) => {
+                        let mut processed_files_guard = processed_files_clone.lock().unwrap();
+                        processed_files_guard.insert(file_path);
     
-                                // Ensure to drop the lock
-                                drop(processed_files_guard);
+                        // Drop the lock before any async operation
+                        drop(processed_files_guard);
     
-                                if let Err(save_err) = save_processed_files_to_db(&db_clone, &processed_files_guard) {
-                                    eprintln!("Failed to save processed files to the database: {}", save_err);
-                                }
-                            },
-                            Err(process_err) => {
-                                eprintln!("Failed to process blk file: {}", process_err);
-                            }
+                        // Save processed files to the database
+                        if let Err(save_err) = save_processed_files_to_db(&db_clone, &processed_files_guard) {
+                            eprintln!("Failed to save processed files to the database: {}", save_err);
                         }
+                    },
+                    Err(process_err) => {
+                        eprintln!("Failed to process blk file: {}", process_err);
                     }
                 }
             }
+    
             Ok::<(), String>(())
         })
-    });
+    }).collect();
 
     // Wait for all tasks to complete
     for future in futures {
