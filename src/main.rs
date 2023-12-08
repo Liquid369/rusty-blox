@@ -375,20 +375,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
         tokio::task::spawn(async move {
             let should_process = {
+                let processed_files = processed_files_clone.lock().await;
                 if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with("blk") && file_name.ends_with(".dat") {
-                        // Lock the mutex to check processed_files and immediately drop it
-                        let processed_files = processed_files_clone.lock().unwrap();
-                        let result = !processed_files.contains(&file_path);
-                        drop(processed_files); // Explicitly drop the MutexGuard
-                        result
-                    } else {
-                        false
-                    }
+                    file_name.starts_with("blk") && file_name.ends_with(".dat") && !processed_files.contains(&file_path)
                 } else {
                     false
                 }
-            };
+            }; 
     
             if should_process {
                 match process_blk_file(&file_path, &db_clone).await {
