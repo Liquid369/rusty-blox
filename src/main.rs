@@ -620,7 +620,7 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> CBlockHeader {
         },
     };*/
 
-    let block_height = rmatch read_ldb_block_async(&hash_prev_block, header_size).await {
+    let block_height = match read_ldb_block_async(&hash_prev_block, header_size).await {
         Ok(block_height) => {
             // Use block_height
         },
