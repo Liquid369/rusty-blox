@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use serde::Serialize;
 use lazy_static::lazy_static;
 use tokio::task;
+use tokio::task::JoinError;
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use hex;
@@ -173,6 +174,12 @@ pub struct VShieldOutput {
 #[derive(Debug)]
 pub struct CustomError {
     message: String,
+}
+
+impl From<JoinError> for CustomError {
+    fn from(error: JoinError) -> Self {
+        CustomError::new(&format!("Task join error: {}", error))
+    }
 }
 
 impl CustomError {
@@ -1334,7 +1341,7 @@ fn read_ldb_block(hash_prev_block: &[u8; 32], header_size: usize) -> Result<Opti
 
     // Get the value from the database.
     let read_options: leveldb::options::ReadOptions<'_, Byte33> = LevelDBReadOptions::new();
-    let height = match database.get(read_options, &key) {
+    let height = match database.get(read_options, key) {
         Ok(Some(value)) => {
             // Process the value to get the height, and handle potential errors with new error handling
             parse_ldb_block(&value).map_err(|e| CustomError::new(&format!("Error parsing block: {}", e)))
