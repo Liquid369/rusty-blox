@@ -648,3 +648,9 @@ async fn read_varint128(data: &[u8]) -> (usize, u64) {
 
     (index, value)
 }
+
+async fn set_end_pos<R: AsyncReadExt + AsyncSeek + Unpin>(reader: &mut R, start_pos: u64) -> Result<u64, io::Error> {
+    let end_pos = reader.stream_position().await?;
+    reader.seek(SeekFrom::Start(start_pos)).await?;
+    Ok(end_pos)
+}
