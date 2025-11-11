@@ -53,27 +53,72 @@ fn main() {
         }
     }
     
-    // Count total blocks with heights
-    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
-    let mut count_heights = 0;
-    let mut count_hash_mappings = 0;
+    // Quick sample check: test some heights
+    println!("\n=== SAMPLE HEIGHT CHECKS ===");
+    let sample_heights: Vec<i32> = vec![0, 1, 10, 100, 1000, 10000, 50000, 75000, 99000];
+    let mut found_count = 0;
+    let mut highest_found = 0;
     
-    for item in iter {
-        match item {
-            Ok((key, _value)) => {
-                if key.len() == 4 && key[0] != b'h' && key[0] != b'p' {
-                    count_heights += 1;
-                } else if key.len() == 33 && key[0] == b'h' {
-                    count_hash_mappings += 1;
+    for height in sample_heights {
+        let height_key = height.to_le_bytes().to_vec();
+        match db.get_cf(&cf_metadata, &height_key) {
+            Ok(Some(value)) => {
+                let hash_hex = hex::encode(&value);
+                println!("✓ Height {}: {}", height, hash_hex);
+                found_count += 1;
+                if height > highest_found {
+                    highest_found = height;
                 }
             }
+            Ok(None) => {
+                println!("✗ Height {}: NOT FOUND", height);
+            }
             Err(e) => {
-                eprintln!("Iterator error: {}", e);
-                break;
+                println!("✗ Height {} ERROR: {}", height, e);
             }
         }
     }
     
-    println!("\nTotal height mappings: {}", count_heights);
-    println!("Total hash->height mappings: {}", count_hash_mappings);
+    println!("\n=== SUMMARY ===");
+    println!("Sample checks: {} / {} found", found_count, 9);
+    println!("Highest sampled height found: {}", highest_found);
+    
+    // Quick estimate by checking sequential heights from 0 until we find a gap
+    println!("\n=== FINDING ACTUAL HIGHEST HEIGHT ===");
+    let mut height: i32 = 0;
+    let mut consecutive_missing = 0;
+    let max_missing = 10; // Stop after 10 consecutive missing
+    
+    loop {
+        let height_key = height.to_le_bytes().to_vec();
+        match db.get_cf(&cf_metadata, &height_key) {
+            Ok(Some(_)) => {
+                consecutive_missing = 0;
+                height += 1;
+            }
+            Ok(None) => {
+                consecutive_missing += 1;
+                if consecutive_missing >= max_missing {
+                    println!("Highest height found: {} (stopped after {} missing)", height - max_missing, max_missing);
+                    break;
+                }
+                height += 1;
+            }
+            Err(e) => {
+                println!("Error at height {}: {}", height, e);
+                break;
+            }
+        }
+        
+        // Also show progress every 10K blocks
+        if height % 10000 == 0 && height > 0 {
+            println!("  ... checked up to height {}", height);
+        }
+        
+        // Safety limit to prevent infinite loop
+        if height > 10_000_000 {
+            println!("Reached safety limit at height {}", height);
+            break;
+        }
+    }
 }
