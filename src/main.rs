@@ -2,20 +2,29 @@ mod address;
 mod api;
 mod batch_writer;
 mod blocks;
+mod chain_state;
 mod db_utils;
+mod mempool;
+mod monitor;
+mod parallel;
 mod parser;
+mod search;
+mod sync;
 mod transactions;
 mod config;
 mod types;
+mod websocket;
 
 use crate::config::{get_global_config, init_global_config};
-use crate::db_utils::save_file_as_incomplete;
-use crate::blocks::process_blk_file;
+use crate::sync::run_sync_service;
+use crate::mempool::{MempoolState, run_mempool_monitor};
+use crate::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
 use crate::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
     send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, relay_mnb_v2,
+    status_v2, search_v2, mempool_v2, mempool_tx_v2,
 };
-use crate::types::{MyError, AppState};
+use crate::types::MyError;
 
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options};
@@ -23,12 +32,8 @@ use axum::{Router, routing::get};
 use tokio::sync::Mutex as TokioMutex;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::fs;
 use std::path::PathBuf;
 use lazy_static::lazy_static;
-
-const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
-const MAX_PAYLOAD_SIZE: usize = 10000;
 
 const COLUMN_FAMILIES: [&str; 7] = [
     "blocks",
@@ -40,89 +45,47 @@ const COLUMN_FAMILIES: [&str; 7] = [
     "chain_state",
 ];
 
-const BATCH_SIZE: usize = 3;
-
 lazy_static! {
     static ref DB_MUTEX: TokioMutex<()> = TokioMutex::new(());
 }
 
-async fn process_file_chunks(
-    entries: &[PathBuf],
-    db_arc: Arc<DB>,
-    state: AppState,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Process files sequentially (RocksDB column family handles aren't Send)
-    // Performance optimization: Within-file transaction processing is already async
-    for file_path in entries {
-        if let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) {
-            if file_name.starts_with("blk") && file_name.ends_with(".dat") {
-                if let Err(e) = process_blk_file(state.clone(), file_path.clone(), db_arc.clone()).await {
-                    eprintln!("Failed to process blk file: {}", e);
-                    save_file_as_incomplete(&db_arc, &file_path).await?;
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn start_web_server(db_arc: Arc<DB>) {
+async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, broadcaster: Arc<EventBroadcaster>) {
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api", get(api_handler))
         .route("/api/endpoint", get(api_handler))
-        .route("/api/v2/block-index/:block_height", get(block_index_v2))
-        .route("/api/v2/tx/:txid", get(tx_v2))
-        .route("/api/v2/address/:address", get(addr_v2))
-        .route("/api/v2/xpub/:xpub", get(xpub_v2))
-        .route("/api/v2/utxo/:address", get(utxo_v2))
-        .route("/api/v2/block/:block_height", get(block_v2))
-        .route("/api/v2/sendtx/:hex_tx", get(send_tx_v2))
+        .route("/api/v2/status", get(status_v2))
+        .route("/api/v2/search/{query}", get(search_v2))
+        .route("/api/v2/mempool", get(mempool_v2))
+        .route("/api/v2/mempool/{txid}", get(mempool_tx_v2))
+        .route("/api/v2/block-index/{block_height}", get(block_index_v2))
+        .route("/api/v2/tx/{txid}", get(tx_v2))
+        .route("/api/v2/address/{address}", get(addr_v2))
+        .route("/api/v2/xpub/{xpub}", get(xpub_v2))
+        .route("/api/v2/utxo/{address}", get(utxo_v2))
+        .route("/api/v2/block/{block_height}", get(block_v2))
+        .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
         .route("/api/v2/mncount", get(mn_count_v2))
         .route("/api/v2/mnlist", get(mn_list_v2))
         .route("/api/v2/moneysupply", get(money_supply_v2))
         .route("/api/v2/budgetinfo", get(budget_info_v2))
-        .route("/api/v2/relaymnb/:hex_mnb", get(relay_mnb_v2))
-        .route("/api/v2/budgetvotes/:proposal_name", get(api_handler))
+        .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
+        .route("/api/v2/budgetvotes/{proposal_name}", get(api_handler))
         .route("/api/v2/budgetprojection", get(api_handler))
-        .route("/api/v2/mnrawbudgetvote/:raw_vote_params", get(api_handler))
-        .layer(axum::extract::Extension(db_arc));
+        .route("/api/v2/mnrawbudgetvote/{raw_vote_params}", get(api_handler))
+        .route("/ws/blocks", get(ws_blocks_handler))
+        .route("/ws/transactions", get(ws_transactions_handler))
+        .route("/ws/mempool", get(ws_mempool_handler))
+        .layer(axum::extract::Extension(db_arc))
+        .layer(axum::extract::Extension(mempool_state))
+        .layer(axum::extract::Extension(broadcaster));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3005));
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind");
     println!("Listening on {}", addr);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
+    axum::serve(listener, app)
         .await
         .expect("server failed");
-}
-
-async fn process_files_loop(blk_dir: PathBuf, db_arc: Arc<DB>, state: AppState) {
-    loop {
-        let read_dir_result = fs::read_dir(&blk_dir).await;
-        match read_dir_result {
-            Ok(mut dir_entries) => {
-                let mut entries = Vec::new();
-                
-                // Read all entries from directory
-                while let Ok(Some(entry)) = dir_entries.next_entry().await {
-                    entries.push(entry.path());
-                }
-
-                if let Err(e) = process_file_chunks(&entries, Arc::clone(&db_arc), state.clone()).await {
-                    eprintln!("Error processing file chunks: {}", e);
-                }
-            },
-            Err(e) => {
-                eprintln!("Error reading directory: {}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        // Sleep for a while before the next iteration...
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    }
 }
 
 #[tokio::main]
@@ -153,9 +116,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
+    // RocksDB optimizations for high-throughput writes
     let mut db_options = Options::default();
     db_options.create_if_missing(true);
     db_options.create_missing_column_families(true);
+    
+    // Write buffer optimizations
+    db_options.set_write_buffer_size(256 * 1024 * 1024); // 256MB write buffer
+    db_options.set_max_write_buffer_number(4); // Allow up to 4 write buffers
+    db_options.set_min_write_buffer_number_to_merge(2); // Merge after 2 buffers
+    
+    // File size and compaction
+    db_options.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST files
+    db_options.set_level_zero_file_num_compaction_trigger(8); // Trigger compaction after 8 L0 files
+    db_options.set_max_background_jobs(8); // Parallel background compaction/flush
+    
+    // Compression
+    db_options.set_compression_type(rocksdb::DBCompressionType::Lz4); // Fast compression
+    
+    // Increase parallelism (8 cores)
+    db_options.increase_parallelism(8);
+    
     let db = DB::open_cf_descriptors(
         &db_options,
         db_path_str,
@@ -164,16 +145,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_arc = Arc::new(db);
 
     let blk_dir_path = PathBuf::from(blk_dir);
+    
+    // Create shared state
+    let mempool_state = Arc::new(MempoolState::new());
+    let broadcaster = Arc::new(EventBroadcaster::new());
+    
+    // Spawn web server in background task
+    let api_db = Arc::clone(&db_arc);
+    let api_mempool = Arc::clone(&mempool_state);
+    let api_broadcaster = Arc::clone(&broadcaster);
+    tokio::spawn(async move {
+        start_web_server(api_db, api_mempool, api_broadcaster).await;
+    });
+    
+    // Spawn mempool monitor service
+    let mempool_clone = Arc::clone(&mempool_state);
+    tokio::spawn(async move {
+        if let Err(e) = run_mempool_monitor(mempool_clone, 10).await {
+            eprintln!("Mempool monitor error: {}", e);
+        }
+    });
 
-    let state = AppState {
-        db: Arc::clone(&db_arc),
-    };
-
-    // Run file processing directly (not spawned) for testing transaction integration
-    process_files_loop(blk_dir_path, Arc::clone(&db_arc), state).await;
-
-    // Start web server
-    start_web_server(Arc::clone(&db_arc)).await;
+    // Give services time to start
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // Run sync service (handles both initial and live sync)
+    run_sync_service(blk_dir_path, Arc::clone(&db_arc), Some(broadcaster)).await?;
 
     Ok(())
 }

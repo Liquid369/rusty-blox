@@ -58,7 +58,7 @@ pub async fn deserialize_transaction(
         outputs.push(deserialize_tx_out(&mut cursor).await);
     }
 
-    let lock_time = cursor.read_u32::<LittleEndian>().unwrap();
+    let lock_time = cursor.read_u32::<LittleEndian>()?;
 
     Ok(CTransaction {
         txid: txid,
@@ -73,9 +73,9 @@ pub async fn deserialize_tx_in(cursor: &mut Cursor<&[u8]>, tx_ver_out: u32, bloc
     if block_version < 3 && tx_ver_out == 2 {
         // It's a coinbase transaction
         let mut buffer = [0; 26];
-        cursor.read_exact(&mut buffer).unwrap();
+        let _ = cursor.read_exact(&mut buffer); // Ignore errors for coinbase
         let coinbase = buffer.to_vec();
-        let sequence = cursor.read_u32::<LittleEndian>().unwrap();
+        let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
 
         CTxIn {
             prevout: None,
@@ -87,9 +87,9 @@ pub async fn deserialize_tx_in(cursor: &mut Cursor<&[u8]>, tx_ver_out: u32, bloc
     } else {
         // It's a regular transaction
         let prevout = deserialize_out_point(cursor).await;
-        let script_sig = read_script(cursor).await.unwrap();
-        let sequence = cursor.read_u32::<LittleEndian>().unwrap();
-        let index = cursor.read_u64::<LittleEndian>().unwrap();
+        let script_sig = read_script(cursor).await.unwrap_or(Vec::new());
+        let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
+        let index = cursor.read_u64::<LittleEndian>().unwrap_or(0);
 
         CTxIn {
             prevout: Some(prevout),
@@ -102,15 +102,16 @@ pub async fn deserialize_tx_in(cursor: &mut Cursor<&[u8]>, tx_ver_out: u32, bloc
 }
 
 pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>) -> CTxOut {
-    let value = cursor.read_i64::<LittleEndian>().unwrap();
+    let value = cursor.read_i64::<LittleEndian>().unwrap_or(0);
     let script_length = read_varint(cursor).await;
-    let mut script_pubkey = vec![0; script_length.unwrap() as usize];
-    cursor.read_exact(&mut script_pubkey).unwrap();
-    let index = cursor.read_u64::<LittleEndian>().unwrap();
+    let script_len = script_length.unwrap_or(0) as usize;
+    let mut script_pubkey = vec![0; script_len];
+    let _ = cursor.read_exact(&mut script_pubkey); // Ignore errors
+    let index = cursor.read_u64::<LittleEndian>().unwrap_or(0);
 
     let mut address_data = Vec::new();
-    cursor.read_to_end(&mut address_data).unwrap();
-    let address = String::from_utf8(address_data).unwrap();
+    let _ = cursor.read_to_end(&mut address_data); // Ignore errors
+    let address = String::from_utf8(address_data).unwrap_or_default();
 
     CTxOut {
         value: value,
@@ -125,9 +126,9 @@ pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>) -> CTxOut {
 
 pub async fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {
     let mut hash_bytes = [0u8; 32];
-    cursor.read_exact(&mut hash_bytes).unwrap();
+    let _ = cursor.read_exact(&mut hash_bytes); // Ignore errors
     let hash = hex::encode(hash_bytes);
-    let n = cursor.read_u32::<LittleEndian>().unwrap();
+    let n = cursor.read_u32::<LittleEndian>().unwrap_or(0);
     
     COutPoint { hash, n }
 }

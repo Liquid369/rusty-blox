@@ -41,7 +41,7 @@ pub async fn process_transaction(
             if tx_ver_out < 3 {
                 if let Err(e) = process_transaction_v1(
                     reader,
-                    tx_ver_out.try_into().unwrap(),
+                    tx_ver_out.try_into().unwrap_or(1),
                     block_version,
                     block_hash,
                     _db.clone(),
@@ -59,7 +59,7 @@ pub async fn process_transaction(
             if tx_ver_out <= 2 {
                 if let Err(e) = process_transaction_v1(
                     reader,
-                    tx_ver_out.try_into().unwrap(),
+                    tx_ver_out.try_into().unwrap_or(1),
                     block_version,
                     block_hash,
                     _db.clone(),
@@ -146,7 +146,7 @@ async fn process_transaction_v1(
         let script = read_script(reader).await?;
         let address_type = get_address_type(&CTxOut {
             value,
-            script_length: script.len().try_into().unwrap(),
+            script_length: script.len().try_into().unwrap_or(0),
             script_pubkey: CScript { script: script.clone() },
             index: i as u64,
             address: Vec::new(),
@@ -155,7 +155,7 @@ async fn process_transaction_v1(
         let addresses = address_type_to_string(Some(address_type.clone()));
         outputs.push(CTxOut {
             value,
-            script_length: script.len().try_into().unwrap(),
+            script_length: script.len().try_into().unwrap_or(0),
             script_pubkey: CScript { script },
             index: i as u64,
             address: addresses.await,
@@ -193,7 +193,7 @@ async fn process_transaction_v1(
                 _db.clone(),
                 &address_type,
                 reversed_txid.clone(),
-                tx_out.index.try_into().unwrap(),
+                tx_out.index.try_into().unwrap_or(0),
             ).await?;
 
             // 'p' + scriptpubkey -> list of (txid, output_index)
@@ -218,52 +218,53 @@ async fn process_transaction_v1(
         }
 
         for tx_in in &transaction.inputs {
-        let mut key = vec![b't'];
-        if let Some(actual_prevout) = &tx_in.prevout {
-            key.extend_from_slice(&actual_prevout.hash.as_bytes());
-        }
-        let spent_output: Option<&CTxOut> = None;
-        let tx_data_option = perform_rocksdb_get(_db.clone(), "transactions", key.clone()).await;
-        if let Ok(Some(tx_data)) = tx_data_option {
-            let referenced_transaction = deserialize_transaction(&tx_data).await.unwrap();
-
-            if let Some(prevout) = &tx_in.prevout {
-                let output = &referenced_transaction.outputs[prevout.n as usize];
-                let address_type = get_address_type(output, &general_address_type).await;
-
-                let _ = remove_utxo_addr(_db.clone(), &address_type, &prevout.hash, prevout.n).await;
+            let mut key = vec![b't'];
+            if let Some(actual_prevout) = &tx_in.prevout {
+                key.extend_from_slice(&actual_prevout.hash.as_bytes());
             }
-        }
-        let mut key_utxo = vec![b'u'];
-        if let Some(actual_prevout) = &tx_in.prevout {
-            key.extend_from_slice(&actual_prevout.hash.as_bytes());
-        }
-        if let Ok(Some(data)) = perform_rocksdb_get(_db.clone(), "pubkey", key_utxo.clone()).await {
-            let mut utxos = deserialize_utxos(&data).await;
+            let tx_data_option = perform_rocksdb_get(_db.clone(), "transactions", key.clone()).await;
+            if let Ok(Some(tx_data)) = tx_data_option {
+                // Safely deserialize - skip if corrupted
+                if let Ok(referenced_transaction) = deserialize_transaction(&tx_data).await {
+                    if let Some(prevout) = &tx_in.prevout {
+                        let output = &referenced_transaction.outputs[prevout.n as usize];
+                        let address_type = get_address_type(output, &general_address_type).await;
 
-            // Remove the UTXO that matches the current transaction's input
-            if let Some(prevout) = &tx_in.prevout {
-                let _hash = &prevout.hash;
-                let _n = prevout.n;
-                if let Some(pos) = utxos
-                    .iter()
-                    .position(|(txid, index)| *txid == _hash.as_bytes() && *index == _n as u64)
-                {
-                    utxos.remove(pos);
+                        let _ = remove_utxo_addr(_db.clone(), &address_type, &prevout.hash, prevout.n).await;
+                    }
+                }
+            }
+            
+            let mut key_utxo = vec![b'u'];
+            if let Some(actual_prevout) = &tx_in.prevout {
+                key_utxo.extend_from_slice(&actual_prevout.hash.as_bytes());
+            }
+            if let Ok(Some(data)) = perform_rocksdb_get(_db.clone(), "pubkey", key_utxo.clone()).await {
+                let mut utxos = deserialize_utxos(&data).await;
+
+                // Remove the UTXO that matches the current transaction's input
+                if let Some(prevout) = &tx_in.prevout {
+                    let _hash = &prevout.hash;
+                    let _n = prevout.n;
+                    if let Some(pos) = utxos
+                        .iter()
+                        .position(|(txid, index)| *txid == _hash.as_bytes() && *index == _n as u64)
+                    {
+                        utxos.remove(pos);
+                    }
+                }
+
+                // Serialize the updated list of UTXOs and store it back in the database
+                if !utxos.is_empty() {
+                    perform_rocksdb_put(_db.clone(), "pubkey", key_pubkey.clone(), serialize_utxos(&utxos).await).await;
+                } else {
+                    perform_rocksdb_del(_db.clone(), "pubkey", key_pubkey.clone()).await;
                 }
             }
 
-            // Serialize the updated list of UTXOs and store it back in the database
-            if !utxos.is_empty() {
-                perform_rocksdb_put(_db.clone(), "pubkey", key_pubkey.clone(), serialize_utxos(&utxos).await).await;
-            } else {
-                perform_rocksdb_del(_db.clone(), "pubkey", key_pubkey.clone()).await;
-            }
+            // Remove the referenced UTXO from the UTXO set
+            perform_rocksdb_del(_db.clone(), "utxo", key_utxo.clone()).await;
         }
-
-        // Remove the referenced UTXO from the UTXO set
-        perform_rocksdb_del(_db.clone(), "utxo", key_utxo.clone()).await;
-    }
     } // End UTXO tracking (fast_sync skip)
 
     // 't' + txid -> tx_bytes
@@ -276,7 +277,14 @@ async fn process_transaction_v1(
     // Add to batch instead of direct write
     batch.put("transactions", key.clone(), full_data);
     
-    reader.seek(SeekFrom::Start(end_pos.try_into().unwrap())).await?;
+    // Safe conversion - use current position if conversion fails
+    match end_pos.try_into() {
+        Ok(pos) => reader.seek(SeekFrom::Start(pos)).await?,
+        Err(_) => {
+            eprintln!("Failed to convert end_pos, seeking to current position");
+            reader.seek(SeekFrom::Current(0)).await?
+        }
+    };
 
     Ok(())
 }
@@ -360,7 +368,7 @@ async fn parse_sapling_tx_data(
             let address_type = get_address_type(
                 &CTxOut {
                     value,
-                    script_length: script.len().try_into().unwrap(),
+                    script_length: script.len().try_into().unwrap_or(0),
                     script_pubkey: CScript { script: script.clone() },
                     index: i,
                     address: Vec::new(),
@@ -371,7 +379,7 @@ async fn parse_sapling_tx_data(
 
             outputs.push(CTxOut {
                 value,
-                script_length: script.len().try_into().unwrap(),
+                script_length: script.len().try_into().unwrap_or(0),
                 script_pubkey: CScript { script },
                 index: i,
                 address: addresses,
@@ -435,9 +443,12 @@ async fn parse_sapling_tx_data(
             }
         }
 
-        let mut key_utxo = vec![b'u'];
-        key_utxo.extend_from_slice(referenced_utxo_id.as_ref().unwrap().as_bytes());
-        perform_rocksdb_del(_db.clone(), "utxo", key_utxo).await;
+        // Only delete UTXO if we have a valid reference
+        if let Some(ref_id) = &referenced_utxo_id {
+            let mut key_utxo = vec![b'u'];
+            key_utxo.extend_from_slice(ref_id.as_bytes());
+            perform_rocksdb_del(_db.clone(), "utxo", key_utxo).await;
+        }
     }
 
     for tx_out in &outputs {
@@ -446,7 +457,7 @@ async fn parse_sapling_tx_data(
             _db.clone(),
             &address_type,
             reversed_txid.clone(),
-            tx_out.index.try_into().unwrap(),
+            tx_out.index.try_into().unwrap_or(0),
         ).await;
 
         let mut key_pubkey = vec![b'p'];
@@ -488,8 +499,8 @@ async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<VShiel
     let buff_64 = [0u8; 64];
     let buff_192 = [0u8; 192];
 
-    // Read each vShieldSpend entry
-    let mut vshield_spends = Vec::with_capacity(count.try_into().unwrap());
+    // Read each vShieldSpend entry - default to 0 capacity if conversion fails
+    let mut vshield_spends = Vec::with_capacity(count.try_into().unwrap_or(0));
     for _ in 0..count {
         // Read each field
         let mut cv = buff_32;

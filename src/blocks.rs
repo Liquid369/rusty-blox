@@ -10,8 +10,8 @@ use crate::batch_writer::BatchWriter;
 use crate::config::get_global_config;
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
-const BATCH_SIZE: usize = 100;
-const TX_BATCH_SIZE: usize = 1000; // Flush transaction batches every 1000 operations
+const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput
+const TX_BATCH_SIZE: usize = 10000; // Increased from 1000 for better throughput
 
 // Helper to read varint from async reader
 async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u64, std::io::Error> {
@@ -219,8 +219,16 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             
             match db.get_cf(&cf_metadata, &height_key) {
                 Ok(Some(height_bytes)) if height_bytes.len() == 4 => {
-                    let parent_height = i32::from_le_bytes(height_bytes.as_slice().try_into().unwrap());
-                    Some(parent_height + 1)
+                    match height_bytes.as_slice().try_into() {
+                        Ok(bytes) => {
+                            let parent_height = i32::from_le_bytes(bytes);
+                            Some(parent_height + 1)
+                        }
+                        Err(_) => {
+                            eprintln!("  Failed to convert height bytes");
+                            None
+                        }
+                    }
                 }
                 Ok(Some(_)) => {
                     eprintln!("  Invalid height data for parent block");
@@ -314,13 +322,13 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     if !batch_items.is_empty() {
         let remaining_count = batch_items.len();
         batch_put_cf(db.clone(), "blocks", batch_items).await?;
-        println!("  Wrote {} remaining blocks to database", remaining_count);
+        println!("Wrote {} remaining blocks to database", remaining_count);
     }
     
     // Flush any remaining transaction batch writes
     if tx_batch.pending_count() > 0 {
         tx_batch.flush().await?;
-        println!("  Flushed {} pending transaction operations", tx_batch.pending_count());
+        println!("Flushed {} pending transaction operations", tx_batch.pending_count());
     }
 
     println!("File complete: {} total blocks processed", block_count);
