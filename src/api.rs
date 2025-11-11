@@ -11,6 +11,9 @@ use crate::types::{CTransaction};
 use crate::parser::{deserialize_transaction, deserialize_utxos};
 use crate::db_utils::{db_get_blocking, db_put_blocking, db_delete_blocking};
 use crate::config::{get_global_config, init_global_config};
+use crate::chain_state::{get_chain_state, ChainState};
+use crate::search::{search, SearchResult};
+use crate::mempool::{MempoolState, MempoolInfo};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
@@ -790,5 +793,53 @@ pub async fn relay_mnb_v2(AxumPath(param): AxumPath<String>) -> Result<Json<Stri
             Ok(Json(mnb_relay))
         },
         Err(_) => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+// ============================================================================
+// New V2 API Endpoints
+// ============================================================================
+
+/// GET /api/v2/status
+/// Returns current sync status and chain state
+pub async fn status_v2(
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<ChainState>, StatusCode> {
+    match get_chain_state(&db) {
+        Ok(state) => Ok(Json(state)),
+        Err(_e) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// GET /api/v2/search/{query}
+/// Universal search for blocks, transactions, or addresses
+pub async fn search_v2(
+    Path(query): Path<String>,
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<SearchResult>, StatusCode> {
+    match search(&db, &query) {
+        Ok(result) => Ok(Json(result)),
+        Err(_e) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// GET /api/v2/mempool
+/// Returns current mempool information
+pub async fn mempool_v2(
+    Extension(mempool_state): Extension<Arc<MempoolState>>,
+) -> Result<Json<MempoolInfo>, StatusCode> {
+    let info = mempool_state.get_info().await;
+    Ok(Json(info))
+}
+
+/// GET /api/v2/mempool/{txid}
+/// Returns specific mempool transaction
+pub async fn mempool_tx_v2(
+    Path(txid): Path<String>,
+    Extension(mempool_state): Extension<Arc<MempoolState>>,
+) -> Result<Json<crate::mempool::MempoolTransaction>, StatusCode> {
+    match mempool_state.get_transaction(&txid).await {
+        Some(tx) => Ok(Json(tx)),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
