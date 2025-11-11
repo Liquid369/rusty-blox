@@ -1,62 +1,333 @@
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, SeekFrom};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use rocksdb::DB;
-use crate::db_utils::RocksDBOperations;
-use crate::types::{CBlockHeader};
-use std::error::Error;
+use crate::types::{CBlockHeader, AppState, MyError, CTransaction, CTxIn, CTxOut, COutPoint, CScript};
+use rustyblox::call_quark_hash;
+use sha2::{Sha256, Digest};
+use crate::db_utils::batch_put_cf;
+use crate::transactions::process_transaction;
+use crate::batch_writer::BatchWriter;
+use crate::config::get_global_config;
 
-async fn process_blk_file(
-    state: AppState,
-    file_path: impl AsRef<Path>,
-    db: Arc<DB>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Set as in progress
-    let file_path_buf = PathBuf::from(file_path.as_ref());
-    save_file_as_in_progress(&db, &file_path_buf).await?;
+const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
+const BATCH_SIZE: usize = 100;
+const TX_BATCH_SIZE: usize = 1000; // Flush transaction batches every 1000 operations
 
-    let mut file = File::open(file_path).await?;
-    let mut prefix_buffer = [0u8; 4];
-    let mut size_buffer = [0u8; 4];
-    let mut stream_position = 0;
-    let mut reader = BufReader::new(file);
-
-    while let Ok(_) = reader.seek(SeekFrom::Start(stream_position)).await {
-        if reader.read_exact(&mut prefix_buffer).await.is_err() {
-            break; // End of file or error
+// Helper to read varint from async reader
+async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u64, std::io::Error> {
+    let first = reader.read_u8().await?;
+    let value = match first {
+        0x00..=0xfc => u64::from(first),
+        0xfd => {
+            let mut buf = [0u8; 2];
+            reader.read_exact(&mut buf).await?;
+            u64::from(u16::from_le_bytes(buf))
         }
-
-        if prefix_buffer != PREFIX {
-            continue; // If the prefix doesn't match, skip to next
+        0xfe => {
+            let mut buf = [0u8; 4];
+            reader.read_exact(&mut buf).await?;
+            u64::from(u32::from_le_bytes(buf))
         }
+        0xff => {
+            let mut buf = [0u8; 8];
+            reader.read_exact(&mut buf).await?;
+            u64::from_le_bytes(buf)
+        }
+    };
+    Ok(value)
+}
 
-        reader.read_exact(&mut size_buffer).await?;
-        let block_size = u32::from_le_bytes(size_buffer);
+// Helper to read script
+async fn read_script<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>, std::io::Error> {
+    let script_length = read_varint(reader).await?;
+    let mut script = vec![0u8; script_length as usize];
+    reader.read_exact(&mut script).await?;
+    Ok(script)
+}
 
-        let _version = read_4_bytes(&mut reader).await?;
-        let ver_as_int = u32::from_le_bytes(_version);
-        let header_size = get_header_size(ver_as_int).await;
+// Helper to read outpoint
+async fn read_outpoint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<COutPoint, std::io::Error> {
+    let mut hash = [0u8; 32];
+    reader.read_exact(&mut hash).await?;
+    
+    let mut n_buf = [0u8; 4];
+    reader.read_exact(&mut n_buf).await?;
+    let n = u32::from_le_bytes(n_buf);
+    
+    // Reverse hash for display
+    let reversed_hash: Vec<u8> = hash.iter().rev().cloned().collect();
+    let hex_hash = hex::encode(&reversed_hash);
+    
+    Ok(COutPoint { hash: hex_hash, n })
+}
 
-        let mut header_buffer = vec![0u8; header_size];
-        reader.read_exact(&mut header_buffer).await?;
-
-        let block_header = parse_block_header(&header_buffer, header_size).await?;
+// Parse transaction inputs
+async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    block_version: u32,
+    tx_version: i16,
+) -> Result<Vec<CTxIn>, std::io::Error> {
+    let input_count = read_varint(reader).await?;
+    let mut inputs = Vec::new();
+    
+    for i in 0..input_count {
+        let mut coinbase = None;
+        let mut prevout = None;
+        let mut script = Vec::new();
         
-        let cf_name = Arc::new(db.cf_handle("blocks").ok_or("Column family not found")?);
-        let block_hash_vec: Vec<u8> = block_header.block_hash.iter().rev().cloned().collect();
-        perform_rocksdb_put(db.clone(), "blocks", block_hash_vec.clone(), header_buffer).await;
-        let height_bytes = block_header.block_height.unwrap_or(0).to_le_bytes();
-        let height_bytes_vec = height_bytes.to_vec();
-        perform_rocksdb_put(db.clone(), "blocks", height_bytes_vec, block_hash_vec.clone()).await;
+        // Check if this is a coinbase transaction
+        if block_version < 3 && tx_version == 2 {
+            // Coinbase transaction
+            let mut buffer = [0u8; 26];
+            reader.read_exact(&mut buffer).await?;
+            coinbase = Some(buffer.to_vec());
+        } else {
+            // Regular transaction
+            prevout = Some(read_outpoint(reader).await?);
+            script = read_script(reader).await?;
+        }
+        
+        let mut seq_buf = [0u8; 4];
+        reader.read_exact(&mut seq_buf).await?;
+        let sequence = u32::from_le_bytes(seq_buf);
+        
+        inputs.push(CTxIn {
+            prevout,
+            script_sig: CScript { script },
+            sequence,
+            index: i,
+            coinbase,
+        });
+    }
+    
+    Ok(inputs)
+}
 
-        process_transaction(&mut reader, ver_as_int, &block_header.block_hash, db.clone()).await?;
+// Parse transaction outputs
+async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<CTxOut>, std::io::Error> {
+    let output_count = read_varint(reader).await?;
+    let mut outputs = Vec::new();
+    
+    for i in 0..output_count {
+        let mut value_buf = [0u8; 8];
+        reader.read_exact(&mut value_buf).await?;
+        let value = i64::from_le_bytes(value_buf);
+        
+        let script = read_script(reader).await?;
+        let script_length = script.len() as i32;
+        
+        outputs.push(CTxOut {
+            value,
+            script_length,
+            script_pubkey: CScript { script },
+            index: i,
+            address: Vec::new(), // Will be populated later with address extraction
+        });
+    }
+    
+    Ok(outputs)
+}
 
-        stream_position += block_size as u64 + 8; // Adjusting stream_position for the next block
+pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let file_path_ref = file_path.as_ref();
+    println!("Processing file: {}", file_path_ref.display());
+    
+    // Get fast_sync setting from config
+    let config = get_global_config();
+    let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
+    if fast_sync {
+        println!("  Fast sync mode enabled (skipping UTXO tracking)");
     }
 
+    let file = tokio::fs::File::open(&file_path_ref).await?;
+    let mut reader = BufReader::new(file);
+
+    let mut batch_items = Vec::new();
+    let mut header_buffer = Vec::with_capacity(112);
+    let mut block_count = 0;
+    
+    // Create batch writer for transaction data
+    let mut tx_batch = BatchWriter::new(db.clone(), TX_BATCH_SIZE);
+    
+    let mut size_buffer = [0u8; 4];
+    let mut magic_bytes = [0u8; 4];
+
+    loop {
+        // Read magic bytes
+        match reader.read_exact(&mut magic_bytes).await {
+            Ok(_) => {},
+            Err(e) => {
+                if block_count > 0 {
+                    println!("  EOF reached after {} blocks: {}", block_count, e);
+                }
+                break;
+            }
+        }
+
+        if magic_bytes != PREFIX {
+            eprintln!("  Invalid magic at block {}: {:02x?}, expected {:02x?}", 
+                     block_count, magic_bytes, PREFIX);
+            break;  // Invalid block, end of file
+        }
+
+        // Read block size
+        match reader.read_exact(&mut size_buffer).await {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("  Failed to read size at block {}: {}", block_count, e);
+                break;
+            }
+        }
+        let block_size = u32::from_le_bytes(size_buffer) as u64;
+
+        // Peek at version to determine header size (4 bytes)
+        let mut version_bytes = [0u8; 4];
+        match reader.read_exact(&mut version_bytes).await {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("  Failed to read version at block {}: {}", block_count, e);
+                break;
+            }
+        }
+        let ver_as_int = u32::from_le_bytes(version_bytes);
+        let header_size = get_header_size(ver_as_int);
+
+        // Read the rest of the header (header_size - 4 bytes already read for version)
+        header_buffer.clear();
+        header_buffer.extend_from_slice(&version_bytes); // Include version in header
+        header_buffer.resize(header_size, 0);
+        match reader.read_exact(&mut header_buffer[4..]).await {
+            Ok(_) => {},
+            Err(e) => {
+                eprintln!("  Failed to read header (size {}) at block {}: {}", 
+                         header_size, block_count, e);
+                break;
+            }
+        }
+
+        let mut block_header = parse_block_header_sync(&header_buffer, header_size)?;
+        
+        // Determine block height by looking up parent block's height
+        let block_height = if block_header.hash_prev_block == [0u8; 32] {
+            // Genesis block has height 0
+            Some(0)
+        } else {
+            // Look up parent block's height from chain_metadata CF
+            let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+            let mut height_key = vec![b'h'];
+            height_key.extend_from_slice(&block_header.hash_prev_block);
+            
+            match db.get_cf(&cf_metadata, &height_key) {
+                Ok(Some(height_bytes)) if height_bytes.len() == 4 => {
+                    let parent_height = i32::from_le_bytes(height_bytes.as_slice().try_into().unwrap());
+                    Some(parent_height + 1)
+                }
+                Ok(Some(_)) => {
+                    eprintln!("  Invalid height data for parent block");
+                    None
+                }
+                Ok(None) => {
+                    // Parent not indexed yet - block is out of order, will be processed later
+                    None
+                }
+                Err(e) => {
+                    eprintln!("  Error looking up parent height: {}", e);
+                    None
+                }
+            }
+        };
+        
+        block_header.block_height = block_height;
+        
+        // Store block data
+        let block_hash_vec = block_header.block_hash.to_vec();
+        
+        // Store in blocks CF: block_hash -> header_buffer
+        batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
+        
+        // If we have a height, store mappings in chain_metadata CF
+        if let Some(height) = block_height {
+            let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+            
+            // Store: 'h' + block_hash -> height (for parent lookup, uses internal byte order)
+            let mut height_key = vec![b'h'];
+            height_key.extend_from_slice(&block_hash_vec);
+            let height_bytes = height.to_le_bytes().to_vec();
+            db.put_cf(&cf_metadata, &height_key, &height_bytes)
+                .map_err(|e| format!("Failed to store height: {}", e))?;
+            
+            // Store: height -> block_hash (for height-based queries, use display format - reversed)
+            let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
+            db.put_cf(&cf_metadata, &height_bytes, &reversed_hash)
+                .map_err(|e| format!("Failed to store height mapping: {}", e))?;
+        }
+        
+        block_count += 1;
+        
+        // Debug: print every 100 blocks
+        if block_count % 100 == 0 {
+            println!("  Processed {} blocks so far", block_count);
+        }
+        
+        // Write batch when it reaches the target size
+        if batch_items.len() >= BATCH_SIZE * 2 {
+            batch_put_cf(db.clone(), "blocks", batch_items.clone()).await?;
+            println!("  Wrote {} blocks to database", BATCH_SIZE);
+            batch_items.clear();
+        }
+        
+        // Process transactions
+        let block_version = block_header.n_version;
+        let block_hash_slice = &block_header.block_hash;
+        
+        match process_transaction(&mut reader, block_version, block_hash_slice, db.clone(), &mut tx_batch, fast_sync).await {
+            Ok(_) => {
+                // Successfully processed transactions
+                // Flush batch if needed
+                if tx_batch.should_flush() {
+                    if let Err(e) = tx_batch.flush().await {
+                        eprintln!("Warning: Failed to flush transaction batch: {}", e);
+                    }
+                }
+            },
+            Err(e) => {
+                eprintln!("Warning: Failed to process transactions for block at height {:?}: {}", 
+                    block_header.block_height, e);
+                // Skip remaining transaction data to get to next block
+                let tx_data_size = (block_size as usize).saturating_sub(header_size);
+                if tx_data_size > 0 {
+                    let mut skip_buf = vec![0u8; tx_data_size.min(65536)];
+                    let mut remaining = tx_data_size;
+                    
+                    while remaining > 0 {
+                        let to_read = remaining.min(65536);
+                        skip_buf.truncate(to_read);
+                        reader.read_exact(&mut skip_buf).await?;
+                        remaining -= to_read;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Write any remaining items
+    if !batch_items.is_empty() {
+        let remaining_count = batch_items.len();
+        batch_put_cf(db.clone(), "blocks", batch_items).await?;
+        println!("  Wrote {} remaining blocks to database", remaining_count);
+    }
+    
+    // Flush any remaining transaction batch writes
+    if tx_batch.pending_count() > 0 {
+        tx_batch.flush().await?;
+        println!("  Flushed {} pending transaction operations", tx_batch.pending_count());
+    }
+
+    println!("File complete: {} total blocks processed", block_count);
     Ok(())
 }
 
-async fn get_header_size(ver_as_int: u32) -> usize {
+fn get_header_size(ver_as_int: u32) -> usize {
     match ver_as_int {
         4 | 5 | 6 | 8 | 9 | 10 | 11 => 112,
         7 => 80,
@@ -64,119 +335,97 @@ async fn get_header_size(ver_as_int: u32) -> usize {
     }
 }
 
-async fn parse_block_header(slice: &[u8], header_size: usize) -> Result<CBlockHeader, MyError> {
-    // Grab header bytes
-    let mut reader = io::Cursor::new(slice);
+fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlockHeader, MyError> {
+    if slice.len() < 80 {
+        return Err(MyError::new("Header too short"));
+    }
 
-    // Set buffer
-    let max_size = 112;
-    let mut header_buffer = vec![0u8; header_size.min(max_size)];
-    // Set position
-    let current_position = match reader.seek(SeekFrom::Current(0)).await {
-        Ok(pos) => pos,
-        Err(e) => {
-            eprintln!("Error while setting current position: {:?}", e);
-            0 // or some other default value or action
-        }
-    };
-    // Read buffer
-    if let Err(e) = reader.read_exact(&mut header_buffer).await {
-        eprintln!("Error while reading header buffer: {:?}", e);
-    }
-    //println!("Header Buffer: {:?}", hex::encode(&header_buffer));
-    // Return to original position to start breaking down header
-    if let Err(e) = reader.seek(SeekFrom::Start(current_position)).await {
-        eprintln!("Error while seeking: {:?}", e);
-    }
+    let mut offset = 0;
+
     // Read block version
-    let n_version = reader.read_u32_le().await.unwrap();
+    let n_version = u32::from_le_bytes(
+        slice[offset..offset+4].try_into()
+            .map_err(|_| MyError::new("Invalid version bytes"))?
+    );
+    offset += 4;
+
     // Read previous block hash
-    let mut hash_prev_block = {
-        let mut buf = [0u8; 32];
-        reader.read_exact(&mut buf).await.unwrap();
-        if n_version < 4 {
-            buf.reverse(); // Reverse the hash for n_version less than 4
-        }
-        buf
-    };
-    // Calculate the hash based on the version
+    let mut hash_prev_block = [0u8; 32];
+    hash_prev_block.copy_from_slice(&slice[offset..offset+32]);
+    offset += 32;
+
+    // Read merkle root
+    let mut hash_merkle_root = [0u8; 32];
+    hash_merkle_root.copy_from_slice(&slice[offset..offset+32]);
+    offset += 32;
+
+    // Read time, bits, nonce
+    let n_time = u32::from_le_bytes(
+        slice[offset..offset+4].try_into()
+            .map_err(|_| MyError::new("Invalid time bytes"))?
+    );
+    offset += 4;
+    let n_bits = u32::from_le_bytes(
+        slice[offset..offset+4].try_into()
+            .map_err(|_| MyError::new("Invalid bits bytes"))?
+    );
+    offset += 4;
+    let n_nonce = u32::from_le_bytes(
+        slice[offset..offset+4].try_into()
+            .map_err(|_| MyError::new("Invalid nonce bytes"))?
+    );
+    offset += 4;
+
+    // Calculate block hash - ALWAYS hash only first 80 bytes regardless of version
+    let hash_bytes = &slice[..80.min(slice.len())];
     let reversed_hash = match n_version {
         0..=3 => {
-            // Use quark_hash for n_version less than 4
-            let output_hash = call_quark_hash(&header_buffer);
-            output_hash.iter().rev().cloned().collect::<Vec<_>>()
+            // For v0-v3, use Quark hash on first 80 bytes
+            let output_hash = call_quark_hash(hash_bytes);
+            output_hash.to_vec()
         }
         _ => {
-            // Use SHA-256 based hashing for n_version 4 or greater
-            Sha256::digest(&Sha256::digest(&header_buffer))
-                .iter()
-                .rev()
-                .cloned()
-                .collect::<Vec<_>>()
+            // For v4+, use SHA256d on first 80 bytes
+            let first_hash = Sha256::digest(hash_bytes);
+            let block_hash = Sha256::digest(&first_hash);
+            block_hash.to_vec()
         }
     };
 
-    // Test print hash
-    println!("Block hash: {:?}", hex::encode(&reversed_hash));
+    let block_hash: [u8; 32] = reversed_hash.try_into()
+        .map_err(|_| MyError::new("Failed to convert hash"))?;
 
-    let reversed_hash_array: [u8; 32] = match reversed_hash.try_into() {
-        Ok(arr) => arr,
-        Err(_) => panic!("Expected a Vec<u8> of length 32"),
-    };
-    // Determine the block height
-    let block_height = match n_version {
-        0..=3 if hash_prev_block.iter().all(|&b| b == 0) => {
-            // If hash_prev_block is all zeros for version less than 4, assign 0
-            0
-        }
-        _ => match get_block_height_fallback(&reversed_hash_array, header_size).await {
-            Ok(Some(height)) => height,
-            Ok(None) | Err(_) => {
-                0
-            },
-        },
-    };
-
-    // Reverse hash_prev_block back to its original order if n_version is less than 4
-    if n_version < 4 {
-        hash_prev_block.reverse();
-    }
-    // Read merkle root
-    let hash_merkle_root = {
-        let mut buf = [0u8; 32];
-        reader.read_exact(&mut buf).await.unwrap();
-        buf
-    };
-    // Read nTime, nBits, and nNonce
-    let n_time = reader.read_u32_le().await.unwrap();
-    let n_bits = reader.read_u32_le().await.unwrap();
-    let n_nonce = reader.read_u32_le().await.unwrap();
-
-    // Handle the expanded header size based on the params given
+    // Handle version-specific fields
     let (hash_final_sapling_root, n_accumulator_checkpoint) = match n_version {
         7 => (None, None),
         8..=11 => {
-            let mut final_sapling_root = [0u8; 32];
-            reader
-                .read_exact(&mut final_sapling_root).await
-                .expect("Failed to read final sapling root");
-            (Some(final_sapling_root), None)
+            if offset + 32 <= slice.len() {
+                let mut sapling_root = [0u8; 32];
+                sapling_root.copy_from_slice(&slice[offset..offset+32]);
+                (Some(sapling_root), None)
+            } else {
+                (None, None)
+            }
         }
         4..=6 => {
-            let mut accumulator_checkpoint = [0u8; 32];
-            reader
-                .read_exact(&mut accumulator_checkpoint).await
-                .expect("Failed to read accumulator checkpoint");
-            (None, Some(accumulator_checkpoint))
+            if offset + 32 <= slice.len() {
+                let mut accumulator = [0u8; 32];
+                accumulator.copy_from_slice(&slice[offset..offset+32]);
+                (None, Some(accumulator))
+            } else {
+                (None, None)
+            }
         }
         _ => (None, None),
     };
 
-    // Create CBlockHeader
+    // Height will be assigned sequentially by process_blk_file
+    let block_height = Some(0);
+
     Ok(CBlockHeader {
         n_version,
-        block_hash: reversed_hash_array,
-        block_height: Some(block_height),
+        block_hash,
+        block_height,
         hash_prev_block,
         hash_merkle_root,
         n_time,
@@ -185,57 +434,4 @@ async fn parse_block_header(slice: &[u8], header_size: usize) -> Result<CBlockHe
         n_accumulator_checkpoint,
         hash_final_sapling_root,
     })
-}
-
-async fn get_block_height_fallback(hash_block: &[u8; 32], header_size: usize) -> Result<Option<i32>, Box<dyn Error>> {
-    // First, attempt to read from LevelDB
-    let ldb_height = read_ldb_block_async(hash_block, header_size).await;
-    match ldb_height {
-        Ok(Some(height)) => {
-            println!("Retrieved from LevelDB: {:?}", height);
-            return Ok(Some(height));
-        },
-        Ok(None) => {
-            // Key not found in LevelDB, continue to attempt RPC.
-            println!("Key not found in LevelDB, falling back to RPC.");
-        },
-        Err(e) => {
-            eprintln!("LevelDB read error: {}, falling back to RPC", e);
-        },
-    }
-
-    // If LevelDB read fails or key not found, fall back to Bitcoin RPC
-    get_block_height_from_rpc(hash_block).await
-}
-
-async fn get_block_height_from_rpc(hash_block: &[u8; 32]) -> Result<Option<i32>, Box<dyn Error>> {
-    let config = get_global_config();
-    let rpc_host = config.get::<String>("rpc.host")?;
-    let rpc_user = config.get::<String>("rpc.user")?;
-    let rpc_pass = config.get::<String>("rpc.pass")?;
-
-    let client = BitcoinRpcClient::new(
-        rpc_host,
-        Some(rpc_user),
-        Some(rpc_pass),
-        3,    // Max retries
-        10,   // Connection timeout
-        1000, // Read/write timeout
-    );
-
-    let hash_block_hex = hex::encode(hash_block);
-
-    let block_height = match client.getblock(hash_block_hex) {
-        Ok(block_info) => Some(
-            block_info
-                .height
-                .try_into()
-                .expect("Block height is too large for i32"),
-        ),
-        Err(err) => {
-            None
-        }
-    };
-    println!("Block height: {:?}", block_height.unwrap_or(0));
-    Ok(block_height)
 }

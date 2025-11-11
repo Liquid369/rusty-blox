@@ -1,6 +1,6 @@
 pub use config::{Config, File as ConfigFile};
 pub use once_cell::sync::OnceCell;
-use crate::Error;
+use std::error::Error;
 
 static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 

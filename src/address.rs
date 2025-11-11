@@ -1,16 +1,20 @@
+// address.rs
+
 use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160, Digest as RipemdDigest};
 use bs58;
-use crate::types::{CScript, AddressType};
+use crate::types::{CScript, AddressType, CTxOut};
+use std::error::Error;
+use std::sync::Arc;
+use rocksdb::DB;
 
-async fn compute_address_hash(data: &[u8]) -> Vec<u8> {
+pub async fn compute_address_hash(data: &[u8]) -> Vec<u8> {
     let sha = Sha256::digest(data);
     Ripemd160::digest(&sha).to_vec()
 }
 
-// Function to convert hash to P2PKH Bitcoin address (with prefix 0x00 for mainnet)
-async fn hash_address(hash: &[u8], prefix: u8) -> String {
-    let mut extended_hash = vec![prefix]; // This is 30 in hex, the P2PKH prefix you provided
+pub async fn hash_address(hash: &[u8], prefix: u8) -> String {
+    let mut extended_hash = vec![prefix];
     extended_hash.extend_from_slice(hash);
 
     let checksum = sha256d(&extended_hash);
@@ -41,7 +45,6 @@ fn sha256d(data: &[u8]) -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
-// Function to parse script_pubkey to a P2PKH address
 async fn scriptpubkey_to_p2pkh_address(script: &CScript) -> Option<String> {
     if script.script.len() == 25
         && script.script[0] == 0x76
@@ -58,7 +61,6 @@ async fn scriptpubkey_to_p2pkh_address(script: &CScript) -> Option<String> {
 }
 
 async fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
-    // OP_HASH160 = 0xa9, followed by a length byte of 20 (0x14 in hexadecimal) and then OP_EQUAL = 0x87
     if script.script.len() == 23
         && script.script[0] == 0xa9
         && script.script[1] == 0x14
@@ -82,7 +84,6 @@ async fn compress_pubkey(pub_key_bytes: &[u8]) -> Option<Vec<u8>> {
             Some(compressed_key)
         }
         33 if pub_key_bytes[0] == 0x02 || pub_key_bytes[0] == 0x03 => {
-            // Already compressed, just return as is
             Some(pub_key_bytes.to_vec())
         }
         _ => None,
@@ -97,8 +98,8 @@ async fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
     }
 
     match script.len() {
-        67 => Some(&script[1..66]), // skip the OP_PUSHDATA, then take uncompressed pubkey
-        35 => Some(&script[1..34]), // skip the OP_PUSHDATA, then take compressed pubkey
+        67 => Some(&script[1..66]),
+        35 => Some(&script[1..34]),
         _ => None,
     }
 }
@@ -107,13 +108,12 @@ async fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
     const OP_DUP: u8 = 0x76;
 
     if script.script.contains(&OP_DUP) {
-        return None; // Not a P2PK script.
+        return None;
     }
 
     let pubkey = extract_pubkey_from_script(&script.script).await?;
 
     let pubkey_compressed = compress_pubkey(pubkey).await?;
-    let pubkey_hex: Vec<u8> = hex::encode(&pubkey_compressed).into();
     let pubkey_hash = compute_address_hash(&pubkey_compressed).await;
     let pubkey_addr = hash_address(&pubkey_hash, 30).await;
 
@@ -121,7 +121,7 @@ async fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
 }
 
 async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)> {
-    const HASH_LEN: usize = 20; // Length of public key hash
+    const HASH_LEN: usize = 20;
     const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
     const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
     const OP_ELSE: u8 = 0x67;
@@ -131,7 +131,6 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
         .iter()
         .position(|&x| x == OP_CHECKCOLDSTAKEVERIFY || x == OP_CHECKCOLDSTAKEVERIFY_LOF)?;
 
-    // Boundary check to avoid panic during slicing
     if script.script.len() < pos_checkcoldstakeverify + 1 + HASH_LEN {
         return None;
     }
@@ -139,7 +138,6 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
     let staker_key_hash =
         &script.script[(pos_checkcoldstakeverify + 1)..(pos_checkcoldstakeverify + 1 + HASH_LEN)];
 
-    // Find the position of OP_ELSE
     let pos_else = script.script.iter().position(|&x| x == OP_ELSE)?;
     if script.script.len() < pos_else + 1 + HASH_LEN {
         return None;
@@ -147,14 +145,13 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
 
     let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 1 + HASH_LEN)];
 
-    let staker_address = hash_address(staker_key_hash, 63).await; // 63 is the prefix for staker P2PKH
-    let owner_address = hash_address(owner_key_hash, 30).await; // 30 is the prefix for owner P2PKH
+    let staker_address = hash_address(staker_key_hash, 63).await;
+    let owner_address = hash_address(owner_key_hash, 30).await;
 
     Some((staker_address, owner_address))
 }
 
-async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
-    // Verify non-empty script
+pub async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
     if script.script.is_empty() {
         return Some(AddressType::Nonstandard);
     }
@@ -210,11 +207,11 @@ async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
                 Some(AddressType::Nonstandard)
             }
         }
-        _ => Some(AddressType::Nonstandard), // Doesn't match non-standard
+        _ => Some(AddressType::Nonstandard),
     }
 }
 
-async fn address_type_to_string(address: Option<AddressType>) -> Vec<String> {
+pub async fn address_type_to_string(address: Option<AddressType>) -> Vec<String> {
     match address {
         Some(AddressType::CoinStakeTx) => vec!["CoinStakeTx".to_string()],
         Some(AddressType::CoinBaseTx) => vec!["CoinBaseTx".to_string()],
@@ -229,52 +226,6 @@ async fn address_type_to_string(address: Option<AddressType>) -> Vec<String> {
             vec![format!("Staking({}, {})", staker, owner)]
         }
         Some(AddressType::Sapling) => vec!["Sapling".to_string()],
-        None => Vec::new(),
+        None => vec!["None".to_string()],
     }
-}
-
-async fn get_address_type(tx_out: &CTxOut, general_address_type: &AddressType) -> AddressType {
-    let address_type = if !tx_out.script_pubkey.script.is_empty() {
-        scriptpubkey_to_address(&tx_out.script_pubkey).await
-            .unwrap_or_else(|| general_address_type.clone())
-    } else {
-        general_address_type.clone()
-    };
-    address_type
-}
-
-async fn handle_address(
-    db: Arc<DB>,
-    address_type: &AddressType,
-    reversed_txid: Vec<u8>,
-    tx_out_index: u32,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let address_keys = match address_type {
-        AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
-        AddressType::P2PK(pubkey) => vec![pubkey.clone()],
-        AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
-        _ => return Ok(()),
-    };
-
-    for address_key in &address_keys {
-        // Assuming cf_handle name is "addr_index"
-        let cf_handle = Arc::new(db.cf_handle("addr_index").ok_or("Column family not found")?);
-
-        let mut key_address = vec![b'a'];
-        key_address.extend_from_slice(address_key.as_bytes());
-
-        // Here you can use read_from_db if necessary to fetch existing data
-        let existing_data_result = perform_rocksdb_get(db.clone(), "addr_index", key_address.clone()).await;
-        let mut existing_utxos = match existing_data_result {
-            Ok(Some(data)) => deserialize_utxos(&data).await, // Properly await the async function
-            Ok(None) => Vec::new(),  // No data found, use an empty vector
-            Err(e) => return Err(e.into()),  // Handle possible errors
-        };
-        
-        existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
-
-        perform_rocksdb_put(db.clone(), "addr_index", key_address, serialize_utxos(&existing_utxos).await).await;
-    }
-
-    Ok(())
 }
