@@ -3,7 +3,24 @@ db_path = ""
 blk_dir = ""
 ldb_dir = ""
 
+[sync]
+# Fast sync mode: skip UTXO/address tracking for 10-20x speedup
+# Only indexes blocks and transactions (TXIDs)
+# Run with build_utxo = true later to build UTXO set
+fast_sync = true
+build_utxo = false
+
+# Parallel file processing: number of concurrent blk*.dat files to process
+# Higher = faster but more CPU/memory usage. Recommended: 4-16
+parallel_files = 8
+
 [rpc]
+# Use a full link for host, ie; https://127.0.0.1/
 host = ""
 user = ""
 pass = ""
+
+[server]
+host = "0.0.0.0"
+port = 3005
+worker_threads = "4"
