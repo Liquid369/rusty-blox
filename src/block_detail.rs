@@ -254,7 +254,9 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                         
                         if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
                             eprintln!("  Found tx data, size: {} bytes", tx_data.len());
-                            if let Ok(tx) = parse_transaction(&tx_data) {
+                            if let Ok(mut tx) = parse_transaction(&tx_data) {
+                                // Enrich inputs with values and addresses
+                                enrich_transaction_inputs(db, &cf_transactions, &mut tx);
                                 transactions.push(tx);
                                 eprintln!("  Parsed tx successfully");
                             } else {
@@ -278,6 +280,70 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
     eprintln!("Block {} has {} transaction entries, parsed {} transactions", height, count, transactions.len());
     
     Ok(transactions)
+}
+
+fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary) {
+    for input in &mut tx.vin {
+        // Skip coinbase inputs
+        if input.coinbase.is_some() {
+            continue;
+        }
+        
+        // Get the previous transaction if we have txid
+        if let Some(ref prev_txid) = input.txid {
+            if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
+                let mut prev_key = vec![b't'];
+                prev_key.extend_from_slice(&prev_txid_bytes);
+                
+                if let Ok(Some(prev_data)) = db.get_cf(cf_transactions, &prev_key) {
+                    if prev_data.len() >= 8 {
+                        let prev_tx_json = &prev_data[8..];
+                        if let Ok(prev_tx) = serde_json::from_slice::<serde_json::Value>(prev_tx_json) {
+                            // Extract the output at vout index
+                            if let Some(vout_idx) = input.vout {
+                                if let Some(vout_array) = prev_tx.get("vout").and_then(|v| v.as_array()) {
+                                    if let Some(output) = vout_array.get(vout_idx as usize) {
+                                        // Add value from the output
+                                        if let Some(value) = output.get("value").and_then(|v| v.as_f64()) {
+                                            input.value = Some(value);
+                                        }
+                                        
+                                        // Add address from the output
+                                        if let Some(script_pubkey) = output.get("scriptPubKey") {
+                                            if let Some(addresses) = script_pubkey.get("addresses").and_then(|a| a.as_array()) {
+                                                if let Some(first_addr) = addresses.get(0).and_then(|a| a.as_str()) {
+                                                    input.address = Some(first_addr.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Recalculate value_in and fees after enrichment
+    tx.value_in = tx.vin.iter()
+        .filter_map(|i| i.value)
+        .sum::<f64>();
+    
+    // Recalculate fees
+    if tx.value_in > 0.0 {
+        let calculated_fee = tx.value_in - tx.value_out;
+        tx.fees = if calculated_fee < 0.0 {
+            // Coinstake transaction (outputs include reward)
+            0.0
+        } else {
+            calculated_fee
+        };
+    } else {
+        // Coinbase transaction
+        tx.fees = 0.0;
+    }
 }
 
 fn parse_transaction(data: &[u8]) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
@@ -354,7 +420,22 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
         .filter_map(|i| i.value)
         .sum::<f64>();
     
-    let fees = if value_in > 0.0 { value_in - value_out } else { 0.0 };
+    // Calculate fees
+    // For coinstake transactions (value_out > value_in), the "fee" would be negative
+    // because the output includes staking rewards. We should report 0 fee for these.
+    // For regular transactions and coinbase, calculate normally.
+    let fees = if value_in > 0.0 {
+        let calculated_fee = value_in - value_out;
+        if calculated_fee < 0.0 {
+            // This is a coinstake (outputs include reward)
+            0.0
+        } else {
+            calculated_fee
+        }
+    } else {
+        // Coinbase transaction (no inputs)
+        0.0
+    };
     
     Ok(TransactionSummary {
         txid,

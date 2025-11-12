@@ -134,7 +134,14 @@ fn index_block_from_rpc(
     let height_key = height.to_le_bytes().to_vec();
     let hash_bytes = hex::decode(&block_hash)?;
     
+    // Store height -> hash mapping
     db.put_cf(&cf_metadata, &height_key, &hash_bytes)?;
+    
+    // Store hash -> height mapping for reverse lookups
+    let mut hash_key = vec![b'h'];
+    hash_key.extend_from_slice(&hash_bytes);
+    let height_bytes = height.to_le_bytes().to_vec();
+    db.put_cf(&cf_metadata, &hash_key, &height_bytes)?;
     
     // Store block header in blocks CF
     // Create a minimal header with the data we have from RPC

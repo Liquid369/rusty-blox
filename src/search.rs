@@ -115,23 +115,43 @@ fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dy
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
     
-    // Create the key: 'h' + hash_bytes
     let hash_bytes = hex::decode(hash)?;
+    
+    // Method 1: Try direct hash -> height lookup (for newly indexed blocks)
     let mut key = vec![b'h'];
     key.extend_from_slice(&hash_bytes);
     
-    match db.get_cf(&cf_metadata, &key)? {
-        Some(height_bytes) => {
-            let height = i32::from_le_bytes(height_bytes.as_slice().try_into()?);
-            Ok(SearchResult::Block {
-                height,
-                hash: hash.to_string(),
-            })
-        }
-        None => Ok(SearchResult::NotFound {
-            query: hash.to_string(),
-        }),
+    if let Some(height_bytes) = db.get_cf(&cf_metadata, &key)? {
+        let height = i32::from_le_bytes(height_bytes.as_slice().try_into()?);
+        return Ok(SearchResult::Block {
+            height,
+            hash: hash.to_string(),
+        });
     }
+    
+    // Method 2: Fallback - iterate through height -> hash mappings (for old blocks)
+    // This searches all numeric keys (heights) to find matching hash
+    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
+    
+    for item in iter {
+        if let Ok((key, value)) = item {
+            // Skip non-numeric keys (like 'h' prefix keys)
+            if key.len() == 4 && key[0] != b'h' {
+                // This is a height key (4 bytes little-endian)
+                if value.as_ref() == hash_bytes.as_slice() {
+                    let height = i32::from_le_bytes(key.as_ref().try_into()?);
+                    return Ok(SearchResult::Block {
+                        height,
+                        hash: hash.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    
+    Ok(SearchResult::NotFound {
+        query: hash.to_string(),
+    })
 }
 
 /// Search for transaction
