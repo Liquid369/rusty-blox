@@ -145,11 +145,17 @@ fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn 
     key.extend_from_slice(&txid_bytes);
     
     match db.get_cf(&cf_transactions, &key)? {
-        Some(_tx_data) => {
-            // TODO: Extract block height from tx_data
+        Some(tx_data) => {
+            // Data format: version (4 bytes) + height (4 bytes) + JSON
+            let block_height = if tx_data.len() >= 8 {
+                Some(i32::from_le_bytes(tx_data[4..8].try_into()?))
+            } else {
+                None
+            };
+            
             Ok(SearchResult::Transaction {
                 txid: txid.to_string(),
-                block_height: None,
+                block_height,
             })
         }
         None => Ok(SearchResult::NotFound {

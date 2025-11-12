@@ -240,16 +240,101 @@ pub async fn block_index_v2(Path(param): Path<String>, Extension(db): Extension<
     Json(BlockHash{block_hash: result})
 }
 
-pub async fn tx_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<serde_json::Value> {
-    let key = format!("t{}", param);
-    let result = match db_get_blocking(db.clone(), key.as_bytes()).await {
-        Ok(Some(data)) => data,
-        _ => return Json(serde_json::json!({"error": "Transaction not found"})),
-    };
-
-    match deserialize_transaction(&result).await {
-        Ok(_tx) => Json(serde_json::json!({"txid": param, "status": "found"})),
-        Err(_) => Json(serde_json::json!({"error": "Failed to deserialize transaction"})),
+pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<serde_json::Value> {
+    let db_clone = Arc::clone(&db);
+    let txid_clone = txid.clone();
+    
+    let result = tokio::task::spawn_blocking(move || {
+        // Transaction key: 't' + txid_hex_bytes
+        let txid_bytes = match hex::decode(&txid_clone) {
+            Ok(bytes) => bytes,
+            Err(_) => return Err("Invalid transaction ID format"),
+        };
+        
+        let mut key = vec![b't'];
+        key.extend_from_slice(&txid_bytes);
+        
+        let cf_transactions = db_clone.cf_handle("transactions")
+            .ok_or("transactions CF not found")?;
+        
+        let data = db_clone.get_cf(&cf_transactions, &key)
+            .map_err(|_| "Database error")?
+            .ok_or("Transaction not found")?;
+        
+        // Data format: version (4 bytes) + height (4 bytes) + JSON
+        if data.len() < 8 {
+            return Err("Invalid transaction data");
+        }
+        
+        let block_height = i32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+        let tx_json = &data[8..];
+        
+        let mut tx: serde_json::Value = serde_json::from_slice(tx_json)
+            .map_err(|_| "Failed to parse transaction data")?;
+        
+        // Enrich inputs with value and address from previous transaction outputs
+        if let Some(obj) = tx.as_object_mut() {
+            obj.insert("block_height".to_string(), serde_json::json!(block_height));
+            
+            // Process vin array to add value and address
+            if let Some(vin_array) = obj.get_mut("vin").and_then(|v| v.as_array_mut()) {
+                for vin in vin_array.iter_mut() {
+                    if let Some(vin_obj) = vin.as_object_mut() {
+                        // Skip coinbase inputs
+                        if vin_obj.contains_key("coinbase") {
+                            continue;
+                        }
+                        
+                        // Get the previous txid and vout index
+                        let prev_txid = vin_obj.get("txid").and_then(|v| v.as_str());
+                        let vout_index = vin_obj.get("vout").and_then(|v| v.as_u64());
+                        
+                        if let (Some(prev_txid), Some(vout_idx)) = (prev_txid, vout_index) {
+                            // Look up the previous transaction
+                            if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
+                                let mut prev_key = vec![b't'];
+                                prev_key.extend_from_slice(&prev_txid_bytes);
+                                
+                                if let Ok(Some(prev_data)) = db_clone.get_cf(&cf_transactions, &prev_key) {
+                                    if prev_data.len() >= 8 {
+                                        let prev_tx_json = &prev_data[8..];
+                                        if let Ok(prev_tx) = serde_json::from_slice::<serde_json::Value>(prev_tx_json) {
+                                            // Extract the output at vout_idx
+                                            if let Some(vout_array) = prev_tx.get("vout").and_then(|v| v.as_array()) {
+                                                if let Some(output) = vout_array.get(vout_idx as usize) {
+                                                    // Add value from the output
+                                                    if let Some(value) = output.get("value") {
+                                                        vin_obj.insert("value".to_string(), value.clone());
+                                                    }
+                                                    
+                                                    // Add address from the output
+                                                    if let Some(script_pubkey) = output.get("scriptPubKey") {
+                                                        if let Some(addresses) = script_pubkey.get("addresses").and_then(|a| a.as_array()) {
+                                                            if let Some(first_addr) = addresses.get(0) {
+                                                                vin_obj.insert("address".to_string(), first_addr.clone());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(tx)
+    })
+    .await;
+    
+    match result {
+        Ok(Ok(tx)) => Json(tx),
+        Ok(Err(e)) => Json(serde_json::json!({"error": e})),
+        Err(_) => Json(serde_json::json!({"error": "Internal server error"})),
     }
 }
 
