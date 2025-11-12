@@ -20,6 +20,7 @@ pub async fn process_transaction(
     mut reader: &mut BufReader<File>,
     block_version: u32,
     block_hash: &[u8],
+    block_height: Option<i32>,
     _db: Arc<DB>,
     batch: &mut BatchWriter,
     fast_sync: bool,
@@ -31,7 +32,7 @@ pub async fn process_transaction(
             format!("Invalid transaction count: {} (likely corrupt varint)", tx_amt)));
     }
     
-    for _ in 0..tx_amt {
+    for tx_index in 0..tx_amt {
         let start_pos = reader.stream_position().await?;
 
         let tx_ver_out = reader.read_u16_le().await?;
@@ -44,6 +45,8 @@ pub async fn process_transaction(
                     tx_ver_out.try_into().unwrap_or(1),
                     block_version,
                     block_hash,
+                    block_height,
+                    tx_index,
                     _db.clone(),
                     start_pos,
                     batch,
@@ -62,6 +65,8 @@ pub async fn process_transaction(
                     tx_ver_out.try_into().unwrap_or(1),
                     block_version,
                     block_hash,
+                    block_height,
+                    tx_index,
                     _db.clone(),
                     start_pos,
                     batch,
@@ -83,6 +88,8 @@ async fn process_transaction_v1(
     tx_ver_out: i16,
     block_version: u32,
     block_hash: &[u8],
+    block_height: Option<i32>,
+    tx_index: u64,
     _db: Arc<DB>,
     start_pos: u64,
     batch: &mut BatchWriter,
@@ -267,15 +274,31 @@ async fn process_transaction_v1(
         }
     } // End UTXO tracking (fast_sync skip)
 
-    // 't' + txid -> tx_bytes
-    let mut key = vec![b't'];
-    key.extend_from_slice(&reversed_txid);
+    // Store transaction with proper indexing
+    // 1. Main transaction storage: 't' + txid → (block_version + block_height + tx_bytes)
+    let mut tx_key = vec![b't'];
+    tx_key.extend_from_slice(&reversed_txid);
+    
     let version_bytes = block_version.to_le_bytes().to_vec();
+    let height_bytes = block_height.unwrap_or(0).to_le_bytes().to_vec();
+    
     let mut full_data = version_bytes.clone();
+    full_data.extend(&height_bytes);
     full_data.extend(&tx_bytes);
     
-    // Add to batch instead of direct write
-    batch.put("transactions", key.clone(), full_data);
+    batch.put("transactions", tx_key.clone(), full_data);
+    
+    // 2. Block transaction index: 'B' + height (4 bytes) + tx_index (8 bytes) → txid
+    // This allows efficient listing of all transactions in a block
+    if let Some(height) = block_height {
+        let mut block_tx_key = vec![b'B'];
+        block_tx_key.extend(&height.to_le_bytes());
+        block_tx_key.extend(&tx_index.to_le_bytes());
+        
+        // Store the display format (reversed) txid so we can show it directly
+        let display_txid = hex::encode(reversed_txid.iter().rev().cloned().collect::<Vec<u8>>());
+        batch.put("transactions", block_tx_key, display_txid.as_bytes().to_vec());
+    }
     
     // Safe conversion - use current position if conversion fails
     match end_pos.try_into() {

@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::config::get_global_config;
 use crate::websocket::EventBroadcaster;
+use crate::chain_state::set_network_height;
 
 #[derive(Debug, Clone)]
 pub struct ChainTip {
@@ -135,36 +136,107 @@ fn index_block_from_rpc(
     
     db.put_cf(&cf_metadata, &height_key, &hash_bytes)?;
     
+    // Store block header in blocks CF
+    // Create a minimal header with the data we have from RPC
+    let cf_blocks = db.cf_handle("blocks")
+        .ok_or("blocks CF not found")?;
+    
+    // Parse block header fields from RPC result
+    let time = result.get("time").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let nonce = result.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let bits = result.get("bits").and_then(|v| v.as_str()).unwrap_or("00000000");
+    let merkleroot = result.get("merkleroot").and_then(|v| v.as_str()).unwrap_or("");
+    let previousblockhash = result.get("previousblockhash").and_then(|v| v.as_str()).unwrap_or("");
+    
+    // Build a minimal 80-byte block header
+    let mut header = Vec::with_capacity(80);
+    header.extend(&version.to_le_bytes()); // 4 bytes: version
+    
+    // 32 bytes: previous block hash
+    if !previousblockhash.is_empty() {
+        if let Ok(prev_hash) = hex::decode(previousblockhash) {
+            let prev_internal: Vec<u8> = prev_hash.iter().rev().cloned().collect();
+            header.extend(&prev_internal);
+        } else {
+            header.extend(&[0u8; 32]);
+        }
+    } else {
+        header.extend(&[0u8; 32]); // Genesis block
+    }
+    
+    // 32 bytes: merkle root
+    if !merkleroot.is_empty() {
+        if let Ok(merkle) = hex::decode(merkleroot) {
+            let merkle_internal: Vec<u8> = merkle.iter().rev().cloned().collect();
+            header.extend(&merkle_internal);
+        } else {
+            header.extend(&[0u8; 32]);
+        }
+    } else {
+        header.extend(&[0u8; 32]);
+    }
+    
+    header.extend(&time.to_le_bytes()); // 4 bytes: time
+    
+    // 4 bytes: bits
+    if let Ok(bits_val) = u32::from_str_radix(bits, 16) {
+        header.extend(&bits_val.to_le_bytes());
+    } else {
+        header.extend(&[0u8; 4]);
+    }
+    
+    header.extend(&nonce.to_le_bytes()); // 4 bytes: nonce
+    
+    // Store the header (key is internal format hash, value is header)
+    let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+    db.put_cf(&cf_blocks, &internal_hash, &header)?;
+    
+    eprintln!("Stored block header for height {}, hash {}", height, block_hash);
+    
     // Index all transactions from this block
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
     
+    eprintln!("Indexing block {} with {} transactions", height, tx_array.len());
+    
     let mut tx_count = 0;
-    for tx_val in tx_array {
-        // Each tx should be an object with txid and hex fields
+    for (tx_index, tx_val) in tx_array.iter().enumerate() {
+        // Each tx is a full transaction object from RPC
         if let Some(tx_obj) = tx_val.as_object() {
-            if let (Some(txid), Some(hex_str)) = (
-                tx_obj.get("txid").and_then(|v| v.as_str()),
-                tx_obj.get("hex").and_then(|v| v.as_str())
-            ) {
-                // Decode the transaction hex
-                if let Ok(tx_bytes) = hex::decode(hex_str) {
-                    // Create transaction key: 't' + txid
-                    let mut key = vec![b't'];
-                    if let Ok(txid_bytes) = hex::decode(txid) {
-                        key.extend_from_slice(&txid_bytes);
-                        
-                        // Store: block_version (4 bytes) + transaction_data
-                        let mut full_data = version.to_le_bytes().to_vec();
-                        full_data.extend(&tx_bytes);
-                        
-                        db.put_cf(&cf_transactions, &key, &full_data)?;
-                        tx_count += 1;
+            if let Some(txid) = tx_obj.get("txid").and_then(|v| v.as_str()) {
+                if let Ok(txid_bytes) = hex::decode(txid) {
+                    // 1. Main transaction storage: 't' + txid → (version + height + JSON)
+                    let mut tx_key = vec![b't'];
+                    tx_key.extend_from_slice(&txid_bytes);
+                    
+                    // Serialize the full transaction JSON
+                    let tx_json = serde_json::to_vec(tx_val)?;
+                    
+                    let mut full_data = version.to_le_bytes().to_vec();
+                    full_data.extend(&height.to_le_bytes());
+                    full_data.extend(&tx_json);
+                    
+                    db.put_cf(&cf_transactions, &tx_key, &full_data)?;
+                    
+                    // 2. Block transaction index: 'B' + height + tx_index → txid
+                    let mut block_tx_key = vec![b'B'];
+                    block_tx_key.extend(&height.to_le_bytes());
+                    block_tx_key.extend(&(tx_index as u64).to_le_bytes());
+                    
+                    // Store the txid in display format (already in correct format from RPC)
+                    db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes())?;
+                    
+                    tx_count += 1;
+                    
+                    if tx_count == 1 || tx_count % 10 == 0 {
+                        eprintln!("  Indexed tx {} of block {}: {}", tx_index, height, txid);
                     }
                 }
             }
         }
     }
+    
+    eprintln!("Block {} indexed with {} transactions", height, tx_count);
     
     // Update sync height
     let cf_state = db.cf_handle("chain_state")
@@ -234,8 +306,11 @@ pub async fn run_block_monitor(
     
     // Test connection
     match rpc_client.getblockcount() {
-        Ok(_height) => {
-            // Connected successfully
+        Ok(height) => {
+            // Connected successfully - store initial network height
+            if let Err(e) = set_network_height(&db, height as i32) {
+                eprintln!("Failed to set initial network height: {}", e);
+            }
         }
         Err(e) => {
             eprintln!("RPC connection failed: {}", e);
@@ -259,6 +334,11 @@ pub async fn run_block_monitor(
                 continue;
             }
         };
+        
+        // Update network height in database
+        if let Err(e) = set_network_height(&db, rpc_tip.height) {
+            eprintln!("Failed to update network height: {}", e);
+        }
         
         let db_tip = match get_db_chain_tip(&db) {
             Ok(tip) => tip,

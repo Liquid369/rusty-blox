@@ -1,6 +1,7 @@
 mod address;
 mod api;
 mod batch_writer;
+mod block_detail;
 mod blocks;
 mod chain_state;
 mod db_utils;
@@ -19,6 +20,7 @@ use crate::config::{get_global_config, init_global_config};
 use crate::sync::run_sync_service;
 use crate::mempool::{MempoolState, run_mempool_monitor};
 use crate::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
+use crate::block_detail::block_detail_v2;
 use crate::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
     send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, relay_mnb_v2,
@@ -29,6 +31,7 @@ use crate::types::MyError;
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options};
 use axum::{Router, routing::get};
+use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::Mutex as TokioMutex;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -50,6 +53,12 @@ lazy_static! {
 }
 
 async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, broadcaster: Arc<EventBroadcaster>) {
+    // Configure CORS to allow requests from the frontend
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api", get(api_handler))
@@ -59,6 +68,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/mempool", get(mempool_v2))
         .route("/api/v2/mempool/{txid}", get(mempool_tx_v2))
         .route("/api/v2/block-index/{block_height}", get(block_index_v2))
+        .route("/api/v2/block-detail/{block_height}", get(block_detail_v2))
         .route("/api/v2/tx/{txid}", get(tx_v2))
         .route("/api/v2/address/{address}", get(addr_v2))
         .route("/api/v2/xpub/{xpub}", get(xpub_v2))
@@ -76,6 +86,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
+        .layer(cors)
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
         .layer(axum::extract::Extension(broadcaster));

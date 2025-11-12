@@ -419,21 +419,28 @@ pub async fn block_v2(
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }*/
 
-async fn get_block_from_db(db: &Arc<DB>, _key: &[u8]) -> Result<Json<crate::types::Block>, StatusCode> {
+async fn get_block_from_db(db: &Arc<DB>, height_key: &[u8]) -> Result<Json<crate::types::Block>, StatusCode> {
     let db_clone = Arc::clone(db);
+    let height_key = height_key.to_vec();
 
     tokio::task::spawn_blocking(move || {
-        let cf_handle = db_clone.cf_handle("cf_blocks").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let key_hex = "68d1851300";
-        let key_binary = hex::decode(key_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
-        db_clone.get_cf(cf_handle, &key_binary)
+        // Get block hash from height
+        let cf_metadata = db_clone.cf_handle("chain_metadata").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let block_hash = db_clone.get_cf(&cf_metadata, &height_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        
+        // Get block header from blocks CF
+        let cf_blocks = db_clone.cf_handle("blocks").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        // Reverse the hash back to internal format for block lookup
+        let internal_hash: Vec<u8> = block_hash.iter().rev().cloned().collect();
+        let block_data = db_clone.get_cf(&cf_blocks, &internal_hash)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        
+        serde_json::from_slice::<crate::types::Block>(&block_data)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            .and_then(|value_opt| value_opt.ok_or_else(|| StatusCode::NOT_FOUND))
-            .and_then(|value| {
-                serde_json::from_slice::<crate::types::Block>(&value)
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-                    .map(Json)
-            })
+            .map(Json)
     }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 

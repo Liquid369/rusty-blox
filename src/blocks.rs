@@ -287,8 +287,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // Process transactions
         let block_version = block_header.n_version;
         let block_hash_slice = &block_header.block_hash;
+        let block_height_val = block_header.block_height;
         
-        match process_transaction(&mut reader, block_version, block_hash_slice, db.clone(), &mut tx_batch, fast_sync).await {
+        match process_transaction(&mut reader, block_version, block_hash_slice, block_height_val, db.clone(), &mut tx_batch, fast_sync).await {
             Ok(_) => {
                 // Successfully processed transactions
                 // Flush batch if needed
