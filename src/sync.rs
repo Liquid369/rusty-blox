@@ -310,7 +310,8 @@ async fn run_initial_sync(
     Ok(())
 }
 
-/// Monitor for new blocks - HYBRID approach
+/// Monitor for new blocks - SMART HYBRID approach
+/// Skips blk file processing if we're close to chain tip (within 100 blocks)
 async fn run_live_sync(
     blk_dir: PathBuf,
     db: Arc<DB>,
@@ -318,35 +319,57 @@ async fn run_live_sync(
     current_height: i32,
     broadcaster: Option<Arc<EventBroadcaster>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting HYBRID sync mode...");
+    println!("Starting SMART sync mode...");
     println!("Current DB height: {}", current_height);
     
-    // Step 1: Sync from blk*.dat files to get caught up faster
-    println!("Phase 1: Syncing from blk*.dat files (fast)...");
+    // Check network height to determine if we need blk file catchup
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
     
-    let config = get_global_config();
-    let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
-    
-    // Read all .dat files
-    let mut dir_entries = fs::read_dir(&blk_dir).await?;
-    let mut entries = Vec::new();
-    
-    while let Ok(Some(entry)) = dir_entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("dat") {
-            entries.push(path);
+    let network_height = match db.get_cf(&cf_state, b"network_height")? {
+        Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into().unwrap_or([0, 0, 0, 0])),
+        None => {
+            println!("⚠️  Network height not available, will fetch from RPC");
+            current_height // Assume we're current if unknown
         }
-    }
+    };
     
-    if !entries.is_empty() {
-        println!("Found {} blk*.dat files, processing in parallel...", entries.len());
-        process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
+    let blocks_behind = network_height - current_height;
+    println!("📊 Network height: {} | Blocks behind: {}", network_height, blocks_behind);
+    
+    // Only process blk files if we're significantly behind (>100 blocks)
+    // This makes startup instant when we're already synced
+    if blocks_behind > 100 {
+        println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
+        println!("Phase 1: Syncing from blk*.dat files...");
         
-        println!("✅ Finished processing blk*.dat files!");
+        let config = get_global_config();
+        let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
+        
+        // Read all .dat files
+        let mut dir_entries = fs::read_dir(&blk_dir).await?;
+        let mut entries = Vec::new();
+        
+        while let Ok(Some(entry)) = dir_entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("dat") {
+                entries.push(path);
+            }
+        }
+        
+        if !entries.is_empty() {
+            println!("Found {} blk*.dat files, processing in parallel...", entries.len());
+            process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
+            
+            println!("✅ Finished processing blk*.dat files!");
+        }
+    } else {
+        println!("\n🚀 Only {} blocks behind - skipping blk file scan (INSTANT startup!)", blocks_behind);
+        println!("   Will catch up via RPC...");
     }
     
-    // Step 2: Switch to RPC for new blocks (blk files won't have the latest)
-    println!("Phase 2: Switching to RPC for new blocks...");
+    // Switch to RPC for new blocks (or catchup if we skipped blk files)
+    println!("Phase 2: Monitoring for new blocks via RPC...");
     run_block_monitor(db, 5, broadcaster).await?;
     
     Ok(())
@@ -363,13 +386,20 @@ pub async fn run_sync_service(
         db: Arc::clone(&db),
     };
     
+    println!("\n╔════════════════════════════════════════════════════╗");
+    println!("║          PIVX BLOCKCHAIN EXPLORER SYNC             ║");
+    println!("╚════════════════════════════════════════════════════╝\n");
+    
     // Fetch and store network height from RPC early
+    println!("🔍 Checking network status...");
     update_network_height(&db).await;
     
     // Check sync status
+    println!("🔍 Checking database sync status...");
     match get_sync_status(&db).await? {
         SyncStatus::NeedInitialSync => {
-            println!("\n🆕 No existing index found - running initial sync\n");
+            println!("\n🆕 NO EXISTING INDEX FOUND");
+            println!("   Running initial sync from scratch...\n");
             
             // Try leveldb-based sync first (MUCH faster!)
             let final_height = match run_initial_sync_leveldb(blk_dir.clone(), Arc::clone(&db), state.clone()).await {
@@ -404,14 +434,40 @@ pub async fn run_sync_service(
             };
             
             // Then switch to live mode
+            println!("\n🔄 Switching to live sync mode...");
             run_live_sync(blk_dir, db, state, final_height, broadcaster).await?;
         }
         SyncStatus::Synced { height } => {
-            println!("\n✅ Existing index found at height {}\n", height);
-            // Go straight to live mode
+            println!("\n✅ EXISTING INDEX FOUND");
+            println!("   Database height: {}\n", height);
+            
+            // Get network height for comparison
+            let cf_state = db.cf_handle("chain_state")
+                .ok_or("chain_state CF not found")?;
+            
+            let network_height = match db.get_cf(&cf_state, b"network_height")? {
+                Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into().unwrap_or([0, 0, 0, 0])),
+                None => height, // Unknown, assume current
+            };
+            
+            let blocks_behind = network_height - height;
+            
+            if blocks_behind <= 5 {
+                println!("🎉 ALREADY SYNCED! Only {} blocks behind", blocks_behind);
+                println!("   Startup will be INSTANT - going straight to RPC monitoring\n");
+            } else if blocks_behind <= 100 {
+                println!("⚡ NEARLY SYNCED! {} blocks behind", blocks_behind);
+                println!("   Startup will be FAST - skipping blk file scan\n");
+            } else {
+                println!("📥 CATCHING UP: {} blocks behind", blocks_behind);
+                println!("   Will process blk files for faster catchup\n");
+            }
+            
+            // Go straight to live mode (it will decide whether to scan blk files)
             run_live_sync(blk_dir, db, state, height, broadcaster).await?;
         }
     }
     
     Ok(())
 }
+
