@@ -414,87 +414,171 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
 
 pub async fn addr_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<AddressInfo> {
    let key = format!("a{}", param);
-   let result = match db_get_blocking(db.clone(), key.as_bytes()).await {
-       Ok(Some(data)) => data,
-       _ => vec![],
-   };
-
+   let key_bytes = key.as_bytes().to_vec();
+   let db_clone = db.clone();
+   
+   // Get from addr_index column family in blocking task
+   let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+       let cf_addr_index = db_clone.cf_handle("addr_index")
+           .ok_or_else(|| "addr_index CF not found".to_string())?;
+       db_clone.get_cf(&cf_addr_index, &key_bytes)
+           .map_err(|e| e.to_string())
+   })
+   .await
+   .unwrap_or_else(|_| Ok(None))
+   .unwrap_or(None)
+   .unwrap_or_else(|| vec![]);
     let utxos = deserialize_utxos(&result).await;
     let mut balance: f64 = 0.0;
+    
     for utxo in &utxos {
         let (txid_hash, _output_index) = utxo;
         let txid_hex = hex::encode(txid_hash);
-        let key = format!("t{}", txid_hex);
-        if let Ok(Some(tx_data)) = db_get_blocking(db.clone(), key.as_bytes()).await {
+        let mut key = vec![b't'];
+        key.extend(txid_hash);
+        let key_clone = key.clone();
+        let db_clone = db.clone();
+        
+        let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_transactions = db_clone.cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            db_clone.get_cf(&cf_transactions, &key_clone)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(None);
+        
+        if let Some(tx_data) = tx_data {
             let tx_value = deserialize_transaction(&tx_data).await;
             if let Ok(tx) = tx_value {
                 balance += tx.outputs.iter().map(|output| output.value as f64).sum::<f64>();
             }
         } else {
-            eprintln!("Failed to read from DB for key: {}", key);
+            eprintln!("Failed to read from DB for key: {}", hex::encode(&key));
         }
     }
-    let txids: Vec<String> = utxos.iter()
+    // Deduplicate txids (one address can have multiple outputs from same tx)
+    let mut unique_txids: Vec<String> = utxos.iter()
         .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
         .collect();
-    let tx_amt: u32 = txids.len().try_into().unwrap_or(0);
+    unique_txids.sort();
+    unique_txids.dedup();
+    
     Json(AddressInfo {
         address: param,
         balance,
-        txs: tx_amt,
-        txids: txids,
+        txs: unique_txids.len() as u32,
+        txids: unique_txids,
     })
 }
 
 pub async fn xpub_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<XPubInfo> {
     let key = format!("p{}", param);
-    let result = match db_get_blocking(db.clone(), key.as_bytes()).await {
-        Ok(Some(data)) => data,
-        _ => vec![],
-    };
+    let key_bytes = key.as_bytes().to_vec();
+    let db_clone = db.clone();
+    
+    // Get pubkey CF in blocking task
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+        let cf_pubkey = db_clone.cf_handle("pubkey")
+            .ok_or_else(|| "pubkey CF not found".to_string())?;
+        db_clone.get_cf(&cf_pubkey, &key_bytes)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(None)
+    .unwrap_or_else(|| vec![]);
 
     let utxos = deserialize_utxos(&result).await;
     let mut balance: f64 = 0.0;
+    
     for utxo in &utxos {
         let (txid_hash, _output_index) = utxo;
         let txid_hex = hex::encode(txid_hash);
-        let key = format!("t{}", txid_hex);
-        if let Ok(Some(tx_data)) = db_get_blocking(db.clone(), key.as_bytes()).await {
+        let mut key = vec![b't'];
+        key.extend(txid_hash);
+        let key_clone = key.clone();
+        let db_clone = db.clone();
+        
+        let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_transactions = db_clone.cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            db_clone.get_cf(&cf_transactions, &key_clone)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(None);
+        
+        if let Some(tx_data) = tx_data {
             let tx_value = deserialize_transaction(&tx_data).await;
             if let Ok(tx) = tx_value {
                 balance += tx.outputs.iter().map(|output| output.value as f64).sum::<f64>();
             }
         } else {
-            eprintln!("Failed to read from DB for key: {}", key);
+            eprintln!("Failed to read from DB for key: {}", hex::encode(&key));
         }
     }
-    let txids: Vec<String> = utxos.iter()
+    // Deduplicate txids
+    let mut unique_txids: Vec<String> = utxos.iter()
         .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
         .collect();
-    let tx_amt: u32 = txids.len().try_into().unwrap_or(0);
+    unique_txids.sort();
+    unique_txids.dedup();
+    
     Json(XPubInfo {
         address: param,
         balance,
-        txs: tx_amt,
-        txids: txids,
+        txs: unique_txids.len() as u32,
+        txids: unique_txids,
     })
 }
 
 pub async fn utxo_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Result<Json<Vec<UTXO>>, StatusCode> {
-    // Parse the address parameter to get UTXOs
+    // Parse the address parameter to get UTXOs from addr_index CF
     let key = format!("a{}", param);
-    let result = match db_get_blocking(db.clone(), key.as_bytes()).await {
-        Ok(Some(data)) => data,
-        _ => return Err(StatusCode::NOT_FOUND),
+    let key_bytes = key.as_bytes().to_vec();
+    let db_clone = db.clone();
+    
+    // Get data from addr_index CF in blocking task
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+        let cf_addr_index = db_clone.cf_handle("addr_index")
+            .ok_or_else(|| "addr_index CF not found".to_string())?;
+        db_clone.get_cf(&cf_addr_index, &key_bytes)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    let data = match result {
+        Ok(Some(d)) => d,
+        Ok(None) => return Ok(Json(vec![])), // Empty list if address not found  
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
     };
 
-    let utxos = deserialize_utxos(&result).await;
+    let utxos = deserialize_utxos(&data).await;
     let mut utxo_list: Vec<UTXO> = Vec::new();
     
+    // Get transactions from transactions CF
     for (txid_hash, output_index) in &utxos {
         let txid_hex = hex::encode(txid_hash);
-        let key = format!("t{}", txid_hex);
-        if let Ok(Some(tx_data)) = db_get_blocking(db.clone(), key.as_bytes()).await {
+        let mut key = vec![b't'];
+        key.extend(txid_hash);
+        let key_clone = key.clone();
+        let db_clone = db.clone();
+        
+        let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_transactions = db_clone.cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            db_clone.get_cf(&cf_transactions, &key_clone)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(None);
+        
+        if let Some(tx_data) = tx_data {
             if let Ok(tx) = deserialize_transaction(&tx_data).await {
                 if let Some(output) = tx.outputs.get(*output_index as usize) {
                     utxo_list.push(UTXO {

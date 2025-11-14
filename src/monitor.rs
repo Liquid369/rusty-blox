@@ -384,6 +384,79 @@ async fn index_block_from_rpc(
             }
         }
         
+        // Process inputs: remove spent UTXOs from address index
+        for input in &parsed_tx.inputs {
+            // Skip coinbase transactions (no prevout)
+            let prevout = match &input.prevout {
+                Some(p) => p,
+                None => continue,
+            };
+            
+            // Skip if coinbase (indicated by coinbase field)
+            if input.coinbase.is_some() {
+                continue;
+            }
+            
+            // Get previous txid and output index
+            let prev_txid_hex = &prevout.hash;
+            let prev_output_idx = prevout.n;
+            
+            // Decode the previous txid from hex string to bytes
+            let prev_txid_bytes = match hex::decode(prev_txid_hex) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    eprintln!("⚠️  Invalid prev txid hex: {}", prev_txid_hex);
+                    continue;
+                }
+            };
+            
+            // Previous txid needs to be in reversed (internal) format for lookup
+            let mut prev_txid_internal: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
+            
+            // Get the previous transaction
+            let mut prev_tx_key = vec![b't'];
+            prev_tx_key.extend_from_slice(&prev_txid_internal);
+            
+            if let Ok(Some(prev_tx_data)) = db.get_cf(&cf_transactions, &prev_tx_key) {
+                // Parse previous transaction to find addresses of the spent output
+                if let Ok(prev_tx) = deserialize_transaction(&prev_tx_data).await {
+                    // Get the output at this index
+                    if let Some(output) = prev_tx.outputs.get(prev_output_idx as usize) {
+                        // Remove from address index for each address in this output
+                        for address in &output.address {
+                            if address.is_empty() {
+                                continue;
+                            }
+                            
+                            let mut addr_key = vec![b'a'];
+                            addr_key.extend_from_slice(address.as_bytes());
+                            
+                            // Get existing UTXOs
+                            let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
+                                Some(data) => deserialize_utxos(&data).await,
+                                None => Vec::new(),
+                            };
+                            
+                            // Remove the spent UTXO (match by reversed txid and index)
+                            let updated_utxos: Vec<_> = existing_utxos.into_iter()
+                                .filter(|(stored_txid, stored_idx)| {
+                                    !(stored_txid == &prev_txid_internal && *stored_idx == prev_output_idx as u64)
+                                })
+                                .collect();
+                            
+                            // Update or delete
+                            if !updated_utxos.is_empty() {
+                                let serialized = serialize_utxos(&updated_utxos).await;
+                                let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
+                            } else {
+                                let _ = db.delete_cf(&cf_addr_index, &addr_key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         tx_count += 1;
     }
     

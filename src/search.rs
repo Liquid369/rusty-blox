@@ -159,14 +159,26 @@ fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn 
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
     
-    // Transaction key format: 't' + txid_bytes
+    // Transaction key format: 't' + txid_bytes_reversed (internal format)
     let txid_bytes = hex::decode(txid)?;
-    let mut key = vec![b't'];
-    key.extend_from_slice(&txid_bytes);
     
-    match db.get_cf(&cf_transactions, &key)? {
+    // Try reversed format first (new/correct format)
+    let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+    let mut key = vec![b't'];
+    key.extend_from_slice(&txid_reversed);
+    
+    let tx_data = if let Ok(Some(data)) = db.get_cf(&cf_transactions, &key) {
+        Some(data)
+    } else {
+        // Fallback: try display format (old/incorrect format for migration)
+        let mut key_display = vec![b't'];
+        key_display.extend_from_slice(&txid_bytes);
+        db.get_cf(&cf_transactions, &key_display)?
+    };
+    
+    match tx_data {
         Some(tx_data) => {
-            // Data format: version (4 bytes) + height (4 bytes) + JSON
+            // Data format: version (4 bytes) + height (4 bytes) + raw_tx_bytes
             let block_height = if tx_data.len() >= 8 {
                 Some(i32::from_le_bytes(tx_data[4..8].try_into()?))
             } else {
