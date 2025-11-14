@@ -103,8 +103,8 @@ fn index_block_from_rpc(
     
     let client = reqwest::blocking::Client::new();
     
-    // Use verbosity=1 for faster sync (TXIDs only, not full tx data)
-    // Full tx data will be fetched on-demand when viewing transactions
+    // Use verbosity=2 for full block data with all transactions
+    // This is more efficient than fetching each TX separately
     let response = client
         .post(&url)
         .basic_auth(&user, Some(&pass))
@@ -112,7 +112,7 @@ fn index_block_from_rpc(
             "jsonrpc": "1.0",
             "id": "rustyblox",
             "method": "getblock",
-            "params": [block_hash.clone(), 1]
+            "params": [block_hash.clone(), 2]  // verbosity=2 includes full TX data
         }))
         .send()?;
     
@@ -205,51 +205,139 @@ fn index_block_from_rpc(
         .ok_or("transactions CF not found")?;
     
     let mut tx_count = 0;
+    let mut tx_errors = 0;
+    
     for (tx_index, tx_val) in tx_array.iter().enumerate() {
-        // With verbosity=1, tx_val is just a txid string
-        if let Some(txid) = tx_val.as_str() {
-            if let Ok(txid_bytes) = hex::decode(txid) {
-                // Fetch full raw transaction data
-                let tx_response = client
-                    .post(&url)
-                    .basic_auth(&user, Some(&pass))
-                    .json(&serde_json::json!({
-                        "jsonrpc": "1.0",
-                        "id": "rustyblox",
-                        "method": "getrawtransaction",
-                        "params": [txid, 0]  // 0 = raw hex, not JSON
-                    }))
-                    .send();
-                
-                if let Ok(tx_resp) = tx_response {
-                    if let Ok(tx_json) = tx_resp.json::<Value>() {
-                        if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
-                            if let Ok(raw_tx_bytes) = hex::decode(raw_hex) {
-                                // 1. Store full transaction: 't' + txid → (version + height + raw_tx)
-                                let mut tx_key = vec![b't'];
-                                tx_key.extend_from_slice(&txid_bytes);
-                                
-                                let mut full_data = version.to_le_bytes().to_vec();
-                                full_data.extend(&height.to_le_bytes());
-                                full_data.extend(&raw_tx_bytes);
-                                
-                                db.put_cf(&cf_transactions, &tx_key, &full_data)?;
+        // With verbosity=2, tx_val could be:
+        // - A string (just txid) - older PIVX versions
+        // - An object (full transaction data) - newer versions
+        
+        let txid = if let Some(txid_str) = tx_val.as_str() {
+            // Old format: just a txid string
+            txid_str.to_string()
+        } else if let Some(tx_obj) = tx_val.as_object() {
+            // New format: full transaction object
+            tx_obj.get("txid")
+                .and_then(|t| t.as_str())
+                .ok_or("Missing txid in transaction object")?
+                .to_string()
+        } else {
+            eprintln!("⚠️  Skipping invalid transaction at index {} in block {}", tx_index, height);
+            tx_errors += 1;
+            continue;
+        };
+        
+        let txid_bytes = match hex::decode(&txid) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                eprintln!("⚠️  Invalid txid hex at index {} in block {}: {}", tx_index, height, txid);
+                tx_errors += 1;
+                continue;
+            }
+        };
+        
+        // Attempt to get raw transaction data
+        let raw_tx_bytes = if let Some(tx_obj) = tx_val.as_object() {
+            // Try to get 'hex' field from transaction object (verbosity=2)
+            if let Some(hex_str) = tx_obj.get("hex").and_then(|h| h.as_str()) {
+                match hex::decode(hex_str) {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => {
+                        eprintln!("⚠️  Failed to decode hex for txid {}", txid);
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        
+        // If we don't have raw bytes from verbosity=2, fetch individually
+        let raw_tx_bytes = if let Some(bytes) = raw_tx_bytes {
+            bytes
+        } else {
+            // Fallback: Fetch individual transaction
+            match client
+                .post(&url)
+                .basic_auth(&user, Some(&pass))
+                .json(&serde_json::json!({
+                    "jsonrpc": "1.0",
+                    "id": "rustyblox",
+                    "method": "getrawtransaction",
+                    "params": [&txid, 0]  // 0 = raw hex, not JSON
+                }))
+                .send()
+            {
+                Ok(tx_resp) => {
+                    match tx_resp.json::<Value>() {
+                        Ok(tx_json) => {
+                            if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
+                                match hex::decode(raw_hex) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        eprintln!("⚠️  Failed to decode getrawtransaction result for {}", txid);
+                                        tx_errors += 1;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                eprintln!("⚠️  No result in getrawtransaction for {}", txid);
+                                tx_errors += 1;
+                                continue;
                             }
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️  Failed to parse getrawtransaction response for {}: {}", txid, e);
+                            tx_errors += 1;
+                            continue;
                         }
                     }
                 }
-                
-                // 2. Block transaction index: 'B' + height + tx_index → txid
-                let mut block_tx_key = vec![b'B'];
-                block_tx_key.extend(&height.to_le_bytes());
-                block_tx_key.extend(&(tx_index as u64).to_le_bytes());
-                
-                // Store the txid in display format
-                db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes())?;
-                
-                tx_count += 1;
+                Err(e) => {
+                    eprintln!("⚠️  Failed to fetch transaction {}: {}", txid, e);
+                    tx_errors += 1;
+                    continue;
+                }
             }
+        };
+        
+        // 1. Store full transaction: 't' + txid → (version + height + raw_tx)
+        let mut tx_key = vec![b't'];
+        tx_key.extend_from_slice(&txid_bytes);
+        
+        let mut full_data = version.to_le_bytes().to_vec();
+        full_data.extend(&height.to_le_bytes());
+        full_data.extend(&raw_tx_bytes);
+        
+        if let Err(e) = db.put_cf(&cf_transactions, &tx_key, &full_data) {
+            eprintln!("⚠️  Failed to store transaction {}: {}", txid, e);
+            tx_errors += 1;
+            continue;
         }
+        
+        // 2. Block transaction index: 'B' + height + tx_index → txid
+        let mut block_tx_key = vec![b'B'];
+        block_tx_key.extend(&height.to_le_bytes());
+        block_tx_key.extend(&(tx_index as u64).to_le_bytes());
+        
+        // Store the txid in display format
+        if let Err(e) = db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes()) {
+            eprintln!("⚠️  Failed to store block TX index for {}: {}", txid, e);
+            tx_errors += 1;
+            continue;
+        }
+        
+        tx_count += 1;
+    }
+    
+    // Report any errors
+    if tx_errors > 0 {
+        eprintln!("⚠️  Block {}: Indexed {}/{} transactions ({} errors)", 
+                  height, tx_count, tx_array.len(), tx_errors);
+    } else if height % 100 == 0 {
+        println!("✅ Block {}: Indexed all {} transactions", height, tx_count);
     }
     
     // Update sync height
