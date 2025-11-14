@@ -84,7 +84,7 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
 }
 
 /// Fetch and index a single block from RPC
-fn index_block_from_rpc(
+async fn index_block_from_rpc(
     rpc_client: &BitcoinRpcClient,
     height: i32,
     db: &Arc<DB>,
@@ -329,6 +329,58 @@ fn index_block_from_rpc(
             continue;
         }
         
+        // 3. Parse transaction and index addresses/UTXOs
+        // Prepend dummy block_version for parser compatibility
+        let mut tx_data_with_header = vec![0u8; 4];
+        tx_data_with_header.extend_from_slice(&raw_tx_bytes);
+        
+        // Parse the transaction
+        use crate::parser::{deserialize_transaction, serialize_utxos, deserialize_utxos};
+        let parsed_tx = match deserialize_transaction(&tx_data_with_header).await {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("⚠️  Failed to parse transaction {}: {}", txid, e);
+                tx_errors += 1;
+                continue;
+            }
+        };
+        
+        // Index addresses from outputs - match blk file format
+        let cf_addr_index = db.cf_handle("addr_index")
+            .ok_or("addr_index CF not found")?;
+        
+        // Reversed txid for UTXO storage (internal format)
+        let mut reversed_txid = txid_bytes.clone();
+        reversed_txid.reverse();
+        
+        for (output_idx, output) in parsed_tx.outputs.iter().enumerate() {
+            for address in &output.address {
+                if address.is_empty() {
+                    continue;
+                }
+                
+                // Key format: 'a' + address
+                let mut addr_key = vec![b'a'];
+                addr_key.extend_from_slice(address.as_bytes());
+                
+                // Get existing UTXOs for this address
+                let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
+                    Some(data) => deserialize_utxos(&data).await,
+                    None => Vec::new(),
+                };
+                
+                // Add new UTXO: (reversed_txid, output_index)
+                let mut updated_utxos = existing_utxos;
+                updated_utxos.push((reversed_txid.clone(), output_idx as u64));
+                
+                // Store updated UTXO list
+                let serialized = serialize_utxos(&updated_utxos).await;
+                if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
+                    eprintln!("⚠️  Failed to index address {} for tx {}: {}", address, txid, e);
+                }
+            }
+        }
+        
         tx_count += 1;
     }
     
@@ -467,7 +519,7 @@ pub async fn run_block_monitor(
             // Index new blocks - NO SLEEP when catching up!
             for (idx, height) in ((db_tip.height + 1)..=rpc_tip.height).enumerate() {
                 // Index the block
-                if let Err(e) = index_block_from_rpc(&rpc_client, height, &db, &broadcaster) {
+                if let Err(e) = index_block_from_rpc(&rpc_client, height, &db, &broadcaster).await {
                     eprintln!("Failed to index block at height {}: {}", height, e);
                     // Brief pause on error before retry
                     tokio::time::sleep(Duration::from_secs(1)).await;
