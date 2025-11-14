@@ -1103,8 +1103,11 @@ pub async fn block_stats_v2(
     
     let result = tokio::task::spawn_blocking(move || {
         // Get current block height from chain state
-        let chain_state = get_chain_state();
-        let tip_height = chain_state.block_tip;
+        let chain_state = match get_chain_state(&db_clone) {
+            Ok(state) => state,
+            Err(_) => return Err("Failed to get chain state"),
+        };
+        let tip_height = chain_state.height as u32;
         
         let mut stats = Vec::new();
         let start_height = if tip_height > count_clone { tip_height - count_clone } else { 0 };
