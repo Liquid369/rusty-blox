@@ -3,6 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use rocksdb::DB;
 use crate::types::{CBlockHeader, AppState, MyError, CTransaction, CTxIn, CTxOut, COutPoint, CScript};
 use rustyblox::call_quark_hash;
+use rustyblox::chainwork::calculate_work_from_bits;
 use sha2::{Sha256, Digest};
 use crate::db_utils::batch_put_cf;
 use crate::transactions::process_transaction;
@@ -153,6 +154,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     let mut magic_bytes = [0u8; 4];
 
     loop {
+        // Track position at start of block (after magic+size)
+        let block_start_pos = reader.stream_position().await?;
+        
         // Read magic bytes
         match reader.read_exact(&mut magic_bytes).await {
             Ok(_) => {},
@@ -179,6 +183,10 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             }
         }
         let block_size = u32::from_le_bytes(size_buffer) as u64;
+        
+        // Calculate EXACT position where next block should start
+        // next_block_pos = current_pos (after magic+size) + block_size
+        let next_block_pos = block_start_pos + 8 + block_size;
 
         // Peek at version to determine header size (4 bytes)
         let mut version_bytes = [0u8; 4];
@@ -190,59 +198,117 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             }
         }
         let ver_as_int = u32::from_le_bytes(version_bytes);
-        let header_size = get_header_size(ver_as_int);
+        
+        // For version 4-6, we need to DETECT the actual header size dynamically
+        // Some v4 blocks have 80 bytes, some have 112 bytes
+        let header_size = if ver_as_int >= 4 && ver_as_int <= 6 {
+            // Save current position
+            let current_pos = reader.stream_position().await?;
+            
+            // Skip to byte 80 (we've read 4 bytes for version, need to skip 76 more)
+            let mut skip_buffer = vec![0u8; 76];
+            let detected_size = match reader.read_exact(&mut skip_buffer).await {
+                Ok(_) => {
+                    // Now check the next 32 bytes
+                    let mut potential_accumulator = [0u8; 32];
+                    match reader.read_exact(&mut potential_accumulator).await {
+                        Ok(_) => {
+                            // Improved heuristic to differentiate accumulator checkpoint from transaction varint
+                            // Transaction count varint patterns:
+                            // - 1 tx: 0x01 followed by tx data (coinbase usually)
+                            // - 2 txs: 0x02 followed by tx data
+                            // - N txs (N < 253): 0xNN followed by tx data
+                            // - For varint, next bytes would be tx version (0x01000000 or 0x02000000)
+                            
+                            let first_byte = potential_accumulator[0];
+                            
+                            // Check if it looks like a varint followed by transaction version
+                            let looks_like_tx_count = if first_byte < 0xfd {
+                                // Next 4 bytes should be tx version (little endian)
+                                // Common tx versions: 1, 2, 3, 4
+                                let potential_tx_version = u32::from_le_bytes([
+                                    potential_accumulator[1],
+                                    potential_accumulator[2],
+                                    potential_accumulator[3],
+                                    potential_accumulator[4]
+                                ]);
+                                // Tx version is typically 1-4, definitely < 100
+                                potential_tx_version > 0 && potential_tx_version < 100
+                            } else {
+                                false
+                            };
+                            
+                            // Accumulator checkpoint is a 32-byte hash
+                            // Could be all zeros or a valid hash (mixed bytes)
+                            let all_zeros = potential_accumulator.iter().all(|&b| b == 0);
+                            
+                            if looks_like_tx_count {
+                                80  // It's transaction data, header is 80 bytes
+                            } else if all_zeros || first_byte >= 0xfd {
+                                112 // It's accumulator checkpoint, header is 112 bytes
+                            } else {
+                                // Fallback: check byte distribution
+                                // Real hashes have mixed bytes, tx data has patterns
+                                let unique_bytes = potential_accumulator.iter().collect::<std::collections::HashSet<_>>().len();
+                                if unique_bytes > 10 {
+                                    112 // Looks like hash data
+                                } else {
+                                    80  // Looks like structured data (tx count + version)
+                                }
+                            }
+                        },
+                        Err(_) => 80 // Can't read 32 more bytes, must be 80
+                    }
+                },
+                Err(_) => 80 // Can't skip to position 80, must be shorter
+            };
+            
+            // Seek back to where we started (after version bytes)
+            use tokio::io::AsyncSeekExt;
+            reader.seek(std::io::SeekFrom::Start(current_pos)).await?;
+            
+            detected_size
+        } else {
+            get_header_size(ver_as_int)
+        };
+
+        // Debug logging for version 4+ blocks  
+        if ver_as_int >= 4 {
+            if block_count < 5 || (block_count >= 863785 && block_count <= 863790) {
+                println!("  Block {}: Version {} detected, detected header_size = {} bytes", 
+                         block_count, ver_as_int, header_size);
+            }
+        }
 
         // Read the rest of the header (header_size - 4 bytes already read for version)
         header_buffer.clear();
         header_buffer.extend_from_slice(&version_bytes); // Include version in header
         header_buffer.resize(header_size, 0);
         match reader.read_exact(&mut header_buffer[4..]).await {
-            Ok(_) => {},
+            Ok(_) => {
+                if ver_as_int >= 4 && (block_count < 5 || (block_count >= 863785 && block_count <= 863790)) {
+                    println!("    ✅ Successfully read {} bytes for header", header_size);
+                }
+            },
             Err(e) => {
                 eprintln!("  Failed to read header (size {}) at block {}: {}", 
                          header_size, block_count, e);
+                eprintln!("    Version: {}, expected {} bytes", ver_as_int, header_size);
                 break;
             }
         }
 
         let mut block_header = parse_block_header_sync(&header_buffer, header_size)?;
         
-        // Determine block height by looking up parent block's height
+        // FAST SYNC: Store ALL blocks first, resolve heights in second pass
+        // This allows processing blocks that are out-of-order in blk files
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
             // Genesis block has height 0
             Some(0)
         } else {
-            // Look up parent block's height from chain_metadata CF
-            let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-            let mut height_key = vec![b'h'];
-            height_key.extend_from_slice(&block_header.hash_prev_block);
-            
-            match db.get_cf(&cf_metadata, &height_key) {
-                Ok(Some(height_bytes)) if height_bytes.len() == 4 => {
-                    match height_bytes.as_slice().try_into() {
-                        Ok(bytes) => {
-                            let parent_height = i32::from_le_bytes(bytes);
-                            Some(parent_height + 1)
-                        }
-                        Err(_) => {
-                            eprintln!("  Failed to convert height bytes");
-                            None
-                        }
-                    }
-                }
-                Ok(Some(_)) => {
-                    eprintln!("  Invalid height data for parent block");
-                    None
-                }
-                Ok(None) => {
-                    // Parent not indexed yet - block is out of order, will be processed later
-                    None
-                }
-                Err(e) => {
-                    eprintln!("  Error looking up parent height: {}", e);
-                    None
-                }
-            }
+            // For now, store block without height - will be resolved in second pass
+            // This prevents skipping 95% of blocks due to out-of-order storage
+            None
         };
         
         block_header.block_height = block_height;
@@ -250,10 +316,23 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // Store block data
         let block_hash_vec = block_header.block_hash.to_vec();
         
-        // Store in blocks CF: block_hash -> header_buffer
+        // Extract nBits for chainwork calculation (bytes 72-76 in header)
+        let n_bits = if header_buffer.len() >= 76 {
+            u32::from_le_bytes([
+                header_buffer[72],
+                header_buffer[73],
+                header_buffer[74],
+                header_buffer[75],
+            ])
+        } else {
+            0
+        };
+        
+        // Store in blocks CF: block_hash -> header_buffer  
+        // ALL blocks are stored, even if height is unknown
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
         
-        // If we have a height, store mappings in chain_metadata CF
+        // If we have a height (genesis or previously resolved), store mappings
         if let Some(height) = block_height {
             let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
             
@@ -268,6 +347,58 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
             db.put_cf(&cf_metadata, &height_bytes, &reversed_hash)
                 .map_err(|e| format!("Failed to store height mapping: {}", e))?;
+            
+            // Calculate and store chainwork
+            if n_bits > 0 {
+                // Calculate work for this block
+                let block_work = calculate_work_from_bits(n_bits);
+                
+                // Get parent chainwork (if not genesis)
+                let parent_chainwork = if height > 0 {
+                    let prev_height = height - 1;
+                    let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
+                    chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
+                    
+                    match db.get_cf(&cf_metadata, &chainwork_key)? {
+                        Some(parent_work_bytes) => {
+                            if parent_work_bytes.len() == 32 {
+                                let mut parent_work = [0u8; 32];
+                                parent_work.copy_from_slice(&parent_work_bytes);
+                                Some(parent_work)
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                } else {
+                    None // Genesis has no parent
+                };
+                
+                // Calculate cumulative chainwork
+                let chainwork = if let Some(parent_work) = parent_chainwork {
+                    // Add parent chainwork + this block's work
+                    use num_bigint::BigUint;
+                    let parent_big = BigUint::from_bytes_be(&parent_work);
+                    let block_big = BigUint::from_bytes_be(&block_work);
+                    let total = parent_big + block_big;
+                    
+                    let work_bytes = total.to_bytes_be();
+                    let mut result = [0u8; 32];
+                    let start = 32 - work_bytes.len().min(32);
+                    result[start..].copy_from_slice(&work_bytes[..work_bytes.len().min(32)]);
+                    result
+                } else {
+                    // Genesis block or parent not found - use just this block's work
+                    block_work
+                };
+                
+                // Store chainwork: 'w' + height -> chainwork (32 bytes)
+                let mut chainwork_key = vec![b'w'];
+                chainwork_key.extend_from_slice(&height.to_le_bytes());
+                db.put_cf(&cf_metadata, &chainwork_key, &chainwork)
+                    .map_err(|e| format!("Failed to store chainwork: {}", e))?;
+            }
         }
         
         block_count += 1;
@@ -289,6 +420,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         let block_hash_slice = &block_header.block_hash;
         let block_height_val = block_header.block_height;
         
+        // Process transactions - errors are non-fatal, we'll seek to correct position anyway
         match process_transaction(&mut reader, block_version, block_hash_slice, block_height_val, db.clone(), &mut tx_batch, fast_sync).await {
             Ok(_) => {
                 // Successfully processed transactions
@@ -300,21 +432,22 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 }
             },
             Err(e) => {
-                eprintln!("Warning: Failed to process transactions for block at height {:?}: {}", 
-                    block_header.block_height, e);
-                // Skip remaining transaction data to get to next block
-                let tx_data_size = (block_size as usize).saturating_sub(header_size);
-                if tx_data_size > 0 {
-                    let mut skip_buf = vec![0u8; tx_data_size.min(65536)];
-                    let mut remaining = tx_data_size;
-                    
-                    while remaining > 0 {
-                        let to_read = remaining.min(65536);
-                        skip_buf.truncate(to_read);
-                        reader.read_exact(&mut skip_buf).await?;
-                        remaining -= to_read;
-                    }
-                }
+                eprintln!("Warning: Failed to process transactions for block {}: {}", block_count, e);
+            }
+        }
+        
+        // CRITICAL: Always seek to the EXACT position where next block starts
+        // This ensures we never skip blocks regardless of transaction parsing issues
+        let current_pos = reader.stream_position().await?;
+        if current_pos != next_block_pos {
+            // Seek to exact position
+            use tokio::io::AsyncSeekExt;
+            reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
+            
+            if block_count % 1000 == 0 && current_pos != next_block_pos {
+                eprintln!("  Block {}: position adjusted from {} to {} (diff: {} bytes)", 
+                         block_count, current_pos, next_block_pos, 
+                         next_block_pos as i64 - current_pos as i64);
             }
         }
     }
@@ -385,8 +518,19 @@ fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlockHe
     );
     offset += 4;
 
-    // Calculate block hash - ALWAYS hash only first 80 bytes regardless of version
-    let hash_bytes = &slice[..80.min(slice.len())];
+    // Calculate block hash - hash size depends on version
+    // v0-3: hash 80 bytes with Quark
+    // v4-6: hash 112 bytes (80 + 32 accumulator) with SHA256d
+    // v7: hash 80 bytes with SHA256d
+    // v8+: hash 112 bytes (80 + 32 sapling root) with SHA256d
+    let hash_size = match n_version {
+        0..=3 => 80,
+        4..=6 => 112,  // Include accumulator checkpoint
+        7 => 80,
+        _ => 112,  // v8+ includes sapling root
+    };
+    
+    let hash_bytes = &slice[..hash_size.min(slice.len())];
     let reversed_hash = match n_version {
         0..=3 => {
             // For v0-v3, use Quark hash on first 80 bytes
@@ -394,7 +538,7 @@ fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlockHe
             output_hash.to_vec()
         }
         _ => {
-            // For v4+, use SHA256d on first 80 bytes
+            // For v4+, use SHA256d on full header (80 or 112 bytes depending on version)
             let first_hash = Sha256::digest(hash_bytes);
             let block_hash = Sha256::digest(&first_hash);
             block_hash.to_vec()

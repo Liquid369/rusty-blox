@@ -5,6 +5,7 @@ mod block_detail;
 mod blocks;
 mod chain_state;
 mod db_utils;
+mod leveldb_index;
 mod mempool;
 mod monitor;
 mod parallel;

@@ -103,6 +103,8 @@ fn index_block_from_rpc(
     
     let client = reqwest::blocking::Client::new();
     
+    // Use verbosity=1 for faster sync (TXIDs only, not full tx data)
+    // Full tx data will be fetched on-demand when viewing transactions
     let response = client
         .post(&url)
         .basic_auth(&user, Some(&pass))
@@ -110,7 +112,7 @@ fn index_block_from_rpc(
             "jsonrpc": "1.0",
             "id": "rustyblox",
             "method": "getblock",
-            "params": [block_hash.clone(), 2]
+            "params": [block_hash.clone(), 1]
         }))
         .send()?;
     
@@ -198,52 +200,37 @@ fn index_block_from_rpc(
     let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     db.put_cf(&cf_blocks, &internal_hash, &header)?;
     
-    eprintln!("Stored block header for height {}, hash {}", height, block_hash);
-    
     // Index all transactions from this block
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
     
-    eprintln!("Indexing block {} with {} transactions", height, tx_array.len());
-    
     let mut tx_count = 0;
     for (tx_index, tx_val) in tx_array.iter().enumerate() {
-        // Each tx is a full transaction object from RPC
-        if let Some(tx_obj) = tx_val.as_object() {
-            if let Some(txid) = tx_obj.get("txid").and_then(|v| v.as_str()) {
-                if let Ok(txid_bytes) = hex::decode(txid) {
-                    // 1. Main transaction storage: 't' + txid → (version + height + JSON)
-                    let mut tx_key = vec![b't'];
-                    tx_key.extend_from_slice(&txid_bytes);
-                    
-                    // Serialize the full transaction JSON
-                    let tx_json = serde_json::to_vec(tx_val)?;
-                    
-                    let mut full_data = version.to_le_bytes().to_vec();
-                    full_data.extend(&height.to_le_bytes());
-                    full_data.extend(&tx_json);
-                    
-                    db.put_cf(&cf_transactions, &tx_key, &full_data)?;
-                    
-                    // 2. Block transaction index: 'B' + height + tx_index → txid
-                    let mut block_tx_key = vec![b'B'];
-                    block_tx_key.extend(&height.to_le_bytes());
-                    block_tx_key.extend(&(tx_index as u64).to_le_bytes());
-                    
-                    // Store the txid in display format (already in correct format from RPC)
-                    db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes())?;
-                    
-                    tx_count += 1;
-                    
-                    if tx_count == 1 || tx_count % 10 == 0 {
-                        eprintln!("  Indexed tx {} of block {}: {}", tx_index, height, txid);
-                    }
-                }
+        // With verbosity=1, tx_val is just a txid string
+        if let Some(txid) = tx_val.as_str() {
+            if let Ok(txid_bytes) = hex::decode(txid) {
+                // 1. Minimal transaction storage: 't' + txid → (version + height)
+                // Full transaction data will be fetched on-demand later
+                let mut tx_key = vec![b't'];
+                tx_key.extend_from_slice(&txid_bytes);
+                
+                let mut minimal_data = version.to_le_bytes().to_vec();
+                minimal_data.extend(&height.to_le_bytes());
+                
+                db.put_cf(&cf_transactions, &tx_key, &minimal_data)?;
+                
+                // 2. Block transaction index: 'B' + height + tx_index → txid
+                let mut block_tx_key = vec![b'B'];
+                block_tx_key.extend(&height.to_le_bytes());
+                block_tx_key.extend(&(tx_index as u64).to_le_bytes());
+                
+                // Store the txid in display format
+                db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes())?;
+                
+                tx_count += 1;
             }
         }
     }
-    
-    eprintln!("Block {} indexed with {} transactions", height, tx_count);
     
     // Update sync height
     let cf_state = db.cf_handle("chain_state")
@@ -306,9 +293,9 @@ pub async fn run_block_monitor(
         rpc_host.clone(),
         Some(rpc_user),
         Some(rpc_pass),
-        3,    // Max retries
-        10,   // Connection timeout (seconds)
-        1000, // Read/write timeout (milliseconds)
+        3,     // Max retries
+        10,    // Connection timeout (seconds)
+        30000, // Read/write timeout (milliseconds) - increased for getblock calls
     ));
     
     // Test connection
@@ -331,13 +318,12 @@ pub async fn run_block_monitor(
     }
     
     loop {
-        tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-        
         // Get current tips
         let rpc_tip = match get_rpc_chain_tip(&rpc_client) {
             Ok(tip) => tip,
             Err(e) => {
                 eprintln!("Failed to get RPC tip: {}", e);
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
         };
@@ -351,6 +337,7 @@ pub async fn run_block_monitor(
             Ok(tip) => tip,
             Err(e) => {
                 eprintln!("Failed to get DB tip: {}", e);
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
         };
@@ -361,19 +348,34 @@ pub async fn run_block_monitor(
             // TODO: Implement reorg handling
             // 1. Rollback DB to reorg_height
             // 2. Re-index from that point
+            tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
             continue;
         }
         
         // Check if we're behind
         if rpc_tip.height > db_tip.height {
-            // Index new blocks
-            for height in (db_tip.height + 1)..=rpc_tip.height {
+            let blocks_behind = rpc_tip.height - db_tip.height;
+            
+            // Index new blocks - NO SLEEP when catching up!
+            for (idx, height) in ((db_tip.height + 1)..=rpc_tip.height).enumerate() {
                 // Index the block
                 if let Err(e) = index_block_from_rpc(&rpc_client, height, &db, &broadcaster) {
                     eprintln!("Failed to index block at height {}: {}", height, e);
+                    // Brief pause on error before retry
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     break;
                 }
+                
+                // Show progress every 100 blocks or on the last block
+                if idx % 100 == 0 || height == rpc_tip.height {
+                    let progress = ((idx + 1) as f64 / blocks_behind as f64) * 100.0;
+                    println!("Indexing progress: {}/{} ({:.1}%) - Block {}", 
+                             idx + 1, blocks_behind, progress, height);
+                }
             }
+        } else {
+            // We're caught up - sleep before checking again
+            tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
         }
     }
 }

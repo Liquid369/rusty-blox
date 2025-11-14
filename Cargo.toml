@@ -8,6 +8,10 @@ edition = "2021"
 name = "rustyblox"
 path = "src/main.rs"
 
+[[bin]]
+name = "build_combined_index"
+path = "src/bin/build_combined_index.rs"
+
 [dependencies]
 hex = "0.4.3"
 rocksdb = "0.21.0"
@@ -35,6 +39,8 @@ rusty-leveldb = "3.0"
 throttled_json_rpc = "0.0.6"
 pivx_rpc_rs = { path = "../pivx-rpc-rs", version = "0.1.0" }
 reqwest = { version = "0.11", features = ["blocking", "json"] }
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [build-dependencies]
 cc = "1.0"

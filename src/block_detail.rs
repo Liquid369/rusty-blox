@@ -227,57 +227,39 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
     let mut prefix = vec![b'B'];
     prefix.extend(&height.to_le_bytes());
     
-    eprintln!("Looking for transactions in block {} with prefix {:?}", height, prefix);
-    
     // Iterate through block transaction index entries
     let iter = db.prefix_iterator_cf(&cf_transactions, &prefix);
     
-    let mut count = 0;
     for item in iter {
         match item {
             Ok((key, value)) => {
                 // Check if key still has our prefix
                 if !key.starts_with(&prefix) {
-                    eprintln!("  Prefix mismatch, stopping iteration");
                     break;
                 }
                 
-                count += 1;
-                
                 // Value is the txid in hex format
                 if let Ok(txid_str) = std::str::from_utf8(&value) {
-                    eprintln!("  Found tx index entry: {}", txid_str);
                     // Look up the full transaction data
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
                         let mut tx_key = vec![b't'];
                         tx_key.extend_from_slice(&txid_bytes);
                         
                         if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
-                            eprintln!("  Found tx data, size: {} bytes", tx_data.len());
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
                                 enrich_transaction_inputs(db, &cf_transactions, &mut tx);
                                 transactions.push(tx);
-                                eprintln!("  Parsed tx successfully");
-                            } else {
-                                eprintln!("  Failed to parse tx");
                             }
-                        } else {
-                            eprintln!("  No tx data found for txid");
                         }
                     }
-                } else {
-                    eprintln!("  Invalid UTF-8 in txid value");
                 }
             }
-            Err(e) => {
-                eprintln!("  Iterator error: {:?}", e);
+            Err(_) => {
                 break;
             }
         }
     }
-    
-    eprintln!("Block {} has {} transaction entries, parsed {} transactions", height, count, transactions.len());
     
     Ok(transactions)
 }

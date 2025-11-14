@@ -3,6 +3,10 @@ extern crate sha2;
 use sha2::{Sha512, Digest};
 use std::ffi::c_void;
 
+pub mod chainwork;
+pub mod canonical_chain;
+pub mod leveldb_index;
+
 #[repr(C)]
 pub struct sph_blake_big_context {
 
