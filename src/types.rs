@@ -1,9 +1,32 @@
 use serde::Serialize;
 use serde::Deserialize;
+use serde::{Serializer, Deserializer};
 use std::fmt;
 use std::hash::Hash as StdHash;
 use std::sync::Arc;
 use rocksdb::DB;
+
+// Helper functions to serialize large byte arrays
+fn serialize_bytes<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_bytes(bytes)
+}
+
+fn deserialize_bytes<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
+    if bytes.len() != N {
+        return Err(Error::custom(format!("expected {} bytes, got {}", N, bytes.len())));
+    }
+    let mut array = [0u8; N];
+    array.copy_from_slice(bytes);
+    Ok(array)
+}
 
 /// Production-ready error type with context
 #[derive(Debug, Clone)]
@@ -117,6 +140,7 @@ pub struct CTransaction {
     pub inputs: Vec<CTxIn>,
     pub outputs: Vec<CTxOut>,
     pub lock_time: u32,
+    pub sapling_data: Option<SaplingTxData>,  // Sapling-specific data for version >= 3
 }
 
 impl std::fmt::Debug for CTransaction {
@@ -128,7 +152,11 @@ impl std::fmt::Debug for CTransaction {
         writeln!(f, "    inputs: {:?}", self.inputs)?;
         writeln!(f, "    outputs: {:?}", self.outputs)?;
         writeln!(f, "    lock_time: {}", self.lock_time)?;
-        write!(f, "}}")
+        if let Some(ref sapling) = self.sapling_data {
+            writeln!(f, "    sapling_data: {:?}", sapling)?;
+        }
+        writeln!(f, "}}")?;
+        Ok(())
     }
 }
 
@@ -192,86 +220,114 @@ impl std::fmt::Debug for CScript {
     }
 }
 
-#[derive(Serialize)]
+/// Sapling transaction data (for version >= 3)
+/// Contains all shielded transfer information
+#[derive(Serialize, Clone)]
 pub struct SaplingTxData {
-    pub value: i64,
-    pub vshield_spend: Vec<VShieldSpend>,
-    pub vshield_output: Vec<VShieldOutput>,
-    pub binding_sig: Vec<u8>,
+    /// The net value of Sapling spends minus outputs (can be negative)
+    /// Positive: shield -> transparent (unshielding)
+    /// Negative: transparent -> shield (shielding)
+    pub value_balance: i64,
+    
+    /// Shielded spends (inputs from shielded pool)
+    pub vshielded_spend: Vec<SpendDescription>,
+    
+    /// Shielded outputs (new notes added to shielded pool)
+    pub vshielded_output: Vec<OutputDescription>,
+    
+    /// Binding signature (64 bytes) - proves balance between spends and outputs
+    #[serde(serialize_with = "serialize_bytes")]
+    pub binding_sig: [u8; 64],
 }
 
 impl std::fmt::Debug for SaplingTxData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Formatting SaplingTxData
         writeln!(f, "SaplingTxData {{")?;
-        writeln!(f, "    value: {}", self.value)?;
-        writeln!(f, "    vshield_spend: {:?}", self.vshield_spend)?;
-        writeln!(f, "    vshield_output: {:?}", self.vshield_output)?;
-        writeln!(f, "    binding_sig: {:?}", hex::encode(&self.binding_sig))?;
+        writeln!(f, "    value_balance: {} satoshis ({} PIV)", self.value_balance, self.value_balance as f64 / 100_000_000.0)?;
+        writeln!(f, "    vshielded_spend: {} spend(s)", self.vshielded_spend.len())?;
+        writeln!(f, "    vshielded_output: {} output(s)", self.vshielded_output.len())?;
+        writeln!(f, "    binding_sig: {}", hex::encode(&self.binding_sig))?;
         write!(f, "}}")
     }
 }
 
-#[derive(Serialize)]
-pub struct VShieldSpend {
-    pub cv: Vec<u8>,
-    pub anchor: Vec<u8>,
-    pub nullifier: Vec<u8>,
-    pub rk: Vec<u8>,
-    pub proof: Vec<u8>,
-    pub spend_auth_sig: Vec<u8>,
+/// A shielded spend (input) - describes consumption of a note from the shielded pool
+/// Total size: 384 bytes (SPENDDESCRIPTION_SIZE)
+#[derive(Serialize, Clone)]
+pub struct SpendDescription {
+    /// Value commitment (32 bytes) - cryptographic commitment to the value being spent
+    pub cv: [u8; 32],
+    
+    /// Merkle anchor (32 bytes) - root of the note commitment tree at a past block
+    pub anchor: [u8; 32],
+    
+    /// Nullifier (32 bytes) - prevents double-spending of the same note
+    pub nullifier: [u8; 32],
+    
+    /// Randomized public key (32 bytes) - used for spendAuthSig verification
+    pub rk: [u8; 32],
+    
+    /// Zero-knowledge proof (192 bytes) - proves spend is valid without revealing details
+    /// Groth16 proof: π_A (48) + π_B (96) + π_C (48)
+    #[serde(serialize_with = "serialize_bytes")]
+    pub zkproof: [u8; 192],
+    
+    /// Spend authorization signature (64 bytes) - authorizes this spend
+    #[serde(serialize_with = "serialize_bytes")]
+    pub spend_auth_sig: [u8; 64],
 }
 
-impl fmt::Debug for VShieldSpend {
+impl fmt::Debug for SpendDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Formatting VShieldSpend
-        writeln!(f, "{{")?;
-        writeln!(f, "    cv: {:?}", hex::encode(&self.cv))?;
-        writeln!(f, "    anchor: {:?}", hex::encode(&self.anchor))?;
-        writeln!(f, "    nullifier: {:?}", hex::encode(&self.nullifier))?;
-        writeln!(f, "    rk: {:?}", hex::encode(&self.rk))?;
-        writeln!(f, "    proof: {:?}", hex::encode(&self.proof))?;
-        writeln!(
-            f,
-            "    spend_auth_sig: {:?}",
-            hex::encode(&self.spend_auth_sig)
-        )?;
+        writeln!(f, "SpendDescription {{")?;
+        writeln!(f, "    cv: {}", hex::encode(&self.cv))?;
+        writeln!(f, "    anchor: {}", hex::encode(&self.anchor))?;
+        writeln!(f, "    nullifier: {}", hex::encode(&self.nullifier))?;
+        writeln!(f, "    rk: {}", hex::encode(&self.rk))?;
+        writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;
+        writeln!(f, "    spend_auth_sig: {}", hex::encode(&self.spend_auth_sig))?;
         write!(f, "}}")
     }
 }
 
-#[derive(Serialize)]
-pub struct VShieldOutput {
-    pub cv: Vec<u8>,
-    pub cmu: Vec<u8>,
-    pub ephemeral_key: Vec<u8>,
-    pub enc_ciphertext: Vec<u8>,
-    pub out_ciphertext: Vec<u8>,
-    pub proof: Vec<u8>,
+/// A shielded output - describes creation of a new note in the shielded pool
+/// Total size: 948 bytes (OUTPUTDESCRIPTION_SIZE)
+#[derive(Serialize, Clone)]
+pub struct OutputDescription {
+    /// Value commitment (32 bytes) - cryptographic commitment to the output value
+    pub cv: [u8; 32],
+    
+    /// Note commitment u-coordinate (32 bytes) - commitment to the new note
+    pub cmu: [u8; 32],
+    
+    /// Ephemeral public key (32 bytes) - Jubjub public key for note encryption
+    pub ephemeral_key: [u8; 32],
+    
+    /// Encrypted ciphertext (580 bytes) - encrypted note for recipient
+    /// Contains: leading byte (1) + diversifier (11) + value (8) + rcm (32) + memo (512) + auth tag (16)
+    #[serde(serialize_with = "serialize_bytes")]
+    pub enc_ciphertext: [u8; 580],
+    
+    /// Outgoing ciphertext (80 bytes) - encrypted note for sender's outgoing viewing key
+    /// Contains: pk_d (32) + esk (32) + auth tag (16)
+    #[serde(serialize_with = "serialize_bytes")]
+    pub out_ciphertext: [u8; 80],
+    
+    /// Zero-knowledge proof (192 bytes) - proves output construction is valid
+    /// Groth16 proof: π_A (48) + π_B (96) + π_C (48)
+    #[serde(serialize_with = "serialize_bytes")]
+    pub zkproof: [u8; 192],
 }
 
-impl std::fmt::Debug for VShieldOutput {
+impl std::fmt::Debug for OutputDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Formatting VShieldOutput
-        writeln!(f, "{{")?;
-        writeln!(f, "    cv: {:?}", hex::encode(&self.cv))?;
-        writeln!(f, "    cmu: {:?}", hex::encode(&self.cmu))?;
-        writeln!(
-            f,
-            "    ephemeral_key: {:?}",
-            hex::encode(&self.ephemeral_key)
-        )?;
-        writeln!(
-            f,
-            "    enc_ciphertext: {:?}",
-            hex::encode(&self.enc_ciphertext)
-        )?;
-        writeln!(
-            f,
-            "    out_ciphertext: {:?}",
-            hex::encode(&self.out_ciphertext)
-        )?;
-        writeln!(f, "    proof: {:?}", hex::encode(&self.proof))?;
+        writeln!(f, "OutputDescription {{")?;
+        writeln!(f, "    cv: {}", hex::encode(&self.cv))?;
+        writeln!(f, "    cmu: {}", hex::encode(&self.cmu))?;
+        writeln!(f, "    ephemeral_key: {}", hex::encode(&self.ephemeral_key))?;
+        writeln!(f, "    enc_ciphertext: {}... ({} bytes)", &hex::encode(&self.enc_ciphertext[..16]), self.enc_ciphertext.len())?;
+        writeln!(f, "    out_ciphertext: {}... ({} bytes)", &hex::encode(&self.out_ciphertext[..16]), self.out_ciphertext.len())?;
+        writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;
         write!(f, "}}")
     }
 }
