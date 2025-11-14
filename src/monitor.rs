@@ -303,9 +303,12 @@ async fn index_block_from_rpc(
             }
         };
         
-        // 1. Store full transaction: 't' + txid → (version + height + raw_tx)
+        // 1. Store full transaction: 't' + txid_reversed → (version + height + raw_tx)
+        // Database uses INTERNAL (reversed) format for txid keys to match Bitcoin Core
+        let mut txid_bytes_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+        
         let mut tx_key = vec![b't'];
-        tx_key.extend_from_slice(&txid_bytes);
+        tx_key.extend_from_slice(&txid_bytes_reversed);
         
         let mut full_data = version.to_le_bytes().to_vec();
         full_data.extend(&height.to_le_bytes());

@@ -245,23 +245,31 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
     let txid_clone = txid.clone();
     
     let result = tokio::task::spawn_blocking(move || {
-        // Transaction key: 't' + txid_bytes (display format)
-        // The txid from URL is in display format, use it directly
+        // Transaction key: 't' + txid_bytes_reversed (internal format)
+        // The txid from URL is in display format, need to reverse for database lookup
         let txid_bytes = match hex::decode(&txid_clone) {
             Ok(bytes) => bytes,
             Err(_) => return Err("Invalid transaction ID format"),
         };
         
-        // Use display format directly (don't reverse)
+        // Try reversed format first (new/correct format)
+        let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
         let mut key = vec![b't'];
-        key.extend_from_slice(&txid_bytes);
+        key.extend_from_slice(&txid_reversed);
         
         let cf_transactions = db_clone.cf_handle("transactions")
             .ok_or("transactions CF not found")?;
         
-        let data = db_clone.get_cf(&cf_transactions, &key)
-            .map_err(|_| "Database error")?
-            .ok_or("Transaction not found")?;
+        let data = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &key) {
+            d
+        } else {
+            // Fallback: try display format (old/incorrect format for migration)
+            let mut key_display = vec![b't'];
+            key_display.extend_from_slice(&txid_bytes);
+            db_clone.get_cf(&cf_transactions, &key_display)
+                .map_err(|_| "Database error")?
+                .ok_or("Transaction not found")?
+        };
         
         // Data format: block_version (4 bytes) + height (4 bytes) + raw_tx_bytes
         if data.len() < 8 {
