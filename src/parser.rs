@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use futures::stream;
 use std::io::{Cursor, Read};
 use byteorder::{LittleEndian, ReadBytesExt};
-use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript};
+use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript, SaplingTxData, SpendDescription, OutputDescription};
 use sha2::{Sha256, Digest};
+use ripemd160::{Ripemd160, Digest as RipemdDigest};
+use bs58;
 
 pub async fn reverse_bytes(array: &[u8]) -> Vec<u8> {
     let mut vec = Vec::from(array);
@@ -41,87 +43,319 @@ pub async fn deserialize_transaction(
     let mut cursor = Cursor::new(data);
     let block_version = cursor.read_u32::<LittleEndian>().unwrap_or_default();
 
-    let version = cursor.read_i16::<LittleEndian>().unwrap_or_default();
+    let version = cursor.read_u16::<LittleEndian>().unwrap_or_default();
+    let tx_type = cursor.read_u16::<LittleEndian>().unwrap_or_default();
+    
     let input_count = read_varint(&mut cursor).await?;
     let mut inputs = Vec::new();
-    for _ in 0..input_count {
+    
+    // Determine transaction type based on PIVX rules
+    // Coinbase: 1 input with prev_hash all zeros, 1 output
+    // Coinstake: 1+ inputs with first prev_hash all zeros, 2+ outputs (first output is empty)
+    // Normal: regular transaction
+    // Sapling: version >= 3
+    
+    let is_sapling = version >= 3;
+    
+    for i in 0..input_count {
         inputs.push(deserialize_tx_in(
             &mut cursor,
             version as u32,
             block_version,
+            i == 0, // is_first_input
         ).await);
     }
 
     let output_count = read_varint(&mut cursor).await?;
+    
+    // Identify transaction type based on PIVX rules:
+    // - Coinbase: first input has coinbase data (prev_hash all zeros), typically has multiple outputs
+    // - Coinstake: first input has coinstake data, first output is ALWAYS empty (0 value, empty script)
+    // - Normal: regular transaction with no coinbase/coinstake inputs
+    
+    let has_coinbase_input = inputs.get(0).map_or(false, |i| i.coinbase.is_some());
+    
     let mut outputs = Vec::new();
-    for _ in 0..output_count {
-        outputs.push(deserialize_tx_out(&mut cursor).await);
+    for i in 0..output_count {
+        outputs.push(deserialize_tx_out(&mut cursor, false).await);
     }
+    
+    // After reading outputs, check if this is coinstake (first output empty)
+    let is_coinstake = has_coinbase_input && output_count > 1 &&
+                       outputs.get(0).map_or(false, |o| o.value == 0 && o.script_pubkey.script.is_empty());
 
     let lock_time = cursor.read_u32::<LittleEndian>()?;
 
+    // For Sapling transactions (version >= 3), parse the Sapling-specific data
+    let sapling_data = if is_sapling {
+        // Read the value_count varint (from old transactions.rs code)
+        let _value_count = read_varint(&mut cursor).await.ok();
+        
+        // Read valueBalance (net value of spends - outputs)
+        let value_balance = cursor.read_i64::<LittleEndian>().ok().unwrap_or(0);
+        
+        // Read vShieldedSpend count and parse each spend (384 bytes each)
+        let spend_count = read_varint(&mut cursor).await.unwrap_or(0);
+        let mut vshielded_spend = Vec::new();
+        for _ in 0..spend_count {
+            // Read each spend field (SPENDDESCRIPTION_SIZE = 384 bytes)
+            let mut cv = [0u8; 32];           // Value commitment
+            let mut anchor = [0u8; 32];       // Merkle tree root
+            let mut nullifier = [0u8; 32];    // Prevents double-spending
+            let mut rk = [0u8; 32];           // Randomized public key
+            let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
+            let mut spend_auth_sig = [0u8; 64]; // Spend authorization signature
+            
+            if cursor.read_exact(&mut cv).is_ok() &&
+               cursor.read_exact(&mut anchor).is_ok() &&
+               cursor.read_exact(&mut nullifier).is_ok() &&
+               cursor.read_exact(&mut rk).is_ok() &&
+               cursor.read_exact(&mut zkproof).is_ok() &&
+               cursor.read_exact(&mut spend_auth_sig).is_ok() {
+                
+                // Reverse byte order for hash fields (network -> display format)
+                cv.reverse();
+                anchor.reverse();
+                nullifier.reverse();
+                rk.reverse();
+                // Note: zkproof and spend_auth_sig are NOT reversed (kept in original order)
+                
+                vshielded_spend.push(SpendDescription {
+                    cv,
+                    anchor,
+                    nullifier,
+                    rk,
+                    zkproof,
+                    spend_auth_sig,
+                });
+            }
+        }
+        
+        // Read vShieldedOutput count and parse each output (948 bytes each)
+        let output_count = read_varint(&mut cursor).await.unwrap_or(0);
+        let mut vshielded_output = Vec::new();
+        for _ in 0..output_count {
+            // Read each output field (OUTPUTDESCRIPTION_SIZE = 948 bytes)
+            let mut cv = [0u8; 32];           // Value commitment
+            let mut cmu = [0u8; 32];          // Note commitment u-coordinate
+            let mut ephemeral_key = [0u8; 32]; // Ephemeral Jubjub public key
+            let mut enc_ciphertext = [0u8; 580]; // Encrypted note for recipient
+            let mut out_ciphertext = [0u8; 80];  // Encrypted note for sender OVK
+            let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
+            
+            if cursor.read_exact(&mut cv).is_ok() &&
+               cursor.read_exact(&mut cmu).is_ok() &&
+               cursor.read_exact(&mut ephemeral_key).is_ok() &&
+               cursor.read_exact(&mut enc_ciphertext).is_ok() &&
+               cursor.read_exact(&mut out_ciphertext).is_ok() &&
+               cursor.read_exact(&mut zkproof).is_ok() {
+                
+                // Reverse byte order for hash fields (network -> display format)
+                cv.reverse();
+                cmu.reverse();
+                ephemeral_key.reverse();
+                // Note: ciphertexts and zkproof are NOT reversed (kept in original order)
+                
+                vshielded_output.push(OutputDescription {
+                    cv,
+                    cmu,
+                    ephemeral_key,
+                    enc_ciphertext,
+                    out_ciphertext,
+                    zkproof,
+                });
+            }
+        }
+        
+        // Read bindingSig (BINDINGSIG_SIZE = 64 bytes)
+        let mut binding_sig = [0u8; 64];
+        if cursor.position() + 64 <= cursor.get_ref().len() as u64 {
+            cursor.read_exact(&mut binding_sig).ok();
+        }
+        
+        // For special transaction types (nType != 0), read extraPayload
+        if tx_type != 0 {
+            // Read extraPayload length and skip it
+            if let Ok(payload_size) = read_varint(&mut cursor).await {
+                cursor.set_position(cursor.position() + payload_size);
+            }
+        }
+        
+        Some(SaplingTxData {
+            value_balance,
+            vshielded_spend,
+            vshielded_output,
+            binding_sig,
+        })
+    } else {
+        None
+    };
+
     Ok(CTransaction {
         txid: txid,
-        version: version,
+        version: version as i16,
         inputs: inputs,
         outputs: outputs,
         lock_time: lock_time,
+        sapling_data,
     })
 }
 
-pub async fn deserialize_tx_in(cursor: &mut Cursor<&[u8]>, tx_ver_out: u32, block_version: u32) -> CTxIn {
-    if block_version < 3 && tx_ver_out == 2 {
-        // It's a coinbase transaction
-        let mut buffer = [0; 26];
-        let _ = cursor.read_exact(&mut buffer); // Ignore errors for coinbase
-        let coinbase = buffer.to_vec();
-        let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
-
+pub async fn deserialize_tx_in(
+    cursor: &mut Cursor<&[u8]>, 
+    _tx_ver_out: u32, 
+    _block_version: u32,
+    _is_first_input: bool,
+) -> CTxIn {
+    // Standard Bitcoin/PIVX transaction input format:
+    // - prev_hash (32 bytes)
+    // - prev_index (4 bytes)
+    // - script_sig_len (varint)
+    // - script_sig (variable)
+    // - sequence (4 bytes)
+    
+    let mut prev_hash = [0u8; 32];
+    let _ = cursor.read_exact(&mut prev_hash);
+    let prev_index = cursor.read_u32::<LittleEndian>().unwrap_or(0);
+    
+    let script_sig = read_script(cursor).await.unwrap_or(Vec::new());
+    let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
+    
+    // Check if this is a coinbase/coinstake (prev_hash is all zeros and prev_index is 0xffffffff)
+    let is_coinbase_or_coinstake = prev_hash.iter().all(|&b| b == 0) && prev_index == 0xffffffff;
+    
+    if is_coinbase_or_coinstake {
         CTxIn {
             prevout: None,
             script_sig: CScript { script: Vec::new() },
             sequence: sequence,
             index: 0,
-            coinbase: Some(coinbase),
+            coinbase: Some(script_sig),  // The coinbase/coinstake data is in the script_sig
         }
     } else {
-        // It's a regular transaction
-        let prevout = deserialize_out_point(cursor).await;
-        let script_sig = read_script(cursor).await.unwrap_or(Vec::new());
-        let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
-        let index = cursor.read_u64::<LittleEndian>().unwrap_or(0);
-
+        // Regular input - reverse the hash for display format
+        let mut hash_display = prev_hash.clone();
+        hash_display.reverse();
+        
         CTxIn {
-            prevout: Some(prevout),
+            prevout: Some(COutPoint {
+                hash: hex::encode(&hash_display),
+                n: prev_index,
+            }),
             script_sig: CScript { script: script_sig },
             sequence: sequence,
-            index: index,
+            index: 0,
             coinbase: None,
         }
     }
 }
 
-pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>) -> CTxOut {
+pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty: bool) -> CTxOut {
+    // Standard Bitcoin/PIVX transaction output format:
+    // - value (8 bytes, i64)
+    // - script_pubkey_len (varint)
+    // - script_pubkey (variable)
+    
     let value = cursor.read_i64::<LittleEndian>().unwrap_or(0);
-    let script_length = read_varint(cursor).await;
-    let script_len = script_length.unwrap_or(0) as usize;
-    let mut script_pubkey = vec![0; script_len];
-    let _ = cursor.read_exact(&mut script_pubkey); // Ignore errors
-    let index = cursor.read_u64::<LittleEndian>().unwrap_or(0);
-
-    let mut address_data = Vec::new();
-    let _ = cursor.read_to_end(&mut address_data); // Ignore errors
-    let address = String::from_utf8(address_data).unwrap_or_default();
+    let script_pubkey = read_script(cursor).await.unwrap_or(Vec::new());
+    
+    // Extract address from script if it's not empty
+    let address = if script_pubkey.is_empty() {
+        Vec::new()
+    } else {
+        extract_address_from_script(&script_pubkey)
+    };
 
     CTxOut {
         value: value,
         script_length: script_pubkey.len() as i32,
-        script_pubkey: CScript {
-            script: script_pubkey,
-        },
-        index: index,
-        address: vec![address],
+        script_pubkey: CScript { script: script_pubkey },
+        index: 0,
+        address: address,
     }
+}
+
+fn extract_address_from_script(script: &[u8]) -> Vec<String> {
+    // P2CS (Cold Stake): 76a97b63d114{20 byte staker}6714{20 byte owner}6888ac (51 bytes)
+    // Format: OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY(0xd1) PUSH20 <staker> OP_ELSE PUSH20 <owner> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+    if script.len() == 51 && 
+       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b && 
+       script[3] == 0x63 && script[4] == 0xd1 && script[5] == 0x14 &&
+       script[26] == 0x67 && script[27] == 0x14 &&
+       script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
+        let staker_hash = &script[6..26];
+        let owner_hash = &script[28..48];
+        
+        let mut addresses = Vec::new();
+        // Staker address (version 0x3f = 63)
+        if let Some(staker_addr) = encode_pivx_address(staker_hash, 63) {
+            addresses.push(staker_addr);
+        }
+        // Owner address (version 0x1e = 30)
+        if let Some(owner_addr) = encode_pivx_address(owner_hash, 30) {
+            addresses.push(owner_addr);
+        }
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
+    
+    // P2PKH: 76a914{20 byte pubkey hash}88ac
+    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14 
+        && script[23] == 0x88 && script[24] == 0xac {
+        let pubkey_hash = &script[3..23];
+        if let Some(address) = encode_pivx_address(pubkey_hash, 30) {
+            return vec![address];
+        }
+    }
+    // P2SH: a914{20 byte script hash}87
+    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+        let script_hash = &script[2..22];
+        if let Some(address) = encode_pivx_address(script_hash, 13) {
+            return vec![address];
+        }
+    }
+    // P2PK: {push_opcode}{pubkey} OP_CHECKSIG (0xac)
+    // Compressed pubkey: 0x21 (push 33) + 33 bytes + 0xac = 35 bytes total
+    // Uncompressed pubkey: 0x41 (push 65) + 65 bytes + 0xac = 67 bytes total
+    if script.len() == 35 && script[0] == 0x21 && script[34] == 0xac {
+        let pubkey = &script[1..34];
+        
+        // Hash the public key: RIPEMD160(SHA256(pubkey))
+        let sha_hash = Sha256::digest(pubkey);
+        let ripemd_hash = Ripemd160::digest(&sha_hash);
+        
+        if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
+            return vec![address];
+        }
+    }
+    if script.len() == 67 && script[0] == 0x41 && script[66] == 0xac {
+        let pubkey = &script[1..66];
+        
+        // Hash the public key: RIPEMD160(SHA256(pubkey))
+        let sha_hash = Sha256::digest(pubkey);
+        let ripemd_hash = Ripemd160::digest(&sha_hash);
+        
+        if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
+            return vec![address];
+        }
+    }
+    Vec::new()
+}
+
+fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
+    // PIVX address encoding: version byte + 20-byte hash + 4-byte checksum
+    let mut data = Vec::with_capacity(25);
+    data.push(version);
+    data.extend_from_slice(hash);
+    
+    // Calculate checksum: first 4 bytes of SHA256(SHA256(version + hash))
+    let first_hash = Sha256::digest(&data);
+    let second_hash = Sha256::digest(&first_hash);
+    data.extend_from_slice(&second_hash[..4]);
+    
+    // Encode to base58
+    Some(bs58::encode(&data).into_string())
 }
 
 pub async fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {

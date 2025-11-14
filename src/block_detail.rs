@@ -37,7 +37,84 @@ pub struct TransactionSummary {
     pub value_in: f64,
     pub value_out: f64,
     pub fees: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reward: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sapling: Option<SaplingInfo>,
 }
+
+/// Detailed Sapling transaction information exposed via API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaplingInfo {
+    /// Net value moved between shielded and transparent pools (PIV)
+    /// Positive: unshielding (shield → transparent)
+    /// Negative: shielding (transparent → shield)
+    pub value_balance: f64,
+    
+    /// Number of shielded spends (inputs from shielded pool)
+    pub shielded_spend_count: u64,
+    
+    /// Number of shielded outputs (new notes in shielded pool)
+    pub shielded_output_count: u64,
+    
+    /// Binding signature proving balance (hex)
+    pub binding_sig: String,
+    
+    /// Detailed spend descriptions (optional, for full tx details)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spends: Option<Vec<SpendInfo>>,
+    
+    /// Detailed output descriptions (optional, for full tx details)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<OutputInfo>>,
+}
+
+/// Information about a single shielded spend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpendInfo {
+    /// Value commitment (hex) - commitment to the value being spent
+    pub cv: String,
+    
+    /// Merkle tree anchor (hex) - root at some past block height
+    pub anchor: String,
+    
+    /// Nullifier (hex) - prevents double-spending
+    pub nullifier: String,
+    
+    /// Randomized public key (hex) - for signature verification
+    pub rk: String,
+    
+    /// Zero-knowledge proof (hex) - Groth16 proof (192 bytes)
+    pub zkproof: String,
+    
+    /// Spend authorization signature (hex) - authorizes this spend
+    pub spend_auth_sig: String,
+}
+
+/// Information about a single shielded output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputInfo {
+    /// Value commitment (hex) - commitment to output value
+    pub cv: String,
+    
+    /// Note commitment u-coordinate (hex) - commitment to the new note
+    pub cmu: String,
+    
+    /// Ephemeral public key (hex) - for note encryption
+    pub ephemeral_key: String,
+    
+    /// Encrypted note for recipient (hex) - 580 bytes
+    pub enc_ciphertext: String,
+    
+    /// Encrypted note for sender (hex) - 80 bytes  
+    pub out_ciphertext: String,
+    
+    /// Zero-knowledge proof (hex) - Groth16 proof (192 bytes)
+    pub zkproof: String,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxInput {
@@ -238,19 +315,26 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                     break;
                 }
                 
-                // Value is the txid in hex format
+                // Value is the txid in hex format (display format)
                 if let Ok(txid_str) = std::str::from_utf8(&value) {
                     // Look up the full transaction data
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
+                        // The 't' key uses reversed byte order for storage
+                        let reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+                        
                         let mut tx_key = vec![b't'];
-                        tx_key.extend_from_slice(&txid_bytes);
+                        tx_key.extend_from_slice(&reversed);
                         
                         if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
                                 enrich_transaction_inputs(db, &cf_transactions, &mut tx);
                                 transactions.push(tx);
+                            } else {
+                                eprintln!("Failed to parse transaction: {}", txid_str);
                             }
+                        } else {
+                            eprintln!("Transaction data not found for txid: {}", txid_str);
                         }
                     }
                 }
@@ -265,6 +349,8 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
 }
 
 fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary) {
+    use crate::parser::deserialize_transaction;
+    
     for input in &mut tx.vin {
         // Skip coinbase inputs
         if input.coinbase.is_some() {
@@ -274,30 +360,31 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
         // Get the previous transaction if we have txid
         if let Some(ref prev_txid) = input.txid {
             if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
+                // The 't' key uses display format directly (not reversed)
                 let mut prev_key = vec![b't'];
                 prev_key.extend_from_slice(&prev_txid_bytes);
                 
                 if let Ok(Some(prev_data)) = db.get_cf(cf_transactions, &prev_key) {
                     if prev_data.len() >= 8 {
-                        let prev_tx_json = &prev_data[8..];
-                        if let Ok(prev_tx) = serde_json::from_slice::<serde_json::Value>(prev_tx_json) {
+                        let prev_tx_data = &prev_data[8..]; // Skip block_version + height
+                        
+                        // Prepend dummy header for parser
+                        let mut data_with_header = vec![0u8; 4];
+                        data_with_header.extend_from_slice(prev_tx_data);
+                        
+                        // Parse the previous transaction
+                        if let Ok(prev_tx) = tokio::runtime::Handle::current().block_on(async {
+                            deserialize_transaction(&data_with_header).await
+                        }) {
                             // Extract the output at vout index
                             if let Some(vout_idx) = input.vout {
-                                if let Some(vout_array) = prev_tx.get("vout").and_then(|v| v.as_array()) {
-                                    if let Some(output) = vout_array.get(vout_idx as usize) {
-                                        // Add value from the output
-                                        if let Some(value) = output.get("value").and_then(|v| v.as_f64()) {
-                                            input.value = Some(value);
-                                        }
-                                        
-                                        // Add address from the output
-                                        if let Some(script_pubkey) = output.get("scriptPubKey") {
-                                            if let Some(addresses) = script_pubkey.get("addresses").and_then(|a| a.as_array()) {
-                                                if let Some(first_addr) = addresses.get(0).and_then(|a| a.as_str()) {
-                                                    input.address = Some(first_addr.to_string());
-                                                }
-                                            }
-                                        }
+                                if let Some(output) = prev_tx.outputs.get(vout_idx as usize) {
+                                    // Add value from the output
+                                    input.value = Some(output.value as f64 / 100_000_000.0);
+                                    
+                                    // Add address from the output
+                                    if !output.address.is_empty() {
+                                        input.address = output.address.get(0).cloned();
                                     }
                                 }
                             }
@@ -313,18 +400,24 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
         .filter_map(|i| i.value)
         .sum::<f64>();
     
-    // Recalculate fees
-    if tx.value_in > 0.0 {
-        let calculated_fee = tx.value_in - tx.value_out;
-        tx.fees = if calculated_fee < 0.0 {
-            // Coinstake transaction (outputs include reward)
-            0.0
-        } else {
-            calculated_fee
-        };
+    // Calculate fees and rewards based on transaction type
+    if let Some(ref tx_type) = tx.tx_type {
+        if tx_type == "coinstake" {
+            // Coinstake: reward is output - input (stake reward)
+            tx.reward = Some(tx.value_out - tx.value_in);
+            tx.fees = 0.0;
+        } else if tx_type == "coinbase" {
+            // Coinbase: reward already set to value_out in parse_transaction_binary
+            tx.fees = 0.0;
+        }
     } else {
-        // Coinbase transaction
-        tx.fees = 0.0;
+        // Normal transaction: calculate fees
+        if tx.value_in > 0.0 {
+            let calculated_fee = tx.value_in - tx.value_out;
+            tx.fees = if calculated_fee < 0.0 { 0.0 } else { calculated_fee };
+        } else {
+            tx.fees = 0.0;
+        }
     }
 }
 
@@ -402,21 +495,31 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
         .filter_map(|i| i.value)
         .sum::<f64>();
     
-    // Calculate fees
+    // Calculate fees and identify transaction type (fallback parsing)
     // For coinstake transactions (value_out > value_in), the "fee" would be negative
     // because the output includes staking rewards. We should report 0 fee for these.
     // For regular transactions and coinbase, calculate normally.
-    let fees = if value_in > 0.0 {
-        let calculated_fee = value_in - value_out;
-        if calculated_fee < 0.0 {
-            // This is a coinstake (outputs include reward)
-            0.0
+    let has_coinbase_input = vin.iter().any(|i| i.coinbase.is_some());
+    let first_output_empty = vout.get(0).map_or(false, |o| o.value == 0.0 && o.addresses.is_empty());
+    
+    let (tx_type, reward, fees) = if has_coinbase_input {
+        if first_output_empty && vout.len() > 1 {
+            // Coinstake: reward is output - input
+            let coinstake_reward = value_out - value_in;
+            (Some("coinstake".to_string()), Some(coinstake_reward), 0.0)
         } else {
-            calculated_fee
+            // Coinbase: reward is total output
+            (Some("coinbase".to_string()), Some(value_out), 0.0)
         }
     } else {
-        // Coinbase transaction (no inputs)
-        0.0
+        // Normal transaction
+        let calculated_fee = if value_in > 0.0 {
+            let fee = value_in - value_out;
+            if fee < 0.0 { 0.0 } else { fee }
+        } else {
+            0.0
+        };
+        (None, None, calculated_fee)
     };
     
     Ok(TransactionSummary {
@@ -429,21 +532,135 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
         value_in,
         value_out,
         fees,
+        tx_type,
+        reward,
+        sapling: None,  // JSON-based parsing doesn't include Sapling details
     })
 }
 
-fn parse_transaction_binary(_data: &[u8]) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
-    // TODO: Implement binary transaction parsing
-    // For now, return a minimal transaction
+fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
+    use crate::parser::deserialize_transaction;
+    
+    // Parse using the binary parser
+    // Need to prepend 4-byte dummy block_version header since parser expects it
+    let mut data_with_header = vec![0u8; 4]; // Dummy block_version
+    data_with_header.extend_from_slice(data);
+    
+    // Use blocking runtime since this is called from a blocking context
+    let tx = tokio::runtime::Handle::current()
+        .block_on(async {
+            deserialize_transaction(&data_with_header).await
+        })?;
+    
+    // Convert inputs
+    let mut vin = Vec::new();
+    for input in &tx.inputs {
+        if let Some(coinbase_data) = &input.coinbase {
+            vin.push(TxInput {
+                txid: None,
+                vout: None,
+                address: None,
+                value: None,
+                coinbase: Some(hex::encode(coinbase_data)),
+            });
+        } else if let Some(prevout) = &input.prevout {
+            vin.push(TxInput {
+                txid: Some(prevout.hash.clone()),
+                vout: Some(prevout.n),
+                address: None, // Will be enriched later
+                value: None,   // Will be enriched later
+                coinbase: None,
+            });
+        }
+    }
+    
+    // Convert outputs
+    let mut vout = Vec::new();
+    let mut value_out = 0.0;
+    for (idx, output) in tx.outputs.iter().enumerate() {
+        let value_piv = output.value as f64 / 100_000_000.0;
+        value_out += value_piv;
+        
+        vout.push(TxOutput {
+            n: idx as u64,
+            value: value_piv,
+            addresses: output.address.clone(),
+            spent: false,
+        });
+    }
+    
+    // Identify transaction type based on PIVX rules:
+    // - Coinbase: first input has coinbase data, first output has value (standard mining reward)
+    // - Coinstake: first output is empty (0 value, 0-length script), has regular inputs
+    // - Normal: regular transaction
+    let has_coinbase_input = vin.get(0).map_or(false, |i| i.coinbase.is_some());
+    let first_output_empty = vout.get(0).map_or(false, |o| 
+        o.value == 0.0 && o.addresses.is_empty()
+    );
+    
+    let (tx_type, reward) = if has_coinbase_input {
+        // Has coinbase input
+        if first_output_empty && vout.len() > 1 {
+            // Should not happen in practice (coinbase with empty output)
+            (Some("coinbase".to_string()), Some(value_out))
+        } else {
+            // Standard coinbase: reward is total output value
+            (Some("coinbase".to_string()), Some(value_out))
+        }
+    } else if first_output_empty && vout.len() > 1 {
+        // Coinstake: no coinbase input, but empty first output
+        // Reward will be calculated after enrichment (output - input)
+        (Some("coinstake".to_string()), None)
+    } else {
+        // Normal transaction
+        (None, None)
+    };
+    
+    // Convert Sapling data if present
+    let sapling = tx.sapling_data.as_ref().map(|sap| {
+        // Convert spends to API format
+        let spends = sap.vshielded_spend.iter().map(|spend| SpendInfo {
+            cv: hex::encode(&spend.cv),
+            anchor: hex::encode(&spend.anchor),
+            nullifier: hex::encode(&spend.nullifier),
+            rk: hex::encode(&spend.rk),
+            zkproof: hex::encode(&spend.zkproof),
+            spend_auth_sig: hex::encode(&spend.spend_auth_sig),
+        }).collect();
+        
+        // Convert outputs to API format
+        let outputs = sap.vshielded_output.iter().map(|output| OutputInfo {
+            cv: hex::encode(&output.cv),
+            cmu: hex::encode(&output.cmu),
+            ephemeral_key: hex::encode(&output.ephemeral_key),
+            enc_ciphertext: hex::encode(&output.enc_ciphertext),
+            out_ciphertext: hex::encode(&output.out_ciphertext),
+            zkproof: hex::encode(&output.zkproof),
+        }).collect();
+        
+        SaplingInfo {
+            value_balance: sap.value_balance as f64 / 100_000_000.0, // Convert satoshis to PIV
+            shielded_spend_count: sap.vshielded_spend.len() as u64,
+            shielded_output_count: sap.vshielded_output.len() as u64,
+            binding_sig: hex::encode(&sap.binding_sig),
+            spends: Some(spends),
+            outputs: Some(outputs),
+        }
+    });
+    
     Ok(TransactionSummary {
-        txid: "unknown".to_string(),
-        version: 1,
-        size: _data.len(),
-        locktime: 0,
-        vin: vec![],
-        vout: vec![],
-        value_in: 0.0,
-        value_out: 0.0,
-        fees: 0.0,
+        txid: tx.txid.clone(),
+        version: tx.version,
+        size: data.len(),
+        locktime: tx.lock_time,
+        vin,
+        vout,
+        value_in: 0.0, // Will be calculated after enrichment
+        value_out,
+        fees: 0.0,     // Will be calculated after enrichment
+        tx_type,
+        reward,
+        sapling,
     })
 }
+

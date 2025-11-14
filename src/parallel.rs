@@ -112,10 +112,23 @@ pub async fn process_files_parallel(
     
     println!("All files processed!");
     
-    // SECOND PASS: Resolve block heights by building the chain
-    println!("\n🔗 Phase 2: Resolving block heights (building chain)...");
-    resolve_block_heights(&db_arc).await?;
-    println!("✅ Chain building complete!");
+    // Check if canonical chain metadata already exists (from leveldb phase)
+    let cf_metadata = db_arc.cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
+    
+    // Check if genesis block exists in metadata (height 0)
+    let has_canonical_metadata = db_arc.get_cf(&cf_metadata, &0i32.to_le_bytes())?.is_some();
+    
+    if has_canonical_metadata {
+        println!("\n✅ Canonical chain metadata already exists (from leveldb)");
+        println!("   Skipping chain resolution - using pre-built canonical chain");
+    } else {
+        // FALLBACK: Only resolve if no canonical metadata exists
+        println!("\n🔗 Phase 2: Resolving block heights (building chain)...");
+        println!("   (No leveldb metadata found, building chain from blk files)");
+        resolve_block_heights(&db_arc).await?;
+        println!("✅ Chain building complete!");
+    }
     
     Ok(())
 }

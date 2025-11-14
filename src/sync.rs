@@ -202,7 +202,7 @@ async fn run_initial_sync_leveldb(
     
     // Store canonical chain metadata in our DB
     // This will guide the parallel block processor to know which blocks to index
-    println!("\n� Storing canonical chain metadata...");
+    println!("\n📦 Storing canonical chain metadata...");
     
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     
@@ -212,6 +212,12 @@ async fn run_initial_sync_leveldb(
         let mut display_hash = hash.clone();
         display_hash.reverse();
         db.put_cf(&cf_metadata, &height_key, &display_hash)?;
+        
+        // ALSO store the reverse mapping: 'h' + internal_hash → height
+        // This allows blk file processing to look up heights efficiently
+        let mut hash_key = vec![b'h'];
+        hash_key.extend_from_slice(hash);  // Internal format (not reversed)
+        db.put_cf(&cf_metadata, &hash_key, &height_key)?;
         
         if *height % 500_000 == 0 {
             println!("  Stored metadata for height {}", height);

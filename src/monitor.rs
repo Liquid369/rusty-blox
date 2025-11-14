@@ -209,15 +209,35 @@ fn index_block_from_rpc(
         // With verbosity=1, tx_val is just a txid string
         if let Some(txid) = tx_val.as_str() {
             if let Ok(txid_bytes) = hex::decode(txid) {
-                // 1. Minimal transaction storage: 't' + txid → (version + height)
-                // Full transaction data will be fetched on-demand later
-                let mut tx_key = vec![b't'];
-                tx_key.extend_from_slice(&txid_bytes);
+                // Fetch full raw transaction data
+                let tx_response = client
+                    .post(&url)
+                    .basic_auth(&user, Some(&pass))
+                    .json(&serde_json::json!({
+                        "jsonrpc": "1.0",
+                        "id": "rustyblox",
+                        "method": "getrawtransaction",
+                        "params": [txid, 0]  // 0 = raw hex, not JSON
+                    }))
+                    .send();
                 
-                let mut minimal_data = version.to_le_bytes().to_vec();
-                minimal_data.extend(&height.to_le_bytes());
-                
-                db.put_cf(&cf_transactions, &tx_key, &minimal_data)?;
+                if let Ok(tx_resp) = tx_response {
+                    if let Ok(tx_json) = tx_resp.json::<Value>() {
+                        if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
+                            if let Ok(raw_tx_bytes) = hex::decode(raw_hex) {
+                                // 1. Store full transaction: 't' + txid → (version + height + raw_tx)
+                                let mut tx_key = vec![b't'];
+                                tx_key.extend_from_slice(&txid_bytes);
+                                
+                                let mut full_data = version.to_le_bytes().to_vec();
+                                full_data.extend(&height.to_le_bytes());
+                                full_data.extend(&raw_tx_bytes);
+                                
+                                db.put_cf(&cf_transactions, &tx_key, &full_data)?;
+                            }
+                        }
+                    }
+                }
                 
                 // 2. Block transaction index: 'B' + height + tx_index → txid
                 let mut block_tx_key = vec![b'B'];

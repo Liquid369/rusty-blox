@@ -300,14 +300,30 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
 
         let mut block_header = parse_block_header_sync(&header_buffer, header_size)?;
         
-        // FAST SYNC: Store ALL blocks first, resolve heights in second pass
-        // This allows processing blocks that are out-of-order in blk files
+        // Try to get height from chain_metadata (if leveldb was parsed)
+        let cf_metadata = db.cf_handle("chain_metadata");
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
             // Genesis block has height 0
             Some(0)
+        } else if let Some(cf) = cf_metadata {
+            // Try to look up height from chain_metadata using 'h' + block_hash
+            let mut height_key = vec![b'h'];
+            height_key.extend_from_slice(&block_header.block_hash);
+            
+            match db.get_cf(&cf, &height_key) {
+                Ok(Some(height_bytes)) if height_bytes.len() == 4 => {
+                    // Found height in metadata
+                    let height = i32::from_le_bytes([
+                        height_bytes[0],
+                        height_bytes[1], 
+                        height_bytes[2],
+                        height_bytes[3]
+                    ]);
+                    Some(height)
+                }
+                _ => None  // Height not in metadata yet
+            }
         } else {
-            // For now, store block without height - will be resolved in second pass
-            // This prevents skipping 95% of blocks due to out-of-order storage
             None
         };
         
@@ -477,7 +493,7 @@ fn get_header_size(ver_as_int: u32) -> usize {
     }
 }
 
-fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlockHeader, MyError> {
+pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlockHeader, MyError> {
     if slice.len() < 80 {
         return Err(MyError::new("Header too short"));
     }

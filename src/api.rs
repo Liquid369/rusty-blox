@@ -245,12 +245,14 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
     let txid_clone = txid.clone();
     
     let result = tokio::task::spawn_blocking(move || {
-        // Transaction key: 't' + txid_hex_bytes
+        // Transaction key: 't' + txid_bytes (display format)
+        // The txid from URL is in display format, use it directly
         let txid_bytes = match hex::decode(&txid_clone) {
             Ok(bytes) => bytes,
             Err(_) => return Err("Invalid transaction ID format"),
         };
         
+        // Use display format directly (don't reverse)
         let mut key = vec![b't'];
         key.extend_from_slice(&txid_bytes);
         
@@ -261,73 +263,137 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
             .map_err(|_| "Database error")?
             .ok_or("Transaction not found")?;
         
-        // Data format: version (4 bytes) + height (4 bytes) + JSON
+        // Data format: block_version (4 bytes) + height (4 bytes) + raw_tx_bytes
         if data.len() < 8 {
             return Err("Invalid transaction data");
         }
         
+        let _block_version = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4]));
         let block_height = i32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
-        let tx_json = &data[8..];
         
-        let mut tx: serde_json::Value = serde_json::from_slice(tx_json)
-            .map_err(|_| "Failed to parse transaction data")?;
+        // Transaction data starts at byte 8 (after block_version and height)
+        // We need to prepend a dummy block_version for the parser
+        let mut tx_data_with_header = vec![0u8; 4]; // Dummy block_version
+        tx_data_with_header.extend_from_slice(&data[8..]); // Actual tx data
         
-        // Enrich inputs with value and address from previous transaction outputs
-        if let Some(obj) = tx.as_object_mut() {
-            obj.insert("block_height".to_string(), serde_json::json!(block_height));
-            
-            // Process vin array to add value and address
-            if let Some(vin_array) = obj.get_mut("vin").and_then(|v| v.as_array_mut()) {
-                for vin in vin_array.iter_mut() {
-                    if let Some(vin_obj) = vin.as_object_mut() {
-                        // Skip coinbase inputs
-                        if vin_obj.contains_key("coinbase") {
-                            continue;
-                        }
-                        
-                        // Get the previous txid and vout index
-                        let prev_txid = vin_obj.get("txid").and_then(|v| v.as_str());
-                        let vout_index = vin_obj.get("vout").and_then(|v| v.as_u64());
-                        
-                        if let (Some(prev_txid), Some(vout_idx)) = (prev_txid, vout_index) {
-                            // Look up the previous transaction
-                            if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
-                                let mut prev_key = vec![b't'];
-                                prev_key.extend_from_slice(&prev_txid_bytes);
-                                
-                                if let Ok(Some(prev_data)) = db_clone.get_cf(&cf_transactions, &prev_key) {
-                                    if prev_data.len() >= 8 {
-                                        let prev_tx_json = &prev_data[8..];
-                                        if let Ok(prev_tx) = serde_json::from_slice::<serde_json::Value>(prev_tx_json) {
-                                            // Extract the output at vout_idx
-                                            if let Some(vout_array) = prev_tx.get("vout").and_then(|v| v.as_array()) {
-                                                if let Some(output) = vout_array.get(vout_idx as usize) {
-                                                    // Add value from the output
-                                                    if let Some(value) = output.get("value") {
-                                                        vin_obj.insert("value".to_string(), value.clone());
-                                                    }
-                                                    
-                                                    // Add address from the output
-                                                    if let Some(script_pubkey) = output.get("scriptPubKey") {
-                                                        if let Some(addresses) = script_pubkey.get("addresses").and_then(|a| a.as_array()) {
-                                                            if let Some(first_addr) = addresses.get(0) {
-                                                                vin_obj.insert("address".to_string(), first_addr.clone());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+        // Parse the binary transaction data
+        use crate::parser::deserialize_transaction;
+        let tx = tokio::runtime::Handle::current().block_on(async {
+            deserialize_transaction(&tx_data_with_header).await
+        }).map_err(|_| "Failed to parse transaction")?;
+        
+        // Convert to JSON format expected by frontend
+        let mut vin = Vec::new();
+        for (idx, input) in tx.inputs.iter().enumerate() {
+            if let Some(coinbase_data) = &input.coinbase {
+                // Coinbase transaction
+                vin.push(serde_json::json!({
+                    "coinbase": hex::encode(coinbase_data),
+                    "sequence": input.sequence,
+                }));
+            } else if let Some(prevout) = &input.prevout {
+                // Regular input - look up previous output for value and address
+                let mut input_json = serde_json::json!({
+                    "txid": prevout.hash.clone(),
+                    "vout": prevout.n,
+                    "sequence": input.sequence,
+                    "scriptSig": {
+                        "hex": hex::encode(&input.script_sig.script)
+                    }
+                });
+                
+                // Try to get value and address from previous transaction
+                if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
+                    // Reverse for database lookup (same as main tx lookup)
+                    let reversed: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
+                    let mut prev_key = vec![b't'];
+                    prev_key.extend_from_slice(&reversed);
+                    
+                    if let Ok(Some(prev_data)) = db_clone.get_cf(&cf_transactions, &prev_key) {
+                        if prev_data.len() >= 8 {
+                            // Parse previous transaction (skip block_version + height)
+                            let mut prev_tx_data_with_header = vec![0u8; 4];
+                            prev_tx_data_with_header.extend_from_slice(&prev_data[8..]);
+                            
+                            if let Ok(prev_tx) = tokio::runtime::Handle::current().block_on(async {
+                                deserialize_transaction(&prev_tx_data_with_header).await
+                            }) {
+                                if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
+                                    input_json["value"] = serde_json::json!(output.value as f64 / 100_000_000.0);
+                                    if !output.address.is_empty() {
+                                        input_json["address"] = serde_json::json!(output.address[0].clone());
                                     }
                                 }
                             }
                         }
                     }
                 }
+                
+                vin.push(input_json);
             }
         }
         
-        Ok(tx)
+        let mut vout = Vec::new();
+        for (idx, output) in tx.outputs.iter().enumerate() {
+            // output.address is already Vec<String>, so just use it directly
+            vout.push(serde_json::json!({
+                "value": output.value as f64 / 100_000_000.0,
+                "n": idx,
+                "scriptPubKey": {
+                    "hex": hex::encode(&output.script_pubkey.script),
+                    "addresses": output.address  // Already a Vec<String>
+                }
+            }));
+        }
+        
+        let tx_size = data.len() - 8; // Subtract the 8 header bytes
+        
+        // Convert Sapling data if present with detailed spend/output info
+        let sapling_json = tx.sapling_data.as_ref().map(|sap| {
+            let spends: Vec<_> = sap.vshielded_spend.iter().map(|spend| serde_json::json!({
+                "cv": hex::encode(&spend.cv),
+                "anchor": hex::encode(&spend.anchor),
+                "nullifier": hex::encode(&spend.nullifier),
+                "rk": hex::encode(&spend.rk),
+                "zkproof": hex::encode(&spend.zkproof),
+                "spend_auth_sig": hex::encode(&spend.spend_auth_sig),
+            })).collect();
+            
+            let outputs: Vec<_> = sap.vshielded_output.iter().map(|output| serde_json::json!({
+                "cv": hex::encode(&output.cv),
+                "cmu": hex::encode(&output.cmu),
+                "ephemeral_key": hex::encode(&output.ephemeral_key),
+                "enc_ciphertext": hex::encode(&output.enc_ciphertext),
+                "out_ciphertext": hex::encode(&output.out_ciphertext),
+                "zkproof": hex::encode(&output.zkproof),
+            })).collect();
+            
+            serde_json::json!({
+                "value_balance": sap.value_balance as f64 / 100_000_000.0,
+                "shielded_spend_count": sap.vshielded_spend.len(),
+                "shielded_output_count": sap.vshielded_output.len(),
+                "binding_sig": hex::encode(&sap.binding_sig),
+                "spends": spends,
+                "outputs": outputs,
+            })
+        });
+        
+        let mut tx_json = serde_json::json!({
+            "txid": tx.txid,
+            "version": tx.version,
+            "locktime": tx.lock_time,
+            "vin": vin,
+            "vout": vout,
+            "size": tx_size,
+            "block_height": block_height,
+        });
+        
+        // Add sapling field if present
+        if let Some(sapling) = sapling_json {
+            tx_json["sapling"] = sapling;
+        }
+        
+        Ok(tx_json)
     })
     .await;
     
@@ -509,9 +575,16 @@ async fn get_block_from_db(db: &Arc<DB>, height_key: &[u8]) -> Result<Json<crate
     let height_key = height_key.to_vec();
 
     tokio::task::spawn_blocking(move || {
-        // Get block hash from height
+        // Extract height from key ('h' prefix + 4-byte i32)
+        if height_key.len() < 5 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let height_bytes = &height_key[1..5];
+        let height = i32::from_le_bytes(height_bytes.try_into().unwrap());
+        
+        // Get block hash from chain_metadata
         let cf_metadata = db_clone.cf_handle("chain_metadata").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let block_hash = db_clone.get_cf(&cf_metadata, &height_key)
+        let block_hash = db_clone.get_cf(&cf_metadata, height_bytes)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?;
         
@@ -519,13 +592,86 @@ async fn get_block_from_db(db: &Arc<DB>, height_key: &[u8]) -> Result<Json<crate
         let cf_blocks = db_clone.cf_handle("blocks").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
         // Reverse the hash back to internal format for block lookup
         let internal_hash: Vec<u8> = block_hash.iter().rev().cloned().collect();
-        let block_data = db_clone.get_cf(&cf_blocks, &internal_hash)
+        let header_bytes = db_clone.get_cf(&cf_blocks, &internal_hash)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
             .ok_or(StatusCode::NOT_FOUND)?;
         
-        serde_json::from_slice::<crate::types::Block>(&block_data)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            .map(Json)
+        // Parse block header
+        use crate::blocks::parse_block_header_sync;
+        let header = parse_block_header_sync(&header_bytes, header_bytes.len())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        
+        // Get transaction IDs for this block
+        let cf_transactions = db_clone.cf_handle("transactions").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut tx_ids = Vec::new();
+        
+        // Query all entries starting with 'B' + height
+        let mut block_tx_prefix = vec![b'B'];
+        block_tx_prefix.extend_from_slice(height_bytes);
+        
+        let iter = db_clone.prefix_iterator_cf(&cf_transactions, &block_tx_prefix);
+        for item in iter {
+            match item {
+                Ok((key, value)) => {
+                    // Verify this is for our block height
+                    if key.len() >= 5 && &key[0..5] == block_tx_prefix.as_slice() {
+                        // Value is the txid as a hex string
+                        if let Ok(txid_str) = String::from_utf8(value.to_vec()) {
+                            tx_ids.push(txid_str);
+                        }
+                    } else {
+                        break; // Past our prefix
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        
+        // Calculate difficulty from nBits
+        // Simplified - just use a constant approximation
+        let difficulty = if header.n_bits != 0 {
+            let compact = header.n_bits;
+            let size = (compact >> 24) as u32;
+            let word = compact & 0x00ffffff;
+            
+            let target = if size <= 3 {
+                (word >> (8 * (3 - size))) as f64
+            } else {
+                (word as f64) * (256.0_f64).powi((size - 3) as i32)
+            };
+            
+            if target > 0.0 {
+                // Approximate difficulty
+                (256.0_f64).powi(26) / target
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        
+        // Get previous block hash (if not genesis)
+        let previousblockhash = if header.hash_prev_block != [0u8; 32] {
+            Some(hex::encode(header.hash_prev_block.iter().rev().cloned().collect::<Vec<u8>>()))
+        } else {
+            None
+        };
+        
+        // Build Block struct
+        let block = crate::types::Block {
+            hash: hex::encode(block_hash),
+            height: height as u32,
+            version: header.n_version,
+            merkleroot: hex::encode(header.hash_merkle_root.iter().rev().cloned().collect::<Vec<u8>>()),
+            time: header.n_time,
+            nonce: header.n_nonce,
+            bits: format!("{:08x}", header.n_bits),
+            difficulty,
+            tx: tx_ids,
+            previousblockhash,
+        };
+        
+        Ok(Json(block))
     }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 

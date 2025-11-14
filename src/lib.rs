@@ -6,6 +6,8 @@ use std::ffi::c_void;
 pub mod chainwork;
 pub mod canonical_chain;
 pub mod leveldb_index;
+pub mod parser;
+pub mod types;
 
 #[repr(C)]
 pub struct sph_blake_big_context {

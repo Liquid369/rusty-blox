@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, SeekFrom};
 use rocksdb::DB;
 use crate::batch_writer::BatchWriter;
 use crate::db_utils::{perform_rocksdb_get, perform_rocksdb_put, perform_rocksdb_del};
-use crate::types::{CTransaction, CTxIn, CTxOut, AddressType, CScript, VShieldSpend, VShieldOutput, SaplingTxData, COutPoint};
+use crate::types::{CTransaction, CTxIn, CTxOut, AddressType, CScript, SpendDescription, OutputDescription, SaplingTxData, COutPoint};
 use crate::address::{scriptpubkey_to_address, address_type_to_string};
 use crate::parser::{serialize_utxos, deserialize_utxos, deserialize_transaction, reverse_bytes};
 use std::error::Error;
@@ -39,44 +39,40 @@ pub async fn process_transaction(
         let tx_type = reader.read_u16_le().await?;
 
         if block_version == 11 {
-            if tx_ver_out < 3 {
-                if let Err(e) = process_transaction_v1(
-                    reader,
-                    tx_ver_out.try_into().unwrap_or(1),
-                    block_version,
-                    block_hash,
-                    block_height,
-                    tx_index,
-                    _db.clone(),
-                    start_pos,
-                    batch,
-                    fast_sync,
-                ).await {
-                    eprintln!("Error processing transaction v1: {}", e);
-                    return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
-                }
-            } else {
-                parse_sapling_tx_data(reader, start_pos, _db.clone(), batch).await?;
+            // For block version 11, handle all transaction versions uniformly
+            if let Err(e) = process_transaction_v1(
+                reader,
+                tx_ver_out.try_into().unwrap_or(1),
+                tx_type,
+                block_version,
+                block_hash,
+                block_height,
+                tx_index,
+                _db.clone(),
+                start_pos,
+                batch,
+                fast_sync,
+            ).await {
+                eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
+                return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
             }
         } else if (tx_ver_out <= 2 && block_version < 11) || (tx_ver_out > 1 && block_version > 7) {
-            if tx_ver_out <= 2 {
-                if let Err(e) = process_transaction_v1(
-                    reader,
-                    tx_ver_out.try_into().unwrap_or(1),
-                    block_version,
-                    block_hash,
-                    block_height,
-                    tx_index,
-                    _db.clone(),
-                    start_pos,
-                    batch,
-                    fast_sync,
-                ).await {
-                    eprintln!("Error processing transaction v1: {}", e);
-                    return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
-                }
-            } else {
-                parse_sapling_tx_data(reader, start_pos, _db.clone(), batch).await?;
+            // For older blocks, process v1/v2 transactions
+            if let Err(e) = process_transaction_v1(
+                reader,
+                tx_ver_out.try_into().unwrap_or(1),
+                tx_type,
+                block_version,
+                block_hash,
+                block_height,
+                tx_index,
+                _db.clone(),
+                start_pos,
+                batch,
+                fast_sync,
+            ).await {
+                eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
+                return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
             }
         }
     }
@@ -86,6 +82,7 @@ pub async fn process_transaction(
 async fn process_transaction_v1(
     reader: &mut (impl AsyncReadExt + AsyncSeek + Unpin),
     tx_ver_out: i16,
+    tx_type: u16,
     block_version: u32,
     block_hash: &[u8],
     block_height: Option<i32>,
@@ -171,6 +168,48 @@ async fn process_transaction_v1(
 
     let lock_time_buff = reader.read_u32_le().await?;
 
+    // For Sapling transactions (version >= 3), skip the Sapling-specific data
+    if tx_ver_out >= 3 {
+        // Read value_count varint
+        let _ = read_varint(reader).await;
+        
+        // Read valueBalance (i64)
+        let mut value_balance_buf = [0u8; 8];
+        let _ = reader.read_exact(&mut value_balance_buf).await;
+        
+        // Read and skip vShieldSpend
+        if let Ok(spend_count) = read_varint(reader).await {
+            for _ in 0..spend_count {
+                // Each spend: 384 bytes
+                let mut spend_buf = vec![0u8; 384];
+                let _ = reader.read_exact(&mut spend_buf).await;
+            }
+        }
+        
+        // Read and skip vShieldOutput
+        if let Ok(output_count) = read_varint(reader).await {
+            for _ in 0..output_count {
+                // Each output: 948 bytes
+                let mut output_buf = vec![0u8; 948];
+                let _ = reader.read_exact(&mut output_buf).await;
+            }
+        }
+        
+        // Skip bindingSig (64 bytes)
+        let mut binding_sig = vec![0u8; 64];
+        let _ = reader.read_exact(&mut binding_sig).await;
+        
+        // For special transaction types (nType != 0), skip extraPayload
+        if tx_type != 0 {
+            if let Ok(payload_size) = read_varint(reader).await {
+                if payload_size > 0 {
+                    let mut payload = vec![0u8; payload_size as usize];
+                    let _ = reader.read_exact(&mut payload).await;
+                }
+            }
+        }
+    }
+
     // Get current position as end_pos
     let end_pos = set_end_pos(reader, start_pos).await?;
     
@@ -185,6 +224,7 @@ async fn process_transaction_v1(
         inputs,
         outputs: outputs.clone(),
         lock_time: lock_time_buff,
+        sapling_data: None,  // File-based indexing doesn't parse Sapling details (stored as raw bytes)
     };
 
     //println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
@@ -414,21 +454,21 @@ async fn parse_sapling_tx_data(
     //println!("Lock Time: {}", lock_time_buff);
     // Hacky fix for getting proper values/spends/outputs for Sapling
     let value_count = read_varint(reader).await?;
-    let value = reader.read_i64_le().await?;
-    //println!("Value: {}", value);
+    let value_balance = reader.read_i64_le().await?;
+    //println!("Value: {}", value_balance);
     // Read the SaplingTxData
-    let vshield_spend = parse_vshield_spends(reader).await?;
-    let vshield_output = parse_vshield_outputs(reader).await?;
+    let vshielded_spend = parse_vshield_spends(reader).await?;
+    let vshielded_output = parse_vshield_outputs(reader).await?;
     // Read the binding_sig as an array of unsigned chars max size 64
     let mut binding_sig = [0u8; 64];
     reader.read_exact(&mut binding_sig).await?;
 
     // Create and return the SaplingTxData struct
     let sapling_tx_data = SaplingTxData {
-        value,
-        vshield_spend,
-        vshield_output,
-        binding_sig: binding_sig.to_vec(),
+        value_balance,
+        vshielded_spend,
+        vshielded_output,
+        binding_sig,
     };
 
     let serialized_data = bincode::serialize(&sapling_tx_data)
@@ -509,7 +549,7 @@ async fn parse_sapling_tx_data(
     Ok(sapling_tx_data)
 }
 
-async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<VShieldSpend>, io::Error> {
+async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<SpendDescription>, io::Error> {
     // Read the number of vShieldSpend entries
     let count = read_varint(reader).await? as usize;
     //println!("vShieldSpend Count: {}", count);
@@ -517,46 +557,47 @@ async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<VShiel
         return Ok(Vec::new());
     }
 
-    // Define buffer sizes for respective fields
-    let buff_32 = [0u8; 32];
-    let buff_64 = [0u8; 64];
-    let buff_192 = [0u8; 192];
-
-    // Read each vShieldSpend entry - default to 0 capacity if conversion fails
-    let mut vshield_spends = Vec::with_capacity(count.try_into().unwrap_or(0));
+    // Read each vShieldSpend entry
+    let mut vshield_spends = Vec::with_capacity(count);
     for _ in 0..count {
-        // Read each field
-        let mut cv = buff_32;
+        // Read each field (384 bytes total per spend)
+        let mut cv = [0u8; 32];
         reader.read_exact(&mut cv).await?;
-        let mut anchor = buff_32;
+        let mut anchor = [0u8; 32];
         reader.read_exact(&mut anchor).await?;
-        let mut nullifier = buff_32;
+        let mut nullifier = [0u8; 32];
         reader.read_exact(&mut nullifier).await?;
-        let mut rk = buff_32;
+        let mut rk = [0u8; 32];
         reader.read_exact(&mut rk).await?;
-        let mut proof = buff_192;
-        reader.read_exact(&mut proof).await?;
-        let mut spend_auth_sig = buff_64;
+        let mut zkproof = [0u8; 192];
+        reader.read_exact(&mut zkproof).await?;
+        let mut spend_auth_sig = [0u8; 64];
         reader.read_exact(&mut spend_auth_sig).await?;
 
-        // Create and return the VShieldSpend struct
-        let vshield_spend = VShieldSpend {
-            cv: reverse_bytes(&cv).await,
-            anchor: reverse_bytes(&anchor).await,
-            nullifier: reverse_bytes(&nullifier).await,
-            rk: reverse_bytes(&rk).await,
-            proof: proof.to_vec(),
-            spend_auth_sig: spend_auth_sig.to_vec(),
+        // Reverse byte order for hash fields
+        cv.reverse();
+        anchor.reverse();
+        nullifier.reverse();
+        rk.reverse();
+        // Note: zkproof and spend_auth_sig are NOT reversed
+
+        // Create and return the SpendDescription struct
+        let vshield_spend = SpendDescription {
+            cv,
+            anchor,
+            nullifier,
+            rk,
+            zkproof,
+            spend_auth_sig,
         };
         vshield_spends.push(vshield_spend);
-        //println!("{:?}", vshield_spends);
     }
     Ok(vshield_spends)
 }
 
 async fn parse_vshield_outputs(
     reader: &mut BufReader<File>,
-) -> Result<Vec<VShieldOutput>, io::Error> {
+) -> Result<Vec<OutputDescription>, io::Error> {
     // Read the number of vShieldOutput entries
     let count = read_varint(reader).await? as usize;
     //println!("vShieldOutput Count: {}", count);
@@ -564,40 +605,39 @@ async fn parse_vshield_outputs(
         return Ok(Vec::new());
     }
 
-    // Define buffer sizes for respective fields
-    let buff_32 = [0u8; 32];
-    let buff_80 = [0u8; 80];
-    let buff_192 = [0u8; 192];
-    let buff_580 = [0u8; 580];
-
-    // Read each vShieldOutput entry
+    // Read each vShieldOutput entry (948 bytes total per output)
     let mut vshield_outputs = Vec::with_capacity(count);
     for _ in 0..count {
         // Read each field
-        let mut cv = buff_32;
+        let mut cv = [0u8; 32];
         reader.read_exact(&mut cv).await?;
-        let mut cmu = buff_32;
+        let mut cmu = [0u8; 32];
         reader.read_exact(&mut cmu).await?;
-        let mut ephemeral_key = buff_32;
+        let mut ephemeral_key = [0u8; 32];
         reader.read_exact(&mut ephemeral_key).await?;
-        let mut enc_ciphertext = buff_580;
+        let mut enc_ciphertext = [0u8; 580];
         reader.read_exact(&mut enc_ciphertext).await?;
-        let mut out_ciphertext = buff_80;
+        let mut out_ciphertext = [0u8; 80];
         reader.read_exact(&mut out_ciphertext).await?;
-        let mut proof = buff_192;
-        reader.read_exact(&mut proof).await?;
+        let mut zkproof = [0u8; 192];
+        reader.read_exact(&mut zkproof).await?;
 
-        // Create and return the VShieldOutput struct
-        let vshield_output = VShieldOutput {
-            cv: reverse_bytes(&cv).await,
-            cmu: reverse_bytes(&cmu).await,
-            ephemeral_key: reverse_bytes(&ephemeral_key).await,
-            enc_ciphertext: enc_ciphertext.to_vec(),
-            out_ciphertext: out_ciphertext.to_vec(),
-            proof: proof.to_vec(),
+        // Reverse byte order for hash fields
+        cv.reverse();
+        cmu.reverse();
+        ephemeral_key.reverse();
+        // Note: ciphertexts and zkproof are NOT reversed
+
+        // Create and return the OutputDescription struct
+        let vshield_output = OutputDescription {
+            cv,
+            cmu,
+            ephemeral_key,
+            enc_ciphertext,
+            out_ciphertext,
+            zkproof,
         };
         vshield_outputs.push(vshield_output);
-        //println!("{:?}", vshield_outputs);
     }
 
     Ok(vshield_outputs)
