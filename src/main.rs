@@ -25,7 +25,7 @@ use crate::block_detail::block_detail_v2;
 use crate::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
     send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, relay_mnb_v2,
-    status_v2, search_v2, mempool_v2, mempool_tx_v2,
+    status_v2, search_v2, mempool_v2, mempool_tx_v2, block_stats_v2,
 };
 use crate::types::MyError;
 
@@ -70,6 +70,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/mempool/{txid}", get(mempool_tx_v2))
         .route("/api/v2/block-index/{block_height}", get(block_index_v2))
         .route("/api/v2/block-detail/{block_height}", get(block_detail_v2))
+        .route("/api/v2/block-stats/{count}", get(block_stats_v2))
         .route("/api/v2/tx/{txid}", get(tx_v2))
         .route("/api/v2/address/{address}", get(addr_v2))
         .route("/api/v2/xpub/{xpub}", get(xpub_v2))

@@ -1081,3 +1081,86 @@ pub async fn mempool_tx_v2(
         None => Err(StatusCode::NOT_FOUND),
     }
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BlockStats {
+    pub height: u32,
+    pub hash: String,
+    pub time: u64,
+    pub tx_count: usize,
+    pub size: usize,
+    pub difficulty: f64,
+}
+
+/// GET /api/v2/block-stats/{count}
+/// Returns statistics for the last N blocks
+pub async fn block_stats_v2(
+    Path(count): Path<u32>,
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<Vec<BlockStats>>, StatusCode> {
+    let db_clone = Arc::clone(&db);
+    let count_clone = count;
+    
+    let result = tokio::task::spawn_blocking(move || {
+        // Get current block height from chain state
+        let chain_state = get_chain_state();
+        let tip_height = chain_state.block_tip;
+        
+        let mut stats = Vec::new();
+        let start_height = if tip_height > count_clone { tip_height - count_clone } else { 0 };
+        
+        for height in (start_height..=tip_height).rev() {
+            let key = height.to_le_bytes().to_vec();
+            
+            // Get block hash from blocks CF
+            let cf_blocks = match db_clone.cf_handle("blocks") {
+                Some(cf) => cf,
+                None => continue,
+            };
+            
+            let block_hash = match db_clone.get_cf(&cf_blocks, &key) {
+                Ok(Some(hash)) => hex::encode(&hash),
+                _ => continue,
+            };
+            
+            // Get block details
+            let block_key = hex::decode(&block_hash).unwrap_or_default();
+            let cf_block_data = match db_clone.cf_handle("block_data") {
+                Some(cf) => cf,
+                None => continue,
+            };
+            
+            if let Ok(Some(block_data)) = db_clone.get_cf(&cf_block_data, &block_key) {
+                // Parse block data to get stats
+                // Block data format: height (4) + time (4) + nonce (4) + version (4) + 
+                // prev_hash (32) + merkle_root (32) + bits (4) + tx_count (4) + size (4) + difficulty (8)
+                if block_data.len() >= 100 {
+                    let time = u32::from_le_bytes(block_data[4..8].try_into().unwrap_or([0; 4])) as u64;
+                    let tx_count = u32::from_le_bytes(block_data[92..96].try_into().unwrap_or([0; 4])) as usize;
+                    let size = u32::from_le_bytes(block_data[96..100].try_into().unwrap_or([0; 4])) as usize;
+                    let difficulty = if block_data.len() >= 108 {
+                        f64::from_le_bytes(block_data[100..108].try_into().unwrap_or([0; 8]))
+                    } else {
+                        0.0
+                    };
+                    
+                    stats.push(BlockStats {
+                        height,
+                        hash: block_hash,
+                        time,
+                        tx_count,
+                        size,
+                        difficulty,
+                    });
+                }
+            }
+        }
+        
+        Ok(stats)
+    }).await;
+    
+    match result {
+        Ok(Ok(stats)) => Ok(Json(stats)),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
