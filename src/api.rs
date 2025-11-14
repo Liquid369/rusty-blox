@@ -1,6 +1,6 @@
 use pivx_rpc_rs::{BitcoinRpcClient, MasternodeList, BudgetInfo as RpcBudgetInfo};
 use axum::{
-    extract::{Path, Extension},
+    extract::{Path, Extension, Query},
     Json,
     http::StatusCode,
     Router,
@@ -24,18 +24,49 @@ use std::time::Duration;
 pub use axum::extract::Path as AxumPath;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct XPubInfo {
+    pub page: u32,
+    #[serde(rename = "totalPages")]
+    pub total_pages: u32,
+    #[serde(rename = "itemsOnPage")]
+    pub items_on_page: u32,
     pub address: String,
-    pub balance: f64,
+    pub balance: String,
+    #[serde(rename = "totalReceived")]
+    pub total_received: String,
+    #[serde(rename = "totalSent")]
+    pub total_sent: String,
+    #[serde(rename = "unconfirmedBalance")]
+    pub unconfirmed_balance: String,
+    #[serde(rename = "unconfirmedTxs")]
+    pub unconfirmed_txs: u32,
     pub txs: u32,
-    pub txids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddressInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "totalPages")]
+    pub total_pages: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "itemsOnPage")]
+    pub items_on_page: Option<u32>,
     pub address: String,
-    pub balance: f64,
+    pub balance: String,
+    #[serde(rename = "totalReceived")]
+    pub total_received: String,
+    #[serde(rename = "totalSent")]
+    pub total_sent: String,
+    #[serde(rename = "unconfirmedBalance")]
+    pub unconfirmed_balance: String,
+    #[serde(rename = "unconfirmedTxs")]
+    pub unconfirmed_txs: u32,
     pub txs: u32,
-    pub txids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -120,13 +151,22 @@ pub struct Transaction {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TxInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vout: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
     pub n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isAddress")]
     pub is_address: Option<bool>,
-    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -134,12 +174,41 @@ pub struct TxOutput {
     pub value: String,
     pub n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isAddress")]
     pub is_address: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spent: Option<bool>,
+}
+
+// Query parameters for address and xpub endpoints
+#[derive(Debug, Deserialize)]
+pub struct AddressQuery {
+    #[serde(default = "default_page")]
+    pub page: u32,
+    #[serde(default = "default_page_size")]
+    #[serde(rename = "pageSize")]
+    pub page_size: u32,
+    pub from: Option<u32>,
+    pub to: Option<u32>,
+    #[serde(default = "default_details")]
+    pub details: String,
+    pub contract: Option<String>,
+    pub secondary: Option<String>,
+}
+
+fn default_page() -> u32 { 1 }
+fn default_page_size() -> u32 { 1000 }
+fn default_details() -> String { "txids".to_string() }
+
+// Query parameters for UTXO endpoint
+#[derive(Debug, Deserialize)]
+pub struct UtxoQuery {
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -290,14 +359,17 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
             deserialize_transaction(&tx_data_with_header).await
         }).map_err(|_| "Failed to parse transaction")?;
         
-        // Convert to JSON format expected by frontend
+        // Convert to JSON format (Blockbook-compatible)
         let mut vin = Vec::new();
+        let mut value_in: i64 = 0;
+        
         for (idx, input) in tx.inputs.iter().enumerate() {
             if let Some(coinbase_data) = &input.coinbase {
                 // Coinbase transaction
                 vin.push(serde_json::json!({
                     "coinbase": hex::encode(coinbase_data),
                     "sequence": input.sequence,
+                    "n": idx,
                 }));
             } else if let Some(prevout) = &input.prevout {
                 // Regular input - look up previous output for value and address
@@ -305,9 +377,7 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
                     "txid": prevout.hash.clone(),
                     "vout": prevout.n,
                     "sequence": input.sequence,
-                    "scriptSig": {
-                        "hex": hex::encode(&input.script_sig.script)
-                    }
+                    "n": idx,
                 });
                 
                 // Try to get value and address from previous transaction
@@ -327,9 +397,11 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
                                 deserialize_transaction(&prev_tx_data_with_header).await
                             }) {
                                 if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
-                                    input_json["value"] = serde_json::json!(output.value as f64 / 100_000_000.0);
+                                    input_json["value"] = serde_json::json!(output.value.to_string());
+                                    value_in += output.value;
                                     if !output.address.is_empty() {
-                                        input_json["address"] = serde_json::json!(output.address[0].clone());
+                                        input_json["addresses"] = serde_json::json!(output.address.clone());
+                                        input_json["isAddress"] = serde_json::json!(true);
                                     }
                                 }
                             }
@@ -342,19 +414,36 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         }
         
         let mut vout = Vec::new();
+        let mut value_out: i64 = 0;
+        
         for (idx, output) in tx.outputs.iter().enumerate() {
-            // output.address is already Vec<String>, so just use it directly
+            value_out += output.value;
             vout.push(serde_json::json!({
-                "value": output.value as f64 / 100_000_000.0,
+                "value": output.value.to_string(),
                 "n": idx,
-                "scriptPubKey": {
-                    "hex": hex::encode(&output.script_pubkey.script),
-                    "addresses": output.address  // Already a Vec<String>
-                }
+                "hex": hex::encode(&output.script_pubkey.script),
+                "addresses": output.address,
+                "isAddress": !output.address.is_empty(),
             }));
         }
         
         let tx_size = data.len() - 8; // Subtract the 8 header bytes
+        
+        // Get current height for confirmations
+        let chain_state = get_chain_state(&db_clone).ok();
+        let current_height = chain_state.as_ref().map(|cs| cs.height).unwrap_or(0);
+        let confirmations = if block_height > 0 && current_height > 0 {
+            (current_height - block_height + 1).max(0) as u32
+        } else {
+            0
+        };
+        
+        // Calculate fees (for non-coinbase)
+        let fees = if value_in > 0 && value_in >= value_out {
+            value_in - value_out
+        } else {
+            0
+        };
         
         // Convert Sapling data if present with detailed spend/output info
         let sapling_json = tx.sapling_data.as_ref().map(|sap| {
@@ -377,7 +466,7 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
             })).collect();
             
             serde_json::json!({
-                "value_balance": sap.value_balance as f64 / 100_000_000.0,
+                "value_balance": sap.value_balance.to_string(),
                 "shielded_spend_count": sap.vshielded_spend.len(),
                 "shielded_output_count": sap.vshielded_output.len(),
                 "binding_sig": hex::encode(&sap.binding_sig),
@@ -389,11 +478,16 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         let mut tx_json = serde_json::json!({
             "txid": tx.txid,
             "version": tx.version,
-            "locktime": tx.lock_time,
+            "lockTime": tx.lock_time,
             "vin": vin,
             "vout": vout,
+            "blockHeight": block_height,
+            "confirmations": confirmations,
+            "blockTime": 0, // TODO: get from block data
+            "value": value_out.to_string(),
+            "valueIn": value_in.to_string(),
+            "fees": fees.to_string(),
             "size": tx_size,
-            "block_height": block_height,
         });
         
         // Add sapling field if present
@@ -412,28 +506,33 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
     }
 }
 
-pub async fn addr_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<AddressInfo> {
-   let key = format!("a{}", param);
-   let key_bytes = key.as_bytes().to_vec();
-   let db_clone = db.clone();
-   
-   // Get from addr_index column family in blocking task
-   let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-       let cf_addr_index = db_clone.cf_handle("addr_index")
-           .ok_or_else(|| "addr_index CF not found".to_string())?;
-       db_clone.get_cf(&cf_addr_index, &key_bytes)
-           .map_err(|e| e.to_string())
-   })
-   .await
-   .unwrap_or_else(|_| Ok(None))
-   .unwrap_or(None)
-   .unwrap_or_else(|| vec![]);
+pub async fn addr_v2(
+    AxumPath(address): AxumPath<String>, 
+    Query(params): Query<AddressQuery>,
+    Extension(db): Extension<Arc<DB>>
+) -> Json<AddressInfo> {
+    
+    let key = format!("a{}", address);
+    let key_bytes = key.as_bytes().to_vec();
+    let db_clone = db.clone();
+    
+    // Get from addr_index column family in blocking task
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+        let cf_addr_index = db_clone.cf_handle("addr_index")
+            .ok_or_else(|| "addr_index CF not found".to_string())?;
+        db_clone.get_cf(&cf_addr_index, &key_bytes)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(None)
+    .unwrap_or_else(|| vec![]);
+    
     let utxos = deserialize_utxos(&result).await;
-    let mut balance: f64 = 0.0;
+    let mut balance: i64 = 0;
     
     for utxo in &utxos {
-        let (txid_hash, _output_index) = utxo;
-        let txid_hex = hex::encode(txid_hash);
+        let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
         key.extend(txid_hash);
         let key_clone = key.clone();
@@ -450,14 +549,19 @@ pub async fn addr_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            let tx_value = deserialize_transaction(&tx_data).await;
-            if let Ok(tx) = tx_value {
-                balance += tx.outputs.iter().map(|output| output.value as f64).sum::<f64>();
+            if tx_data.len() >= 8 {
+                let mut tx_data_with_header = vec![0u8; 4];
+                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                
+                if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                    if let Some(output) = tx.outputs.get(*output_index as usize) {
+                        balance += output.value;
+                    }
+                }
             }
-        } else {
-            eprintln!("Failed to read from DB for key: {}", hex::encode(&key));
         }
     }
+    
     // Deduplicate txids (one address can have multiple outputs from same tx)
     let mut unique_txids: Vec<String> = utxos.iter()
         .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
@@ -465,16 +569,39 @@ pub async fn addr_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
     unique_txids.sort();
     unique_txids.dedup();
     
+    let tx_count = unique_txids.len() as u32;
+    let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
+    let total_pages = if total_pages == 0 { 1 } else { total_pages };
+    
+    // Return txids only if details >= "txids"
+    let txids = if params.details == "basic" || params.details == "tokens" || params.details == "tokenBalances" {
+        None
+    } else {
+        Some(unique_txids)
+    };
+    
     Json(AddressInfo {
-        address: param,
-        balance,
-        txs: unique_txids.len() as u32,
-        txids: unique_txids,
+        page: Some(params.page),
+        total_pages: Some(total_pages),
+        items_on_page: Some(params.page_size),
+        address,
+        balance: balance.to_string(),
+        total_received: balance.to_string(), // TODO: track separately
+        total_sent: "0".to_string(), // TODO: track spent outputs
+        unconfirmed_balance: "0".to_string(), // TODO: track mempool
+        unconfirmed_txs: 0, // TODO: track mempool
+        txs: tx_count,
+        txids,
     })
 }
 
-pub async fn xpub_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<XPubInfo> {
-    let key = format!("p{}", param);
+pub async fn xpub_v2(
+    AxumPath(xpub): AxumPath<String>,
+    Query(params): Query<AddressQuery>,
+    Extension(db): Extension<Arc<DB>>
+) -> Json<XPubInfo> {
+    
+    let key = format!("p{}", xpub);
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = db.clone();
     
@@ -491,11 +618,10 @@ pub async fn xpub_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
     .unwrap_or_else(|| vec![]);
 
     let utxos = deserialize_utxos(&result).await;
-    let mut balance: f64 = 0.0;
+    let mut balance: i64 = 0;
     
     for utxo in &utxos {
-        let (txid_hash, _output_index) = utxo;
-        let txid_hex = hex::encode(txid_hash);
+        let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
         key.extend(txid_hash);
         let key_clone = key.clone();
@@ -512,14 +638,19 @@ pub async fn xpub_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            let tx_value = deserialize_transaction(&tx_data).await;
-            if let Ok(tx) = tx_value {
-                balance += tx.outputs.iter().map(|output| output.value as f64).sum::<f64>();
+            if tx_data.len() >= 8 {
+                let mut tx_data_with_header = vec![0u8; 4];
+                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                
+                if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                    if let Some(output) = tx.outputs.get(*output_index as usize) {
+                        balance += output.value;
+                    }
+                }
             }
-        } else {
-            eprintln!("Failed to read from DB for key: {}", hex::encode(&key));
         }
     }
+    
     // Deduplicate txids
     let mut unique_txids: Vec<String> = utxos.iter()
         .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
@@ -527,17 +658,39 @@ pub async fn xpub_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
     unique_txids.sort();
     unique_txids.dedup();
     
+    let tx_count = unique_txids.len() as u32;
+    let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
+    let total_pages = if total_pages == 0 { 1 } else { total_pages };
+    
+    let txids = if params.details == "basic" || params.details == "tokens" || params.details == "tokenBalances" {
+        None
+    } else {
+        Some(unique_txids)
+    };
+    
     Json(XPubInfo {
-        address: param,
-        balance,
-        txs: unique_txids.len() as u32,
-        txids: unique_txids,
+        page: params.page,
+        total_pages,
+        items_on_page: params.page_size,
+        address: xpub,
+        balance: balance.to_string(),
+        total_received: balance.to_string(), // TODO: track separately
+        total_sent: "0".to_string(), // TODO: track spent outputs
+        unconfirmed_balance: "0".to_string(), // TODO: track mempool
+        unconfirmed_txs: 0, // TODO: track mempool
+        txs: tx_count,
+        txids,
     })
 }
 
-pub async fn utxo_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Result<Json<Vec<UTXO>>, StatusCode> {
+pub async fn utxo_v2(
+    AxumPath(address): AxumPath<String>,
+    Query(params): Query<UtxoQuery>,
+    Extension(db): Extension<Arc<DB>>
+) -> Result<Json<Vec<UTXO>>, StatusCode> {
+    
     // Parse the address parameter to get UTXOs from addr_index CF
-    let key = format!("a{}", param);
+    let key = format!("a{}", address);
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = db.clone();
     
@@ -560,6 +713,10 @@ pub async fn utxo_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
     let utxos = deserialize_utxos(&data).await;
     let mut utxo_list: Vec<UTXO> = Vec::new();
     
+    // Get current height for confirmations calculation
+    let chain_state = get_chain_state(&db).ok();
+    let current_height = chain_state.as_ref().map(|cs| cs.height).unwrap_or(0);
+    
     // Get transactions from transactions CF
     for (txid_hash, output_index) in &utxos {
         let txid_hex = hex::encode(txid_hash);
@@ -579,17 +736,45 @@ pub async fn utxo_v2(AxumPath(param): AxumPath<String>, Extension(db): Extension
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            if let Ok(tx) = deserialize_transaction(&tx_data).await {
-                if let Some(output) = tx.outputs.get(*output_index as usize) {
-                    utxo_list.push(UTXO {
-                        txid: txid_hex,
-                        vout: *output_index as u32,
-                        value: format!("{}", output.value),
-                        confirmations: 0, // Would need block height to calculate
-                        lock_time: None,
-                        height: None,
-                        coinbase: None,
-                    });
+            if tx_data.len() >= 8 {
+                // Extract block height (bytes 4-8)
+                let block_height = i32::from_le_bytes(tx_data[4..8].try_into().unwrap_or([0; 4]));
+                
+                // Parse transaction for value
+                let mut tx_data_with_header = vec![0u8; 4];
+                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                
+                if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                    if let Some(output) = tx.outputs.get(*output_index as usize) {
+                        let confirmations = if block_height > 0 && current_height > 0 {
+                            ((current_height - block_height) + 1).max(0) as u32
+                        } else {
+                            0
+                        };
+                        
+                        // Skip unconfirmed if confirmed=true
+                        if params.confirmed && confirmations == 0 {
+                            continue;
+                        }
+                        
+                        utxo_list.push(UTXO {
+                            txid: txid_hex,
+                            vout: *output_index as u32,
+                            value: output.value.to_string(),
+                            confirmations,
+                            lock_time: if confirmations == 0 && tx.lock_time > 0 {
+                                Some(tx.lock_time as u32)
+                            } else {
+                                None
+                            },
+                            height: if block_height > 0 {
+                                Some(block_height as u32)
+                            } else {
+                                None
+                            },
+                            coinbase: None, // TODO: detect coinbase
+                        });
+                    }
                 }
             }
         }
