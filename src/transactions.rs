@@ -92,15 +92,15 @@ async fn process_transaction_v1(
     batch: &mut BatchWriter,
     fast_sync: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cf_transactions = Arc::new(_db
+    let cf_transactions = _db
         .cf_handle("transactions")
-        .expect("Transaction column family not found"));
-    let cf_pubkey = Arc::new(_db
+        .ok_or("transactions CF not found")?;
+    let cf_pubkey = _db
         .cf_handle("pubkey")
-        .expect("Pubkey column family not found"));
-    let cf_utxo = Arc::new(_db
+        .ok_or("pubkey CF not found")?;
+    let cf_utxo = _db
         .cf_handle("utxo")
-        .expect("UTXO column family not found"));
+        .ok_or("utxo CF not found")?;
     
     let input_count = read_varint(reader).await?;
 
@@ -397,15 +397,15 @@ async fn parse_sapling_tx_data(
     _db: Arc<DB>,
     batch: &mut BatchWriter,
 ) -> Result<SaplingTxData, io::Error> {
-    let cf_transactions = Arc::new(_db
+    let cf_transactions = _db
         .cf_handle("transactions")
-        .expect("Transaction column family not found"));
-    let cf_pubkey = Arc::new(_db
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "transactions CF not found"))?;
+    let cf_pubkey = _db
         .cf_handle("pubkey")
-        .expect("Pubkey column family not found"));
-    let cf_utxo = Arc::new(_db
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pubkey CF not found"))?;
+    let cf_utxo = _db
         .cf_handle("utxo")
-        .expect("UTXO column family not found"));
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "utxo CF not found"))?;
 
     // Set empty vectors for later access
     let mut inputs: Vec<CTxIn> = Vec::new();

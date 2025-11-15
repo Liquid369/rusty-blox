@@ -337,9 +337,9 @@ async fn run_live_sync(
     let blocks_behind = network_height - current_height;
     println!("📊 Network height: {} | Blocks behind: {}", network_height, blocks_behind);
     
-    // Only process blk files if we're significantly behind (>100 blocks)
+    // Only process blk files if we're significantly behind (>500 blocks)
     // This makes startup instant when we're already synced
-    if blocks_behind > 10000 {
+    if blocks_behind > 500 {
         println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
         println!("Phase 1: Syncing from blk*.dat files...");
         

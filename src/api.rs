@@ -954,7 +954,10 @@ async fn get_block_from_db(db: &Arc<DB>, height_key: &[u8]) -> Result<Json<crate
             return Err(StatusCode::BAD_REQUEST);
         }
         let height_bytes = &height_key[1..5];
-        let height = i32::from_le_bytes(height_bytes.try_into().unwrap());
+        let height = match height_bytes.try_into() {
+            Ok(bytes) => i32::from_le_bytes(bytes),
+            Err(_) => return Err(StatusCode::BAD_REQUEST),
+        };
         
         // Get block hash from chain_metadata
         let cf_metadata = db_clone.cf_handle("chain_metadata").ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1093,8 +1096,6 @@ pub async fn mn_count_v2() -> Result<Json<MNCount>, StatusCode> {
         .replace("http://", "")
         .replace("https://", "");
     
-    eprintln!("Attempting manual RPC call to {}", host_port);
-    
     let mut stream = match TcpStream::connect(&host_port) {
         Ok(s) => {
             eprintln!("Connected");
@@ -1128,8 +1129,7 @@ pub async fn mn_count_v2() -> Result<Json<MNCount>, StatusCode> {
          {}",
         host_port, auth_b64, content_length, json_body
     );
-    
-    eprintln!("Sending request ({} bytes)...", request.len());
+
     if let Err(e) = stream.write_all(request.as_bytes()) {
         eprintln!("Write failed: {}", e);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -1142,22 +1142,17 @@ pub async fn mn_count_v2() -> Result<Json<MNCount>, StatusCode> {
     }
     
     let response_str = String::from_utf8_lossy(&response);
-    eprintln!("Response received ({} bytes)", response.len());
-    eprintln!("First 500 chars: {}", response_str.chars().take(500).collect::<String>());
-    
+
     // Find the JSON body after headers
     if let Some(pos) = response_str.find("\r\n\r\n") {
         let json_start = pos + 4;
         let body = &response_str[json_start..].trim();
-        eprintln!("Parsing JSON: {}", body);
         
         match serde_json::from_str::<serde_json::Value>(body) {
             Ok(value) => {
                 if let Some(result) = value.get("result") {
-                    eprintln!("Got result: {:?}", result);
                     match serde_json::from_value::<MNCount>(result.clone()) {
                         Ok(mn_count) => {
-                            eprintln!("Success!");
                             return Ok(Json(mn_count));
                         },
                         Err(e) => eprintln!("Parse error: {}", e),

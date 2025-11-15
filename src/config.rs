@@ -14,7 +14,10 @@ pub fn init_global_config() -> Result<(), Box<dyn Error>> {
 }
 
 pub fn get_global_config() -> &'static Config {
-    GLOBAL_CONFIG.get().expect("Config not initialized")
+    GLOBAL_CONFIG.get().unwrap_or_else(|| {
+        eprintln!("FATAL: Config not initialized - call init_global_config() first");
+        std::process::exit(1);
+    })
 }
 
 /// Load config for standalone binaries/utilities

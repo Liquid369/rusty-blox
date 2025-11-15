@@ -276,13 +276,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             get_header_size(ver_as_int)
         };
 
-        // Debug logging for version 4+ blocks  
-        if ver_as_int >= 4 {
-            if block_count < 5 || (block_count >= 863785 && block_count <= 863790) {
-                println!("  Block {}: Version {} detected, detected header_size = {} bytes", 
-                         block_count, ver_as_int, header_size);
-            }
-        }
+        // Debug logging removed for performance - header size detection happens silently
 
         // Read the rest of the header (header_size - 4 bytes already read for version)
         header_buffer.clear();
@@ -290,9 +284,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         header_buffer.resize(header_size, 0);
         match reader.read_exact(&mut header_buffer[4..]).await {
             Ok(_) => {
-                if ver_as_int >= 4 && (block_count < 5 || (block_count >= 863785 && block_count <= 863790)) {
-                    println!("    ✅ Successfully read {} bytes for header", header_size);
-                }
+                // Header read successfully - debug logging removed for performance
             },
             Err(e) => {
                 eprintln!("  Failed to read header (size {}) at block {}: {}", 
@@ -441,15 +433,14 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         
         block_count += 1;
         
-        // Debug: print every 100 blocks
-        if block_count % 1000 == 0 {
+        // Print progress every 5000 blocks (reduced logging for performance)
+        if block_count % 5000 == 0 {
             println!("  Processed {} blocks so far", block_count);
         }
         
         // Write batch when it reaches the target size
         if batch_items.len() >= BATCH_SIZE * 2 {
             batch_put_cf(db.clone(), "blocks", batch_items.clone()).await?;
-            println!("  Wrote {} blocks to database", BATCH_SIZE);
             batch_items.clear();
         }
         
@@ -481,32 +472,23 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             // Seek to exact position
             use tokio::io::AsyncSeekExt;
             reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
-            
-            if block_count % 1000 == 0 && current_pos != next_block_pos {
-                eprintln!("  Block {}: position adjusted from {} to {} (diff: {} bytes)", 
-                         block_count, current_pos, next_block_pos, 
-                         next_block_pos as i64 - current_pos as i64);
-            }
         }
     }
     
     // Write any remaining items
     if !batch_items.is_empty() {
-        let remaining_count = batch_items.len();
         batch_put_cf(db.clone(), "blocks", batch_items).await?;
-        println!("Wrote {} remaining blocks to database", remaining_count);
     }
     
     // Flush any remaining transaction batch writes
     if tx_batch.pending_count() > 0 {
         tx_batch.flush().await?;
-        println!("Flushed {} pending transaction operations", tx_batch.pending_count());
     }
 
     if skipped_count > 0 {
-        println!("File complete: {} new blocks indexed, {} already-indexed blocks skipped", block_count, skipped_count);
+        println!("File complete: {} new blocks indexed, {} skipped", block_count, skipped_count);
     } else {
-        println!("File complete: {} total blocks processed", block_count);
+        println!("File complete: {} blocks processed", block_count);
     }
     Ok(())
 }

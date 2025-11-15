@@ -79,12 +79,16 @@ pub async fn process_files_parallel(
     // So we find the highest blocks first and work backwards to genesis
     blk_files.sort_by(|a, b| b.cmp(a));
     
-    println!("Found {} block files to process (processing in REVERSE order - newest first)", blk_files.len());
+    let total_files = blk_files.len();
+    println!("Found {} block files to process (processing in REVERSE order - newest first)", total_files);
     println!("First file: {:?}", blk_files.first().map(|p| p.file_name()));
     println!("Last file: {:?}", blk_files.last().map(|p| p.file_name()));
     
     // Semaphore to limit concurrent file processing
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    
+    // Progress tracking
+    let completed = Arc::new(tokio::sync::Mutex::new(0_usize));
     
     // Process files with controlled concurrency
     let tasks: Vec<_> = blk_files
@@ -93,16 +97,32 @@ pub async fn process_files_parallel(
             let sem = semaphore.clone();
             let db = db_arc.clone();
             let st = state.clone();
+            let completed_clone = completed.clone();
             
             async move {
-                // Acquire permit
-                let _permit = sem.acquire().await.unwrap();
+                // Acquire permit - if this fails, semaphore is closed (shutdown)
+                let _permit = match sem.acquire().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        eprintln!("Failed to acquire semaphore permit: {}", e);
+                        return;
+                    }
+                };
                 
                 // Process file (this is async but not Send, so we run it directly)
                 if let Err(e) = process_blk_file(st, file_path.clone(), db.clone()).await {
                     eprintln!("Failed to process {}: {}", file_path.display(), e);
                     let _ = save_file_as_incomplete(&db, &file_path).await;
                 }
+                
+                // Update progress
+                let mut count = completed_clone.lock().await;
+                *count += 1;
+                let current = *count;
+                drop(count);
+                
+                let progress = (current as f64 / total_files as f64) * 100.0;
+                println!("\n📊 File Progress: {}/{} ({:.1}%) complete", current, total_files, progress);
             }
         })
         .collect();
@@ -178,16 +198,23 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     println!("  Loaded {} blocks into memory", total_blocks);
     
     // DEBUG: Check if block 2,678,400 is in children_map
-    let block_2678400_hash = hex::decode("bde2ea24bba50fb80a9c98b67e76a4407d0251aa61ac13bbcfa7feccab57bce7")
-        .expect("Failed to decode hash");
-    if let Some(children) = children_map.get(&block_2678400_hash) {
-        println!("  DEBUG: Block 2,678,400 has {} children in map (BEFORE chainwork calc)", children.len());
-        for (i, (child_hash, _)) in children.iter().enumerate() {
-            let display_hash: Vec<u8> = child_hash.iter().rev().cloned().collect();
-            println!("    Child {}: {}", i + 1, hex::encode(&display_hash));
+    let block_2678400_hash = match hex::decode("bde2ea24bba50fb80a9c98b67e76a4407d0251aa61ac13bbcfa7feccab57bce7") {
+        Ok(hash) => hash,
+        Err(e) => {
+            eprintln!("  DEBUG: Failed to decode debug hash: {}", e);
+            vec![] // Empty vec won't match anything in map
         }
-    } else {
-        println!("  DEBUG: Block 2,678,400 NOT FOUND in children_map!");
+    };
+    if !block_2678400_hash.is_empty() {
+        if let Some(children) = children_map.get(&block_2678400_hash) {
+            println!("  DEBUG: Block 2,678,400 has {} children in map (BEFORE chainwork calc)", children.len());
+            for (i, (child_hash, _)) in children.iter().enumerate() {
+                let display_hash: Vec<u8> = child_hash.iter().rev().cloned().collect();
+                println!("    Child {}: {}", i + 1, hex::encode(&display_hash));
+            }
+        } else {
+            println!("  DEBUG: Block 2,678,400 NOT FOUND in children_map!");
+        }
     }
     
     // Store children_map size

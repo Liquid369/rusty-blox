@@ -257,7 +257,10 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
     }
     
     // Parse version (4 bytes)
-    let version = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    let version = u32::from_le_bytes(
+        data[0..4].try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    );
     
     // Skip prev block hash (32 bytes)
     
@@ -266,14 +269,23 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
     let merkleroot = hex::encode(merkle_bytes.iter().rev().cloned().collect::<Vec<u8>>());
     
     // Parse time (4 bytes at offset 68)
-    let time = u32::from_le_bytes(data[68..72].try_into().unwrap());
+    let time = u32::from_le_bytes(
+        data[68..72].try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    );
     
     // Parse bits (4 bytes at offset 72)
-    let bits_value = u32::from_le_bytes(data[72..76].try_into().unwrap());
+    let bits_value = u32::from_le_bytes(
+        data[72..76].try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    );
     let bits = format!("{:08x}", bits_value);
     
     // Parse nonce (4 bytes at offset 76)
-    let nonce = u32::from_le_bytes(data[76..80].try_into().unwrap());
+    let nonce = u32::from_le_bytes(
+        data[76..80].try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    );
     
     // Calculate difficulty from bits
     let difficulty = bits_to_difficulty(bits_value);

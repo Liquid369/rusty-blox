@@ -440,7 +440,7 @@ async fn index_block_from_rpc(
                 data
             } else {
                 // Previous transaction not in DB - fetch it from RPC with full details
-                eprintln!("   🔍 Fetching missing previous tx {} from RPC...", prev_txid_hex);
+                // Debug logging removed for performance - only log on errors
                 match client
                     .post(&url)
                     .basic_auth(&user, Some(&pass))
@@ -491,9 +491,8 @@ async fn index_block_from_rpc(
                                                 
                                                 if let Err(e) = db.put_cf(&cf_transactions, &prev_tx_key, &full_data) {
                                                     eprintln!("⚠️  Failed to cache previous tx {}: {}", prev_txid_hex, e);
-                                                } else {
-                                                    eprintln!("   ✅ Cached previous tx {} (height: {})", prev_txid_hex, prev_height);
                                                 }
+                                                // Successfully cached - debug logging removed for performance
                                                 
                                                 // Also store the 'B' index entry for this transaction
                                                 if prev_height > 0 {
@@ -602,9 +601,10 @@ async fn index_block_from_rpc(
     if tx_errors > 0 {
         eprintln!("⚠️  Block {}: Indexed {}/{} transactions ({} errors)", 
                   height, tx_count, tx_array.len(), tx_errors);
-    } else if height % 100 == 0 {
+    } else if height % 1000 == 0 {
         println!("✅ Block {}: Indexed all {} transactions", height, tx_count);
     }
+    // Debug logging reduced for performance - only log every 1000 blocks or on errors
     
     // Update sync height
     let cf_state = db.cf_handle("chain_state")

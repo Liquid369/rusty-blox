@@ -4,6 +4,7 @@ mod batch_writer;
 mod block_detail;
 mod blocks;
 mod chain_state;
+mod db_handles;
 mod db_utils;
 mod leveldb_index;
 mod mempool;
@@ -117,11 +118,19 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         SocketAddr::from(([0, 0, 0, 0], server_port))
     };
     
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind");
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("FATAL: Failed to bind to {}: {}", addr, e);
+            eprintln!("       Check if port {} is already in use", server_port);
+            std::process::exit(1);
+        }
+    };
     println!("Listening on {}", addr);
-    axum::serve(listener, app)
-        .await
-        .expect("server failed");
+    
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Web server error: {}", e);
+    }
 }
 
 #[tokio::main]
@@ -180,21 +189,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let db_arc = Arc::new(db);
 
+    // Initialize cached column family handles
+    // This validates all required CFs exist at startup
+    println!("Initializing database column family handles...");
+    let _db_handles = crate::db_handles::DbHandles::new(Arc::clone(&db_arc))
+        .map_err(|e| format!("Failed to initialize DB handles: {}", e))?;
+    println!("✅ Database handles validated");
+
     let blk_dir_path = PathBuf::from(blk_dir);
     
     // Create shared state
     let mempool_state = Arc::new(MempoolState::new());
     let broadcaster = Arc::new(EventBroadcaster::new());
     
-    // Spawn web server in background task
-    let api_db = Arc::clone(&db_arc);
-    let api_mempool = Arc::clone(&mempool_state);
-    let api_broadcaster = Arc::clone(&broadcaster);
-    tokio::spawn(async move {
-        start_web_server(api_db, api_mempool, api_broadcaster).await;
-    });
-    
-    // Spawn mempool monitor service
+    // Spawn mempool monitor service (can start early)
     let mempool_clone = Arc::clone(&mempool_state);
     tokio::spawn(async move {
         if let Err(e) = run_mempool_monitor(mempool_clone, 10).await {
@@ -202,11 +210,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Give services time to start
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Start sync service in background - this runs indefinitely
+    println!("\n🔄 Starting blockchain sync...");
+    let sync_db = Arc::clone(&db_arc);
+    let sync_broadcaster = Arc::clone(&broadcaster);
+    let blk_dir_clone = blk_dir_path.clone();
     
-    // Run sync service (handles both initial and live sync)
-    run_sync_service(blk_dir_path, Arc::clone(&db_arc), Some(broadcaster)).await?;
+    tokio::task::spawn_blocking(move || {
+        // Use tokio runtime for async operations
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            if let Err(e) = run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await {
+                eprintln!("Sync service error: {}", e);
+            }
+        });
+    });
+    
+    // Wait for minimum viable sync before starting web server
+    // Check every 2 seconds if we have at least 1000 blocks indexed
+    let api_db = Arc::clone(&db_arc);
+    loop {
+        let cf_state = match api_db.cf_handle("chain_state") {
+            Some(cf) => cf,
+            None => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        
+        match api_db.get_cf(&cf_state, b"sync_height") {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
+                let height = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                if height >= 1000 {
+                    println!("\n✅ Minimum viable data indexed (height: {})", height);
+                    println!("   Starting web server...\n");
+                    break;
+                }
+                println!("📊 Indexing in progress (height: {})... waiting for minimum 1000 blocks", height);
+            }
+            _ => {
+                println!("📊 Indexing in progress... waiting for initial data");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    
+    // NOW start web server (data is ready)
+    let api_mempool = Arc::clone(&mempool_state);
+    let api_broadcaster = Arc::clone(&broadcaster);
+    start_web_server(api_db, api_mempool, api_broadcaster).await;
 
     Ok(())
 }

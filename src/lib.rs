@@ -6,6 +6,7 @@ use std::ffi::c_void;
 pub mod chainwork;
 pub mod canonical_chain;
 pub mod config;
+pub mod db_handles;
 pub mod leveldb_index;
 pub mod parser;
 pub mod types;
