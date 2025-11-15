@@ -1347,6 +1347,134 @@ pub async fn budget_info_v2() -> Result<Json<Vec<RpcBudgetInfo>>, StatusCode> {
     Err(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
+pub async fn budget_votes_v2(AxumPath(proposal_name): AxumPath<String>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = get_global_config();
+    let rpc_host = config.get::<String>("rpc.host")
+        .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
+    let rpc_user = config.get::<String>("rpc.user")
+        .unwrap_or_else(|_| "explorer".to_string());
+    let rpc_pass = config.get::<String>("rpc.pass")
+        .unwrap_or_else(|_| "explorer_test_pass".to_string());
+    
+    let host_port = rpc_host
+        .replace("http://", "")
+        .replace("https://", "");
+    
+    let mut stream = match TcpStream::connect(&host_port) {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    
+    let json_body = format!(r#"{{"jsonrpc":"1.0","id":"1","method":"getbudgetvotes","params":["{}"]}}"#, proposal_name);
+    let content_length = json_body.len();
+    
+    let auth_str = format!("{}:{}", rpc_user, rpc_pass);
+    let auth_b64 = base64::encode(&auth_str);
+    
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Authorization: Basic {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        host_port, auth_b64, content_length, json_body
+    );
+    
+    if let Err(_) = stream.write_all(request.as_bytes()) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    
+    let mut response = Vec::new();
+    if let Err(_) = stream.read_to_end(&mut response) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    
+    let response_str = String::from_utf8_lossy(&response);
+    
+    if let Some(pos) = response_str.find("\r\n\r\n") {
+        let json_start = pos + 4;
+        let body = response_str[json_start..].trim();
+        
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(result) = value.get("result") {
+                return Ok(Json(result.clone()));
+            }
+        }
+    }
+    
+    Err(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn budget_projection_v2() -> Result<Json<serde_json::Value>, StatusCode> {
+    let config = get_global_config();
+    let rpc_host = config.get::<String>("rpc.host")
+        .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
+    let rpc_user = config.get::<String>("rpc.user")
+        .unwrap_or_else(|_| "explorer".to_string());
+    let rpc_pass = config.get::<String>("rpc.pass")
+        .unwrap_or_else(|_| "explorer_test_pass".to_string());
+    
+    let host_port = rpc_host
+        .replace("http://", "")
+        .replace("https://", "");
+    
+    let mut stream = match TcpStream::connect(&host_port) {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+    
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    stream.set_write_timeout(Some(Duration::from_secs(15))).ok();
+    
+    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getbudgetprojection","params":[]}"#;
+    let content_length = json_body.len();
+    
+    let auth_str = format!("{}:{}", rpc_user, rpc_pass);
+    let auth_b64 = base64::encode(&auth_str);
+    
+    let request = format!(
+        "POST / HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Authorization: Basic {}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {}",
+        host_port, auth_b64, content_length, json_body
+    );
+    
+    if let Err(_) = stream.write_all(request.as_bytes()) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    
+    let mut response = Vec::new();
+    if let Err(_) = stream.read_to_end(&mut response) {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    
+    let response_str = String::from_utf8_lossy(&response);
+    
+    if let Some(pos) = response_str.find("\r\n\r\n") {
+        let json_start = pos + 4;
+        let body = response_str[json_start..].trim();
+        
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+            if let Some(result) = value.get("result") {
+                return Ok(Json(result.clone()));
+            }
+        }
+    }
+    
+    Err(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub async fn relay_mnb_v2(AxumPath(param): AxumPath<String>) -> Result<Json<String>, StatusCode> {
     let config = get_global_config();
     let rpc_host = config.get::<String>("rpc.host");

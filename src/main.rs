@@ -24,8 +24,9 @@ use crate::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_hand
 use crate::block_detail::block_detail_v2;
 use crate::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
-    send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, relay_mnb_v2,
-    status_v2, search_v2, mempool_v2, mempool_tx_v2, block_stats_v2,
+    send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2, 
+    budget_projection_v2, relay_mnb_v2, status_v2, search_v2, mempool_v2, mempool_tx_v2, 
+    block_stats_v2,
 };
 use crate::types::MyError;
 
@@ -60,6 +61,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // We just want to mimic blockbook API endpoints and structure for compatibility
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api", get(api_handler))
@@ -82,8 +84,8 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/moneysupply", get(money_supply_v2))
         .route("/api/v2/budgetinfo", get(budget_info_v2))
         .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
-        .route("/api/v2/budgetvotes/{proposal_name}", get(api_handler))
-        .route("/api/v2/budgetprojection", get(api_handler))
+        .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
+        .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/mnrawbudgetvote/{raw_vote_params}", get(api_handler))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
