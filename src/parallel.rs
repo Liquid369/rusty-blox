@@ -110,7 +110,7 @@ pub async fn process_files_parallel(
     // Execute all tasks concurrently
     futures::future::join_all(tasks).await;
     
-    println!("All files processed!");
+    println!("\n✅ All blk*.dat files processed!");
     
     // Check if canonical chain metadata already exists (from leveldb phase)
     let cf_metadata = db_arc.cf_handle("chain_metadata")
@@ -129,6 +129,10 @@ pub async fn process_files_parallel(
         resolve_block_heights(&db_arc).await?;
         println!("✅ Chain building complete!");
     }
+    
+    println!("\n╔════════════════════════════════════════════════════╗");
+    println!("║        📦 BLK FILE PROCESSING COMPLETE 📦          ║");
+    println!("╚════════════════════════════════════════════════════╝");
     
     Ok(())
 }

@@ -468,6 +468,9 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         // Get current height for confirmations
         let chain_state = get_chain_state(&db_clone).ok();
         let current_height = chain_state.as_ref().map(|cs| cs.height).unwrap_or(0);
+        
+        // Note: Some transactions may have block_height = 0 due to indexing issues during initial sync
+        // These will show 0 confirmations until the transaction index is rebuilt
         let confirmations = if block_height > 0 && current_height > 0 {
             (current_height - block_height + 1).max(0) as u32
         } else {
@@ -612,7 +615,40 @@ pub async fn addr_v2(
     unique_txids.sort();
     unique_txids.dedup();
     
-    let tx_count = unique_txids.len() as u32;
+    // Sort txids by block height (newest first = least confirmations first)
+    let mut txid_heights: Vec<(String, u32)> = Vec::new();
+    for txid in &unique_txids {
+        let txid_bytes = match hex::decode(txid) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        let mut key = vec![b't'];
+        key.extend(&txid_bytes);
+        let db_clone = db.clone();
+        
+        let height = tokio::task::spawn_blocking(move || -> Option<u32> {
+            let cf_transactions = db_clone.cf_handle("transactions")?;
+            let tx_data = db_clone.get_cf(&cf_transactions, &key).ok()??;
+            if tx_data.len() >= 8 {
+                let height_bytes: [u8; 4] = tx_data[4..8].try_into().ok()?;
+                Some(u32::from_le_bytes(height_bytes))
+            } else {
+                None
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+        
+        txid_heights.push((txid.clone(), height));
+    }
+    
+    // Sort by height descending (newest first)
+    txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+    let sorted_txids: Vec<String> = txid_heights.iter().map(|(txid, _)| txid.clone()).collect();
+    
+    let tx_count = sorted_txids.len() as u32;
     let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
     let total_pages = if total_pages == 0 { 1 } else { total_pages };
     
@@ -620,7 +656,7 @@ pub async fn addr_v2(
     let txids = if params.details == "basic" || params.details == "tokens" || params.details == "tokenBalances" {
         None
     } else {
-        Some(unique_txids)
+        Some(sorted_txids)
     };
     
     Json(AddressInfo {

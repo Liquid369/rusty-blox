@@ -229,8 +229,10 @@ async fn process_transaction_v1(
 
     //println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
 
-    // UTXO tracking - skip in fast sync mode
+    // UTXO tracking and address indexing
     if !fast_sync {
+        // FULL MODE: Complete UTXO tracking with spent output removal
+        // This is SLOW because it looks up previous transactions for every input
         let mut key_pubkey = vec![b'p'];
         for tx_out in &transaction.outputs {
             let address_type = get_address_type(tx_out, &general_address_type).await;
@@ -312,7 +314,22 @@ async fn process_transaction_v1(
             // Remove the referenced UTXO from the UTXO set
             perform_rocksdb_del(_db.clone(), "utxo", key_utxo.clone()).await;
         }
-    } // End UTXO tracking (fast_sync skip)
+    } else {
+        // FAST SYNC MODE: Index addresses only (no spent tracking)
+        // This is 10-15x faster because we don't look up previous transactions
+        // We still index addresses so they can be searched, but totalSent will be 0
+        for tx_out in &transaction.outputs {
+            let address_type = get_address_type(tx_out, &general_address_type).await;
+            
+            // Index address without checking if UTXOs are spent
+            handle_address_outputs_only(
+                _db.clone(),
+                &address_type,
+                reversed_txid.clone(),
+                tx_out.index.try_into().unwrap_or(0),
+            ).await?;
+        }
+    } // End UTXO tracking / address indexing
 
     // Store transaction with proper indexing
     // 1. Main transaction storage: 't' + txid → (block_version + block_height + tx_bytes)
@@ -766,6 +783,43 @@ async fn get_address_type(tx_out: &CTxOut, general_address_type: &AddressType) -
 
 // Helper function to handle address indexing
 async fn handle_address(
+    _db: Arc<DB>,
+    address_type: &AddressType,
+    reversed_txid: Vec<u8>,
+    tx_out_index: u32,
+) -> Result<(), io::Error> {
+    let address_keys = match address_type {
+        AddressType::P2PKH(address) | AddressType::P2SH(address) => vec![address.clone()],
+        AddressType::P2PK(pubkey) => vec![pubkey.clone()],
+        AddressType::Staking(staker, owner) => vec![staker.clone(), owner.clone()],
+        _ => return Ok(()),
+    };
+
+    for address_key in &address_keys {
+        let mut key_address = vec![b'a'];
+        key_address.extend_from_slice(address_key.as_bytes());
+        
+        let existing_data = perform_rocksdb_get(_db.clone(), "addr_index", key_address.clone()).await;
+        let mut existing_utxos = match existing_data {
+            Ok(Some(data)) => deserialize_utxos(&data).await,
+            _ => Vec::new(),
+        };
+        
+        existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
+        perform_rocksdb_put(
+            _db.clone(),
+            "addr_index",
+            key_address,
+            serialize_utxos(&existing_utxos).await
+        ).await;
+    }
+
+    Ok(())
+}
+
+// Helper function for fast_sync mode: Index addresses only (no spent tracking)
+// This is much faster than full UTXO tracking because it doesn't look up previous transactions
+async fn handle_address_outputs_only(
     _db: Arc<DB>,
     address_type: &AddressType,
     reversed_txid: Vec<u8>,

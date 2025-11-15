@@ -399,6 +399,7 @@ async fn index_block_from_rpc(
         }
         
         // Process inputs: remove spent UTXOs from address index
+        // AND fetch missing previous transactions via RPC if needed
         for input in &parsed_tx.inputs {
             // Skip coinbase transactions (no prevout)
             let prevout = match &input.prevout {
@@ -431,65 +432,163 @@ async fn index_block_from_rpc(
             let mut prev_tx_key = vec![b't'];
             prev_tx_key.extend_from_slice(&prev_txid_internal);
             
-            if let Ok(Some(prev_tx_data)) = db.get_cf(&cf_transactions, &prev_tx_key) {
-                // Validate previous transaction data size (must have at least 8 byte header)
-                if prev_tx_data.len() < 8 {
-                    eprintln!("⚠️  Previous transaction {} data too short", prev_txid_hex);
-                    continue;
-                }
-                
-                if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
-                    eprintln!("⚠️  Previous transaction {} too large", prev_txid_hex);
-                    continue;
-                }
-                
-                // Format: version (4) + height (4) + raw_tx
-                // We need to prepend 4-byte dummy header for parser, so extract raw tx part
-                let raw_prev_tx = &prev_tx_data[8..];
-                
-                if raw_prev_tx.is_empty() {
-                    eprintln!("⚠️  Previous transaction {} has empty data", prev_txid_hex);
-                    continue;
-                }
-                
-                // Prepend dummy block_version for parser compatibility
-                let mut prev_tx_with_header = Vec::with_capacity(4 + raw_prev_tx.len());
-                prev_tx_with_header.extend_from_slice(&[0u8; 4]);
-                prev_tx_with_header.extend_from_slice(raw_prev_tx);
-                
-                // Parse previous transaction to find addresses of the spent output
-                if let Ok(prev_tx) = deserialize_transaction(&prev_tx_with_header).await {
-                    // Get the output at this index
-                    if let Some(output) = prev_tx.outputs.get(prev_output_idx as usize) {
-                        // Remove from address index for each address in this output
-                        for address in &output.address {
-                            if address.is_empty() {
+            // Try to get from database first
+            let prev_tx_data_opt = db.get_cf(&cf_transactions, &prev_tx_key)?;
+            
+            // If not in database, fetch from RPC and store it
+            let prev_tx_data = if let Some(data) = prev_tx_data_opt {
+                data
+            } else {
+                // Previous transaction not in DB - fetch it from RPC with full details
+                eprintln!("   🔍 Fetching missing previous tx {} from RPC...", prev_txid_hex);
+                match client
+                    .post(&url)
+                    .basic_auth(&user, Some(&pass))
+                    .json(&serde_json::json!({
+                        "jsonrpc": "1.0",
+                        "id": "rustyblox",
+                        "method": "getrawtransaction",
+                        "params": [prev_txid_hex, 1]  // 1 = verbose (includes blockhash)
+                    }))
+                    .send()
+                {
+                    Ok(resp) => {
+                        match resp.json::<Value>() {
+                            Ok(json) => {
+                                if let Some(result) = json.get("result") {
+                                    // Extract hex and blockhash
+                                    let raw_hex = result.get("hex").and_then(|h| h.as_str());
+                                    let blockhash = result.get("blockhash").and_then(|h| h.as_str());
+                                    
+                                    if let (Some(hex_str), Some(block_hash)) = (raw_hex, blockhash) {
+                                        match hex::decode(hex_str) {
+                                            Ok(raw_bytes) => {
+                                                // Fetch block height for this blockhash
+                                                let prev_height = match client
+                                                    .post(&url)
+                                                    .basic_auth(&user, Some(&pass))
+                                                    .json(&serde_json::json!({
+                                                        "jsonrpc": "1.0",
+                                                        "id": "rustyblox",
+                                                        "method": "getblock",
+                                                        "params": [block_hash, 1]
+                                                    }))
+                                                    .send()
+                                                {
+                                                    Ok(block_resp) => {
+                                                        block_resp.json::<Value>()
+                                                            .ok()
+                                                            .and_then(|j| j.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()))
+                                                            .unwrap_or(0) as i32
+                                                    }
+                                                    Err(_) => 0,
+                                                };
+                                                
+                                                // Store this transaction with proper height
+                                                let mut full_data = version.to_le_bytes().to_vec();
+                                                full_data.extend(&prev_height.to_le_bytes());
+                                                full_data.extend(&raw_bytes);
+                                                
+                                                if let Err(e) = db.put_cf(&cf_transactions, &prev_tx_key, &full_data) {
+                                                    eprintln!("⚠️  Failed to cache previous tx {}: {}", prev_txid_hex, e);
+                                                } else {
+                                                    eprintln!("   ✅ Cached previous tx {} (height: {})", prev_txid_hex, prev_height);
+                                                }
+                                                
+                                                // Also store the 'B' index entry for this transaction
+                                                if prev_height > 0 {
+                                                    // We don't know the tx_index within the block, so skip 'B' entry
+                                                    // The transaction will still be queryable via 't' prefix
+                                                }
+                                                
+                                                full_data
+                                            }
+                                            Err(_) => {
+                                                eprintln!("⚠️  Failed to decode previous tx hex {}", prev_txid_hex);
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        eprintln!("⚠️  Missing hex or blockhash for previous tx {}", prev_txid_hex);
+                                        continue;
+                                    }
+                                } else {
+                                    eprintln!("⚠️  No result for previous tx {}", prev_txid_hex);
+                                    continue;
+                                }
+                            }
+                            Err(_) => {
+                                eprintln!("⚠️  Failed to parse RPC response for previous tx {}", prev_txid_hex);
                                 continue;
                             }
-                            
-                            let mut addr_key = vec![b'a'];
-                            addr_key.extend_from_slice(address.as_bytes());
-                            
-                            // Get existing UTXOs
-                            let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
-                                Some(data) => deserialize_utxos(&data).await,
-                                None => Vec::new(),
-                            };
-                            
-                            // Remove the spent UTXO (match by reversed txid and index)
-                            let updated_utxos: Vec<_> = existing_utxos.into_iter()
-                                .filter(|(stored_txid, stored_idx)| {
-                                    !(stored_txid == &prev_txid_internal && *stored_idx == prev_output_idx as u64)
-                                })
-                                .collect();
-                            
-                            // Update or delete
-                            if !updated_utxos.is_empty() {
-                                let serialized = serialize_utxos(&updated_utxos).await;
-                                let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
-                            } else {
-                                let _ = db.delete_cf(&cf_addr_index, &addr_key);
-                            }
+                        }
+                    }
+                    Err(_) => {
+                        // RPC fetch failed - can't process this input
+                        // This is non-fatal, just skip removing from UTXO set
+                        eprintln!("⚠️  RPC request failed for previous tx {}", prev_txid_hex);
+                        continue;
+                    }
+                }
+            };
+            
+            // Now process the previous transaction data
+            if prev_tx_data.len() < 8 {
+                eprintln!("⚠️  Previous transaction {} data too short", prev_txid_hex);
+                continue;
+            }
+            
+            if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
+                eprintln!("⚠️  Previous transaction {} too large", prev_txid_hex);
+                continue;
+            }
+            
+            // Format: version (4) + height (4) + raw_tx
+            // We need to prepend 4-byte dummy header for parser, so extract raw tx part
+            let raw_prev_tx = &prev_tx_data[8..];
+            
+            if raw_prev_tx.is_empty() {
+                eprintln!("⚠️  Previous transaction {} has empty data", prev_txid_hex);
+                continue;
+            }
+            
+            // Prepend dummy block_version for parser compatibility
+            let mut prev_tx_with_header = Vec::with_capacity(4 + raw_prev_tx.len());
+            prev_tx_with_header.extend_from_slice(&[0u8; 4]);
+            prev_tx_with_header.extend_from_slice(raw_prev_tx);
+            
+            // Parse previous transaction to find addresses of the spent output
+            if let Ok(prev_tx) = deserialize_transaction(&prev_tx_with_header).await {
+                // Get the output at this index
+                if let Some(output) = prev_tx.outputs.get(prev_output_idx as usize) {
+                    // Remove from address index for each address in this output
+                    for address in &output.address {
+                        if address.is_empty() {
+                            continue;
+                        }
+                        
+                        let mut addr_key = vec![b'a'];
+                        addr_key.extend_from_slice(address.as_bytes());
+                        
+                        // Get existing UTXOs
+                        let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
+                            Some(data) => deserialize_utxos(&data).await,
+                            None => Vec::new(),
+                        };
+                        
+                        // Remove the spent UTXO (match by reversed txid and index)
+                        let updated_utxos: Vec<_> = existing_utxos.into_iter()
+                            .filter(|(stored_txid, stored_idx)| {
+                                !(stored_txid == &prev_txid_internal && *stored_idx == prev_output_idx as u64)
+                            })
+                            .collect();
+                        
+                        // Update or delete
+                        if !updated_utxos.is_empty() {
+                            let serialized = serialize_utxos(&updated_utxos).await;
+                            let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
+                        } else {
+                            let _ = db.delete_cf(&cf_addr_index, &addr_key);
                         }
                     }
                 }
@@ -631,11 +730,14 @@ pub async fn run_block_monitor(
         if rpc_tip.height > db_tip.height {
             let blocks_behind = rpc_tip.height - db_tip.height;
             
+            println!("\n📡 RPC CATCHUP: {} blocks behind (heights {} → {})", 
+                     blocks_behind, db_tip.height + 1, rpc_tip.height);
+            
             // Index new blocks - NO SLEEP when catching up!
             for (idx, height) in ((db_tip.height + 1)..=rpc_tip.height).enumerate() {
                 // Index the block
                 if let Err(e) = index_block_from_rpc(&rpc_client, height, &db, &broadcaster).await {
-                    eprintln!("Failed to index block at height {}: {}", height, e);
+                    eprintln!("❌ Failed to index block at height {}: {}", height, e);
                     // Brief pause on error before retry
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     break;
@@ -644,9 +746,25 @@ pub async fn run_block_monitor(
                 // Show progress every 100 blocks or on the last block
                 if idx % 100 == 0 || height == rpc_tip.height {
                     let progress = ((idx + 1) as f64 / blocks_behind as f64) * 100.0;
-                    println!("Indexing progress: {}/{} ({:.1}%) - Block {}", 
+                    println!("   📊 Progress: {}/{} ({:.1}%) - Block {}", 
                              idx + 1, blocks_behind, progress, height);
                 }
+            }
+            
+            // Check if we successfully caught up
+            let new_db_tip = match get_db_chain_tip(&db) {
+                Ok(tip) => tip,
+                Err(_) => db_tip.clone(),
+            };
+            
+            if new_db_tip.height >= rpc_tip.height {
+                println!("\n✅ RPC CATCHUP COMPLETE!");
+                println!("   📍 Current height: {}", new_db_tip.height);
+                println!("   🌐 Network height: {}", rpc_tip.height);
+                println!("   🎯 Status: FULLY SYNCED\n");
+                println!("╔════════════════════════════════════════════════════╗");
+                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉       ║");
+                println!("╚════════════════════════════════════════════════════╝\n");
             }
         } else {
             // We're caught up - sleep before checking again

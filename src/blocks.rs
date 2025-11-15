@@ -442,7 +442,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         block_count += 1;
         
         // Debug: print every 100 blocks
-        if block_count % 100 == 0 {
+        if block_count % 1000 == 0 {
             println!("  Processed {} blocks so far", block_count);
         }
         

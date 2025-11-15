@@ -16,3 +16,17 @@ pub fn init_global_config() -> Result<(), Box<dyn Error>> {
 pub fn get_global_config() -> &'static Config {
     GLOBAL_CONFIG.get().expect("Config not initialized")
 }
+
+/// Load config for standalone binaries/utilities
+pub fn load_config() -> Result<Config, Box<dyn Error>> {
+    let mut config = Config::default();
+    config.merge(ConfigFile::with_name("config.toml"))?;
+    Ok(config)
+}
+
+/// Get db_path from config
+pub fn get_db_path(config: &Config) -> Result<String, Box<dyn Error>> {
+    config
+        .get_string("paths.db_path")
+        .map_err(|e| format!("Missing paths.db_path in config: {}", e).into())
+}

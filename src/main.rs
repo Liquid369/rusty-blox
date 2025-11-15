@@ -55,6 +55,16 @@ lazy_static! {
 }
 
 async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, broadcaster: Arc<EventBroadcaster>) {
+    let config = get_global_config();
+    
+    // Get server configuration
+    let server_host = config
+        .get_string("server.host")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let server_port: u16 = config
+        .get_int("server.port")
+        .unwrap_or(3005) as u16;
+    
     // Configure CORS to allow requests from the frontend
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -95,7 +105,18 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .layer(axum::extract::Extension(mempool_state))
         .layer(axum::extract::Extension(broadcaster));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3005));
+    // Parse host IP
+    let host_parts: Vec<u8> = server_host
+        .split('.')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    
+    let addr = if host_parts.len() == 4 {
+        SocketAddr::from(([host_parts[0], host_parts[1], host_parts[2], host_parts[3]], server_port))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0], server_port))
+    };
+    
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind");
     println!("Listening on {}", addr);
     axum::serve(listener, app)
