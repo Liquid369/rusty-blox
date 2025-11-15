@@ -146,12 +146,16 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     let mut batch_items = Vec::new();
     let mut header_buffer = Vec::with_capacity(112);
     let mut block_count = 0;
+    let mut skipped_count = 0;
     
     // Create batch writer for transaction data
     let mut tx_batch = BatchWriter::new(db.clone(), TX_BATCH_SIZE);
     
     let mut size_buffer = [0u8; 4];
     let mut magic_bytes = [0u8; 4];
+    
+    // Get column families for quick lookups
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
 
     loop {
         // Track position at start of block (after magic+size)
@@ -300,6 +304,27 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
 
         let mut block_header = parse_block_header_sync(&header_buffer, header_size)?;
         
+        // Check if this block is already indexed
+        let block_hash_vec = block_header.block_hash.to_vec();
+        let mut block_key = vec![b'b'];
+        block_key.extend_from_slice(&block_hash_vec);
+        
+        // Quick check: if block already exists, skip it
+        if let Ok(Some(_)) = db.get_cf(&cf_blocks, &block_key) {
+            // Block already indexed, skip to next block
+            skipped_count += 1;
+            if skipped_count == 1 || skipped_count % 100 == 0 {
+                println!("  Skipping already-indexed blocks ({} so far)...", skipped_count);
+            }
+            
+            // Seek to next block position and continue
+            if let Err(e) = reader.seek(std::io::SeekFrom::Start(next_block_pos)).await {
+                eprintln!("  Failed to seek to next block: {}", e);
+                break;
+            }
+            continue;
+        }
+        
         // Try to get height from chain_metadata (if leveldb was parsed)
         let cf_metadata = db.cf_handle("chain_metadata");
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
@@ -328,9 +353,6 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         };
         
         block_header.block_height = block_height;
-        
-        // Store block data
-        let block_hash_vec = block_header.block_hash.to_vec();
         
         // Extract nBits for chainwork calculation (bytes 72-76 in header)
         let n_bits = if header_buffer.len() >= 76 {
@@ -481,7 +503,11 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         println!("Flushed {} pending transaction operations", tx_batch.pending_count());
     }
 
-    println!("File complete: {} total blocks processed", block_count);
+    if skipped_count > 0 {
+        println!("File complete: {} new blocks indexed, {} already-indexed blocks skipped", block_count, skipped_count);
+    } else {
+        println!("File complete: {} total blocks processed", block_count);
+    }
     Ok(())
 }
 

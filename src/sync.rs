@@ -339,26 +339,45 @@ async fn run_live_sync(
     
     // Only process blk files if we're significantly behind (>100 blocks)
     // This makes startup instant when we're already synced
-    if blocks_behind > 100 {
+    if blocks_behind > 10000 {
         println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
         println!("Phase 1: Syncing from blk*.dat files...");
         
         let config = get_global_config();
         let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
         
-        // Read all .dat files
+        // Read all .dat files and determine which ones to process
         let mut dir_entries = fs::read_dir(&blk_dir).await?;
-        let mut entries = Vec::new();
+        let mut all_entries = Vec::new();
         
         while let Ok(Some(entry)) = dir_entries.next_entry().await {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("dat") {
-                entries.push(path);
+            // Only include blk*.dat files (not rev*.dat or other .dat files)
+            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if filename.starts_with("blk") && filename.ends_with(".dat") {
+                    all_entries.push(path);
+                }
             }
         }
         
+        // Sort blk files to find the most recent ones
+        all_entries.sort();
+        
+        let entries = if blocks_behind < 100000 {
+            // If we're within ~100k blocks, only process the last few blk files
+            // Each blk file typically contains ~10-20k blocks, so last 5-10 files covers 100k blocks
+            let files_to_check = (blocks_behind / 10000).max(5).min(10) as usize;
+            let start_idx = all_entries.len().saturating_sub(files_to_check);
+            let recent_files: Vec<_> = all_entries[start_idx..].to_vec();
+            println!("📁 Synced within last 100k blocks - only processing last {} blk files (FAST startup!)", recent_files.len());
+            recent_files
+        } else {
+            println!("📁 Far behind - processing all {} blk files", all_entries.len());
+            all_entries
+        };
+        
         if !entries.is_empty() {
-            println!("Found {} blk*.dat files, processing in parallel...", entries.len());
+            println!("Processing {} blk*.dat files in parallel...", entries.len());
             process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
             
             println!("✅ Finished processing blk*.dat files!");

@@ -333,8 +333,22 @@ async fn index_block_from_rpc(
         }
         
         // 3. Parse transaction and index addresses/UTXOs
+        // Validate transaction size before allocation
+        if raw_tx_bytes.len() > 10_000_000 {
+            eprintln!("⚠️  Transaction {} too large ({} bytes), skipping", txid, raw_tx_bytes.len());
+            tx_errors += 1;
+            continue;
+        }
+        
+        if raw_tx_bytes.is_empty() {
+            eprintln!("⚠️  Transaction {} has empty data, skipping", txid);
+            tx_errors += 1;
+            continue;
+        }
+        
         // Prepend dummy block_version for parser compatibility
-        let mut tx_data_with_header = vec![0u8; 4];
+        let mut tx_data_with_header = Vec::with_capacity(4 + raw_tx_bytes.len());
+        tx_data_with_header.extend_from_slice(&[0u8; 4]);
         tx_data_with_header.extend_from_slice(&raw_tx_bytes);
         
         // Parse the transaction
@@ -418,8 +432,33 @@ async fn index_block_from_rpc(
             prev_tx_key.extend_from_slice(&prev_txid_internal);
             
             if let Ok(Some(prev_tx_data)) = db.get_cf(&cf_transactions, &prev_tx_key) {
+                // Validate previous transaction data size (must have at least 8 byte header)
+                if prev_tx_data.len() < 8 {
+                    eprintln!("⚠️  Previous transaction {} data too short", prev_txid_hex);
+                    continue;
+                }
+                
+                if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
+                    eprintln!("⚠️  Previous transaction {} too large", prev_txid_hex);
+                    continue;
+                }
+                
+                // Format: version (4) + height (4) + raw_tx
+                // We need to prepend 4-byte dummy header for parser, so extract raw tx part
+                let raw_prev_tx = &prev_tx_data[8..];
+                
+                if raw_prev_tx.is_empty() {
+                    eprintln!("⚠️  Previous transaction {} has empty data", prev_txid_hex);
+                    continue;
+                }
+                
+                // Prepend dummy block_version for parser compatibility
+                let mut prev_tx_with_header = Vec::with_capacity(4 + raw_prev_tx.len());
+                prev_tx_with_header.extend_from_slice(&[0u8; 4]);
+                prev_tx_with_header.extend_from_slice(raw_prev_tx);
+                
                 // Parse previous transaction to find addresses of the spent output
-                if let Ok(prev_tx) = deserialize_transaction(&prev_tx_data).await {
+                if let Ok(prev_tx) = deserialize_transaction(&prev_tx_with_header).await {
                     // Get the output at this index
                     if let Some(output) = prev_tx.outputs.get(prev_output_idx as usize) {
                         // Remove from address index for each address in this output

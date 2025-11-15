@@ -121,8 +121,11 @@ pub struct TxInput {
     pub txid: Option<String>,
     pub vout: Option<u32>,
     pub address: Option<String>,
+    pub addresses: Option<Vec<String>>,
     pub value: Option<f64>,
     pub coinbase: Option<String>,
+    #[serde(rename = "type")]
+    pub script_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +134,8 @@ pub struct TxOutput {
     pub value: f64,
     pub addresses: Vec<String>,
     pub spent: bool,
+    #[serde(rename = "type")]
+    pub script_type: Option<String>,
 }
 
 /// API Handler for /api/v2/block-detail/{height}
@@ -398,13 +403,19 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
                             // Extract the output at vout index
                             if let Some(vout_idx) = input.vout {
                                 if let Some(output) = prev_tx.outputs.get(vout_idx as usize) {
-                                    // Add value from the output
-                                    input.value = Some(output.value as f64 / 100_000_000.0);
+                                    // Add value from the output (in satoshis)
+                                    input.value = Some(output.value as f64);
                                     
-                                    // Add address from the output
+                                    // Add address(es) from the output
                                     if !output.address.is_empty() {
                                         input.address = output.address.get(0).cloned();
+                                        input.addresses = Some(output.address.clone());
                                     }
+                                    
+                                    // Add script type from the output
+                                    use crate::parser::get_script_type;
+                                    let script_type = get_script_type(&output.script_pubkey.script);
+                                    input.script_type = Some(script_type.to_string());
                                 }
                             }
                         }
@@ -414,10 +425,10 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
         }
     }
     
-    // Recalculate value_in and fees after enrichment
+    // Recalculate value_in and fees after enrichment (convert satoshis to PIV)
     tx.value_in = tx.vin.iter()
         .filter_map(|i| i.value)
-        .sum::<f64>();
+        .sum::<f64>() / 100_000_000.0;
     
     // Calculate fees and rewards based on transaction type
     if let Some(ref tx_type) = tx.tx_type {
@@ -472,16 +483,20 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
                     txid: None,
                     vout: None,
                     address: None,
+                    addresses: None,
                     value: None,
                     coinbase: Some(coinbase.to_string()),
+                    script_type: None,
                 });
             } else {
                 vin.push(TxInput {
                     txid: input["txid"].as_str().map(|s| s.to_string()),
                     vout: input["vout"].as_u64().map(|v| v as u32),
                     address: input["address"].as_str().map(|s| s.to_string()),
+                    addresses: None, // Will be enriched if prev tx is cold staking
                     value: input["value"].as_f64(),
                     coinbase: None,
+                    script_type: None, // Will be enriched from prev tx
                 });
             }
         }
@@ -501,11 +516,17 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
                     .collect();
             }
             
+            // Get script type if available
+            let script_type = output["scriptPubKey"]["type"]
+                .as_str()
+                .map(|s| s.to_string());
+            
             vout.push(TxOutput {
                 n: n as u64,
                 value,
                 addresses,
                 spent: false,
+                script_type,
             });
         }
     }
@@ -579,16 +600,20 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
                 txid: None,
                 vout: None,
                 address: None,
+                addresses: None,
                 value: None,
                 coinbase: Some(hex::encode(coinbase_data)),
+                script_type: None,
             });
         } else if let Some(prevout) = &input.prevout {
             vin.push(TxInput {
                 txid: Some(prevout.hash.clone()),
                 vout: Some(prevout.n),
                 address: None, // Will be enriched later
+                addresses: None, // Will be enriched later
                 value: None,   // Will be enriched later
                 coinbase: None,
+                script_type: None, // Will be enriched later
             });
         }
     }
@@ -596,15 +621,21 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
     // Convert outputs
     let mut vout = Vec::new();
     let mut value_out = 0.0;
+    
+    use crate::parser::get_script_type;
+    
     for (idx, output) in tx.outputs.iter().enumerate() {
-        let value_piv = output.value as f64 / 100_000_000.0;
-        value_out += value_piv;
+        let value_satoshis = output.value as f64;
+        value_out += value_satoshis / 100_000_000.0;  // Still calculate PIV totals for backward compatibility
+        
+        let script_type = get_script_type(&output.script_pubkey.script);
         
         vout.push(TxOutput {
             n: idx as u64,
-            value: value_piv,
+            value: value_satoshis,  // Return raw satoshis, not PIV
             addresses: output.address.clone(),
             spent: false,
+            script_type: Some(script_type.to_string()),
         });
     }
     

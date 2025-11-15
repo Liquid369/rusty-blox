@@ -343,6 +343,42 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     Vec::new()
 }
 
+pub fn get_script_type(script: &[u8]) -> &str {
+    // P2CS (Cold Stake)
+    if script.len() == 51 && 
+       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b && 
+       script[3] == 0x63 && script[4] == 0xd1 && script[5] == 0x14 &&
+       script[26] == 0x67 && script[27] == 0x14 &&
+       script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
+        return "coldstake";
+    }
+    
+    // P2PKH (Pay to Public Key Hash)
+    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14 
+        && script[23] == 0x88 && script[24] == 0xac {
+        return "pubkeyhash";
+    }
+    
+    // P2SH (Pay to Script Hash)
+    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+        return "scripthash";
+    }
+    
+    // P2PK (Pay to Public Key)
+    if (script.len() == 35 && script[0] == 0x21 && script[34] == 0xac) ||
+       (script.len() == 67 && script[0] == 0x41 && script[66] == 0xac) {
+        return "pubkey";
+    }
+    
+    // Empty script
+    if script.is_empty() {
+        return "nonstandard";
+    }
+    
+    // Unknown type
+    "unknown"
+}
+
 fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
     // PIVX address encoding: version byte + 20-byte hash + 4-byte checksum
     let mut data = Vec::with_capacity(25);

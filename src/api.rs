@@ -345,16 +345,27 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
             return Err("Invalid transaction data");
         }
         
+        // Sanity check: max transaction size is 10MB (reasonable limit)
+        if data.len() > 10_000_000 {
+            return Err("Transaction data too large");
+        }
+        
         let _block_version = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4]));
         let block_height = i32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
         
         // Transaction data starts at byte 8 (after block_version and height)
         // We need to prepend a dummy block_version for the parser
-        let mut tx_data_with_header = vec![0u8; 4]; // Dummy block_version
+        let tx_data_len = data.len() - 8;
+        if tx_data_len == 0 {
+            return Err("Empty transaction data");
+        }
+        
+        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+        tx_data_with_header.extend_from_slice(&[0u8; 4]); // Dummy block_version
         tx_data_with_header.extend_from_slice(&data[8..]); // Actual tx data
         
         // Parse the binary transaction data
-        use crate::parser::deserialize_transaction;
+        use crate::parser::{deserialize_transaction, get_script_type};
         let tx = tokio::runtime::Handle::current().block_on(async {
             deserialize_transaction(&tx_data_with_header).await
         }).map_err(|_| "Failed to parse transaction")?;
@@ -387,11 +398,29 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
                     let mut prev_key = vec![b't'];
                     prev_key.extend_from_slice(&reversed);
                     
-                    if let Ok(Some(prev_data)) = db_clone.get_cf(&cf_transactions, &prev_key) {
-                        if prev_data.len() >= 8 {
-                            // Parse previous transaction (skip block_version + height)
-                            let mut prev_tx_data_with_header = vec![0u8; 4];
-                            prev_tx_data_with_header.extend_from_slice(&prev_data[8..]);
+                    
+                    let prev_data_opt = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &prev_key) {
+                        Some(d)
+                    } else {
+                        // Fallback: try display format (old/incorrect format for migration)
+                        let mut prev_key_display = vec![b't'];
+                        prev_key_display.extend_from_slice(&prev_txid_bytes);
+                        db_clone.get_cf(&cf_transactions, &prev_key_display).ok().flatten()
+                    };
+                    
+                    if let Some(prev_data) = prev_data_opt {
+                        // Validate previous transaction data size
+                        if prev_data.len() > 10_000_000 {
+                            eprintln!("Warning: Previous transaction data too large for {}", prevout.hash);
+                        } else if prev_data.len() >= 8 {
+                            let prev_tx_data_len = prev_data.len() - 8;
+                            if prev_tx_data_len == 0 {
+                                eprintln!("Warning: Empty previous transaction data for {}", prevout.hash);
+                            } else {
+                                // Parse previous transaction (skip block_version + height)
+                                let mut prev_tx_data_with_header = Vec::with_capacity(4 + prev_tx_data_len);
+                                prev_tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                                prev_tx_data_with_header.extend_from_slice(&prev_data[8..]);
                             
                             if let Ok(prev_tx) = tokio::runtime::Handle::current().block_on(async {
                                 deserialize_transaction(&prev_tx_data_with_header).await
@@ -403,7 +432,12 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
                                         input_json["addresses"] = serde_json::json!(output.address.clone());
                                         input_json["isAddress"] = serde_json::json!(true);
                                     }
+                                    
+                                    // Add script type from previous output
+                                    let script_type = get_script_type(&output.script_pubkey.script);
+                                    input_json["type"] = serde_json::json!(script_type);
                                 }
+                            }
                             }
                         }
                     }
@@ -418,12 +452,14 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         
         for (idx, output) in tx.outputs.iter().enumerate() {
             value_out += output.value;
+            let script_type = get_script_type(&output.script_pubkey.script);
             vout.push(serde_json::json!({
                 "value": output.value.to_string(),
                 "n": idx,
                 "hex": hex::encode(&output.script_pubkey.script),
                 "addresses": output.address,
                 "isAddress": !output.address.is_empty(),
+                "type": script_type,
             }));
         }
         
@@ -549,13 +585,20 @@ pub async fn addr_v2(
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
-                let mut tx_data_with_header = vec![0u8; 4];
-                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+            // Validate transaction data size for UTXO lookup
+            if tx_data.len() > 10_000_000 {
+                eprintln!("Warning: UTXO transaction data too large");
+            } else if tx_data.len() >= 8 {
+                let tx_data_len = tx_data.len() - 8;
+                if tx_data_len > 0 {
+                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
                 
-                if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                    if let Some(output) = tx.outputs.get(*output_index as usize) {
-                        balance += output.value;
+                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                        if let Some(output) = tx.outputs.get(*output_index as usize) {
+                            balance += output.value;
+                        }
                     }
                 }
             }
@@ -638,13 +681,20 @@ pub async fn xpub_v2(
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
-                let mut tx_data_with_header = vec![0u8; 4];
-                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+            // Validate transaction data size for xpub UTXO lookup
+            if tx_data.len() > 10_000_000 {
+                eprintln!("Warning: xpub UTXO transaction data too large");
+            } else if tx_data.len() >= 8 {
+                let tx_data_len = tx_data.len() - 8;
+                if tx_data_len > 0 {
+                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
                 
-                if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                    if let Some(output) = tx.outputs.get(*output_index as usize) {
-                        balance += output.value;
+                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                        if let Some(output) = tx.outputs.get(*output_index as usize) {
+                            balance += output.value;
+                        }
                     }
                 }
             }
@@ -736,12 +786,23 @@ pub async fn utxo_v2(
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
+            // Validate transaction data size for UTXO details
+            if tx_data.len() > 10_000_000 {
+                eprintln!("Warning: UTXO detail transaction data too large for {}", txid_hex);
+                continue;
+            } else if tx_data.len() >= 8 {
+                let tx_data_len = tx_data.len() - 8;
+                if tx_data_len == 0 {
+                    eprintln!("Warning: Empty UTXO transaction data for {}", txid_hex);
+                    continue;
+                }
+                
                 // Extract block height (bytes 4-8)
                 let block_height = i32::from_le_bytes(tx_data[4..8].try_into().unwrap_or([0; 4]));
                 
                 // Parse transaction for value
-                let mut tx_data_with_header = vec![0u8; 4];
+                let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                tx_data_with_header.extend_from_slice(&[0u8; 4]);
                 tx_data_with_header.extend_from_slice(&tx_data[8..]);
                 
                 if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
