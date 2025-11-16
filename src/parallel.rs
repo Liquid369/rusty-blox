@@ -5,9 +5,44 @@ use tokio::sync::Semaphore;
 use crate::types::AppState;
 use crate::blocks::process_blk_file;
 use crate::db_utils::save_file_as_incomplete;
+use crate::chain_state::set_sync_height;
 use rustyblox::chainwork::calculate_all_chainwork;
 use hex;
 use std::collections::HashMap;
+
+/// Update sync_height by finding the highest block in chain_metadata
+/// This allows incremental progress updates as files are processed
+/// Optimized: reads in reverse to find max height quickly
+async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_metadata = db.cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
+    
+    // Iterate in reverse from high heights to find max quickly
+    // Start from a very high number and work backwards
+    let mut max_height: i32 = 0;
+    
+    // Try reverse iteration (most efficient if DB stores in sorted order)
+    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::End);
+    
+    for item in iter.take(1000) {  // Only check last 1000 entries max
+        if let Ok((key, _value)) = item {
+            if key.len() == 4 {
+                let height = i32::from_le_bytes([key[0], key[1], key[2], key[3]]);
+                if height > max_height {
+                    max_height = height;
+                }
+            }
+        }
+    }
+    
+    // Only update if we found a valid height and it's higher than current
+    if max_height > 0 {
+        set_sync_height(db, max_height)?;
+    }
+    
+    Ok(())
+}
+
 
 /// Find the maximum chainwork among all descendants of a block
 /// This is used to pick the "best" fork - the one leading to the most work
@@ -123,6 +158,11 @@ pub async fn process_files_parallel(
                 
                 let progress = (current as f64 / total_files as f64) * 100.0;
                 println!("\n📊 File Progress: {}/{} ({:.1}%) complete", current, total_files, progress);
+                
+                // Update sync_height incrementally to show progress
+                if let Err(e) = update_sync_height_from_metadata(&db).await {
+                    eprintln!("Warning: Failed to update sync_height: {}", e);
+                }
             }
         })
         .collect();

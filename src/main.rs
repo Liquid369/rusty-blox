@@ -6,6 +6,7 @@ mod blocks;
 mod chain_state;
 mod db_handles;
 mod db_utils;
+mod enrich_addresses;
 mod leveldb_index;
 mod mempool;
 mod monitor;

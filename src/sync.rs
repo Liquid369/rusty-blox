@@ -452,6 +452,27 @@ pub async fn run_sync_service(
                 }
             };
             
+            // Check if address enrichment is needed
+            let config = get_global_config();
+            let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
+            let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
+            
+            if fast_sync && enrich_addresses {
+                println!("\n╔════════════════════════════════════════════════════╗");
+                println!("║         STARTING ADDRESS ENRICHMENT                ║");
+                println!("╚════════════════════════════════════════════════════╝\n");
+                println!("Fast sync completed. Now enriching transactions with address data...\n");
+                
+                use crate::enrich_addresses::enrich_all_addresses;
+                if let Err(e) = enrich_all_addresses(Arc::clone(&db)).await {
+                    eprintln!("⚠️  Address enrichment failed: {}", e);
+                    eprintln!("   Continuing without address enrichment.");
+                    eprintln!("   You can run enrichment later by setting enrich_addresses=true\n");
+                } else {
+                    println!("✅ Address enrichment complete!\n");
+                }
+            }
+            
             // Then switch to live mode
             println!("\n🔄 Switching to live sync mode...");
             run_live_sync(blk_dir, db, state, final_height, broadcaster).await?;

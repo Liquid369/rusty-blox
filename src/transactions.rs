@@ -92,15 +92,22 @@ async fn process_transaction_v1(
     batch: &mut BatchWriter,
     fast_sync: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let cf_transactions = _db
-        .cf_handle("transactions")
-        .ok_or("transactions CF not found")?;
-    let cf_pubkey = _db
-        .cf_handle("pubkey")
-        .ok_or("pubkey CF not found")?;
-    let cf_utxo = _db
-        .cf_handle("utxo")
-        .ok_or("utxo CF not found")?;
+    // CRITICAL OPTIMIZATION: In fast_sync mode, we don't track UTXOs or addresses
+    // So skip expensive CF handle lookups entirely!
+    let (cf_transactions, cf_pubkey, cf_utxo) = if !fast_sync {
+        let cf_tx = _db
+            .cf_handle("transactions")
+            .ok_or("transactions CF not found")?;
+        let cf_pub = _db
+            .cf_handle("pubkey")
+            .ok_or("pubkey CF not found")?;
+        let cf_ut = _db
+            .cf_handle("utxo")
+            .ok_or("utxo CF not found")?;
+        (Some(cf_tx), Some(cf_pub), Some(cf_ut))
+    } else {
+        (None, None, None)
+    };
     
     let input_count = read_varint(reader).await?;
 
@@ -136,7 +143,7 @@ async fn process_transaction_v1(
 
 
     let output_count = read_varint(reader).await?;
-    let mut general_address_type = if input_count == 1 && output_count == 1 {
+    let general_address_type = if input_count == 1 && output_count == 1 {
         AddressType::CoinBaseTx
     } else if output_count > 1 {
         AddressType::CoinStakeTx
@@ -148,21 +155,30 @@ async fn process_transaction_v1(
     for i in 0..output_count {
         let value = reader.read_i64_le().await?;
         let script = read_script(reader).await?;
-        let address_type = get_address_type(&CTxOut {
-            value,
-            script_length: script.len().try_into().unwrap_or(0),
-            script_pubkey: CScript { script: script.clone() },
-            index: i as u64,
-            address: Vec::new(),
-        }, &general_address_type.clone()).await;
-
-        let addresses = address_type_to_string(Some(address_type.clone()));
+        
+        // OPTIMIZATION: Skip address parsing in fast_sync mode
+        // In fast_sync, we only index block structure, not addresses
+        // Addresses can be enriched post-sync with build_address_index tool
+        let addresses = if !fast_sync {
+            let tx_out_temp = CTxOut {
+                value,
+                script_length: script.len().try_into().unwrap_or(0),
+                script_pubkey: CScript { script: script.clone() },
+                index: i as u64,
+                address: Vec::new(),
+            };
+            let address_type = get_address_type(&tx_out_temp, &general_address_type).await;
+            address_type_to_string(Some(address_type)).await
+        } else {
+            Vec::new()
+        };
+        
         outputs.push(CTxOut {
             value,
             script_length: script.len().try_into().unwrap_or(0),
             script_pubkey: CScript { script },
             index: i as u64,
-            address: addresses.await,
+            address: addresses,
         });
     }
 
@@ -315,20 +331,10 @@ async fn process_transaction_v1(
             perform_rocksdb_del(_db.clone(), "utxo", key_utxo.clone()).await;
         }
     } else {
-        // FAST SYNC MODE: Index addresses only (no spent tracking)
-        // This is 10-15x faster because we don't look up previous transactions
-        // We still index addresses so they can be searched, but totalSent will be 0
-        for tx_out in &transaction.outputs {
-            let address_type = get_address_type(tx_out, &general_address_type).await;
-            
-            // Index address without checking if UTXOs are spent
-            handle_address_outputs_only(
-                _db.clone(),
-                &address_type,
-                reversed_txid.clone(),
-                tx_out.index.try_into().unwrap_or(0),
-            ).await?;
-        }
+        // FAST SYNC MODE: SKIP ALL ADDRESS INDEXING
+        // Addresses can be built later with build_address_index tool or enrich_addresses
+        // This gives maximum speed for initial sync - just index blocks and transactions
+        // NO address parsing, NO async calls, NO database writes for addresses
     } // End UTXO tracking / address indexing
 
     // Store transaction with proper indexing
