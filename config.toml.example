@@ -1,0 +1,58 @@
+# ========================================
+# RustyBlox Configuration Example
+# ========================================
+# Copy this file to config.toml and edit the values below
+
+[paths]
+# Database path for RocksDB storage
+db_path = "./data/blocks.db"
+
+# Directory containing PIVX blockchain files (blk*.dat)
+# Linux default: ~/.pivx/blocks
+# macOS default: ~/Library/Application Support/PIVX/blocks
+# Windows default: %APPDATA%\PIVX\blocks
+blk_dir = "/path/to/PIVX/blocks"
+
+# PIVX data directory (contains leveldb index)
+# Same path prefix as blk_dir
+pivx_data_dir = "/path/to/PIVX"
+
+[sync]
+# Fast sync mode: skip UTXO tracking during initial sync for 10-20x speedup
+# Recommended: true for initial sync, false for archival/full nodes
+fast_sync = true
+
+# Automatically build address index after sync completes
+# This enables address lookup and balance queries
+# Recommended: true for block explorers
+enrich_addresses = true
+
+# Build UTXO set during sync
+# Only used when fast_sync = false
+# Recommended: false unless you need UTXO tracking
+build_utxo = false
+
+# Parallel file processing: number of concurrent blk*.dat files to process
+# Higher = faster but more CPU/memory usage
+# Recommended: 4-8 for 4-8 core systems, up to 16 for high-end systems
+parallel_files = 8
+
+[rpc]
+# PIVX Core RPC connection settings
+# Must match your pivx.conf configuration
+host = "http://127.0.0.1:51472"
+user = "your_rpc_username"
+pass = "your_secure_rpc_password"
+
+[server]
+# Web server bind address
+# Use 0.0.0.0 to allow external connections
+# Use 127.0.0.1 for localhost-only access
+host = "0.0.0.0"
+
+# Web server port for API and WebSocket
+port = 3005
+
+# Number of worker threads for the web server
+# Recommended: match your CPU core count
+worker_threads = "4"
