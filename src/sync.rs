@@ -310,6 +310,200 @@ async fn run_initial_sync(
     Ok(())
 }
 
+/// Run post-sync enrichment: address indexing + transaction reconciliation
+/// This runs after blockchain sync to ensure all explorer data is available
+async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = get_global_config();
+    let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
+    let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
+    
+    println!("\n╔════════════════════════════════════════════════════╗");
+    println!("║         POST-SYNC DATA ENRICHMENT                  ║");
+    println!("╚════════════════════════════════════════════════════╝\n");
+    
+    // Check what enrichment steps have been completed
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    
+    let address_index_complete = match db.get_cf(&cf_state, b"address_index_complete")? {
+        Some(bytes) => bytes[0] == 1,
+        None => false,
+    };
+    
+    let tx_block_index_complete = match db.get_cf(&cf_state, b"tx_block_index_complete")? {
+        Some(bytes) => bytes[0] == 1,
+        None => false,
+    };
+    
+    let repair_complete = match db.get_cf(&cf_state, b"repair_complete")? {
+        Some(bytes) => bytes[0] == 1,
+        None => false,
+    };
+    
+    // 1. Address enrichment (if fast_sync was used and not already done)
+    if fast_sync && enrich_addresses && !address_index_complete {
+        println!("📍 Phase 1: Building address index...");
+        println!("   This allows searching by address and viewing address balances\n");
+        
+        use crate::enrich_addresses::enrich_all_addresses;
+        if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
+            eprintln!("⚠️  Address enrichment failed: {}", e);
+            eprintln!("   Continuing without address data.");
+            eprintln!("   You can retry later by setting enrich_addresses=true\n");
+        } else {
+            println!("✅ Address index built successfully!\n");
+            db.put_cf(&cf_state, b"address_index_complete", &[1u8])?;
+        }
+    } else if address_index_complete {
+        println!("✅ Phase 1: Address index already complete - skipping\n");
+    } else if fast_sync {
+        println!("ℹ️  Address enrichment disabled (enrich_addresses=false in config)");
+        println!("   Set enrich_addresses=true to enable address search\n");
+    }
+    
+    // 2. Transaction block index (B prefix entries for faster block tx lookups)
+    if !tx_block_index_complete {
+        println!("📊 Phase 2: Building transaction block index...");
+        println!("   This speeds up block transaction queries\n");
+        
+        if let Err(e) = rebuild_transaction_block_index(db).await {
+            eprintln!("⚠️  Transaction block index failed: {}", e);
+            eprintln!("   Continuing without block tx index optimization\n");
+        } else {
+            println!("✅ Transaction block index built successfully!\n");
+            db.put_cf(&cf_state, b"tx_block_index_complete", &[1u8])?;
+        }
+    } else {
+        println!("✅ Phase 2: Transaction block index already complete - skipping\n");
+    }
+    
+    // 3. Fix transactions with height=0 (database repair)
+    if !repair_complete {
+        println!("🔧 Phase 3: Repairing transactions with incorrect heights...");
+        println!("   This fixes transactions stored with height=0 during initial sync\n");
+        
+        match rustyblox::repair::fix_zero_height_transactions(db).await {
+            Ok((fixed, orphaned)) => {
+                if fixed > 0 {
+                    println!("   ✅ Repaired {} transactions with correct heights", fixed);
+                }
+                if orphaned > 0 {
+                    println!("   ⚠️  Marked {} orphaned transactions (height=-1, excluded from balances)", orphaned);
+                }
+                if fixed == 0 && orphaned == 0 {
+                    println!("   ✅ No transactions needed repair");
+                }
+                println!();
+                db.put_cf(&cf_state, b"repair_complete", &[1u8])?;
+            }
+            Err(e) => {
+                eprintln!("⚠️  Transaction repair failed: {}", e);
+                eprintln!("   Continuing - some transactions may show incorrect data\n");
+            }
+        }
+    } else {
+        println!("✅ Phase 3: Transaction repair already complete - skipping\n");
+    }
+    
+    println!("╔════════════════════════════════════════════════════╗");
+    println!("║     🎉 ENRICHMENT COMPLETE - READY FOR USE 🎉     ║");
+    println!("╚════════════════════════════════════════════════════╝\n");
+    
+    Ok(())
+}
+
+/// Rebuild transaction block index (B prefix entries)
+/// Creates entries like 'B' + height + tx_index → txid for faster block queries
+async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    use rocksdb::WriteBatch;
+    use std::collections::HashMap;
+    
+    let cf_transactions = db.cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
+    
+    // Map of height -> list of txids
+    let mut block_txs: HashMap<i32, Vec<Vec<u8>>> = HashMap::new();
+    
+    println!("   📖 Reading all transactions...");
+    let mut tx_count = 0;
+    let mut indexed_count = 0;
+    let iter = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
+    
+    for item in iter {
+        match item {
+            Ok((key, value)) => {
+                // Only process 't' prefix entries (transaction data)
+                if !key.is_empty() && key[0] == b't' {
+                    tx_count += 1;
+                    
+                    // Extract txid from key (skip 't' prefix)
+                    let txid = &key[1..];
+                    
+                    // Extract height from value
+                    // Format: version (4 bytes) + height (4 bytes) + tx_bytes
+                    if value.len() >= 8 {
+                        let height = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
+                        
+                        // Skip if height is invalid
+                        if height > 0 && height < 10_000_000 {
+                            block_txs.entry(height).or_insert_with(Vec::new).push(txid.to_vec());
+                            indexed_count += 1;
+                        }
+                    }
+                    
+                    if tx_count % 100_000 == 0 {
+                        println!("      Processed {} transactions...", tx_count);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("      Error reading transaction: {}", e);
+            }
+        }
+    }
+    
+    println!("   ✅ Read {} transactions ({} with valid heights)", tx_count, indexed_count);
+    println!("   📝 Writing block transaction index...");
+    
+    let mut batch = WriteBatch::default();
+    let mut batch_count = 0;
+    const BATCH_SIZE: usize = 10000;
+    
+    for (height, mut txids) in block_txs {
+        // Sort txids to maintain consistent order
+        txids.sort();
+        
+        for (tx_index, txid) in txids.iter().enumerate() {
+            // Create key: 'B' + height (4 bytes) + tx_index (4 bytes)
+            let mut key = vec![b'B'];
+            key.extend_from_slice(&height.to_le_bytes());
+            key.extend_from_slice(&(tx_index as u32).to_le_bytes());
+            
+            batch.put_cf(&cf_transactions, &key, txid);
+            batch_count += 1;
+            
+            // Commit batch periodically
+            if batch_count % BATCH_SIZE == 0 {
+                db.write(batch)?;
+                batch = WriteBatch::default();
+                
+                if batch_count % 50000 == 0 {
+                    println!("      Written {} block-tx mappings...", batch_count);
+                }
+            }
+        }
+    }
+    
+    // Final batch
+    if batch.len() > 0 {
+        db.write(batch)?;
+    }
+    
+    println!("   ✅ Wrote {} block-tx index entries", batch_count);
+    
+    Ok(())
+}
+
 /// Monitor for new blocks - SMART HYBRID approach
 /// Skips blk file processing if we're close to chain tip (within 100 blocks)
 async fn run_live_sync(
@@ -452,26 +646,8 @@ pub async fn run_sync_service(
                 }
             };
             
-            // Check if address enrichment is needed
-            let config = get_global_config();
-            let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
-            let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
-            
-            if fast_sync && enrich_addresses {
-                println!("\n╔════════════════════════════════════════════════════╗");
-                println!("║         STARTING ADDRESS ENRICHMENT                ║");
-                println!("╚════════════════════════════════════════════════════╝\n");
-                println!("Fast sync completed. Now enriching transactions with address data...\n");
-                
-                use crate::enrich_addresses::enrich_all_addresses;
-                if let Err(e) = enrich_all_addresses(Arc::clone(&db)).await {
-                    eprintln!("⚠️  Address enrichment failed: {}", e);
-                    eprintln!("   Continuing without address enrichment.");
-                    eprintln!("   You can run enrichment later by setting enrich_addresses=true\n");
-                } else {
-                    println!("✅ Address enrichment complete!\n");
-                }
-            }
+            // Run post-sync enrichment (addresses + transaction indexing)
+            run_post_sync_enrichment(&db).await?;
             
             // Then switch to live mode
             println!("\n🔄 Switching to live sync mode...");
@@ -502,6 +678,10 @@ pub async fn run_sync_service(
                 println!("📥 CATCHING UP: {} blocks behind", blocks_behind);
                 println!("   Will process blk files for faster catchup\n");
             }
+            
+            // Only run enrichment if any phase is incomplete
+            // The monitor handles incremental updates for new blocks
+            run_post_sync_enrichment(&db).await?;
             
             // Go straight to live mode (it will decide whether to scan blk files)
             run_live_sync(blk_dir, db, state, height, broadcaster).await?;

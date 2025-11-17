@@ -101,7 +101,7 @@ async fn index_block_from_rpc(
     let user = config.get_string("rpc.user")?;
     let pass = config.get_string("rpc.pass")?;
     
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     
     // Use verbosity=2 for full block data with all transactions
     // This is more efficient than fetching each TX separately
@@ -114,9 +114,10 @@ async fn index_block_from_rpc(
             "method": "getblock",
             "params": [block_hash.clone(), 2]  // verbosity=2 includes full TX data
         }))
-        .send()?;
+        .send()
+        .await?;
     
-    let json: Value = response.json()?;
+    let json: Value = response.json().await?;
     let result = json.get("result")
         .ok_or("No result in RPC response")?;
     
@@ -269,9 +270,10 @@ async fn index_block_from_rpc(
                     "params": [&txid, 0]  // 0 = raw hex, not JSON
                 }))
                 .send()
+                .await
             {
                 Ok(tx_resp) => {
-                    match tx_resp.json::<Value>() {
+                    match tx_resp.json::<Value>().await {
                         Ok(tx_json) => {
                             if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
                                 match hex::decode(raw_hex) {
@@ -305,7 +307,7 @@ async fn index_block_from_rpc(
         
         // 1. Store full transaction: 't' + txid_reversed → (version + height + raw_tx)
         // Database uses INTERNAL (reversed) format for txid keys to match Bitcoin Core
-        let mut txid_bytes_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+        let txid_bytes_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
         
         let mut tx_key = vec![b't'];
         tx_key.extend_from_slice(&txid_bytes_reversed);
@@ -362,7 +364,7 @@ async fn index_block_from_rpc(
             }
         };
         
-        // Index addresses from outputs - match blk file format
+        // Index addresses from outputs
         let cf_addr_index = db.cf_handle("addr_index")
             .ok_or("addr_index CF not found")?;
         
@@ -370,13 +372,19 @@ async fn index_block_from_rpc(
         let mut reversed_txid = txid_bytes.clone();
         reversed_txid.reverse();
         
+        // Track which addresses are involved in this transaction (for tx history)
+        let mut involved_addresses = std::collections::HashSet::new();
+        
         for (output_idx, output) in parsed_tx.outputs.iter().enumerate() {
             for address in &output.address {
                 if address.is_empty() {
                     continue;
                 }
                 
-                // Key format: 'a' + address
+                // Track address for transaction history
+                involved_addresses.insert(address.clone());
+                
+                // Key format: 'a' + address (UTXOs)
                 let mut addr_key = vec![b'a'];
                 addr_key.extend_from_slice(address.as_bytes());
                 
@@ -426,7 +434,7 @@ async fn index_block_from_rpc(
             };
             
             // Previous txid needs to be in reversed (internal) format for lookup
-            let mut prev_txid_internal: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
+            let prev_txid_internal: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
             
             // Get the previous transaction
             let mut prev_tx_key = vec![b't'];
@@ -451,9 +459,10 @@ async fn index_block_from_rpc(
                         "params": [prev_txid_hex, 1]  // 1 = verbose (includes blockhash)
                     }))
                     .send()
+                    .await
                 {
                     Ok(resp) => {
-                        match resp.json::<Value>() {
+                        match resp.json::<Value>().await {
                             Ok(json) => {
                                 if let Some(result) = json.get("result") {
                                     // Extract hex and blockhash
@@ -474,9 +483,11 @@ async fn index_block_from_rpc(
                                                         "params": [block_hash, 1]
                                                     }))
                                                     .send()
+                                                    .await
                                                 {
                                                     Ok(block_resp) => {
                                                         block_resp.json::<Value>()
+                                                            .await
                                                             .ok()
                                                             .and_then(|j| j.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()))
                                                             .unwrap_or(0) as i32
@@ -566,6 +577,9 @@ async fn index_block_from_rpc(
                             continue;
                         }
                         
+                        // Track address for transaction history (inputs spend from this address)
+                        involved_addresses.insert(address.clone());
+                        
                         let mut addr_key = vec![b'a'];
                         addr_key.extend_from_slice(address.as_bytes());
                         
@@ -590,6 +604,39 @@ async fn index_block_from_rpc(
                             let _ = db.delete_cf(&cf_addr_index, &addr_key);
                         }
                     }
+                }
+            }
+        }
+        
+        // Add this transaction to all involved addresses' transaction lists
+        // Key format: 't' + address for transaction history
+        for address in &involved_addresses {
+            let mut tx_list_key = vec![b't'];
+            tx_list_key.extend_from_slice(address.as_bytes());
+            
+            // Get existing transaction list
+            let mut tx_list = match db.get_cf(&cf_addr_index, &tx_list_key)? {
+                Some(data) => {
+                    // Deserialize as list of txids (32 bytes each, reversed format)
+                    data.chunks_exact(32)
+                        .map(|chunk| chunk.to_vec())
+                        .collect::<Vec<Vec<u8>>>()
+                },
+                None => Vec::new(),
+            };
+            
+            // Add this transaction (if not already present)
+            if !tx_list.iter().any(|t| t == &reversed_txid) {
+                tx_list.push(reversed_txid.clone());
+                
+                // Serialize transaction list (just concatenate txids)
+                let mut serialized = Vec::new();
+                for tx in &tx_list {
+                    serialized.extend(tx);
+                }
+                
+                if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
+                    eprintln!("⚠️  Failed to update tx list for {}: {}", address, e);
                 }
             }
         }
@@ -733,22 +780,47 @@ pub async fn run_block_monitor(
             println!("\n📡 RPC CATCHUP: {} blocks behind (heights {} → {})", 
                      blocks_behind, db_tip.height + 1, rpc_tip.height);
             
-            // Index new blocks - NO SLEEP when catching up!
-            for (idx, height) in ((db_tip.height + 1)..=rpc_tip.height).enumerate() {
-                // Index the block
-                if let Err(e) = index_block_from_rpc(&rpc_client, height, &db, &broadcaster).await {
-                    eprintln!("❌ Failed to index block at height {}: {}", height, e);
-                    // Brief pause on error before retry
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    break;
+            // Batch process blocks in PARALLEL for much faster catchup
+            // Now that RPC calls are async, we can process many at once
+            const BATCH_SIZE: i32 = 50; // Process 50 blocks in parallel per batch
+            let mut current_height = db_tip.height + 1;
+            let target_height = rpc_tip.height;
+            let mut total_processed = 0;
+            
+            while current_height <= target_height {
+                let batch_end = (current_height + BATCH_SIZE - 1).min(target_height);
+                
+                // Create futures for all blocks in this batch
+                let mut futures = Vec::new();
+                for height in current_height..=batch_end {
+                    let rpc = rpc_client.clone();
+                    let db_clone = db.clone();
+                    let bc = broadcaster.clone();
+                    futures.push(async move {
+                        (height, index_block_from_rpc(&rpc, height, &db_clone, &bc).await)
+                    });
                 }
                 
-                // Show progress every 100 blocks or on the last block
-                if idx % 100 == 0 || height == rpc_tip.height {
-                    let progress = ((idx + 1) as f64 / blocks_behind as f64) * 100.0;
-                    println!("   📊 Progress: {}/{} ({:.1}%) - Block {}", 
-                             idx + 1, blocks_behind, progress, height);
+                // Process all blocks in this batch in parallel
+                let results = futures::future::join_all(futures).await;
+                
+                // Check results
+                let mut errors = 0;
+                for (height, result) in results {
+                    if let Err(e) = result {
+                        eprintln!("❌ Failed to index block {}: {}", height, e);
+                        errors += 1;
+                    }
+                    total_processed += 1;
                 }
+                
+                // Show progress after each batch
+                let progress = (total_processed as f64 / blocks_behind as f64) * 100.0;
+                println!("   📊 Progress: {}/{} ({:.1}%) - Blocks {} → {} ({} errors)", 
+                         total_processed, blocks_behind, progress, 
+                         current_height, batch_end, errors);
+                
+                current_height = batch_end + 1;
             }
             
             // Check if we successfully caught up

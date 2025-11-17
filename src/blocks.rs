@@ -9,7 +9,6 @@ use crate::db_utils::batch_put_cf;
 use crate::transactions::process_transaction;
 use crate::batch_writer::BatchWriter;
 use crate::config::get_global_config;
-use std::time::Instant;
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
 const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput
@@ -148,7 +147,6 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     let mut header_buffer = Vec::with_capacity(112);
     let mut block_count = 0;
     let mut skipped_count = 0;
-    let file_start = Instant::now();
     
     // Create batch writer for transaction data
     let mut tx_batch = BatchWriter::new(db.clone(), TX_BATCH_SIZE);
@@ -434,14 +432,10 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         }
         
         block_count += 1;
-
-        // Print progress more frequently so we can observe throughput during debugging
-        // Print every 100 blocks with average time per block to surface bottlenecks
-        if block_count % 100 == 0 {
-            let elapsed = file_start.elapsed();
-            let secs = elapsed.as_secs_f64();
-            let avg_ms = if block_count > 0 { (secs / block_count as f64) * 1000.0 } else { 0.0 };
-            println!("  Processed {} blocks so far (avg {:.2} ms/block, elapsed {:.1}s)", block_count, avg_ms, secs);
+        
+        // Print progress every 5000 blocks
+        if block_count % 5000 == 0 {
+            println!("  Processed {} blocks", block_count);
         }
         
         // Write batch when it reaches the target size

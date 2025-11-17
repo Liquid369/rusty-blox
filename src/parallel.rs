@@ -17,15 +17,16 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
     
-    // Iterate in reverse from high heights to find max quickly
-    // Start from a very high number and work backwards
-    let mut max_height: i32 = 0;
+    // Iterate FORWARD through ALL entries to find the max height
+    // We need to check ALL 4-byte keys since they're mixed with 33-byte 'h' + hash keys
+    let mut max_height: i32 = -1;
     
-    // Try reverse iteration (most efficient if DB stores in sorted order)
-    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::End);
+    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
     
-    for item in iter.take(1000) {  // Only check last 1000 entries max
+    for item in iter {
         if let Ok((key, _value)) = item {
+            // Only check 4-byte keys (height → hash mappings)
+            // Skip 33-byte keys ('h' + hash → height mappings)
             if key.len() == 4 {
                 let height = i32::from_le_bytes([key[0], key[1], key[2], key[3]]);
                 if height > max_height {
@@ -36,8 +37,9 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
     }
     
     // Only update if we found a valid height and it's higher than current
-    if max_height > 0 {
+    if max_height >= 0 {
         set_sync_height(db, max_height)?;
+        println!("  Updated sync_height to: {}", max_height);
     }
     
     Ok(())
@@ -171,6 +173,11 @@ pub async fn process_files_parallel(
     futures::future::join_all(tasks).await;
     
     println!("\n✅ All blk*.dat files processed!");
+    
+    // CRITICAL: Update sync_height to reflect all blocks processed
+    // This ensures the next phase (RPC monitoring) knows our true current height
+    println!("\n🔄 Updating sync height from all processed blocks...");
+    update_sync_height_from_metadata(&db_arc).await?;
     
     // Check if canonical chain metadata already exists (from leveldb phase)
     let cf_metadata = db_arc.cf_handle("chain_metadata")

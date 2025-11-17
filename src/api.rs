@@ -567,10 +567,34 @@ pub async fn addr_v2(
     .unwrap_or(None)
     .unwrap_or_else(|| vec![]);
     
-    let utxos = deserialize_utxos(&result).await;
+    // The data is in simple format (no spent flags) - Bitcoin Core approach
+    // Entries are removed when spent, so everything here is unspent
+    let unspent_utxos = deserialize_utxos(&result).await;
+    
+    // Get transaction list for this address (key: 't' + address)
+    let tx_list_key = format!("t{}", address);
+    let tx_list_key_bytes = tx_list_key.as_bytes().to_vec();
+    let db_clone = db.clone();
+    
+    let tx_list_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+        let cf_addr_index = db_clone.cf_handle("addr_index")
+            .ok_or_else(|| "addr_index CF not found".to_string())?;
+        db_clone.get_cf(&cf_addr_index, &tx_list_key_bytes)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(None)
+    .unwrap_or_else(|| vec![]);
+    
+    // Parse transaction list (32 bytes per txid, reversed format)
+    let all_txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
+        .map(|chunk| chunk.to_vec())
+        .collect();
+    
     let mut balance: i64 = 0;
     
-    for utxo in &utxos {
+    for utxo in &unspent_utxos {
         let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
         key.extend(txid_hash);
@@ -608,12 +632,15 @@ pub async fn addr_v2(
         }
     }
     
-    // Deduplicate txids (one address can have multiple outputs from same tx)
-    let mut unique_txids: Vec<String> = utxos.iter()
-        .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
+    // Use the transaction list for history (all transactions)
+    // Convert from internal format (reversed) to display format
+    let unique_txids: Vec<String> = all_txids.iter()
+        .map(|txid_internal| {
+            let mut txid_display = txid_internal.clone();
+            txid_display.reverse();
+            hex::encode(&txid_display)
+        })
         .collect();
-    unique_txids.sort();
-    unique_txids.dedup();
     
     // Sort txids by block height (newest first = least confirmations first)
     let mut txid_heights: Vec<(String, u32)> = Vec::new();

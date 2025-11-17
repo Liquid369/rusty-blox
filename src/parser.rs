@@ -23,6 +23,24 @@ pub async fn serialize_utxos(utxos: &Vec<(Vec<u8>, u64)>) -> Vec<u8> {
     serialized
 }
 
+// Serialize UTXOs with spent flags
+pub async fn serialize_utxos_with_spent(utxos: &Vec<(Vec<u8>, u64, bool)>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    // Write count
+    buffer.extend(&(utxos.len() as u32).to_le_bytes());
+    
+    for (txid, vout, is_spent) in utxos {
+        // Write txid length and txid
+        buffer.extend(&(txid.len() as u32).to_le_bytes());
+        buffer.extend(txid);
+        // Write vout
+        buffer.extend(&vout.to_le_bytes());
+        // Write spent flag (1 byte: 0 = unspent, 1 = spent)
+        buffer.push(if *is_spent { 1 } else { 0 });
+    }
+    buffer
+}
+
 pub async fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
     let mut utxos = Vec::new();
     let mut iter = data.chunks_exact(40); // 32 bytes for txid and 8 bytes for index
@@ -33,6 +51,53 @@ pub async fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
             utxos.push((txid, index));
         }
     }
+    utxos
+}
+
+// Deserialize UTXOs with spent flags
+pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, bool)> {
+    let mut utxos = Vec::new();
+    if data.len() < 4 {
+        return utxos;
+    }
+    
+    let mut cursor = std::io::Cursor::new(data);
+    use byteorder::ReadBytesExt;
+    
+    // Read count
+    let count = match cursor.read_u32::<byteorder::LittleEndian>() {
+        Ok(c) => c,
+        Err(_) => return utxos,
+    };
+    
+    for _ in 0..count {
+        // Read txid length
+        let txid_len = match cursor.read_u32::<byteorder::LittleEndian>() {
+            Ok(len) => len as usize,
+            Err(_) => break,
+        };
+        
+        // Read txid
+        let mut txid = vec![0u8; txid_len];
+        if std::io::Read::read_exact(&mut cursor, &mut txid).is_err() {
+            break;
+        }
+        
+        // Read vout
+        let vout = match cursor.read_u64::<byteorder::LittleEndian>() {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        
+        // Read spent flag
+        let is_spent = match cursor.read_u8() {
+            Ok(flag) => flag == 1,
+            Err(_) => break,
+        };
+        
+        utxos.push((txid, vout, is_spent));
+    }
+    
     utxos
 }
 
@@ -73,16 +138,12 @@ pub async fn deserialize_transaction(
     // - Coinstake: first input has coinstake data, first output is ALWAYS empty (0 value, empty script)
     // - Normal: regular transaction with no coinbase/coinstake inputs
     
-    let has_coinbase_input = inputs.get(0).map_or(false, |i| i.coinbase.is_some());
-    
     let mut outputs = Vec::new();
     for i in 0..output_count {
-        outputs.push(deserialize_tx_out(&mut cursor, false).await);
+        let mut output = deserialize_tx_out(&mut cursor, false).await;
+        output.index = i as u64;  // Set the correct vout index
+        outputs.push(output);
     }
-    
-    // After reading outputs, check if this is coinstake (first output empty)
-    let is_coinstake = has_coinbase_input && output_count > 1 &&
-                       outputs.get(0).map_or(false, |o| o.value == 0 && o.script_pubkey.script.is_empty());
 
     let lock_time = cursor.read_u32::<LittleEndian>()?;
 
@@ -221,31 +282,37 @@ pub async fn deserialize_tx_in(
     let script_sig = read_script(cursor).await.unwrap_or(Vec::new());
     let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
     
-    // Check if this is a coinbase/coinstake (prev_hash is all zeros and prev_index is 0xffffffff)
-    let is_coinbase_or_coinstake = prev_hash.iter().all(|&b| b == 0) && prev_index == 0xffffffff;
+    // Check if this is TRULY coinbase: prev_hash is all zeros AND prev_index is 0xffffffff
+    // CRITICAL: Coinstake transactions have REAL prevouts, not null!
+    let is_coinbase = prev_hash.iter().all(|&b| b == 0) && prev_index == 0xffffffff;
     
-    if is_coinbase_or_coinstake {
+    // Always create prevout structure - even for coinbase-like inputs
+    // We'll determine later if it's truly coinbase or just coinstake
+    let mut hash_display = prev_hash.clone();
+    hash_display.reverse();
+    
+    let prevout = Some(COutPoint {
+        hash: hex::encode(&hash_display),
+        n: prev_index,
+    });
+    
+    if is_coinbase {
+        // TRUE coinbase - has null prevout (all zeros)
         CTxIn {
-            prevout: None,
+            prevout,
             script_sig: CScript { script: Vec::new() },
             sequence: sequence,
             index: 0,
-            coinbase: Some(script_sig),  // The coinbase/coinstake data is in the script_sig
+            coinbase: Some(script_sig),
         }
     } else {
-        // Regular input - reverse the hash for display format
-        let mut hash_display = prev_hash.clone();
-        hash_display.reverse();
-        
+        // Regular input OR coinstake input - both have real prevouts!
         CTxIn {
-            prevout: Some(COutPoint {
-                hash: hex::encode(&hash_display),
-                n: prev_index,
-            }),
+            prevout,
             script_sig: CScript { script: script_sig },
             sequence: sequence,
             index: 0,
-            coinbase: None,
+            coinbase: None,  // NOT coinbase - has real prevout
         }
     }
 }

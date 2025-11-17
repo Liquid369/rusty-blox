@@ -10,6 +10,7 @@ pub mod db_handles;
 pub mod enrich_addresses;
 pub mod leveldb_index;
 pub mod parser;
+pub mod repair;
 pub mod types;
 
 #[repr(C)]
