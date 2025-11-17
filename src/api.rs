@@ -593,7 +593,9 @@ pub async fn addr_v2(
         .collect();
     
     let mut balance: i64 = 0;
+    let mut total_received: i64 = 0;
     
+    // Calculate balance from unspent UTXOs
     for utxo in &unspent_utxos {
         let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
@@ -612,10 +614,7 @@ pub async fn addr_v2(
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
-            // Validate transaction data size for UTXO lookup
-            if tx_data.len() > 10_000_000 {
-                eprintln!("Warning: UTXO transaction data too large");
-            } else if tx_data.len() >= 8 {
+            if tx_data.len() >= 8 {
                 let tx_data_len = tx_data.len() - 8;
                 if tx_data_len > 0 {
                     let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
@@ -631,6 +630,47 @@ pub async fn addr_v2(
             }
         }
     }
+    
+    // Calculate total received from ALL transactions
+    for txid_internal in &all_txids {
+        let mut key = vec![b't'];
+        key.extend(txid_internal);
+        let key_clone = key.clone();
+        let db_clone = db.clone();
+        let address_clone = address.clone();
+        
+        let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_transactions = db_clone.cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            db_clone.get_cf(&cf_transactions, &key_clone)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(None);
+        
+        if let Some(tx_data) = tx_data {
+            if tx_data.len() >= 8 {
+                let tx_data_len = tx_data.len() - 8;
+                if tx_data_len > 0 {
+                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                
+                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                        // Sum all outputs to this address
+                        for output in &tx.outputs {
+                            if output.address.contains(&address_clone) {
+                                total_received += output.value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    let total_sent = total_received - balance;
     
     // Use the transaction list for history (all transactions)
     // Convert from internal format (reversed) to display format
@@ -692,8 +732,8 @@ pub async fn addr_v2(
         items_on_page: Some(params.page_size),
         address,
         balance: balance.to_string(),
-        total_received: balance.to_string(), // TODO: track separately
-        total_sent: "0".to_string(), // TODO: track spent outputs
+        total_received: total_received.to_string(),
+        total_sent: total_sent.to_string(),
         unconfirmed_balance: "0".to_string(), // TODO: track mempool
         unconfirmed_txs: 0, // TODO: track mempool
         txs: tx_count,
