@@ -246,7 +246,7 @@ impl std::fmt::Debug for SaplingTxData {
         writeln!(f, "    value_balance: {} satoshis ({} PIV)", self.value_balance, self.value_balance as f64 / 100_000_000.0)?;
         writeln!(f, "    vshielded_spend: {} spend(s)", self.vshielded_spend.len())?;
         writeln!(f, "    vshielded_output: {} output(s)", self.vshielded_output.len())?;
-        writeln!(f, "    binding_sig: {}", hex::encode(&self.binding_sig))?;
+        writeln!(f, "    binding_sig: {}", hex::encode(self.binding_sig))?;
         write!(f, "}}")
     }
 }
@@ -280,12 +280,12 @@ pub struct SpendDescription {
 impl fmt::Debug for SpendDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "SpendDescription {{")?;
-        writeln!(f, "    cv: {}", hex::encode(&self.cv))?;
-        writeln!(f, "    anchor: {}", hex::encode(&self.anchor))?;
-        writeln!(f, "    nullifier: {}", hex::encode(&self.nullifier))?;
-        writeln!(f, "    rk: {}", hex::encode(&self.rk))?;
+        writeln!(f, "    cv: {}", hex::encode(self.cv))?;
+        writeln!(f, "    anchor: {}", hex::encode(self.anchor))?;
+        writeln!(f, "    nullifier: {}", hex::encode(self.nullifier))?;
+        writeln!(f, "    rk: {}", hex::encode(self.rk))?;
         writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;
-        writeln!(f, "    spend_auth_sig: {}", hex::encode(&self.spend_auth_sig))?;
+        writeln!(f, "    spend_auth_sig: {}", hex::encode(self.spend_auth_sig))?;
         write!(f, "}}")
     }
 }
@@ -322,9 +322,9 @@ pub struct OutputDescription {
 impl std::fmt::Debug for OutputDescription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "OutputDescription {{")?;
-        writeln!(f, "    cv: {}", hex::encode(&self.cv))?;
-        writeln!(f, "    cmu: {}", hex::encode(&self.cmu))?;
-        writeln!(f, "    ephemeral_key: {}", hex::encode(&self.ephemeral_key))?;
+        writeln!(f, "    cv: {}", hex::encode(self.cv))?;
+        writeln!(f, "    cmu: {}", hex::encode(self.cmu))?;
+        writeln!(f, "    ephemeral_key: {}", hex::encode(self.ephemeral_key))?;
         writeln!(f, "    enc_ciphertext: {}... ({} bytes)", &hex::encode(&self.enc_ciphertext[..16]), self.enc_ciphertext.len())?;
         writeln!(f, "    out_ciphertext: {}... ({} bytes)", &hex::encode(&self.out_ciphertext[..16]), self.out_ciphertext.len())?;
         writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;

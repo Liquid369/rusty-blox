@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 // Parse PIVX's VARINT format
-fn read_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
+pub fn read_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
     if *offset >= data.len() { return None; }
     
     let mut n: u64 = 0;
@@ -41,12 +41,12 @@ fn read_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
 }
 
 // VARINT with NONNEGATIVE_SIGNED mode (divides by 2)
-fn read_varint_signed(data: &[u8], offset: &mut usize) -> Option<i64> {
+pub fn read_varint_signed(data: &[u8], offset: &mut usize) -> Option<i64> {
     read_varint(data, offset).map(|v| (v / 2) as i64)
 }
 
 // Read a vector (compact size + elements)
-fn read_vector_bytes(data: &[u8], offset: &mut usize) -> Option<Vec<u8>> {
+pub fn read_vector_bytes(data: &[u8], offset: &mut usize) -> Option<Vec<u8>> {
     let size = read_varint(data, offset)? as usize;
     if *offset + size > data.len() {
         return None;
@@ -151,13 +151,16 @@ pub struct BlockInfo {
     pub hash_prev: Vec<u8>,
     pub n_bits: u32,
     pub chainwork: Option<[u64; 4]>,
+    // File number & data position (if present in CDiskBlockIndex)
+    pub file: Option<u64>,
+    pub data_pos: Option<u64>,
 }
 
 /// Build canonical blockchain from leveldb block index
-/// Returns: Vec<(height, block_hash)> in genesis -> tip order
+/// Returns: Vec<(height, block_hash, Option<file>, Option<data_pos>)> in genesis -> tip order
 pub fn build_canonical_chain_from_leveldb(
     leveldb_path: &str,
-) -> Result<Vec<(i64, Vec<u8>)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(i64, Vec<u8>, Option<u64>, Option<u64>)>, Box<dyn std::error::Error>> {
     
     println!("📖 Reading PIVX leveldb block index from: {}", leveldb_path);
     
@@ -169,6 +172,10 @@ pub fn build_canonical_chain_from_leveldb(
     let mut height_to_hashes: HashMap<i64, Vec<Vec<u8>>> = HashMap::new();
     let mut parse_errors = 0;
     let mut leveldb_count = 0;
+    
+    // Statistics for offset data
+    let mut blocks_with_data_flag = 0;
+    let mut blocks_with_file_and_pos = 0;
     
     // Step 1: Parse all blocks from leveldb
     while let Some((key, value)) = LdbIterator::next(&mut iter) {
@@ -184,15 +191,14 @@ pub fn build_canonical_chain_from_leveldb(
         // nSerVersion (NONNEGATIVE_SIGNED)
         read_varint_signed(&value, &mut offset);
         
-        // nHeight (uses raw varint, not NONNEGATIVE_SIGNED!)
-        let height_raw = match read_varint(&value, &mut offset) {
-            Some(h) => h,
+        // nHeight (regular VARINT, not signed!)
+        let height = match read_varint(&value, &mut offset) {
+            Some(h) => h as i64,
             None => {
                 parse_errors += 1;
                 continue;
             }
         };
-        let height = height_raw as i64;
         
         // nStatus
         let status = match read_varint(&value, &mut offset) {
@@ -210,12 +216,46 @@ pub fn build_canonical_chain_from_leveldb(
         const BLOCK_HAVE_UNDO: u64 = 16;
         
         // Conditional fields based on nStatus
-        if (status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) != 0 {
-            read_varint_signed(&value, &mut offset); // nFile
+        // Capture file number and data position when present
+        let mut n_file: Option<u64> = None;
+        let mut n_data_pos: Option<u64> = None;
+        
+        let has_data = (status & BLOCK_HAVE_DATA) != 0;
+        let has_undo = (status & BLOCK_HAVE_UNDO) != 0;
+        
+        if has_data {
+            blocks_with_data_flag += 1;
         }
         
+        // Debug: log first few blocks to verify parsing
+        if leveldb_count < 3 {
+            println!("  Block #{}: height={}, nStatus=0x{:x} (HAVE_DATA={}, HAVE_UNDO={})", 
+                     leveldb_count, height, status, has_data, has_undo);
+        }
+        
+        if (status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) != 0 {
+            if let Some(f) = read_varint_signed(&value, &mut offset) {
+                if f >= 0 {
+                    n_file = Some(f as u64);
+                    if leveldb_count < 3 {
+                        println!("    → nFile={}", f);
+                    }
+                }
+            }
+        }
+
         if (status & BLOCK_HAVE_DATA) != 0 {
-            read_varint(&value, &mut offset); // nDataPos
+            if let Some(pos) = read_varint(&value, &mut offset) {
+                n_data_pos = Some(pos);
+                if leveldb_count < 3 {
+                    println!("    → nDataPos={}", pos);
+                }
+            }
+        }
+        
+        // Track statistics
+        if n_file.is_some() && n_data_pos.is_some() {
+            blocks_with_file_and_pos += 1;
         }
         
         if (status & BLOCK_HAVE_UNDO) != 0 {
@@ -280,10 +320,12 @@ pub fn build_canonical_chain_from_leveldb(
             hash_prev,
             n_bits,
             chainwork: None,
+            file: n_file,
+            data_pos: n_data_pos,
         };
         
         index.insert(block_hash.clone(), info);
-        height_to_hashes.entry(height).or_insert_with(Vec::new).push(block_hash);
+        height_to_hashes.entry(height).or_default().push(block_hash);
         leveldb_count += 1;
     }
     
@@ -292,6 +334,18 @@ pub fn build_canonical_chain_from_leveldb(
     println!("✅ Parsed {} blocks from leveldb", leveldb_count);
     println!("  Parse errors: {}", parse_errors);
     println!("  Height range: 0 to {}", max_height);
+    println!("  Blocks with BLOCK_HAVE_DATA flag: {} ({:.2}%)", 
+             blocks_with_data_flag,
+             (blocks_with_data_flag as f64 / leveldb_count as f64) * 100.0);
+    println!("  Blocks with file AND position: {} ({:.2}%)", 
+             blocks_with_file_and_pos,
+             (blocks_with_file_and_pos as f64 / leveldb_count as f64) * 100.0);
+    
+    if blocks_with_file_and_pos < leveldb_count / 2 {
+        println!("\n⚠️  WARNING: Less than 50% of blocks have offset data!");
+        println!("   This will limit Pattern A offset-based reading.");
+        println!("   Consider running: pivxd -reindex");
+    }
     
     // Step 2: Calculate chainwork for all blocks
     println!("⚡ Calculating chainwork for all blocks...");
@@ -343,6 +397,7 @@ pub fn build_canonical_chain_from_leveldb(
     println!("🏆 Finding best chain tip (highest chainwork)...");
     
     let mut best_tip: Option<(Vec<u8>, i64, [u64; 4])> = None;
+    let mut blocks_without_chainwork = 0;
     
     // Check all blocks at max height and nearby (in case of orphans)
     for height in (max_height.saturating_sub(100))..=max_height {
@@ -360,33 +415,59 @@ pub fn build_canonical_chain_from_leveldb(
                                 }
                             }
                         }
+                    } else {
+                        blocks_without_chainwork += 1;
                     }
                 }
             }
         }
     }
     
-    let (best_tip_hash, best_tip_height, _) = best_tip
-        .ok_or("No valid tip found!")?;
+    if blocks_without_chainwork > 0 {
+        println!("⚠️  {} blocks at tip heights missing chainwork", blocks_without_chainwork);
+    }
+    
+    // Fallback: if no tip found with chainwork, just use max height
+    let (best_tip_hash, best_tip_height, _) = if let Some(tip) = best_tip {
+        tip
+    } else {
+        println!("⚠️  No blocks found with valid chainwork, using max height as fallback");
+        if let Some(hashes) = height_to_hashes.get(&max_height) {
+            if let Some(hash) = hashes.first() {
+                (hash.clone(), max_height, [0, 0, 0, 0])
+            } else {
+                return Err("No blocks found at max height".into());
+            }
+        } else {
+            return Err("No blocks found at max height".into());
+        }
+    };
     
     println!("✅ Best tip: height {}, hash {}", best_tip_height, hex::encode(&best_tip_hash));
     
     // Step 4: Build canonical chain by walking BACKWARDS from best tip
     println!("⬇️  Building canonical chain (walking backwards from tip)...");
     
-    let mut chain: Vec<(i64, Vec<u8>)> = Vec::new();
+    let mut chain: Vec<(i64, Vec<u8>, Option<u64>, Option<u64>)> = Vec::new();
     let mut current_hash = best_tip_hash;
+    let mut steps = 0;
     
     loop {
         let block_info = match index.get(&current_hash) {
             Some(info) => info,
             None => {
-                println!("  ⚠️  Block not found - stopping at height {}", chain.last().map(|(h, _)| *h).unwrap_or(-1));
+                println!("  ⚠️  Block not found - stopping at height {}", chain.last().map(|(h, _, _, _)| *h).unwrap_or(-1));
                 break;
             }
         };
         
-        chain.push((block_info.height, current_hash.clone()));
+        if steps < 20 {
+            let hash_hex: String = current_hash.iter().rev().map(|b| format!("{:02x}", b)).collect();
+            println!("  Step {}: height={}, hash={}", steps, block_info.height, &hash_hex[..16]);
+        }
+        steps += 1;
+        
+        chain.push((block_info.height, current_hash.clone(), block_info.file, block_info.data_pos));
         
         // Check if we reached genesis
         if block_info.height == 0 {
@@ -403,10 +484,10 @@ pub fn build_canonical_chain_from_leveldb(
     
     // Reverse to get genesis -> tip order
     chain.reverse();
-    
+
     println!("✅ Built canonical chain: {} blocks (height 0 to {})", 
              chain.len(), 
-             chain.last().map(|(h, _)| *h).unwrap_or(0));
-    
+             chain.last().map(|(h, _, _, _)| *h).unwrap_or(0));
+
     Ok(chain)
 }

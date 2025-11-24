@@ -179,7 +179,7 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
     
     // Get block hash from height
     let height_key = height.to_le_bytes();
-    let block_hash_bytes = db.get_cf(&cf_metadata, &height_key)
+    let block_hash_bytes = db.get_cf(&cf_metadata, height_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     
@@ -205,7 +205,7 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
     // Get previous block hash
     let previousblockhash = if height > 0 {
         let prev_height = (height - 1).to_le_bytes();
-        db.get_cf(&cf_metadata, &prev_height)
+        db.get_cf(&cf_metadata, prev_height)
             .ok()
             .flatten()
             .map(|bytes| hex::encode(&bytes))
@@ -216,7 +216,7 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
     // Get next block hash
     let nextblockhash = {
         let next_height = (height + 1).to_le_bytes();
-        db.get_cf(&cf_metadata, &next_height)
+        db.get_cf(&cf_metadata, next_height)
             .ok()
             .flatten()
             .map(|bytes| hex::encode(&bytes))
@@ -354,7 +354,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
-                                enrich_transaction_inputs(db, &cf_transactions, &mut tx);
+                                enrich_transaction_inputs(db, cf_transactions, &mut tx);
                                 transactions.push(tx);
                             } else {
                                 eprintln!("Failed to parse transaction: {}", txid_str);
@@ -375,7 +375,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
 }
 
 fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary) {
-    use crate::parser::deserialize_transaction;
+    
     
     for input in &mut tx.vin {
         // Skip coinbase inputs
@@ -409,9 +409,7 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
                         data_with_header.extend_from_slice(prev_tx_data);
                         
                         // Parse the previous transaction
-                        if let Ok(prev_tx) = tokio::runtime::Handle::current().block_on(async {
-                            deserialize_transaction(&data_with_header).await
-                        }) {
+                                                if let Ok(prev_tx) = crate::parser::deserialize_transaction_blocking(&data_with_header) {
                             // Extract the output at vout index
                             if let Some(vout_idx) = input.vout {
                                 if let Some(output) = prev_tx.outputs.get(vout_idx as usize) {
@@ -420,7 +418,7 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
                                     
                                     // Add address(es) from the output
                                     if !output.address.is_empty() {
-                                        input.address = output.address.get(0).cloned();
+                                        input.address = output.address.first().cloned();
                                         input.addresses = Some(output.address.clone());
                                     }
                                     
@@ -552,7 +550,7 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
     // because the output includes staking rewards. We should report 0 fee for these.
     // For regular transactions and coinbase, calculate normally.
     let has_coinbase_input = vin.iter().any(|i| i.coinbase.is_some());
-    let first_output_empty = vout.get(0).map_or(false, |o| o.value == 0.0 && o.addresses.is_empty());
+    let first_output_empty = vout.first().map_or(false, |o| o.value == 0.0 && o.addresses.is_empty());
     
     let (tx_type, reward, fees) = if has_coinbase_input {
         if first_output_empty && vout.len() > 1 {
@@ -655,8 +653,8 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
     // - Coinbase: first input has coinbase data, first output has value (standard mining reward)
     // - Coinstake: first output is empty (0 value, 0-length script), has regular inputs
     // - Normal: regular transaction
-    let has_coinbase_input = vin.get(0).map_or(false, |i| i.coinbase.is_some());
-    let first_output_empty = vout.get(0).map_or(false, |o| 
+    let has_coinbase_input = vin.first().map_or(false, |i| i.coinbase.is_some());
+    let first_output_empty = vout.first().map_or(false, |o| 
         o.value == 0.0 && o.addresses.is_empty()
     );
     
@@ -682,29 +680,29 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
     let sapling = tx.sapling_data.as_ref().map(|sap| {
         // Convert spends to API format
         let spends = sap.vshielded_spend.iter().map(|spend| SpendInfo {
-            cv: hex::encode(&spend.cv),
-            anchor: hex::encode(&spend.anchor),
-            nullifier: hex::encode(&spend.nullifier),
-            rk: hex::encode(&spend.rk),
-            zkproof: hex::encode(&spend.zkproof),
-            spend_auth_sig: hex::encode(&spend.spend_auth_sig),
+            cv: hex::encode(spend.cv),
+            anchor: hex::encode(spend.anchor),
+            nullifier: hex::encode(spend.nullifier),
+            rk: hex::encode(spend.rk),
+            zkproof: hex::encode(spend.zkproof),
+            spend_auth_sig: hex::encode(spend.spend_auth_sig),
         }).collect();
         
         // Convert outputs to API format
         let outputs = sap.vshielded_output.iter().map(|output| OutputInfo {
-            cv: hex::encode(&output.cv),
-            cmu: hex::encode(&output.cmu),
-            ephemeral_key: hex::encode(&output.ephemeral_key),
-            enc_ciphertext: hex::encode(&output.enc_ciphertext),
-            out_ciphertext: hex::encode(&output.out_ciphertext),
-            zkproof: hex::encode(&output.zkproof),
+            cv: hex::encode(output.cv),
+            cmu: hex::encode(output.cmu),
+            ephemeral_key: hex::encode(output.ephemeral_key),
+            enc_ciphertext: hex::encode(output.enc_ciphertext),
+            out_ciphertext: hex::encode(output.out_ciphertext),
+            zkproof: hex::encode(output.zkproof),
         }).collect();
         
         SaplingInfo {
             value_balance: sap.value_balance as f64 / 100_000_000.0, // Convert satoshis to PIV
             shielded_spend_count: sap.vshielded_spend.len() as u64,
             shielded_output_count: sap.vshielded_output.len() as u64,
-            binding_sig: hex::encode(&sap.binding_sig),
+            binding_sig: hex::encode(sap.binding_sig),
             spends: Some(spends),
             outputs: Some(outputs),
         }

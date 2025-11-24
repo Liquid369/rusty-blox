@@ -172,7 +172,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
     }
     
     // Write final batch
-    if batch.len() > 0 {
+    if !batch.is_empty() {
         db.write(batch)?;
     }
     
@@ -187,7 +187,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     
     #[tokio::test]
     async fn test_fix_zero_height_transactions() {

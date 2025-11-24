@@ -36,6 +36,12 @@ pub struct MempoolState {
     pub transactions: RwLock<HashMap<String, MempoolTransaction>>,
 }
 
+impl Default for MempoolState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MempoolState {
     pub fn new() -> Self {
         Self {

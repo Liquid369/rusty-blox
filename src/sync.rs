@@ -8,7 +8,6 @@
 
 use std::sync::Arc;
 use std::path::PathBuf;
-use std::time::Duration;
 use rocksdb::DB;
 use tokio::fs;
 
@@ -19,7 +18,9 @@ use crate::monitor::run_block_monitor;
 use crate::websocket::EventBroadcaster;
 use crate::leveldb_index::build_canonical_chain_from_leveldb;
 use crate::chain_state::set_network_height;
+use crate::pivx_copy::get_block_index_path;
 use pivx_rpc_rs::BitcoinRpcClient;
+use crate::repair;
 
 /// Get current sync status from database
 async fn get_sync_status(db: &Arc<DB>) -> Result<SyncStatus, Box<dyn std::error::Error>> {
@@ -30,7 +31,7 @@ async fn get_sync_status(db: &Arc<DB>) -> Result<SyncStatus, Box<dyn std::error:
     match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => {
             let height = i32::from_le_bytes(bytes.as_slice().try_into()?);
-            return Ok(SyncStatus::Synced { height });
+            Ok(SyncStatus::Synced { height })
         }
         None => {
             // No sync marker, check if we have any blocks indexed
@@ -61,10 +62,10 @@ async fn get_sync_status(db: &Arc<DB>) -> Result<SyncStatus, Box<dyn std::error:
                     // Set the sync marker for next time
                     set_sync_height(db, final_height).await?;
                     
-                    return Ok(SyncStatus::Synced { height: final_height });
+                    Ok(SyncStatus::Synced { height: final_height })
                 }
                 None => {
-                    return Ok(SyncStatus::NeedInitialSync);
+                    Ok(SyncStatus::NeedInitialSync)
                 }
             }
         }
@@ -76,7 +77,7 @@ async fn set_sync_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::e
     let cf = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    db.put_cf(&cf, b"sync_height", &height.to_le_bytes())?;
+    db.put_cf(&cf, b"sync_height", height.to_le_bytes())?;
     Ok(())
 }
 
@@ -139,66 +140,67 @@ async fn run_initial_sync_leveldb(
     
     // Get PIVX data directory for leveldb
     let config = get_global_config();
-    let pivx_data_dir = config
-        .get_string("paths.pivx_data_dir")
+    let pivx_blocks_dir = config
+        .get_string("paths.blk_dir")
         .unwrap_or_else(|_| {
             // Default macOS location
             let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/liquid".to_string());
-            format!("{}/Library/Application Support/PIVX", home)
+            format!("{}/Library/Application Support/PIVX/blocks", home)
         });
     
-    let leveldb_path = format!("{}/blocks/index", pivx_data_dir);
-    let copy_leveldb_path = "/tmp/pivx_index_current";
+    // Get copy directory from config
+    let block_index_copy_dir = config
+        .get_string("paths.block_index_copy_dir")
+        .ok();
     
-    println!("📍 PIVX data directory: {}", pivx_data_dir);
-    println!("📍 Source leveldb: {}", leveldb_path);
+    println!("� PIVX blocks directory: {}", pivx_blocks_dir);
+    
+    // Get the block index path (copies if needed)
+    let leveldb_path = get_block_index_path(
+        &pivx_blocks_dir,
+        block_index_copy_dir.as_deref(),
+    )?;
+    
+    println!("📍 Reading block index from: {}", leveldb_path);
     println!("📍 Blk files directory: {}", blk_dir.display());
     
-    // Check if we already have a copy
-    let needs_copy = if std::path::Path::new(copy_leveldb_path).exists() {
-        println!("📦 Found existing leveldb copy at {}", copy_leveldb_path);
-        println!("   Using existing copy (delete it to force a fresh copy)");
-        false
-    } else {
-        println!("📋 No leveldb copy found, will create one...");
-        true
-    };
-    
-    let final_leveldb_path = if needs_copy {
-        // Copy leveldb to /tmp so we can read it while daemon is running
-        println!("📋 Copying leveldb from {} to {}", leveldb_path, copy_leveldb_path);
-        println!("   This may take a minute or two...");
-        
-        // Remove old copy if exists
-        if std::path::Path::new(copy_leveldb_path).exists() {
-            std::fs::remove_dir_all(copy_leveldb_path)?;
-        }
-        
-        // Use cp command for faster copy
-        let copy_result = std::process::Command::new("cp")
-            .arg("-R")
-            .arg(&leveldb_path)
-            .arg(copy_leveldb_path)
-            .output()?;
-        
-        if !copy_result.status.success() {
-            return Err(format!("Failed to copy leveldb: {}", 
-                String::from_utf8_lossy(&copy_result.stderr)).into());
-        }
-        
-        println!("✅ Leveldb copy complete!");
-        copy_leveldb_path.to_string()
-    } else {
-        copy_leveldb_path.to_string()
-    };
-    
-    println!("📍 Reading from leveldb: {}", final_leveldb_path);
-    
     // Build canonical chain from leveldb
-    let canonical_chain = build_canonical_chain_from_leveldb(&final_leveldb_path)?;
-    
+    let canonical_chain = build_canonical_chain_from_leveldb(&leveldb_path)?;
+
     let chain_len = canonical_chain.len();
-    println!("\n📊 Canonical chain has {} blocks", chain_len);
+    let leveldb_height = (chain_len - 1) as i32;
+    println!("\n📊 Canonical chain from LevelDB: {} blocks (height 0 to {})", chain_len, leveldb_height);
+    
+    // Verify against RPC to see if daemon has synced further
+    let rpc_host = config.get_string("rpc.host").unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
+    let rpc_user = config.get_string("rpc.user").unwrap_or_else(|_| "explorer".to_string());
+    let rpc_pass = config.get_string("rpc.pass").unwrap_or_else(|_| "explorer_test_pass".to_string());
+    
+    let rpc_client = BitcoinRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+    
+    match rpc_client.getblockcount() {
+        Ok(network_height) => {
+            let blocks_behind = network_height as i32 - leveldb_height;
+            if blocks_behind > 0 {
+                println!("⚠️  LevelDB copy is {} blocks behind current daemon height {}", blocks_behind, network_height);
+                println!("   Will fetch missing blocks via RPC after processing blk files");
+            } else {
+                println!("✅ LevelDB copy is current (matches daemon height {})", network_height);
+            }
+        }
+        Err(e) => {
+            println!("⚠️  Could not verify LevelDB freshness via RPC: {}", e);
+            println!("   Proceeding with LevelDB data as-is");
+        }
+    }
+    
+    println!("\n📊 Using canonical chain: {} blocks", chain_len);
+    
+    // SET SYNC_HEIGHT IMMEDIATELY from LevelDB
+    // This ensures API has correct height even during blk file processing
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    db.put_cf(&cf_state, b"sync_height", leveldb_height.to_le_bytes())?;
+    println!("✅ Set sync_height to {} (from LevelDB canonical chain)", leveldb_height);
     
     // Store canonical chain metadata in our DB
     // This will guide the parallel block processor to know which blocks to index
@@ -206,23 +208,48 @@ async fn run_initial_sync_leveldb(
     
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     
-    for (height, hash) in &canonical_chain {
+    let mut offsets_stored = 0;
+    let mut offsets_missing = 0;
+    
+    for (height, hash, opt_file, opt_pos) in &canonical_chain {
         let height_key = (*height as i32).to_le_bytes();
         // Store reversed hash (display format) for consistency with existing code
         let mut display_hash = hash.clone();
         display_hash.reverse();
-        db.put_cf(&cf_metadata, &height_key, &display_hash)?;
+        db.put_cf(&cf_metadata, height_key, &display_hash)?;
         
         // ALSO store the reverse mapping: 'h' + internal_hash → height
         // This allows blk file processing to look up heights efficiently
         let mut hash_key = vec![b'h'];
         hash_key.extend_from_slice(hash);  // Internal format (not reversed)
-        db.put_cf(&cf_metadata, &hash_key, &height_key)?;
+        db.put_cf(&cf_metadata, &hash_key, height_key)?;
+
+        // If the leveldb index provided blk file number and data position, store it
+        if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
+            let mut off_key = vec![b'o'];
+            off_key.extend_from_slice(hash); // internal format
+            let mut buf = Vec::with_capacity(12);
+            buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
+            buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
+            db.put_cf(&cf_metadata, &off_key, &buf)?;
+            offsets_stored += 1;
+        } else {
+            offsets_missing += 1;
+        }
         
         if *height % 500_000 == 0 {
             println!("  Stored metadata for height {}", height);
         }
     }
+    
+    println!("✅ Canonical chain metadata stored:");
+    println!("   Total blocks: {}", canonical_chain.len());
+    println!("   Blocks WITH offsets: {} ({:.2}%)", 
+             offsets_stored,
+             (offsets_stored as f64 / canonical_chain.len() as f64) * 100.0);
+    println!("   Blocks WITHOUT offsets: {} ({:.2}%)", 
+             offsets_missing,
+             (offsets_missing as f64 / canonical_chain.len() as f64) * 100.0);
     
     println!("✅ Canonical chain metadata stored!");
     println!("   The parallel block processor will now index {} blocks from blk*.dat files", chain_len);
@@ -240,10 +267,8 @@ async fn run_initial_sync_leveldb(
     
     while let Ok(Some(entry)) = dir_entries.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("dat") {
-            if path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("blk")).unwrap_or(false) {
-                entries.push(path);
-            }
+        if path.extension().and_then(|s| s.to_str()) == Some("dat") && path.file_name().and_then(|n| n.to_str()).map(|n| n.starts_with("blk")).unwrap_or(false) {
+            entries.push(path);
         }
     }
     
@@ -251,7 +276,7 @@ async fn run_initial_sync_leveldb(
     
     // Process files in parallel (this will index all blocks, including orphans)
     // The chainwork calculation later will determine which ones are canonical
-    process_files_parallel(entries, Arc::clone(&db), state, max_concurrent).await?;
+    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
     
     let final_height = (chain_len - 1) as i32;
     
@@ -261,6 +286,24 @@ async fn run_initial_sync_leveldb(
     
     // Mark sync complete
     set_sync_height(&db, final_height).await?;
+    
+    // OPTIONAL: Run Pattern A offset-based indexing for validation
+    // This reads blocks directly by offset and compares with scanner results
+    let validate_with_offset_indexer = config.get_bool("sync.validate_offset_indexing").unwrap_or(false);
+    if validate_with_offset_indexer {
+        println!("\n📍 Running Pattern A validation (offset-based indexing)...");
+        println!("   This will re-index canonical blocks using file offsets");
+        println!("   to validate the offset-based approach works correctly.\n");
+        
+        use crate::offset_indexer::index_canonical_blocks_by_offset;
+        if let Err(e) = index_canonical_blocks_by_offset(blk_dir.clone(), db.clone(), state.clone()).await {
+            eprintln!("⚠️  Offset-based validation failed: {}", e);
+            eprintln!("   Continuing with scanner-based results");
+        } else {
+            println!("✅ Offset-based indexing validation complete!");
+            println!("   Pattern A approach verified - ready to switch over\n");
+        }
+    }
     
     Ok(final_height)
 }
@@ -316,6 +359,8 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
     let config = get_global_config();
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
+    let use_chainstate = config.get_bool("sync.use_chainstate_for_utxos").unwrap_or(false);
+    let use_block_index = config.get_bool("sync.use_block_index_for_heights").unwrap_or(true);
     
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║         POST-SYNC DATA ENRICHMENT                  ║");
@@ -324,6 +369,11 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
     // Check what enrichment steps have been completed
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
+    
+    let height_resolution_complete = match db.get_cf(&cf_state, b"height_resolution_complete")? {
+        Some(bytes) => bytes[0] == 1,
+        None => false,
+    };
     
     let address_index_complete = match db.get_cf(&cf_state, b"address_index_complete")? {
         Some(bytes) => bytes[0] == 1,
@@ -340,19 +390,97 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
         None => false,
     };
     
+    // PHASE 0: Resolve heights from PIVX Core block index (NEW - Strategy 1)
+    // Only run this if we actually have transactions in the database!
+    if use_block_index && !height_resolution_complete {
+        // Check if we have any transactions to fix
+        let cf_transactions = db.cf_handle("transactions")
+            .ok_or("transactions CF not found")?;
+        
+        let mut has_transactions = false;
+        if let Some(Ok((_key, _value))) = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start).next() {
+            has_transactions = true;
+        }
+        
+        if !has_transactions {
+            println!("ℹ️  Phase 0: Height resolution skipped - no transactions in database yet");
+            println!("   Height resolution will run after blockchain sync completes\n");
+            // Don't mark as complete - we'll run it later
+        } else {
+            println!("📊 Phase 0: Resolving transaction heights from PIVX Core block index...");
+            println!("   This ensures heights are correct BEFORE enrichment");
+            println!("   Orphaned transactions will be identified from Core's canonical chain\n");
+            
+            use crate::height_resolver::resolve_heights_from_block_index;
+            
+            match resolve_heights_from_block_index(Arc::clone(db), None).await {
+                Ok((fixed, orphaned)) => {
+                    if fixed > 0 {
+                        println!("   ✅ Resolved {} transaction heights from canonical chain", fixed);
+                    }
+                    if orphaned > 0 {
+                        println!("   ⚠️  Identified {} orphaned transactions (not in canonical chain)", orphaned);
+                    }
+                    if fixed == 0 && orphaned == 0 {
+                        println!("   ✅ All transaction heights already correct");
+                    }
+                    println!();
+                    db.put_cf(&cf_state, b"height_resolution_complete", [1u8])?;
+                    
+                    // Mark repair as complete too since we just did it
+                    db.put_cf(&cf_state, b"repair_complete", [1u8])?;
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Height resolution failed: {}", e);
+                    eprintln!("   Will fall back to repair phase during enrichment\n");
+                }
+            }
+        }
+    } else if height_resolution_complete {
+        println!("✅ Phase 0: Height resolution already complete - skipping\n");
+    } else {
+        println!("ℹ️  Phase 0: Height resolution disabled (use_block_index_for_heights=false)");
+        println!("   Will use repair phase instead\n");
+    }
+    
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
-        println!("📍 Phase 1: Building address index...");
-        println!("   This allows searching by address and viewing address balances\n");
-        
-        use crate::enrich_addresses::enrich_all_addresses;
-        if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
-            eprintln!("⚠️  Address enrichment failed: {}", e);
-            eprintln!("   Continuing without address data.");
-            eprintln!("   You can retry later by setting enrich_addresses=true\n");
+        if use_chainstate {
+            println!("📍 Phase 1: Building address index from PIVX Core chainstate...");
+            println!("   Using chainstate as source of truth for current UTXOs");
+            println!("   This ensures balances match PIVX Core exactly\n");
+            
+            use crate::enrich_from_chainstate::enrich_from_chainstate;
+            if let Err(e) = enrich_from_chainstate(Arc::clone(db)).await {
+                eprintln!("⚠️  Chainstate enrichment failed: {}", e);
+                eprintln!("   Falling back to transaction-based enrichment...\n");
+                
+                use crate::enrich_addresses::enrich_all_addresses;
+                if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
+                    eprintln!("⚠️  Address enrichment also failed: {}", e);
+                    eprintln!("   Continuing without address data.");
+                    eprintln!("   You can retry later by setting enrich_addresses=true\n");
+                } else {
+                    println!("✅ Address index built successfully (from transactions)!\n");
+                    db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+                }
+            } else {
+                println!("✅ Address index built successfully (from chainstate)!\n");
+                db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+            }
         } else {
-            println!("✅ Address index built successfully!\n");
-            db.put_cf(&cf_state, b"address_index_complete", &[1u8])?;
+            println!("📍 Phase 1: Building address index from transactions...");
+            println!("   This allows searching by address and viewing address balances\n");
+            
+            use crate::enrich_addresses::enrich_all_addresses;
+            if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
+                eprintln!("⚠️  Address enrichment failed: {}", e);
+                eprintln!("   Continuing without address data.");
+                eprintln!("   You can retry later by setting enrich_addresses=true\n");
+            } else {
+                println!("✅ Address index built successfully!\n");
+                db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+            }
         }
     } else if address_index_complete {
         println!("✅ Phase 1: Address index already complete - skipping\n");
@@ -371,18 +499,18 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
             eprintln!("   Continuing without block tx index optimization\n");
         } else {
             println!("✅ Transaction block index built successfully!\n");
-            db.put_cf(&cf_state, b"tx_block_index_complete", &[1u8])?;
+            db.put_cf(&cf_state, b"tx_block_index_complete", [1u8])?;
         }
     } else {
         println!("✅ Phase 2: Transaction block index already complete - skipping\n");
     }
     
-    // 3. Fix transactions with height=0 (database repair)
-    if !repair_complete {
+    // 3. Fix transactions with height=0 (database repair) - skip if height resolution already ran
+    if !repair_complete && !height_resolution_complete {
         println!("🔧 Phase 3: Repairing transactions with incorrect heights...");
         println!("   This fixes transactions stored with height=0 during initial sync\n");
         
-        match rustyblox::repair::fix_zero_height_transactions(db).await {
+    match repair::fix_zero_height_transactions(db).await {
             Ok((fixed, orphaned)) => {
                 if fixed > 0 {
                     println!("   ✅ Repaired {} transactions with correct heights", fixed);
@@ -394,13 +522,15 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
                     println!("   ✅ No transactions needed repair");
                 }
                 println!();
-                db.put_cf(&cf_state, b"repair_complete", &[1u8])?;
+                db.put_cf(&cf_state, b"repair_complete", [1u8])?;
             }
             Err(e) => {
                 eprintln!("⚠️  Transaction repair failed: {}", e);
                 eprintln!("   Continuing - some transactions may show incorrect data\n");
             }
         }
+    } else if height_resolution_complete {
+        println!("✅ Phase 3: Transaction repair not needed (heights resolved from block index)\n");
     } else {
         println!("✅ Phase 3: Transaction repair already complete - skipping\n");
     }
@@ -446,7 +576,7 @@ async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std
                         
                         // Skip if height is invalid
                         if height > 0 && height < 10_000_000 {
-                            block_txs.entry(height).or_insert_with(Vec::new).push(txid.to_vec());
+                            block_txs.entry(height).or_default().push(txid.to_vec());
                             indexed_count += 1;
                         }
                     }
@@ -495,7 +625,7 @@ async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std
     }
     
     // Final batch
-    if batch.len() > 0 {
+    if !batch.is_empty() {
         db.write(batch)?;
     }
     
@@ -602,6 +732,45 @@ pub async fn run_sync_service(
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║          PIVX BLOCKCHAIN EXPLORER SYNC             ║");
     println!("╚════════════════════════════════════════════════════╝\n");
+    
+    // Check if resync is requested
+    let config = get_global_config();
+    let resync = config.get_bool("sync.resync").unwrap_or(false);
+    
+    if resync {
+        println!("\n🔄 RESYNC MODE ENABLED");
+        println!("   Clearing all databases and rebuilding from scratch...\n");
+        
+        // Clear all column families
+        let cf_names = vec![
+            "blocks", "transactions", "chain_metadata", 
+            "addr_index", "utxo", "pubkey", "chain_state"
+        ];
+        
+        for cf_name in cf_names {
+            if let Some(cf) = db.cf_handle(cf_name) {
+                println!("   Clearing column family: {}", cf_name);
+                
+                // Get all keys in this CF
+                let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+                let mut keys_to_delete = Vec::new();
+                
+                for item in iter {
+                    if let Ok((key, _)) = item {
+                        keys_to_delete.push(key.to_vec());
+                    }
+                }
+                
+                // Delete all keys
+                println!("     Deleting {} entries...", keys_to_delete.len());
+                for key in keys_to_delete {
+                    db.delete_cf(&cf, &key)?;
+                }
+            }
+        }
+        
+        println!("✅ All databases cleared!\n");
+    }
     
     // Fetch and store network height from RPC early
     println!("🔍 Checking network status...");

@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::config::get_global_config;
 use crate::websocket::EventBroadcaster;
 use crate::chain_state::set_network_height;
+use crate::reorg;
 
 #[derive(Debug, Clone)]
 pub struct ChainTip {
@@ -657,7 +658,7 @@ async fn index_block_from_rpc(
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    db.put_cf(&cf_state, b"sync_height", &height.to_le_bytes())?;
+    db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
     
     // Broadcast new block event if broadcaster is available
     if let Some(bc) = broadcaster {
@@ -683,11 +684,9 @@ fn detect_reorg(
     }
     
     // If heights are same, check hashes
-    if rpc_tip.height == db_tip.height {
-        if rpc_tip.hash != db_tip.hash {
-            println!("REORG DETECTED: Hash mismatch at height {}", rpc_tip.height);
-            return Ok(Some(rpc_tip.height - 1));
-        }
+    if rpc_tip.height == db_tip.height && rpc_tip.hash != db_tip.hash {
+        println!("REORG DETECTED: Hash mismatch at height {}", rpc_tip.height);
+        return Ok(Some(rpc_tip.height - 1));
     }
     
     // TODO: More sophisticated reorg detection
@@ -764,12 +763,34 @@ pub async fn run_block_monitor(
         };
         
         // Check for reorg
-        if let Some(reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
-            println!("Handling reorg from height {}", reorg_height);
-            // TODO: Implement reorg handling
-            // 1. Rollback DB to reorg_height
-            // 2. Re-index from that point
-            tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+        if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
+            println!("\n⚠️  BLOCKCHAIN REORGANIZATION DETECTED!");
+            
+            // Handle the reorg using our reorg module
+            match reorg::handle_reorg(
+                db.clone(),
+                &rpc_client,
+                db_tip.height,
+                rpc_tip.height,
+            ).await {
+                Ok(reorg_info) => {
+                    println!("✅ Reorg handled successfully");
+                    println!("   Orphaned {} blocks from fork at height {}", 
+                             reorg_info.orphaned_blocks, reorg_info.fork_height);
+                    
+                    // Continue to re-index from the rollback point
+                    // The normal sync logic below will pick up from the new chain tip
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to handle reorg: {}", e);
+                    eprintln!("   Waiting {} seconds before retry...", poll_interval_secs);
+                    tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+                    continue;
+                }
+            }
+            
+            // After reorg, immediately check for new blocks on the canonical chain
+            tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
         
@@ -835,7 +856,7 @@ pub async fn run_block_monitor(
                 println!("   🌐 Network height: {}", rpc_tip.height);
                 println!("   🎯 Status: FULLY SYNCED\n");
                 println!("╔════════════════════════════════════════════════════╗");
-                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉       ║");
+                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉         ║");
                 println!("╚════════════════════════════════════════════════════╝\n");
             }
         } else {

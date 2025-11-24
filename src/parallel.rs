@@ -6,9 +6,12 @@ use crate::types::AppState;
 use crate::blocks::process_blk_file;
 use crate::db_utils::save_file_as_incomplete;
 use crate::chain_state::set_sync_height;
-use rustyblox::chainwork::calculate_all_chainwork;
+use crate::chainwork::calculate_all_chainwork;
 use hex;
 use std::collections::HashMap;
+use crate::config::get_global_config;
+use reqwest::Client;
+use serde_json::Value;
 
 /// Update sync_height by finding the highest block in chain_metadata
 /// This allows incremental progress updates as files are processed
@@ -183,11 +186,26 @@ pub async fn process_files_parallel(
     let cf_metadata = db_arc.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
     
-    // Check if genesis block exists in metadata (height 0)
-    let has_canonical_metadata = db_arc.get_cf(&cf_metadata, &0i32.to_le_bytes())?.is_some();
-    
+    // Check if canonical metadata appears complete: count how many height->hash 4-byte keys exist.
+    // If there's only the genesis mapping (or none) we consider the metadata incomplete and
+    // fall back to resolving block heights from the processed blk files. This avoids the
+    // situation where a partial leveldb import left only height 0 mapping and the explorer
+    // never assigns real heights (sync_height remains 0).
+    let mut height_key_count: usize = 0;
+    let iter = db_arc.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
+    for item in iter {
+        if let Ok((key, _)) = item {
+            if key.len() == 4 {
+                height_key_count += 1;
+            }
+        }
+    }
+
+    let has_canonical_metadata = height_key_count > 1; // more than just genesis
+
     if has_canonical_metadata {
         println!("\n✅ Canonical chain metadata already exists (from leveldb)");
+        println!("   Using pre-built canonical chain ({} height mappings found)", height_key_count);
         println!("   Skipping chain resolution - using pre-built canonical chain");
     } else {
         // FALLBACK: Only resolve if no canonical metadata exists
@@ -231,7 +249,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                 let header_vec = header_bytes.to_vec();
                 
                 children_map.entry(prev_hash)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((hash_vec, header_vec));
                 
                 total_blocks += 1;
@@ -280,7 +298,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         }
     }
     
-    let chainwork_map = calculate_all_chainwork(&db, &blocks_map)?;
+    let chainwork_map = calculate_all_chainwork(db, &blocks_map)?;
     println!("  ✅ Chainwork calculated for {} blocks", chainwork_map.len());
     
     // DEBUG: Check children_map AFTER chainwork calculation
@@ -322,69 +340,123 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         .collect();
     
     println!("  Found {} potential chain tips", potential_tips.len());
-    
-    // STEP 3B: Check each tip with RPC to get its HEIGHT
-    // Then work backwards from the HIGHEST one
-    println!("  Checking tips with RPC to find the highest one...");
-    
+
+    // STEP 3B: Prefer RPC (HTTP JSON-RPC) to map tips -> heights, but fall back
+    // to chainwork if RPC isn't configured or available. We use `reqwest` to
+    // call the node's RPC directly instead of shelling out to pivx-cli.
+    println!("  Checking tips (RPC preferred, falling back to chainwork)...");
+
+    // Build optional RPC client from config (best-effort)
+    let config = get_global_config();
+    let rpc_info: Option<(Client, String, String, String)> = match (
+        config.get_string("rpc.host"),
+        config.get_string("rpc.user"),
+        config.get_string("rpc.pass"),
+    ) {
+        (Ok(host), Ok(user), Ok(pass)) => {
+            // Ensure host has a scheme
+            let url = if host.starts_with("http://") || host.starts_with("https://") {
+                host
+            } else {
+                format!("http://{}", host)
+            };
+
+            match Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
+                Ok(client) => Some((client, url, user, pass)),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+
     let mut tips_with_heights: Vec<(Vec<u8>, i32)> = Vec::new();
-    
+
     for (idx, tip_hash) in potential_tips.iter().enumerate() {
         if idx % 1000 == 0 && idx > 0 {
             println!("    Checked {} tips with RPC...", idx);
         }
-        
+
         // Convert to display format for RPC
         let tip_display: Vec<u8> = tip_hash.iter().rev().cloned().collect();
         let tip_hex = hex::encode(&tip_display);
-        
-        // Query RPC for this block's height
-        let rpc_result = std::process::Command::new("/Users/liquid/Downloads/pivx-5.6.1/bin/pivx-cli")
-            .args(&["getblock", &tip_hex, "1"])
-            .output();
-        
-        if let Ok(output) = rpc_result {
-            if output.status.success() {
-                let json_str = String::from_utf8_lossy(&output.stdout);
-                // Parse height from JSON (simple string search)
-                if let Some(height_start) = json_str.find("\"height\":") {
-                    let height_substr = &json_str[height_start + 9..];
-                    if let Some(comma_pos) = height_substr.find(',') {
-                        let height_str = height_substr[..comma_pos].trim();
-                        if let Ok(height) = height_str.parse::<i32>() {
-                            tips_with_heights.push((tip_hash.clone(), height));
-                            
-                            if tips_with_heights.len() <= 10 {
-                                println!("    Tip at height {}: {}", height, &tip_hex[..16]);
+
+        // Try RPC via HTTP JSON-RPC if configured
+        if let Some((client, url, user, pass)) = &rpc_info {
+            let body = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "rbx",
+                "method": "getblock",
+                "params": [tip_hex, 1]
+            });
+
+            match client.post(url).basic_auth(user, Some(pass)).json(&body).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        if let Ok(json_val) = resp.json::<Value>().await {
+                            if let Some(height_val) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
+                                let height = height_val as i32;
+                                tips_with_heights.push((tip_hash.clone(), height));
+                                if tips_with_heights.len() <= 10 {
+                                    println!("    Tip at height {}: {}", height, &tip_hex[..16]);
+                                }
                             }
                         }
                     }
                 }
+                Err(_) => { /* best-effort - ignore RPC failures */ }
             }
         }
-        
+
         // Stop after checking 5000 tips - should be enough to find the highest
         if idx >= 5000 {
             println!("    Checked 5000 tips, stopping RPC queries");
             break;
         }
     }
-    
+
     println!("  Found {} tips with known heights via RPC", tips_with_heights.len());
-    
-    if tips_with_heights.is_empty() {
-        return Err("No tips found with valid heights from RPC!".into());
+
+    let (highest_tip, highest_height_opt): (Vec<u8>, Option<i32>) = if !tips_with_heights.is_empty() {
+        // Sort by height (descending) to find the highest
+        tips_with_heights.sort_by(|a, b| b.1.cmp(&a.1));
+        let (h, height) = &tips_with_heights[0];
+        (h.clone(), Some(*height))
+    } else {
+        // RPC did not yield results — fallback to choosing the tip with highest chainwork
+        println!("  RPC unavailable or returned no tips; falling back to chainwork-based tip selection");
+
+        // chainwork_map contains computed chainwork for blocks (from calculate_all_chainwork)
+        // Choose the potential tip with the maximum chainwork value
+        let mut best: Option<(Vec<u8>, [u8; 32])> = None;
+        for tip in &potential_tips {
+            if let Some(work) = chainwork_map.get(tip) {
+                match &best {
+                    None => best = Some((tip.clone(), *work)),
+                    Some((_, best_work)) => {
+                        if work > best_work {
+                            best = Some((tip.clone(), *work));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((best_tip, _)) = best {
+            println!("  Selected best tip by chainwork: {}", hex::encode(best_tip.iter().rev().cloned().collect::<Vec<u8>>()));
+            (best_tip, None)
+        } else {
+            return Err("No tips found with valid heights via RPC and no chainwork data available".into());
+        }
+    };
+
+    if let Some(h) = highest_height_opt {
+        let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
+        println!("\n  📍 Found HIGHEST tip in database:");
+        println!("     Height: {}", h);
+        println!("     Hash: {}", hex::encode(&tip_display));
+    } else {
+        println!("\n  📍 Selected HIGHEST tip by chainwork (height unknown via RPC)");
     }
-    
-    // Sort by height (descending) to find the highest
-    tips_with_heights.sort_by(|a, b| b.1.cmp(&a.1));
-    
-    let (highest_tip, highest_height) = &tips_with_heights[0];
-    let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
-    
-    println!("\n  📍 Found HIGHEST tip in database:");
-    println!("     Height: {}", highest_height);
-    println!("     Hash: {}", hex::encode(&tip_display));
     
     // Show top 10 tips
     println!("\n  Top 10 highest tips:");
@@ -394,7 +466,15 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     }
     
     // STEP 3C: Walk backwards from the HIGHEST tip to genesis
-    println!("\n  Walking backwards from highest tip (height {}) to genesis...", highest_height);
+    let mut highest_height: i32 = 0;
+    let mut have_highest_height = false;
+    if let Some(h) = highest_height_opt {
+        highest_height = h;
+        have_highest_height = true;
+        println!("\n  Walking backwards from highest tip (height {}) to genesis...", highest_height);
+    } else {
+        println!("\n  Walking backwards from highest tip (height unknown via RPC) to genesis...");
+    }
     
     let mut chain_path: Vec<Vec<u8>> = Vec::new();
     let mut current_hash = highest_tip.clone();
@@ -463,93 +543,92 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         // Try to find this block's parent and continue walking backwards
         println!("\n  Attempting second backwards walk from the gap point...");
         
-        // Query RPC for the missing block to get its parent
-        let rpc_result = std::process::Command::new("/Users/liquid/Downloads/pivx-5.6.1/bin/pivx-cli")
-            .args(&["getblock", &hex::encode(&missing_hash_display), "1"])
-            .output();
-        
-        if let Ok(output) = rpc_result {
-            if output.status.success() {
-                let json_str = String::from_utf8_lossy(&output.stdout);
-                
-                // Extract the previousblockhash
-                if let Some(prev_start) = json_str.find("\"previousblockhash\":") {
-                    let prev_substr = &json_str[prev_start + 22..];
-                    if let Some(quote_end) = prev_substr.find('"') {
-                        let prev_hash_str = &prev_substr[..quote_end];
-                        
-                        if let Ok(prev_hash_bytes) = hex::decode(prev_hash_str) {
-                            // Convert from display format to internal format
-                            let prev_hash_internal: Vec<u8> = prev_hash_bytes.iter().rev().cloned().collect();
-                            
-                            println!("  Found missing block's parent via RPC: {}", prev_hash_str);
-                            println!("  Continuing backwards walk from parent...");
-                            
-                            // Now walk backwards from this parent
-                            let mut second_chain_path: Vec<Vec<u8>> = Vec::new();
-                            let mut current_hash_2 = prev_hash_internal.clone();
-                            let mut second_reached_genesis = false;
-                            
-                            for step2 in 0..10_000_000 {
-                                if step2 % 100000 == 0 && step2 > 0 {
-                                    println!("    Second walk: traced back {} blocks...", step2);
-                                }
-                                
-                                second_chain_path.push(current_hash_2.clone());
-                                
-                                // Check if this block exists in our database
-                                if let Some(header) = blocks_map.get(&current_hash_2) {
-                                    if header.len() >= 36 {
-                                        let prev_hash_2 = header[4..36].to_vec();
-                                        
-                                        // Check if we reached genesis
-                                        if prev_hash_2 == genesis_parent {
-                                            println!("  ✅ Second walk reached genesis block!");
-                                            second_chain_path.push(prev_hash_2);
-                                            second_reached_genesis = true;
+        // Query RPC for the missing block to get its parent (HTTP JSON-RPC)
+        if let Some((client, url, user, pass)) = &rpc_info {
+            let body = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "rbx",
+                "method": "getblock",
+                "params": [hex::encode(&missing_hash_display), 1]
+            });
+
+            if let Ok(resp) = client.post(url).basic_auth(user, Some(pass)).json(&body).send().await {
+                if resp.status().is_success() {
+                    if let Ok(json_val) = resp.json::<Value>().await {
+                        if let Some(prev_hash_str) = json_val.get("result").and_then(|r| r.get("previousblockhash")).and_then(|p| p.as_str()) {
+                            if let Ok(prev_hash_bytes) = hex::decode(prev_hash_str) {
+                                // Convert from display format to internal format
+                                let prev_hash_internal: Vec<u8> = prev_hash_bytes.iter().rev().cloned().collect();
+
+                                println!("  Found missing block's parent via RPC: {}", prev_hash_str);
+                                println!("  Continuing backwards walk from parent...");
+
+                                // Now walk backwards from this parent
+                                let mut second_chain_path: Vec<Vec<u8>> = Vec::new();
+                                let mut current_hash_2 = prev_hash_internal.clone();
+                                let mut second_reached_genesis = false;
+
+                                for step2 in 0..10_000_000 {
+                                    if step2 % 100000 == 0 && step2 > 0 {
+                                        println!("    Second walk: traced back {} blocks...", step2);
+                                    }
+
+                                    second_chain_path.push(current_hash_2.clone());
+
+                                    // Check if this block exists in our database
+                                    if let Some(header) = blocks_map.get(&current_hash_2) {
+                                        if header.len() >= 36 {
+                                            let prev_hash_2 = header[4..36].to_vec();
+
+                                            // Check if we reached genesis
+                                            if prev_hash_2 == genesis_parent {
+                                                println!("  ✅ Second walk reached genesis block!");
+                                                second_chain_path.push(prev_hash_2);
+                                                second_reached_genesis = true;
+                                                break;
+                                            }
+
+                                            current_hash_2 = prev_hash_2;
+                                        } else {
                                             break;
                                         }
-                                        
-                                        current_hash_2 = prev_hash_2;
                                     } else {
+                                        let display_2: Vec<u8> = current_hash_2.iter().rev().cloned().collect();
+                                        println!("  ⚠️  Second walk: block not found at step {}", step2);
+                                        println!("     Missing hash: {}", hex::encode(&display_2));
                                         break;
                                     }
-                                } else {
-                                    let display_2: Vec<u8> = current_hash_2.iter().rev().cloned().collect();
-                                    println!("  ⚠️  Second walk: block not found at step {}", step2);
-                                    println!("     Missing hash: {}", hex::encode(&display_2));
-                                    break;
                                 }
-                            }
-                            
-                            println!("  Second chain path length: {} blocks", second_chain_path.len());
-                            
-                            if second_reached_genesis {
-                                println!("  🎉 SUCCESS! We can reach genesis from the high chain!");
-                                println!("  Total connected blocks: {} (high chain) + {} (low chain) = {}", 
-                                         chain_path.len(), 
-                                         second_chain_path.len(),
-                                         chain_path.len() + second_chain_path.len());
-                                
-                                // Merge the two chains
-                                // Second chain is in reverse order (tip -> genesis), so reverse it first
-                                second_chain_path.reverse();
-                                
-                                // Remove genesis parent marker if present
-                                let second_start_idx = if second_chain_path[0] == genesis_parent { 1 } else { 0 };
-                                
-                                // Combine: [genesis...gap] + [missing_block] + [gap+1...tip]
-                                let mut full_chain = second_chain_path[second_start_idx..].to_vec();
-                                full_chain.push(current_hash.clone()); // Add the missing block
-                                full_chain.extend(chain_path.iter().rev().cloned()); // Add high chain (reverse it first)
-                                
-                                // Replace chain_path with the full chain
-                                chain_path = full_chain.iter().rev().cloned().collect();
-                                
-                                println!("  Combined chain length: {} blocks", chain_path.len());
-                            } else {
-                                println!("  ⚠️  Second walk also failed to reach genesis");
-                                println!("  There's still a gap that needs to be filled with RPC");
+
+                                println!("  Second chain path length: {} blocks", second_chain_path.len());
+
+                                if second_reached_genesis {
+                                    println!("  🎉 SUCCESS! We can reach genesis from the high chain!");
+                                    println!("  Total connected blocks: {} (high chain) + {} (low chain) = {}", 
+                                             chain_path.len(), 
+                                             second_chain_path.len(),
+                                             chain_path.len() + second_chain_path.len());
+
+                                    // Merge the two chains
+                                    // Second chain is in reverse order (tip -> genesis), so reverse it first
+                                    second_chain_path.reverse();
+
+                                    // Remove genesis parent marker if present
+                                    let second_start_idx = if second_chain_path[0] == genesis_parent { 1 } else { 0 };
+
+                                    // Combine: [genesis...gap] + [missing_block] + [gap+1...tip]
+                                    let mut full_chain = second_chain_path[second_start_idx..].to_vec();
+                                    full_chain.push(current_hash.clone()); // Add the missing block
+                                    full_chain.extend(chain_path.iter().rev().cloned()); // Add high chain (reverse it first)
+
+                                    // Replace chain_path with the full chain
+                                    chain_path = full_chain.iter().rev().cloned().collect();
+
+                                    println!("  Combined chain length: {} blocks", chain_path.len());
+                                } else {
+                                    println!("  ⚠️  Second walk also failed to reach genesis");
+                                    println!("  There's still a gap that needs to be filled with RPC");
+                                }
                             }
                         }
                     }
@@ -560,6 +639,13 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         println!("  ✅ Chain successfully reached genesis!");
     }
     
+    // If we couldn't reach genesis and don't have an RPC-supplied tip height,
+    // we cannot reliably assign heights — abort with a clear error so the
+    // operator can supply RPC access or rebuild metadata with leveldb tools.
+    if !reached_genesis && !have_highest_height {
+        return Err("Chain did not reach genesis and tip height is unknown (RPC required to continue)".into());
+    }
+
     // STEP 3D: Reverse and assign heights
     println!("  Assigning heights to canonical chain...");
     chain_path.reverse();
@@ -571,19 +657,20 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
             idx as i32
         } else {
             // If we didn't reach genesis, calculate height from the known tip height
+            // highest_height is guaranteed to be present here (check above)
             highest_height - (chain_path.len() - start_idx - 1 - idx) as i32
         };
         
         // Store hash -> height mapping
         let mut h_key = vec![b'h'];
         h_key.extend_from_slice(block_hash);
-        db.put_cf(&cf_metadata, &h_key, &height.to_le_bytes())?;
+        db.put_cf(&cf_metadata, &h_key, height.to_le_bytes())?;
         
         // Store height -> hash mapping (in DISPLAY format)
         let display_hash: Vec<u8> = block_hash.iter().rev().cloned().collect();
-        db.put_cf(&cf_metadata, &height.to_le_bytes(), &display_hash)?;
+        db.put_cf(&cf_metadata, height.to_le_bytes(), &display_hash)?;
         
-        if height % 100000 == 0 || height < 5 || height >= highest_height - 5 {
+        if height % 100000 == 0 || height < 5 || (have_highest_height && height >= highest_height - 5) {
             println!("    Height {}: {}", height, hex::encode(&display_hash));
         }
     }
@@ -591,9 +678,9 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     let chain_height = if reached_genesis {
         (chain_path.len() - start_idx - 1) as i32
     } else {
-        *highest_height
+        highest_height
     };
-    
+
     println!("  ✅ Canonical chain established: {} blocks (height {} to {})", 
              chain_path.len() - start_idx,
              if reached_genesis { 0 } else { highest_height - (chain_path.len() - start_idx - 1) as i32 },

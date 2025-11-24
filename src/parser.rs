@@ -1,6 +1,3 @@
-use serde::Serialize;
-use std::path::PathBuf;
-use futures::stream;
 use std::io::{Cursor, Read};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript, SaplingTxData, SpendDescription, OutputDescription};
@@ -43,8 +40,8 @@ pub async fn serialize_utxos_with_spent(utxos: &Vec<(Vec<u8>, u64, bool)>) -> Ve
 
 pub async fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
     let mut utxos = Vec::new();
-    let mut iter = data.chunks_exact(40); // 32 bytes for txid and 8 bytes for index
-    while let Some(chunk) = iter.next() {
+    let iter = data.chunks_exact(40); // 32 bytes for txid and 8 bytes for index
+    for chunk in iter {
         let txid = chunk[0..32].to_vec();
         if let Ok(bytes) = <[u8; 8]>::try_from(&chunk[32..40]) {
             let index = u64::from_le_bytes(bytes);
@@ -141,7 +138,7 @@ pub async fn deserialize_transaction(
     let mut outputs = Vec::new();
     for i in 0..output_count {
         let mut output = deserialize_tx_out(&mut cursor, false).await;
-        output.index = i as u64;  // Set the correct vout index
+        output.index = i;  // Set the correct vout index
         outputs.push(output);
     }
 
@@ -253,13 +250,21 @@ pub async fn deserialize_transaction(
     };
 
     Ok(CTransaction {
-        txid: txid,
+        txid,
         version: version as i16,
-        inputs: inputs,
-        outputs: outputs,
-        lock_time: lock_time,
+        inputs,
+        outputs,
+        lock_time,
         sapling_data,
     })
+}
+
+/// Blocking wrapper for `deserialize_transaction` for use in synchronous contexts.
+/// This executes the async parser to completion on the current thread.
+/// Prefer using `deserialize_transaction(...).await` in async contexts.
+pub fn deserialize_transaction_blocking(data: &[u8]) -> Result<CTransaction, std::io::Error> {
+    // Use the futures executor to run the async function to completion synchronously.
+    futures::executor::block_on(deserialize_transaction(data))
 }
 
 pub async fn deserialize_tx_in(
@@ -288,11 +293,11 @@ pub async fn deserialize_tx_in(
     
     // Always create prevout structure - even for coinbase-like inputs
     // We'll determine later if it's truly coinbase or just coinstake
-    let mut hash_display = prev_hash.clone();
+    let mut hash_display = prev_hash;
     hash_display.reverse();
     
     let prevout = Some(COutPoint {
-        hash: hex::encode(&hash_display),
+        hash: hex::encode(hash_display),
         n: prev_index,
     });
     
@@ -301,7 +306,7 @@ pub async fn deserialize_tx_in(
         CTxIn {
             prevout,
             script_sig: CScript { script: Vec::new() },
-            sequence: sequence,
+            sequence,
             index: 0,
             coinbase: Some(script_sig),
         }
@@ -310,7 +315,7 @@ pub async fn deserialize_tx_in(
         CTxIn {
             prevout,
             script_sig: CScript { script: script_sig },
-            sequence: sequence,
+            sequence,
             index: 0,
             coinbase: None,  // NOT coinbase - has real prevout
         }
@@ -334,11 +339,11 @@ pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty:
     };
 
     CTxOut {
-        value: value,
+        value,
         script_length: script_pubkey.len() as i32,
         script_pubkey: CScript { script: script_pubkey },
         index: 0,
-        address: address,
+        address,
     }
 }
 
@@ -473,7 +478,7 @@ pub async fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {
 // Stub functions for missing parser functions
 pub async fn hash_txid(data: &[u8]) -> String {
     // Proper implementation: SHA256(SHA256(tx_bytes)) then reverse
-    let first_hash = Sha256::digest(&data);
+    let first_hash = Sha256::digest(data);
     let txid = Sha256::digest(&first_hash);
     let reversed_txid: Vec<_> = txid.iter().rev().cloned().collect();
     hex::encode(&reversed_txid)

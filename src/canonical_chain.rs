@@ -173,7 +173,7 @@ pub fn calculate_chainwork_for_all(
     for (hash, entry) in block_index.iter() {
         children_map
             .entry(entry.prev_hash.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(hash.clone());
     }
     

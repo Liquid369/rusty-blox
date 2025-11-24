@@ -50,6 +50,12 @@ pub struct EventBroadcaster {
     pub mempool_tx: broadcast::Sender<BlockchainEvent>,
 }
 
+impl Default for EventBroadcaster {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventBroadcaster {
     pub fn new() -> Self {
         // Create broadcast channels with capacity of 1000 events

@@ -12,7 +12,7 @@ use num_traits::{One, Zero};
 /// Returns work as a 256-bit value stored in a 32-byte array (big-endian).
 pub fn calculate_work_from_bits(n_bits: u32) -> [u8; 32] {
     // Extract exponent and mantissa from compact representation
-    let exponent = (n_bits >> 24) as u32;
+    let exponent = n_bits >> 24;
     let mantissa = n_bits & 0x00ffffff;
     
     // Special case: invalid/negative target
@@ -119,7 +119,7 @@ pub fn calculate_all_chainwork(
     let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
     for (block_hash, prev_hash) in &parent_map {
         children_map.entry(prev_hash.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(block_hash.clone());
     }
     

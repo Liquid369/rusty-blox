@@ -73,7 +73,7 @@ pub fn set_network_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    db.put_cf(&cf_state, b"network_height", &height.to_le_bytes())?;
+    db.put_cf(&cf_state, b"network_height", height.to_le_bytes())?;
     Ok(())
 }
 
@@ -82,7 +82,7 @@ pub fn set_sync_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::err
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    db.put_cf(&cf_state, b"sync_height", &height.to_le_bytes())?;
+    db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
     Ok(())
 }
 
@@ -92,7 +92,7 @@ pub fn mark_reorg(db: &Arc<DB>, height: i32, reason: &str) -> Result<(), Box<dyn
         .ok_or("chain_state CF not found")?;
     
     let key = format!("reorg_{}", height);
-    let value = format!("{}", reason);
+    let value = reason.to_string();
     
     db.put_cf(&cf_state, key.as_bytes(), value.as_bytes())?;
     

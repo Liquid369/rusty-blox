@@ -1,36 +1,15 @@
-mod address;
-mod api;
-mod batch_writer;
-mod block_detail;
-mod blocks;
-mod chain_state;
-mod db_handles;
-mod db_utils;
-mod enrich_addresses;
-mod leveldb_index;
-mod mempool;
-mod monitor;
-mod parallel;
-mod parser;
-mod search;
-mod sync;
-mod transactions;
-mod config;
-mod types;
-mod websocket;
-
-use crate::config::{get_global_config, init_global_config};
-use crate::sync::run_sync_service;
-use crate::mempool::{MempoolState, run_mempool_monitor};
-use crate::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
-use crate::block_detail::block_detail_v2;
-use crate::api::{
+use rustyblox::config::{get_global_config, init_global_config};
+use rustyblox::sync::run_sync_service;
+use rustyblox::mempool::{MempoolState, run_mempool_monitor};
+use rustyblox::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
+use rustyblox::block_detail::block_detail_v2;
+use rustyblox::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
-    send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2, 
-    budget_projection_v2, relay_mnb_v2, status_v2, search_v2, mempool_v2, mempool_tx_v2, 
-    block_stats_v2,
+    send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2,
+    budget_projection_v2, relay_mnb_v2, status_v2, search_v2, mempool_v2, mempool_tx_v2,
+    block_stats_v2, health_check_v2,
 };
-use crate::types::MyError;
+use rustyblox::types::MyError;
 
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options};
@@ -42,7 +21,7 @@ use std::time::Duration;
 use std::path::PathBuf;
 use lazy_static::lazy_static;
 
-const COLUMN_FAMILIES: [&str; 7] = [
+const COLUMN_FAMILIES: [&str; 8] = [
     "blocks",
     "transactions",
     "addr_index",
@@ -50,6 +29,7 @@ const COLUMN_FAMILIES: [&str; 7] = [
     "chain_metadata",
     "pubkey",
     "chain_state",
+    "utxo_undo",  // Spent UTXO tracking for reorg handling and input value calculation
 ];
 
 lazy_static! {
@@ -79,6 +59,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api", get(api_handler))
         .route("/api/endpoint", get(api_handler))
         .route("/api/v2/status", get(status_v2))
+        .route("/api/v2/health", get(health_check_v2))
         .route("/api/v2/search/{query}", get(search_v2))
         .route("/api/v2/mempool", get(mempool_v2))
         .route("/api/v2/mempool/{txid}", get(mempool_tx_v2))
@@ -193,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize cached column family handles
     // This validates all required CFs exist at startup
     println!("Initializing database column family handles...");
-    let _db_handles = crate::db_handles::DbHandles::new(Arc::clone(&db_arc))
+    let _db_handles = rustyblox::db_handles::DbHandles::new(Arc::clone(&db_arc))
         .map_err(|e| format!("Failed to initialize DB handles: {}", e))?;
     println!("✅ Database handles validated");
 
@@ -211,49 +192,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Start sync service in background - this runs indefinitely
-    println!("\n🔄 Starting blockchain sync...");
-    let sync_db = Arc::clone(&db_arc);
-    let sync_broadcaster = Arc::clone(&broadcaster);
-    let blk_dir_clone = blk_dir_path.clone();
-    
-    tokio::task::spawn_blocking(move || {
-        // Use tokio runtime for async operations
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            if let Err(e) = run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await {
-                eprintln!("Sync service error: {}", e);
-            }
+    // Start sync service in background only if enabled in config.
+    // If `sync.auto_start` is false, we skip the sync phase and start the web
+    // server immediately in read-only mode. This prevents accidental long-running
+    // block processing when the operator only wanted to run lightweight tasks.
+    let auto_start_sync = config.get_bool("sync.auto_start").unwrap_or(true);
+    // Prepare API clones now so they are available regardless of sync mode
+    let api_db = Arc::clone(&db_arc);
+    if auto_start_sync {
+        println!("\n🔄 Starting blockchain sync...");
+        let sync_db = Arc::clone(&db_arc);
+        let sync_broadcaster = Arc::clone(&broadcaster);
+        let blk_dir_clone = blk_dir_path.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // Use tokio runtime for async operations
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                if let Err(e) = run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await {
+                    eprintln!("Sync service error: {}", e);
+                }
+            });
         });
-    });
-    
+
     // Wait for minimum viable sync before starting web server
     // Check every 2 seconds if we have at least 1000 blocks indexed
-    let api_db = Arc::clone(&db_arc);
-    loop {
-        let cf_state = match api_db.cf_handle("chain_state") {
-            Some(cf) => cf,
-            None => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-        
-        match api_db.get_cf(&cf_state, b"sync_height") {
-            Ok(Some(bytes)) if bytes.len() == 4 => {
-                let height = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                if height >= 1000 {
-                    println!("\n✅ Minimum viable data indexed (height: {})", height);
-                    println!("   Starting web server...\n");
-                    break;
+        loop {
+            let cf_state = match api_db.cf_handle("chain_state") {
+                Some(cf) => cf,
+                None => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
                 }
-                println!("📊 Indexing in progress (height: {})... waiting for minimum 1000 blocks", height);
+            };
+
+            match api_db.get_cf(&cf_state, b"sync_height") {
+                Ok(Some(bytes)) if bytes.len() == 4 => {
+                    let height = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    if height >= 1000 {
+                        println!("\n✅ Minimum viable data indexed (height: {})", height);
+                        println!("   Starting web server...\n");
+                        break;
+                    }
+                    println!("📊 Indexing in progress (height: {})... waiting for minimum 1000 blocks", height);
+                }
+                _ => {
+                    println!("📊 Indexing in progress... waiting for initial data");
+                }
             }
-            _ => {
-                println!("📊 Indexing in progress... waiting for initial data");
-            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    } else {
+        println!("⚠️  sync.auto_start=false - skipping sync service and starting web server in read-only mode");
     }
     
     // NOW start web server (data is ready)

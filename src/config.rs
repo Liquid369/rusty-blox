@@ -1,12 +1,13 @@
-pub use config::{Config, File as ConfigFile};
+pub use config::Config;
 pub use once_cell::sync::OnceCell;
 use std::error::Error;
 
 static GLOBAL_CONFIG: OnceCell<Config> = OnceCell::new();
 
 pub fn init_global_config() -> Result<(), Box<dyn Error>> {
-    let mut config = Config::default();
-    config.merge(ConfigFile::with_name("config.toml"))?;
+    let config = Config::builder()
+        .add_source(config::File::with_name("config.toml"))
+        .build()?;
     GLOBAL_CONFIG
         .set(config)
         .map_err(|_| "Config already set")?;
@@ -22,9 +23,10 @@ pub fn get_global_config() -> &'static Config {
 
 /// Load config for standalone binaries/utilities
 pub fn load_config() -> Result<Config, Box<dyn Error>> {
-    let mut config = Config::default();
-    config.merge(ConfigFile::with_name("config.toml"))?;
-    Ok(config)
+    Config::builder()
+        .add_source(config::File::with_name("config.toml"))
+        .build()
+        .map_err(|e| Box::new(e) as Box<dyn Error>)
 }
 
 /// Get db_path from config

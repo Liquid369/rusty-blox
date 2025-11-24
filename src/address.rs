@@ -1,12 +1,18 @@
+/// Synchronous/blocking wrapper for scriptpubkey_to_address
+pub fn scriptpubkey_to_address_blocking(cs: &CScript) -> Option<AddressType> {
+    futures::executor::block_on(scriptpubkey_to_address(cs))
+}
+
+/// Synchronous/blocking wrapper for address_type_to_string
+pub fn address_type_to_string_blocking(address: Option<AddressType>) -> Vec<String> {
+    futures::executor::block_on(address_type_to_string(address))
+}
 // address.rs
 
 use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160, Digest as RipemdDigest};
 use bs58;
-use crate::types::{CScript, AddressType, CTxOut};
-use std::error::Error;
-use std::sync::Arc;
-use rocksdb::DB;
+use crate::types::{CScript, AddressType};
 
 pub async fn compute_address_hash(data: &[u8]) -> Vec<u8> {
     let sha = Sha256::digest(data);
@@ -41,7 +47,7 @@ fn sha256d(data: &[u8]) -> Vec<u8> {
     let first = hasher.finalize();
 
     let mut hasher = Sha256::new();
-    hasher.update(&first);
+    hasher.update(first);
     hasher.finalize().to_vec()
 }
 
@@ -223,8 +229,11 @@ pub async fn address_type_to_string(address: Option<AddressType>) -> Vec<String>
         Some(AddressType::ZerocoinSpend) => vec!["ZerocoinSpend".to_string()],
         Some(AddressType::ZerocoinPublicSpend) => vec!["ZerocoinPublicSpend".to_string()],
         Some(AddressType::Staking(staker, owner)) => {
-            vec![format!("Staking({}, {})", staker, owner)]
-        }
+                // Return both the staker (delegated stake address, usually S-prefixed)
+                // and the owner (actual coin owner, usually D-prefixed) separately so
+                // callers (frontend/indexers) can show delegation relationships.
+                vec![staker, owner]
+            }
         Some(AddressType::Sapling) => vec!["Sapling".to_string()],
         None => vec!["None".to_string()],
     }

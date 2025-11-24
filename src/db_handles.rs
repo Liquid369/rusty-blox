@@ -24,6 +24,7 @@ impl DbHandles {
             "chain_metadata",
             "chain_state",
             "pubkey",
+            "utxo_undo",
         ];
         
         for cf_name in required_cfs {

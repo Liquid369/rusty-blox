@@ -3,17 +3,15 @@ use axum::{
     extract::{Path, Extension, Query},
     Json,
     http::StatusCode,
-    Router,
 };
 use rocksdb::DB;
 use hex;
-use crate::types::{CTransaction};
 use crate::parser::{deserialize_transaction, deserialize_utxos};
-use crate::db_utils::{db_get_blocking, db_put_blocking, db_delete_blocking};
-use crate::config::{get_global_config, init_global_config};
+use crate::config::get_global_config;
 use crate::chain_state::{get_chain_state, ChainState};
 use crate::search::{search, SearchResult};
 use crate::mempool::{MempoolState, MempoolInfo};
+use crate::maturity::{filter_spendable_utxos, get_current_height};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
@@ -82,6 +80,13 @@ pub struct UTXO {
     pub height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coinbase: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coinstake: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spendable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "blocksUntilSpendable")]
+    pub blocks_until_spendable: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -365,10 +370,9 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         tx_data_with_header.extend_from_slice(&data[8..]); // Actual tx data
         
         // Parse the binary transaction data
-        use crate::parser::{deserialize_transaction, get_script_type};
-        let tx = tokio::runtime::Handle::current().block_on(async {
-            deserialize_transaction(&tx_data_with_header).await
-        }).map_err(|_| "Failed to parse transaction")?;
+    use crate::parser::get_script_type;
+        let tx = crate::parser::deserialize_transaction_blocking(&tx_data_with_header)
+            .map_err(|_| "Failed to parse transaction")?;
         
         // Convert to JSON format (Blockbook-compatible)
         let mut vin = Vec::new();
@@ -422,9 +426,7 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
                                 prev_tx_data_with_header.extend_from_slice(&[0u8; 4]);
                                 prev_tx_data_with_header.extend_from_slice(&prev_data[8..]);
                             
-                            if let Ok(prev_tx) = tokio::runtime::Handle::current().block_on(async {
-                                deserialize_transaction(&prev_tx_data_with_header).await
-                            }) {
+                            if let Ok(prev_tx) = crate::parser::deserialize_transaction_blocking(&prev_tx_data_with_header) {
                                 if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
                                     input_json["value"] = serde_json::json!(output.value.to_string());
                                     value_in += output.value;
@@ -487,28 +489,28 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         // Convert Sapling data if present with detailed spend/output info
         let sapling_json = tx.sapling_data.as_ref().map(|sap| {
             let spends: Vec<_> = sap.vshielded_spend.iter().map(|spend| serde_json::json!({
-                "cv": hex::encode(&spend.cv),
-                "anchor": hex::encode(&spend.anchor),
-                "nullifier": hex::encode(&spend.nullifier),
-                "rk": hex::encode(&spend.rk),
-                "zkproof": hex::encode(&spend.zkproof),
-                "spend_auth_sig": hex::encode(&spend.spend_auth_sig),
+                "cv": hex::encode(spend.cv),
+                "anchor": hex::encode(spend.anchor),
+                "nullifier": hex::encode(spend.nullifier),
+                "rk": hex::encode(spend.rk),
+                "zkproof": hex::encode(spend.zkproof),
+                "spend_auth_sig": hex::encode(spend.spend_auth_sig),
             })).collect();
             
             let outputs: Vec<_> = sap.vshielded_output.iter().map(|output| serde_json::json!({
-                "cv": hex::encode(&output.cv),
-                "cmu": hex::encode(&output.cmu),
-                "ephemeral_key": hex::encode(&output.ephemeral_key),
-                "enc_ciphertext": hex::encode(&output.enc_ciphertext),
-                "out_ciphertext": hex::encode(&output.out_ciphertext),
-                "zkproof": hex::encode(&output.zkproof),
+                "cv": hex::encode(output.cv),
+                "cmu": hex::encode(output.cmu),
+                "ephemeral_key": hex::encode(output.ephemeral_key),
+                "enc_ciphertext": hex::encode(output.enc_ciphertext),
+                "out_ciphertext": hex::encode(output.out_ciphertext),
+                "zkproof": hex::encode(output.zkproof),
             })).collect();
             
             serde_json::json!({
                 "value_balance": sap.value_balance.to_string(),
                 "shielded_spend_count": sap.vshielded_spend.len(),
                 "shielded_output_count": sap.vshielded_output.len(),
-                "binding_sig": hex::encode(&sap.binding_sig),
+                "binding_sig": hex::encode(sap.binding_sig),
                 "spends": spends,
                 "outputs": outputs,
             })
@@ -563,9 +565,9 @@ pub async fn addr_v2(
             .map_err(|e| e.to_string())
     })
     .await
-    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(Ok(None))
     .unwrap_or(None)
-    .unwrap_or_else(|| vec![]);
+    .unwrap_or_else(std::vec::Vec::new);
     
     // The data is in simple format (no spent flags) - Bitcoin Core approach
     // Entries are removed when spent, so everything here is unspent
@@ -583,20 +585,30 @@ pub async fn addr_v2(
             .map_err(|e| e.to_string())
     })
     .await
-    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(Ok(None))
     .unwrap_or(None)
-    .unwrap_or_else(|| vec![]);
+    .unwrap_or_else(std::vec::Vec::new);
     
     // Parse transaction list (32 bytes per txid, reversed format)
     let all_txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
         .map(|chunk| chunk.to_vec())
         .collect();
     
+    // Get current chain height for maturity checks
+    let current_height = get_current_height(&db).unwrap_or(0);
+    
+    // Filter UTXOs by maturity rules (coinbase/coinstake must meet maturity requirements)
+    let spendable_utxos = filter_spendable_utxos(
+        unspent_utxos.clone(),
+        db.clone(),
+        current_height,
+    ).await;
+    
     let mut balance: i64 = 0;
     let mut total_received: i64 = 0;
     
-    // Calculate balance from unspent UTXOs
-    for utxo in &unspent_utxos {
+    // Calculate balance from SPENDABLE unspent UTXOs only
+    for utxo in &spendable_utxos {
         let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
         key.extend(txid_hash);
@@ -610,7 +622,7 @@ pub async fn addr_v2(
                 .map_err(|e| e.to_string())
         })
         .await
-        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(Ok(None))
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
@@ -646,7 +658,7 @@ pub async fn addr_v2(
                 .map_err(|e| e.to_string())
         })
         .await
-        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(Ok(None))
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
@@ -759,14 +771,25 @@ pub async fn xpub_v2(
             .map_err(|e| e.to_string())
     })
     .await
-    .unwrap_or_else(|_| Ok(None))
+    .unwrap_or(Ok(None))
     .unwrap_or(None)
-    .unwrap_or_else(|| vec![]);
+    .unwrap_or_else(std::vec::Vec::new);
 
     let utxos = deserialize_utxos(&result).await;
+    
+    // Get current chain height for maturity checks
+    let current_height = get_current_height(&db).unwrap_or(0);
+    
+    // Filter UTXOs by maturity rules
+    let spendable_utxos = filter_spendable_utxos(
+        utxos.clone(),
+        db.clone(),
+        current_height,
+    ).await;
+    
     let mut balance: i64 = 0;
     
-    for utxo in &utxos {
+    for utxo in &spendable_utxos {
         let (txid_hash, output_index) = utxo;
         let mut key = vec![b't'];
         key.extend(txid_hash);
@@ -780,7 +803,7 @@ pub async fn xpub_v2(
                 .map_err(|e| e.to_string())
         })
         .await
-        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(Ok(None))
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
@@ -885,7 +908,7 @@ pub async fn utxo_v2(
                 .map_err(|e| e.to_string())
         })
         .await
-        .unwrap_or_else(|_| Ok(None))
+        .unwrap_or(Ok(None))
         .unwrap_or(None);
         
         if let Some(tx_data) = tx_data {
@@ -902,6 +925,16 @@ pub async fn utxo_v2(
                 
                 // Extract block height (bytes 4-8)
                 let block_height = i32::from_le_bytes(tx_data[4..8].try_into().unwrap_or([0; 4]));
+                
+                // CRITICAL FIX: Skip orphaned transactions (height = -1)
+                // These are either:
+                // 1. Transactions from reorganized-out blocks (reorg victims)
+                // 2. Ghost transactions that never existed on canonical chain
+                // Both should NOT appear in UTXO set until properly re-indexed
+                if block_height == -1 {
+                    eprintln!("WARNING: Skipping orphaned UTXO {}:{} (height=-1, needs re-indexing)", txid_hex, output_index);
+                    continue;
+                }
                 
                 // Parse transaction for value
                 let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
@@ -921,13 +954,23 @@ pub async fn utxo_v2(
                             continue;
                         }
                         
+                        // Detect transaction type and check maturity
+                        use crate::tx_type::detect_transaction_type;
+                        use crate::maturity::get_maturity_status;
+                        let tx_type = detect_transaction_type(&tx);
+                        let (is_spendable, blocks_needed) = get_maturity_status(
+                            tx_type,
+                            block_height,
+                            current_height,
+                        );
+                        
                         utxo_list.push(UTXO {
                             txid: txid_hex,
                             vout: *output_index as u32,
                             value: output.value.to_string(),
                             confirmations,
                             lock_time: if confirmations == 0 && tx.lock_time > 0 {
-                                Some(tx.lock_time as u32)
+                                Some(tx.lock_time)
                             } else {
                                 None
                             },
@@ -936,7 +979,14 @@ pub async fn utxo_v2(
                             } else {
                                 None
                             },
-                            coinbase: None, // TODO: detect coinbase
+                            coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
+                            coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
+                            spendable: Some(is_spendable),
+                            blocks_until_spendable: if !is_spendable && blocks_needed > 0 {
+                                Some(blocks_needed)
+                            } else {
+                                None
+                            },
                         });
                     }
                 }
@@ -1277,12 +1327,12 @@ pub async fn mn_list_v2() -> Result<Json<Vec<MasternodeList>>, StatusCode> {
         host_port, auth_b64, content_length, json_body
     );
     
-    if let Err(_) = stream.write_all(request.as_bytes()) {
+    if stream.write_all(request.as_bytes()).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
     let mut response = Vec::new();
-    if let Err(_) = stream.read_to_end(&mut response) {
+    if stream.read_to_end(&mut response).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
@@ -1344,12 +1394,12 @@ pub async fn money_supply_v2() -> Result<Json<MoneySupply>, StatusCode> {
         host_port, auth_b64, content_length, json_body
     );
     
-    if let Err(_) = stream.write_all(request.as_bytes()) {
+    if stream.write_all(request.as_bytes()).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
     let mut response = Vec::new();
-    if let Err(_) = stream.read_to_end(&mut response) {
+    if stream.read_to_end(&mut response).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
@@ -1418,12 +1468,12 @@ pub async fn budget_info_v2() -> Result<Json<Vec<RpcBudgetInfo>>, StatusCode> {
         host_port, auth_b64, content_length, json_body
     );
     
-    if let Err(_) = stream.write_all(request.as_bytes()) {
+    if stream.write_all(request.as_bytes()).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
     let mut response = Vec::new();
-    if let Err(_) = stream.read_to_end(&mut response) {
+    if stream.read_to_end(&mut response).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
@@ -1484,12 +1534,12 @@ pub async fn budget_votes_v2(AxumPath(proposal_name): AxumPath<String>) -> Resul
         host_port, auth_b64, content_length, json_body
     );
     
-    if let Err(_) = stream.write_all(request.as_bytes()) {
+    if stream.write_all(request.as_bytes()).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
     let mut response = Vec::new();
-    if let Err(_) = stream.read_to_end(&mut response) {
+    if stream.read_to_end(&mut response).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
@@ -1548,12 +1598,12 @@ pub async fn budget_projection_v2() -> Result<Json<serde_json::Value>, StatusCod
         host_port, auth_b64, content_length, json_body
     );
     
-    if let Err(_) = stream.write_all(request.as_bytes()) {
+    if stream.write_all(request.as_bytes()).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
     let mut response = Vec::new();
-    if let Err(_) = stream.read_to_end(&mut response) {
+    if stream.read_to_end(&mut response).is_err() {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
     
@@ -1674,7 +1724,7 @@ pub async fn block_stats_v2(
         let tip_height = chain_state.height as u32;
         
         let mut stats = Vec::new();
-        let start_height = if tip_height > count_clone { tip_height - count_clone } else { 0 };
+        let start_height = tip_height.saturating_sub(count_clone);
         
         for height in (start_height..=tip_height).rev() {
             let key = height.to_le_bytes().to_vec();
@@ -1728,6 +1778,102 @@ pub async fn block_stats_v2(
     
     match result {
         Ok(Ok(stats)) => Ok(Json(stats)),
+        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Health check endpoint - shows database and sync status
+#[derive(Serialize)]
+pub struct HealthStatus {
+    pub status: String,
+    pub database_ok: bool,
+    pub address_index_complete: bool,
+    pub total_transactions: u64,
+    pub valid_transactions: u64,
+    pub orphaned_transactions: u64,
+    pub indexed_addresses: u64,
+    pub warnings: Vec<String>,
+}
+
+pub async fn health_check_v2(
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<HealthStatus>, StatusCode> {
+    let result = tokio::task::spawn_blocking(move || -> Result<HealthStatus, Box<dyn std::error::Error + Send + Sync>> {
+        let mut warnings = Vec::new();
+        
+        // Check transaction counts
+        let tx_cf = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+        let mut total_txs = 0u64;
+        let mut orphaned_txs = 0u64;
+        let mut valid_txs = 0u64;
+        
+        let iter = db.iterator_cf(tx_cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, value) = item?;
+            if key.first() == Some(&b'B') {
+                continue;
+            }
+            
+            total_txs += 1;
+            
+            if value.len() >= 8 {
+                let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
+                let height = i32::from_le_bytes(height_bytes);
+                if height == -1 {
+                    orphaned_txs += 1;
+                } else {
+                    valid_txs += 1;
+                }
+            }
+        }
+        
+        // Check address index
+        let addr_cf = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;
+        let mut indexed_addresses = 0u64;
+        let iter = db.iterator_cf(addr_cf, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, _) = item?;
+            if key.first() == Some(&b't') {
+                indexed_addresses += 1;
+            }
+        }
+        
+        // Check address index completeness marker
+        let state_cf = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+        let addr_complete = db.get_cf(state_cf, b"address_index_complete")?;
+        let address_index_complete = addr_complete.is_some();
+        
+        // Generate warnings
+        if !address_index_complete && valid_txs > 0 {
+            warnings.push("Address index not marked as complete. Run rebuild_address_index if sync is done.".to_string());
+        }
+        
+        if indexed_addresses == 0 && valid_txs > 100000 {
+            warnings.push("Address index is empty but many transactions exist. Run rebuild_address_index.".to_string());
+        }
+        
+        if orphaned_txs > valid_txs / 100 {
+            warnings.push(format!("High orphaned transaction count: {} ({:.1}%)", 
+                                 orphaned_txs, 
+                                 (orphaned_txs as f64 / valid_txs as f64) * 100.0));
+        }
+        
+        let status = if warnings.is_empty() { "healthy" } else { "degraded" };
+        
+        Ok(HealthStatus {
+            status: status.to_string(),
+            database_ok: true,
+            address_index_complete,
+            total_transactions: total_txs,
+            valid_transactions: valid_txs,
+            orphaned_transactions: orphaned_txs,
+            indexed_addresses,
+            warnings,
+        })
+    }).await;
+    
+    match result {
+        Ok(Ok(status)) => Ok(Json(status)),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
 }

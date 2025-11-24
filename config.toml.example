@@ -11,6 +11,7 @@ db_path = "./data/blocks.db"
 # Linux default: ~/.pivx/blocks
 # macOS default: ~/Library/Application Support/PIVX/blocks
 # Windows default: %APPDATA%\PIVX\blocks
+# Necessary because we will do copying of DB's from here
 blk_dir = "/path/to/PIVX/blocks"
 
 # PIVX data directory (contains leveldb index)
@@ -27,6 +28,18 @@ fast_sync = true
 # Recommended: true for block explorers
 enrich_addresses = true
 
+# Use PIVX Core's chainstate for UTXO enrichment (RECOMMENDED!)
+# This uses chainstate LevelDB as the source of truth for current UTXOs
+# Ensures balances match PIVX Core exactly
+# If false, builds UTXOs by scanning all transactions (slower, may have discrepancies)
+use_chainstate_for_utxos = true
+
+# Use PIVX Core's block index for transaction height resolution (RECOMMENDED!)
+# This reads Core's canonical chain to fix transaction heights BEFORE enrichment
+# Benefits: eliminates repair phase, marks orphans correctly, ~5 min overhead
+# If false, uses repair phase instead (scans transactions to rebuild heights)
+use_block_index_for_heights = true
+
 # Build UTXO set during sync
 # Only used when fast_sync = false
 # Recommended: false unless you need UTXO tracking
@@ -36,6 +49,12 @@ build_utxo = false
 # Higher = faster but more CPU/memory usage
 # Recommended: 4-8 for 4-8 core systems, up to 16 for high-end systems
 parallel_files = 8
+
+# Validate offset-based indexing (Pattern A) after sync
+# This runs the offset-based indexer in parallel with the scanner to verify
+# that reading blocks directly from file offsets works correctly
+# Recommended: false (enable only for testing/validation)
+validate_offset_indexing = false
 
 [rpc]
 # PIVX Core RPC connection settings
