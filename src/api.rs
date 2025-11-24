@@ -20,6 +20,22 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 pub use axum::extract::Path as AxumPath;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct XPubToken {
+    #[serde(rename = "type")]
+    pub token_type: String,
+    pub name: String,
+    pub path: String,
+    pub transfers: u32,
+    pub decimals: u32,
+    pub balance: String,
+    #[serde(rename = "totalReceived")]
+    pub total_received: String,
+    #[serde(rename = "totalSent")]
+    pub total_sent: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct XPubInfo {
     pub page: u32,
@@ -40,6 +56,13 @@ pub struct XPubInfo {
     pub txs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<Vec<XPubToken>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transactions: Option<Vec<Transaction>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "usedTokens")]
+    pub used_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -138,15 +161,24 @@ pub struct BlockQuery {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Transaction {
     pub txid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "lockTime")]
+    pub lock_time: Option<u32>,
     pub vin: Vec<TxInput>,
     pub vout: Vec<TxOutput>,
     #[serde(rename = "blockHash")]
     pub block_hash: String,
     #[serde(rename = "blockHeight")]
-    pub block_height: u32,
+    pub block_height: i32,  // Changed to i32 to support -1 for mempool txs
     pub confirmations: u32,
     #[serde(rename = "blockTime")]
     pub block_time: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vsize: Option<usize>,
     pub value: String,
     #[serde(rename = "valueIn")]
     pub value_in: String,
@@ -189,6 +221,23 @@ pub struct TxOutput {
     pub spent: Option<bool>,
 }
 
+// Custom deserializer for from parameter that accepts "-Infinity" (MPW compatibility)
+fn deserialize_from_param<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    
+    let value: Option<String> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(s) if s == "-Infinity" => Ok(Some(0)), // Treat -Infinity as 0 (from beginning)
+        Some(s) => s.parse::<u32>()
+            .map(Some)
+            .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {}", s))),
+    }
+}
+
 // Query parameters for address and xpub endpoints
 #[derive(Debug, Deserialize)]
 pub struct AddressQuery {
@@ -197,6 +246,7 @@ pub struct AddressQuery {
     #[serde(default = "default_page_size")]
     #[serde(rename = "pageSize")]
     pub page_size: u32,
+    #[serde(default, deserialize_with = "deserialize_from_param")]
     pub from: Option<u32>,
     pub to: Option<u32>,
     #[serde(default = "default_details")]
@@ -225,6 +275,27 @@ pub struct SendTxResponse {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TxError {
     pub message: String,
+}
+
+// Blockbook-compatible error response wrapper
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BlockbookError {
+    pub error: ErrorDetail,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ErrorDetail {
+    pub message: String,
+}
+
+impl BlockbookError {
+    pub fn new(message: impl Into<String>) -> Self {
+        BlockbookError {
+            error: ErrorDetail {
+                message: message.into(),
+            }
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -291,30 +362,89 @@ pub async fn api_handler() -> &'static str {
     "API response"
 }
 
-pub async fn block_index_v2(Path(param): Path<String>, Extension(db): Extension<Arc<DB>>) -> Json<BlockHash> {
-    // Parse height and convert to bytes (matching how it's stored in blocks.rs)
-    let height: u32 = match param.parse() {
-        Ok(h) => h,
-        Err(_) => return Json(BlockHash{block_hash: "Invalid height".to_string()}),
-    };
+pub async fn block_index_v2(Path(param): Path<String>, Extension(db): Extension<Arc<DB>>) -> Result<Json<BlockHash>, (StatusCode, Json<BlockbookError>)> {
+    // Try to parse as height first, otherwise treat as block hash
+    // This matches Blockbook API behavior: /block/{hashOrHeight}
     
-    let key = height.to_le_bytes().to_vec();
-    
-    // Query the "blocks" column family
-    let result = match db.cf_handle("blocks") {
-        Some(cf) => {
-            match db.get_cf(&cf, &key) {
-                Ok(Some(value)) => hex::encode(&value),
-                _ => "Not found".to_string(),
-            }
-        },
-        None => "Blocks CF not found".to_string(),
-    };
-
-    Json(BlockHash{block_hash: result})
+    if let Ok(height) = param.parse::<u32>() {
+        // Input is a height number - query chain_metadata CF
+        let height_bytes = height.to_le_bytes().to_vec();
+        
+        match db.cf_handle("chain_metadata") {
+            Some(cf) => {
+                match db.get_cf(&cf, &height_bytes) {
+                    Ok(Some(hash_bytes)) => {
+                        // chain_metadata stores reversed hash for display
+                        Ok(Json(BlockHash { block_hash: hex::encode(&hash_bytes) }))
+                    },
+                    Ok(None) => Err((
+                        StatusCode::NOT_FOUND,
+                        Json(BlockbookError::new(format!("Block not found at height {}", height)))
+                    )),
+                    Err(e) => Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(BlockbookError::new(format!("Database error: {}", e)))
+                    )),
+                }
+            },
+            None => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlockbookError::new("chain_metadata column family not found"))
+            )),
+        }
+    } else if param.len() == 64 {
+        // Input is a 64-character hex string - treat as block hash
+        // Decode hex to bytes (blocks CF stores hash in internal byte order)
+        let hash_bytes = match hex::decode(&param) {
+            Ok(bytes) => bytes,
+            Err(_) => return Err((
+                StatusCode::BAD_REQUEST,
+                Json(BlockbookError::new("Invalid block hash format"))
+            )),
+        };
+        
+        if hash_bytes.len() != 32 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(BlockbookError::new("Block hash must be 32 bytes"))
+            ));
+        }
+        
+        // Reverse the hash to match internal storage format
+        let reversed_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+        
+        // Query blocks CF to verify block exists
+        match db.cf_handle("blocks") {
+            Some(cf) => {
+                match db.get_cf(&cf, &reversed_hash) {
+                    Ok(Some(_)) => {
+                        // Block exists - return the original hash (display format)
+                        Ok(Json(BlockHash { block_hash: param }))
+                    },
+                    Ok(None) => Err((
+                        StatusCode::NOT_FOUND,
+                        Json(BlockbookError::new(format!("Block not found with hash {}", param)))
+                    )),
+                    Err(e) => Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(BlockbookError::new(format!("Database error: {}", e)))
+                    )),
+                }
+            },
+            None => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlockbookError::new("blocks column family not found"))
+            )),
+        }
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Parameter must be a block height (number) or block hash (64-char hex)"))
+        ))
+    }
 }
 
-pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Json<serde_json::Value> {
+pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Arc<DB>>) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
     
@@ -466,6 +596,44 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
         }
         
         let tx_size = data.len() - 8; // Subtract the 8 header bytes
+        let tx_vsize = tx_size; // For PIVX (no SegWit), vsize equals size
+        
+        // Get block hash and time if we have a valid height
+        let (block_hash, block_time) = if block_height > 0 {
+            let height_key = (block_height as u32).to_le_bytes().to_vec();
+            
+            // First get block hash from chain_metadata CF
+            if let Some(cf_metadata) = db_clone.cf_handle("chain_metadata") {
+                if let Ok(Some(hash_bytes)) = db_clone.get_cf(&cf_metadata, &height_key) {
+                    let hash_hex = hex::encode(&hash_bytes);
+                    
+                    // Now get block header from blocks CF to extract time
+                    if let Some(cf_blocks) = db_clone.cf_handle("blocks") {
+                        // Reverse the hash for internal lookup
+                        let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+                        if let Ok(Some(header_bytes)) = db_clone.get_cf(&cf_blocks, &internal_hash) {
+                            // Parse block header to get time (offset 68: version(4) + prev_hash(32) + merkle(32) = 68, then time is 4 bytes)
+                            if header_bytes.len() >= 72 {
+                                let time = u32::from_le_bytes(header_bytes[68..72].try_into().unwrap_or([0; 4])) as u64;
+                                (hash_hex, time)
+                            } else {
+                                (hash_hex, 0)
+                            }
+                        } else {
+                            (hash_hex, 0)
+                        }
+                    } else {
+                        (hash_hex, 0)
+                    }
+                } else {
+                    (String::new(), 0)
+                }
+            } else {
+                (String::new(), 0)
+            }
+        } else {
+            (String::new(), 0)
+        };
         
         // Get current height for confirmations
         let chain_state = get_chain_state(&db_clone).ok();
@@ -522,13 +690,16 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
             "lockTime": tx.lock_time,
             "vin": vin,
             "vout": vout,
+            "blockHash": block_hash,
             "blockHeight": block_height,
             "confirmations": confirmations,
-            "blockTime": 0, // TODO: get from block data
+            "blockTime": block_time,
             "value": value_out.to_string(),
             "valueIn": value_in.to_string(),
             "fees": fees.to_string(),
             "size": tx_size,
+            "vsize": tx_vsize,
+            "hex": hex::encode(&data[8..]), // Raw transaction hex (without block metadata)
         });
         
         // Add sapling field if present
@@ -541,9 +712,15 @@ pub async fn tx_v2(AxumPath(txid): AxumPath<String>, Extension(db): Extension<Ar
     .await;
     
     match result {
-        Ok(Ok(tx)) => Json(tx),
-        Ok(Err(e)) => Json(serde_json::json!({"error": e})),
-        Err(_) => Json(serde_json::json!({"error": "Internal server error"})),
+        Ok(Ok(tx)) => Ok(Json(tx)),
+        Ok(Err(e)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(BlockbookError::new(e))
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BlockbookError::new(format!("Task failed: {}", e)))
+        )),
     }
 }
 
@@ -754,35 +931,226 @@ pub async fn addr_v2(
 }
 
 pub async fn xpub_v2(
-    AxumPath(xpub): AxumPath<String>,
+    AxumPath(xpub_str): AxumPath<String>,
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>
 ) -> Json<XPubInfo> {
+    use bitcoin::util::bip32::{ExtendedPubKey, ChildNumber};
+    use std::str::FromStr;
     
-    let key = format!("p{}", xpub);
-    let key_bytes = key.as_bytes().to_vec();
-    let db_clone = db.clone();
+    // Parse the xpub
+    let xpub = match ExtendedPubKey::from_str(&xpub_str) {
+        Ok(xpub) => xpub,
+        Err(_) => {
+            // Invalid xpub - return empty result
+            return Json(XPubInfo {
+                page: params.page,
+                total_pages: 1,
+                items_on_page: params.page_size,
+                address: xpub_str,
+                balance: "0".to_string(),
+                total_received: "0".to_string(),
+                total_sent: "0".to_string(),
+                unconfirmed_balance: "0".to_string(),
+                unconfirmed_txs: 0,
+                txs: 0,
+                txids: Some(vec![]),
+                tokens: None,
+                transactions: None,
+                used_tokens: None,
+            });
+        }
+    };
     
-    // Get pubkey CF in blocking task
-    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-        let cf_pubkey = db_clone.cf_handle("pubkey")
-            .ok_or_else(|| "pubkey CF not found".to_string())?;
-        db_clone.get_cf(&cf_pubkey, &key_bytes)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .unwrap_or(Ok(None))
-    .unwrap_or(None)
-    .unwrap_or_else(std::vec::Vec::new);
-
-    let utxos = deserialize_utxos(&result).await;
+    // Derive addresses from xpub (gap limit of 100 for both receive and change)
+    // BIP44: m/44'/119'/account'/chain/index
+    let mut all_addresses: Vec<(String, String)> = Vec::new(); // (address, path)
+    let gap_limit = 100;
+    
+    // Receive addresses (0/i)
+    for i in 0..gap_limit {
+        if let Ok(child) = xpub.ckd_pub(&bitcoin::secp256k1::Secp256k1::new(), ChildNumber::from_normal_idx(0).unwrap())
+            .and_then(|receive_key| receive_key.ckd_pub(&bitcoin::secp256k1::Secp256k1::new(), ChildNumber::from_normal_idx(i).unwrap()))
+        {
+            let pubkey_hash = child.public_key.pubkey_hash();
+            
+            // Encode as PIVX address (version 30 for mainnet)
+            if let Some(address) = crate::parser::encode_pivx_address(pubkey_hash.as_ref(), 30) {
+                // Determine account number from xpub depth (assume account level xpub)
+                let path = format!("m/44'/119'/{}'/0/{}", xpub.depth.saturating_sub(3), i);
+                all_addresses.push((address, path));
+            }
+        }
+    }
+    
+    // Change addresses (1/i)  
+    for i in 0..gap_limit {
+        if let Ok(child) = xpub.ckd_pub(&bitcoin::secp256k1::Secp256k1::new(), ChildNumber::from_normal_idx(1).unwrap())
+            .and_then(|change_key| change_key.ckd_pub(&bitcoin::secp256k1::Secp256k1::new(), ChildNumber::from_normal_idx(i).unwrap()))
+        {
+            let pubkey_hash = child.public_key.pubkey_hash();
+            
+            // Encode as PIVX address (version 30 for mainnet)
+            if let Some(address) = crate::parser::encode_pivx_address(pubkey_hash.as_ref(), 30) {
+                let path = format!("m/44'/119'/{}'/1/{}", xpub.depth.saturating_sub(3), i);
+                all_addresses.push((address, path));
+            }
+        }
+    }
+    
+    // Aggregate UTXOs and transactions from all derived addresses
+    let mut all_utxos = Vec::new();
+    let mut all_txids = std::collections::HashSet::new();
+    let mut used_addresses: Vec<(String, String, usize, i64, i64, i64)> = Vec::new(); // (address, path, tx_count, balance, total_received, total_sent)
+    
+    // Get current chain height for maturity checks (needed for balance calculation)
+    let current_height = get_current_height(&db).unwrap_or(0);
+    
+    for (address, path) in &all_addresses {
+        // Get UTXOs (unspent outputs) - key: 'a' + address
+        let key = format!("a{}", address);
+        let key_bytes = key.as_bytes().to_vec();
+        let db_clone = db.clone();
+        
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_addr_index = db_clone.cf_handle("addr_index")
+                .ok_or_else(|| "addr_index CF not found".to_string())?;
+            db_clone.get_cf(&cf_addr_index, &key_bytes)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or(Ok(None))
+        .unwrap_or(None)
+        .unwrap_or_else(std::vec::Vec::new);
+        
+        let utxos = deserialize_utxos(&result).await;
+        
+        // Calculate balance for this address
+        let spendable_utxos = filter_spendable_utxos(
+            utxos.clone(),
+            db.clone(),
+            current_height,
+        ).await;
+        
+        let mut address_balance: i64 = 0;
+        for (txid_hash, output_index) in &spendable_utxos {
+            let mut key = vec![b't'];
+            key.extend(txid_hash);
+            let key_clone = key.clone();
+            let db_clone = db.clone();
+            
+            let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+                let cf_transactions = db_clone.cf_handle("transactions")
+                    .ok_or_else(|| "transactions CF not found".to_string())?;
+                db_clone.get_cf(&cf_transactions, &key_clone)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or(Ok(None))
+            .unwrap_or(None);
+            
+            if let Some(tx_data) = tx_data {
+                if tx_data.len() >= 8 {
+                    let tx_data_len = tx_data.len() - 8;
+                    if tx_data_len > 0 {
+                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                    
+                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                            if let Some(output) = tx.outputs.get(*output_index as usize) {
+                                address_balance += output.value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        all_utxos.extend(utxos.clone());
+        
+        // Get transaction list - key: 't' + address  
+        let tx_list_key = format!("t{}", address);
+        let tx_list_key_bytes = tx_list_key.as_bytes().to_vec();
+        let db_clone2 = db.clone();
+        
+        let tx_list_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+            let cf_addr_index = db_clone2.cf_handle("addr_index")
+                .ok_or_else(|| "addr_index CF not found".to_string())?;
+            db_clone2.get_cf(&cf_addr_index, &tx_list_key_bytes)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap_or(Ok(None))
+        .unwrap_or(None)
+        .unwrap_or_else(std::vec::Vec::new);
+        
+        // Parse transaction list (32 bytes per txid)
+        let txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        
+        // Calculate total received for this address by analyzing all its transactions
+        let mut total_received: i64 = 0;
+        
+        for txid_bytes in &txids {
+            let mut key = vec![b't'];
+            key.extend(txid_bytes);
+            let key_clone = key.clone();
+            let db_clone = db.clone();
+            let addr_clone = address.clone();
+            
+            let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+                let cf_transactions = db_clone.cf_handle("transactions")
+                    .ok_or_else(|| "transactions CF not found".to_string())?;
+                db_clone.get_cf(&cf_transactions, &key_clone)
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap_or(Ok(None))
+            .unwrap_or(None);
+            
+            if let Some(tx_data) = tx_data {
+                if tx_data.len() >= 8 {
+                    let tx_data_len = tx_data.len() - 8;
+                    if tx_data_len > 0 {
+                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                    
+                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                            // Calculate received: sum of outputs to this address
+                            for output in &tx.outputs {
+                                if output.address.contains(&addr_clone) {
+                                    total_received += output.value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Calculate total sent: total_received - current_balance
+        let total_sent = total_received - address_balance;
+        
+        // Track this address if it has been used
+        if !txids.is_empty() || !utxos.is_empty() {
+            used_addresses.push((address.clone(), path.clone(), txids.len(), address_balance, total_received, total_sent));
+        }
+        
+        // Add all transaction IDs to the set
+        for txid in txids {
+            all_txids.insert(hex::encode(txid));
+        }
+    }
     
     // Get current chain height for maturity checks
     let current_height = get_current_height(&db).unwrap_or(0);
     
     // Filter UTXOs by maturity rules
     let spendable_utxos = filter_spendable_utxos(
-        utxos.clone(),
+        all_utxos.clone(),
         db.clone(),
         current_height,
     ).await;
@@ -827,28 +1195,79 @@ pub async fn xpub_v2(
         }
     }
     
-    // Deduplicate txids
-    let mut unique_txids: Vec<String> = utxos.iter()
-        .map(|(txid_hash, _output_index)| hex::encode(txid_hash))
-        .collect();
+    // Convert txid set to sorted vec
+    let mut unique_txids: Vec<String> = all_txids.into_iter().collect();
     unique_txids.sort();
-    unique_txids.dedup();
     
     let tx_count = unique_txids.len() as u32;
     let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
     let total_pages = if total_pages == 0 { 1 } else { total_pages };
     
-    let txids = if params.details == "basic" || params.details == "tokens" || params.details == "tokenBalances" {
-        None
+    // Determine what to return based on details parameter
+    let txids = if params.details == "txids" {
+        Some(unique_txids.clone())
     } else {
-        Some(unique_txids)
+        None
+    };
+    
+    // Build full transaction details if requested
+    let transactions = if params.details == "txs" {
+        // Apply pagination to transaction list
+        let start_idx = ((params.page - 1) * params.page_size) as usize;
+        let end_idx = std::cmp::min(start_idx + params.page_size as usize, unique_txids.len());
+        let page_txids = &unique_txids[start_idx..end_idx];
+        
+        let mut txs = Vec::new();
+        for txid_str in page_txids {
+            // Call the tx_v2 endpoint logic to get full transaction details
+            match tx_v2(AxumPath(txid_str.clone()), Extension(db.clone())).await {
+                Ok(Json(tx_json)) => {
+                    // Parse the JSON into a Transaction struct
+                    if let Ok(tx) = serde_json::from_value::<Transaction>(tx_json) {
+                        txs.push(tx);
+                    }
+                },
+                Err(_) => {
+                    // Skip transactions that fail to load
+                    continue;
+                }
+            }
+        }
+        Some(txs)
+    } else {
+        None
+    };
+    
+    // Build tokens array if requested (used addresses with their paths)
+    let tokens = if params.details == "tokens" || params.details == "tokenBalances" {
+        Some(used_addresses.iter().map(|(addr, path, tx_count, addr_balance, total_recv, total_snt)| {
+            XPubToken {
+                token_type: "XPUBAddress".to_string(),
+                name: addr.clone(),
+                path: path.clone(),
+                transfers: *tx_count as u32,
+                decimals: 8, // PIVX has 8 decimal places
+                balance: addr_balance.to_string(),
+                total_received: total_recv.to_string(),
+                total_sent: total_snt.to_string(),
+            }
+        }).collect())
+    } else {
+        None
+    };
+    
+    // usedTokens: number of addresses that have been used
+    let used_tokens = if params.details == "txs" || params.details == "tokens" || params.details == "tokenBalances" {
+        Some(used_addresses.len() as u32)
+    } else {
+        None
     };
     
     Json(XPubInfo {
         page: params.page,
         total_pages,
         items_on_page: params.page_size,
-        address: xpub,
+        address: xpub_str,
         balance: balance.to_string(),
         total_received: balance.to_string(), // TODO: track separately
         total_sent: "0".to_string(), // TODO: track spent outputs
@@ -856,6 +1275,9 @@ pub async fn xpub_v2(
         unconfirmed_txs: 0, // TODO: track mempool
         txs: tx_count,
         txids,
+        tokens,
+        transactions,
+        used_tokens,
     })
 }
 
@@ -1169,7 +1591,36 @@ async fn get_block_from_db(db: &Arc<DB>, height_key: &[u8]) -> Result<Json<crate
     }).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
-pub async fn send_tx_v2(AxumPath(param): AxumPath<String>) -> Result<Json<SendTxResponse>, StatusCode> {
+// GET /sendtx/{hex} - Legacy endpoint for compatibility
+pub async fn send_tx_v2(AxumPath(param): AxumPath<String>) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
+    send_transaction_internal(param).await
+}
+
+// POST /sendtx - Blockbook-compatible endpoint
+// Accepts raw transaction hex in request body (plain text or JSON)
+pub async fn send_tx_post_v2(body: String) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
+    // Body can be either plain hex or JSON {"hex": "..."}
+    let tx_hex = if body.trim().starts_with('{') {
+        // Try to parse as JSON
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(json) => {
+                json.get("hex")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&body)
+                    .trim()
+                    .to_string()
+            },
+            Err(_) => body.trim().to_string(),
+        }
+    } else {
+        body.trim().to_string()
+    };
+    
+    send_transaction_internal(tx_hex).await
+}
+
+// Internal function to send transaction via RPC
+async fn send_transaction_internal(tx_hex: String) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
     let config = get_global_config();
     let rpc_host = config.get::<String>("rpc.host");
     let rpc_user = config.get::<String>("rpc.user");
@@ -1184,17 +1635,24 @@ pub async fn send_tx_v2(AxumPath(param): AxumPath<String>) -> Result<Json<SendTx
         1000, // Read/write timeout
     );
 
-    let result = client.sendrawtransaction(&param, Some(false));
+    let result = client.sendrawtransaction(&tx_hex, Some(false));
 
     match result {
-        Ok(tx_hex) => {
+        Ok(txid) => {
+            // Blockbook format: {"result": "txid"}
             let response = SendTxResponse {
-                result: Some(tx_hex),
+                result: Some(txid),
                 error: None, 
             };
             Ok(Json(response))
         },
-        Err(_) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            // Return Blockbook-compatible error
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(BlockbookError::new(format!("Failed to send transaction: {}", e)))
+            ))
+        },
     }
 }
 
@@ -1656,10 +2114,13 @@ pub async fn relay_mnb_v2(AxumPath(param): AxumPath<String>) -> Result<Json<Stri
 /// Returns current sync status and chain state
 pub async fn status_v2(
     Extension(db): Extension<Arc<DB>>,
-) -> Result<Json<ChainState>, StatusCode> {
+) -> Result<Json<ChainState>, (StatusCode, Json<BlockbookError>)> {
     match get_chain_state(&db) {
         Ok(state) => Ok(Json(state)),
-        Err(_e) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BlockbookError::new(format!("Failed to get chain state: {}", e)))
+        ))
     }
 }
 
@@ -1668,10 +2129,13 @@ pub async fn status_v2(
 pub async fn search_v2(
     Path(query): Path<String>,
     Extension(db): Extension<Arc<DB>>,
-) -> Result<Json<SearchResult>, StatusCode> {
+) -> Result<Json<SearchResult>, (StatusCode, Json<BlockbookError>)> {
     match search(&db, &query) {
         Ok(result) => Ok(Json(result)),
-        Err(_e) => Err(StatusCode::INTERNAL_SERVER_ERROR)
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BlockbookError::new(format!("Search failed: {}", e)))
+        ))
     }
 }
 
@@ -1679,7 +2143,7 @@ pub async fn search_v2(
 /// Returns current mempool information
 pub async fn mempool_v2(
     Extension(mempool_state): Extension<Arc<MempoolState>>,
-) -> Result<Json<MempoolInfo>, StatusCode> {
+) -> Result<Json<MempoolInfo>, (StatusCode, Json<BlockbookError>)> {
     let info = mempool_state.get_info().await;
     Ok(Json(info))
 }
@@ -1689,10 +2153,13 @@ pub async fn mempool_v2(
 pub async fn mempool_tx_v2(
     Path(txid): Path<String>,
     Extension(mempool_state): Extension<Arc<MempoolState>>,
-) -> Result<Json<crate::mempool::MempoolTransaction>, StatusCode> {
+) -> Result<Json<crate::mempool::MempoolTransaction>, (StatusCode, Json<BlockbookError>)> {
     match mempool_state.get_transaction(&txid).await {
         Some(tx) => Ok(Json(tx)),
-        None => Err(StatusCode::NOT_FOUND),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(BlockbookError::new(format!("Transaction {} not found in mempool", txid)))
+        )),
     }
 }
 
@@ -1711,7 +2178,7 @@ pub struct BlockStats {
 pub async fn block_stats_v2(
     Path(count): Path<u32>,
     Extension(db): Extension<Arc<DB>>,
-) -> Result<Json<Vec<BlockStats>>, StatusCode> {
+) -> Result<Json<Vec<BlockStats>>, (StatusCode, Json<BlockbookError>)> {
     let db_clone = Arc::clone(&db);
     let count_clone = count;
     
@@ -1778,7 +2245,14 @@ pub async fn block_stats_v2(
     
     match result {
         Ok(Ok(stats)) => Ok(Json(stats)),
-        _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Ok(Err(e)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BlockbookError::new(format!("Failed to get block stats: {}", e)))
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(BlockbookError::new(format!("Task failed: {}", e)))
+        )),
     }
 }
 

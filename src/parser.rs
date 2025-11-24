@@ -451,7 +451,7 @@ pub fn get_script_type(script: &[u8]) -> &str {
     "unknown"
 }
 
-fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
+pub fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
     // PIVX address encoding: version byte + 20-byte hash + 4-byte checksum
     let mut data = Vec::with_capacity(25);
     data.push(version);

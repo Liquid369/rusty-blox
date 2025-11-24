@@ -5,7 +5,7 @@ use rustyblox::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_
 use rustyblox::block_detail::block_detail_v2;
 use rustyblox::api::{
     api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
-    send_tx_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2,
+    send_tx_v2, send_tx_post_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2,
     budget_projection_v2, relay_mnb_v2, status_v2, search_v2, mempool_v2, mempool_tx_v2,
     block_stats_v2, health_check_v2,
 };
@@ -13,7 +13,7 @@ use rustyblox::types::MyError;
 
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options};
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, post}};
 use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::Mutex as TokioMutex;
 use std::net::SocketAddr;
@@ -72,6 +72,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/utxo/{address}", get(utxo_v2))
         .route("/api/v2/block/{block_height}", get(block_v2))
         .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
+        .route("/api/v2/sendtx", post(send_tx_post_v2))  // Blockbook-compatible POST endpoint
         .route("/api/v2/mncount", get(mn_count_v2))
         .route("/api/v2/mnlist", get(mn_list_v2))
         .route("/api/v2/moneysupply", get(money_supply_v2))
