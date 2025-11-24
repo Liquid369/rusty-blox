@@ -30,15 +30,6 @@ path = "tools/diagnostics/inspect_leveldb.rs"
 name = "rebuild-address-index"
 path = "tools/maintenance/rebuild_address_index.rs"
 
-# Tools under review - compare and potentially delete duplicates
-[[bin]]
-name = "build-combined-index"
-path = "tools/maintenance/build_combined_index.rs"
-
-[[bin]]
-name = "build-address-index"
-path = "tools/maintenance/build_address_index.rs"
-
 # Essential validation tools
 [[bin]]
 name = "validate-sync"
