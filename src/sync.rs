@@ -536,7 +536,7 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
     }
     
     println!("╔════════════════════════════════════════════════════╗");
-    println!("║     🎉 ENRICHMENT COMPLETE - READY FOR USE 🎉     ║");
+    println!("║     🎉 ENRICHMENT COMPLETE - READY FOR USE 🎉      ║");
     println!("╚════════════════════════════════════════════════════╝\n");
     
     Ok(())

@@ -57,6 +57,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
     let app = Router::new()
         .route("/", get(root_handler))
         .route("/api", get(api_handler))
+        .route("/api/", get(status_v2))  // Same as /api/v2/status
         .route("/api/endpoint", get(api_handler))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/health", get(health_check_v2))

@@ -856,7 +856,7 @@ pub async fn run_block_monitor(
                 println!("   🌐 Network height: {}", rpc_tip.height);
                 println!("   🎯 Status: FULLY SYNCED\n");
                 println!("╔════════════════════════════════════════════════════╗");
-                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉         ║");
+                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉        ║");
                 println!("╚════════════════════════════════════════════════════╝\n");
             }
         } else {

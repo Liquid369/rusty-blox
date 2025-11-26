@@ -1214,26 +1214,32 @@ pub async fn xpub_v2(
     let transactions = if params.details == "txs" {
         // Apply pagination to transaction list
         let start_idx = ((params.page - 1) * params.page_size) as usize;
-        let end_idx = std::cmp::min(start_idx + params.page_size as usize, unique_txids.len());
-        let page_txids = &unique_txids[start_idx..end_idx];
         
-        let mut txs = Vec::new();
-        for txid_str in page_txids {
-            // Call the tx_v2 endpoint logic to get full transaction details
-            match tx_v2(AxumPath(txid_str.clone()), Extension(db.clone())).await {
-                Ok(Json(tx_json)) => {
-                    // Parse the JSON into a Transaction struct
-                    if let Ok(tx) = serde_json::from_value::<Transaction>(tx_json) {
-                        txs.push(tx);
+        // Check if start_idx is beyond the available data
+        if start_idx >= unique_txids.len() {
+            Some(Vec::new()) // Return empty array if requesting page beyond available data
+        } else {
+            let end_idx = std::cmp::min(start_idx + params.page_size as usize, unique_txids.len());
+            let page_txids = &unique_txids[start_idx..end_idx];
+            
+            let mut txs = Vec::new();
+            for txid_str in page_txids {
+                // Call the tx_v2 endpoint logic to get full transaction details
+                match tx_v2(AxumPath(txid_str.clone()), Extension(db.clone())).await {
+                    Ok(Json(tx_json)) => {
+                        // Parse the JSON into a Transaction struct
+                        if let Ok(tx) = serde_json::from_value::<Transaction>(tx_json) {
+                            txs.push(tx);
+                        }
+                    },
+                    Err(_) => {
+                        // Skip transactions that fail to load
+                        continue;
                     }
-                },
-                Err(_) => {
-                    // Skip transactions that fail to load
-                    continue;
                 }
             }
+            Some(txs)
         }
-        Some(txs)
     } else {
         None
     };
