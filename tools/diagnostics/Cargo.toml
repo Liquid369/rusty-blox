@@ -1,0 +1,35 @@
+[package]
+name = "diagnostics"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "verify-txid-format"
+path = "verify_txid_format.rs"
+
+[[bin]]
+name = "find-xpub-address"
+path = "find_xpub_address.rs"
+
+[[bin]]
+name = "diagnose-tx"
+path = "diagnose_tx.rs"
+
+[[bin]]
+name = "analyze-orphans"
+path = "analyze_orphans.rs"
+
+[[bin]]
+name = "trace-xpub"
+path = "trace_xpub.rs"
+
+[dependencies]
+rocksdb = "0.21"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+bitcoin = "0.29"
+bs58 = "0.4"
+rustyblox = { path = "../../" }
+futures = "0.3"
