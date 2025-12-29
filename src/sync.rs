@@ -12,6 +12,7 @@ use rocksdb::DB;
 use tokio::fs;
 
 use crate::types::AppState;
+use crate::cache::CacheManager;
 use crate::parallel::process_files_parallel;
 use crate::config::get_global_config;
 use crate::monitor::run_block_monitor;
@@ -661,9 +662,9 @@ async fn run_live_sync(
     let blocks_behind = network_height - current_height;
     println!("📊 Network height: {} | Blocks behind: {}", network_height, blocks_behind);
     
-    // Only process blk files if we're significantly behind (>500 blocks)
-    // This makes startup instant when we're already synced
-    if blocks_behind > 500 {
+    // Only process blk files if we're significantly behind (>1000 blocks)
+    // This makes startup instant when we're nearly synced
+    if blocks_behind > 1000 {
         println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
         println!("Phase 1: Syncing from blk*.dat files...");
         
@@ -679,25 +680,40 @@ async fn run_live_sync(
             // Only include blk*.dat files (not rev*.dat or other .dat files)
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                 if filename.starts_with("blk") && filename.ends_with(".dat") {
-                    all_entries.push(path);
+                    // Get file metadata to sort by modification time
+                    if let Ok(metadata) = entry.metadata().await {
+                        if let Ok(modified) = metadata.modified() {
+                            all_entries.push((path, modified));
+                        }
+                    }
                 }
             }
         }
         
-        // Sort blk files to find the most recent ones
-        all_entries.sort();
+        // Sort by modification time (newest first) instead of filename
+        all_entries.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+        let all_paths: Vec<_> = all_entries.into_iter().map(|(path, _)| path).collect();
         
-        let entries = if blocks_behind < 100000 {
-            // If we're within ~100k blocks, only process the last few blk files
-            // Each blk file typically contains ~10-20k blocks, so last 5-10 files covers 100k blocks
-            let files_to_check = (blocks_behind / 10000).max(5).min(10) as usize;
-            let start_idx = all_entries.len().saturating_sub(files_to_check);
-            let recent_files: Vec<_> = all_entries[start_idx..].to_vec();
-            println!("📁 Synced within last 100k blocks - only processing last {} blk files (FAST startup!)", recent_files.len());
+        let entries = if blocks_behind < 1000 {
+            // Very close - skip blk files, use RPC only for instant startup
+            println!("🚀 Only {} blocks behind - skipping blk files (will catch up via RPC)", blocks_behind);
+            Vec::new()
+        } else if blocks_behind < 5000 {
+            // Close - process last 10 most recent files
+            let files_to_check = 10;
+            let recent_files: Vec<_> = all_paths.into_iter().take(files_to_check).collect();
+            println!("📁 {} blocks behind - processing {} most recent blk files", blocks_behind, recent_files.len());
+            recent_files
+        } else if blocks_behind < 20000 {
+            // Medium distance - process last 30 files
+            let files_to_check = 30;
+            let recent_files: Vec<_> = all_paths.into_iter().take(files_to_check).collect();
+            println!("📁 {} blocks behind - processing {} recent blk files", blocks_behind, recent_files.len());
             recent_files
         } else {
-            println!("📁 Far behind - processing all {} blk files", all_entries.len());
-            all_entries
+            // Far behind - process ALL files to ensure we catch everything
+            println!("📁 {} blocks behind - processing ALL {} blk files (faster than RPC)", blocks_behind, all_paths.len());
+            all_paths
         };
         
         if !entries.is_empty() {
@@ -725,8 +741,12 @@ pub async fn run_sync_service(
     broadcaster: Option<Arc<EventBroadcaster>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     
+    // Create a dummy cache for sync - sync operations don't use the HTTP cache
+    let cache = Arc::new(CacheManager::new());
+    
     let state = AppState {
         db: Arc::clone(&db),
+        cache,
     };
     
     println!("\n╔════════════════════════════════════════════════════╗");
