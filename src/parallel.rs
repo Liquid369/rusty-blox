@@ -206,7 +206,10 @@ pub async fn process_files_parallel(
     if has_canonical_metadata {
         println!("\n✅ Canonical chain metadata already exists (from leveldb)");
         println!("   Using pre-built canonical chain ({} height mappings found)", height_key_count);
-        println!("   Skipping chain resolution - using pre-built canonical chain");
+        println!("   Resolving any NEW blocks from blk files...");
+        // CRITICAL: Always resolve to pick up new blocks beyond the leveldb import
+        resolve_block_heights(&db_arc).await?;
+        println!("✅ Chain resolution complete (extended chain with new blocks)!");
     } else {
         // FALLBACK: Only resolve if no canonical metadata exists
         println!("\n🔗 Phase 2: Resolving block heights (building chain)...");
@@ -214,6 +217,10 @@ pub async fn process_files_parallel(
         resolve_block_heights(&db_arc).await?;
         println!("✅ Chain building complete!");
     }
+    
+    // CRITICAL: Update sync_height AGAIN after chain resolution to pick up newly resolved heights
+    println!("\n🔄 Updating sync height after chain resolution...");
+    update_sync_height_from_metadata(&db_arc).await?;
     
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║        📦 BLK FILE PROCESSING COMPLETE 📦          ║");
