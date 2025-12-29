@@ -15,6 +15,7 @@ pub mod parallel;
 pub mod monitor;
 pub mod websocket;
 pub mod chain_state;
+pub mod cache;
 pub mod blocks;
 pub mod db_utils;
 pub mod batch_writer;

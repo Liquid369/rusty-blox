@@ -3,11 +3,24 @@ use rustyblox::sync::run_sync_service;
 use rustyblox::mempool::{MempoolState, run_mempool_monitor};
 use rustyblox::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
 use rustyblox::block_detail::block_detail_v2;
+use rustyblox::cache::CacheManager;
 use rustyblox::api::{
-    api_handler, root_handler, block_index_v2, block_v2, tx_v2, addr_v2, xpub_v2, utxo_v2,
-    send_tx_v2, send_tx_post_v2, mn_count_v2, mn_list_v2, money_supply_v2, budget_info_v2, budget_votes_v2,
-    budget_projection_v2, relay_mnb_v2, status_v2, search_v2, mempool_v2, mempool_tx_v2,
-    block_stats_v2, health_check_v2,
+    // Root handlers
+    api_handler, root_handler,
+    // Network module
+    status_v2, health_check_v2, money_supply_v2, cache_stats_v2,
+    // Blocks module
+    block_index_v2, block_v2, block_stats_v2,
+    // Transactions module
+    tx_v2, send_tx_v2, send_tx_post_v2,
+    // Addresses module
+    addr_v2, xpub_v2, utxo_v2,
+    // Masternodes module
+    mn_count_v2, mn_list_v2, relay_mnb_v2,
+    // Governance module
+    budget_info_v2, budget_votes_v2, budget_projection_v2,
+    // Search module
+    search_v2, mempool_v2, mempool_tx_v2,
 };
 use rustyblox::types::MyError;
 
@@ -39,6 +52,9 @@ lazy_static! {
 async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, broadcaster: Arc<EventBroadcaster>) {
     let config = get_global_config();
     
+    // Initialize cache manager
+    let cache_manager = Arc::new(CacheManager::new());
+    
     // Get server configuration
     let server_host = config
         .get_string("server.host")
@@ -61,6 +77,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/endpoint", get(api_handler))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/health", get(health_check_v2))
+        .route("/api/v2/cache/stats", get(cache_stats_v2))  // Cache statistics endpoint
         .route("/api/v2/search/{query}", get(search_v2))
         .route("/api/v2/mempool", get(mempool_v2))
         .route("/api/v2/mempool/{txid}", get(mempool_tx_v2))
@@ -86,6 +103,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
         .layer(cors)
+        .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
         .layer(axum::extract::Extension(broadcaster));
