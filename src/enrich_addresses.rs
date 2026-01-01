@@ -1,8 +1,25 @@
-/// Address Enrichment Module
+/// Address Enrichment Module - Transaction Database Approach
 /// 
-/// Builds address index after fast_sync completes.
-/// This reads all transactions and creates address -> [txids] mappings
-/// without modifying the original transaction data.
+/// **Purpose:** Builds address index from our RocksDB transaction database
+/// 
+/// **When to use:**
+/// - Normal sync operations (automatically called after fast_sync)
+/// - Incremental address index rebuilding
+/// - Recovery when address index is corrupted but transactions are intact
+/// 
+/// **Algorithm:**
+/// - Pass 1: Scan all transactions to identify spent outputs
+/// - Pass 2: Index only UNSPENT outputs per address
+/// 
+/// **Advantages:**
+/// - Works with our own database (no dependency on PIVX Core)
+/// - Fast incremental updates
+/// - Proper UTXO tracking (spent vs unspent)
+/// 
+/// **Alternative Approach:**
+/// See `enrich_from_chainstate.rs` for verification using PIVX Core's chainstate
+/// as the authoritative source of truth. That approach is best for one-time
+/// verification or recovery but requires PIVX Core to be stopped.
 
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
@@ -62,10 +79,26 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     continue;
                 }
                 if let Some(prevout) = &input.prevout {
-                    // prevout.hash is hex-encoded display-order txid
-                    // txid_from_hex decodes to natural byte order (no reversal needed)
-                    if let Ok(prev_txid_bytes) = txid_from_hex(&prevout.hash) {
-                        spent_outputs.insert((prev_txid_bytes.clone(), prevout.n as u64));
+                    // CRITICAL: prevout.hash format depends on which parser is used!
+                    // - blocks.rs::read_outpoint() REVERSES the hash → display format hex string
+                    // - parser.rs::deserialize_out_point() does NOT reverse → internal format hex string
+                    //
+                    // We use parser.rs in enrich_addresses, so prevout.hash is INTERNAL format!
+                    // Database keys also use INTERNAL format ('t' + reversed_txid)
+                    // Therefore: decode hex AS-IS, don't reverse!
+                    if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
+                        // prev_txid_internal is already in internal (reversed) format
+                        // This matches the format used in database keys
+                        
+                        // DEBUG: Log first few insertions
+                        if spent_outputs.len() < 3 {
+                            println!("   🔍 DEBUG Pass 1 INSERT:");
+                            println!("      prevout.hash (hex string, INTERNAL format): {}", &prevout.hash[..32]);
+                            println!("      decoded (still internal): {}", hex::encode(&prev_txid_internal)[..32].to_string());
+                            println!("      vout={}", prevout.n);
+                        }
+                        
+                        spent_outputs.insert((prev_txid_internal, prevout.n as u64));
                     }
                 }
             }
@@ -78,17 +111,19 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     
     println!("   ✅ Pass 1 complete: {} transactions scanned, {} spent outputs found\n", processed, spent_outputs.len());
     
-    // DEBUG: Immediately check if our test tuples are in the HashSet
-    let test_txids = vec![
-        ("d8138a0b1b171e861bf49d31c1ad4ff986ef8142bbe3eef3f90a97d84e91f474", 1u64),
-        ("2fb7c2c919d1eb2138f996778ece156f8726ea42d263390ba1e8af5019384c9c", 1u64),
-    ];
-    for (txid_hex, vout) in &test_txids {
-        if let Ok(txid_bytes) = hex::decode(txid_hex) {
-            let found = spent_outputs.contains(&(txid_bytes.clone(), *vout));
-            println!("   🔍 DEBUG: After Pass 1, checking {} vout {}: found={}", &txid_hex[..16], vout, found);
-        }
+    // DEBUG: Sample the spent_outputs to see what format they're in
+    println!("   🔍 DEBUG: First 3 entries from spent_outputs HashSet:");
+    let mut debug_txids: Vec<String> = Vec::new();
+    for (i, (txid, vout)) in spent_outputs.iter().take(3).enumerate() {
+        let txid_hex = hex::encode(txid);
+        debug_txids.push(txid_hex.clone());
+        println!("      {}. SPENT: {} vout {}", i+1, &txid_hex[..32], vout);
     }
+    println!();
+    
+    // Store for comparison in Pass 2
+    let debug_txid_1 = debug_txids.get(0).cloned().unwrap_or_default();
+    
     
     println!("   Pass 2: Indexing outputs with spent flags...");
     
@@ -134,6 +169,21 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let txid_bytes = txid_from_key(&key);
         if txid_bytes.is_empty() {
             continue; // Invalid key format
+        }
+        
+        // DEBUG: Print first transaction's TXID format for comparison
+        if processed == 0 {
+            let txid_hex = hex::encode(&txid_bytes);
+            println!("   🔍 DEBUG: First transaction in Pass 2:");
+            println!("      UTXO created by: {}", &txid_hex[..32]);
+            
+            // Check if this TXID is in our debug spent list
+            if txid_hex == debug_txid_1 {
+                println!("      ⚠️  This TXID was in spent_outputs from Pass 1!");
+            } else {
+                println!("      (Not in first 3 spent outputs)");
+            }
+            println!();
         }
         
         // Track which addresses are involved in this transaction (for txs_map)
@@ -221,10 +271,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         for input in &tx.inputs {
             if input.coinbase.is_some() { continue; }
             if let Some(prevout) = &input.prevout {
-                // prevout.hash is hex-encoded display-order; decode to natural bytes
-                if let Ok(prev_txid_bytes) = txid_from_hex(&prevout.hash) {
-                    // Build correct CF key with 't' prefix
-                    let prev_tx_key = tx_cf_key(&prev_txid_bytes);
+                // prevout.hash from parser.rs is already in internal (reversed) format
+                if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
+                    // Build correct CF key with 't' prefix using internal bytes
+                    let prev_tx_key = tx_cf_key(&prev_txid_internal);
                     if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key).ok().flatten() {
                         if prev_tx_data.len() >= 8 {
                             let prev_raw_tx = &prev_tx_data[8..];
@@ -262,6 +312,8 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut batch = rocksdb::WriteBatch::default();
     let mut written = 0;
     let total_addresses = address_map.len();  // Cache length before consuming map
+    let mut total_utxos_checked = 0;
+    let mut total_spent_found = 0;
     
     for (address, utxos) in address_map {
         let mut key = vec![b'a'];
@@ -271,8 +323,21 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let mut utxos_unspent: Vec<(Vec<u8>, u64)> = Vec::new();
 
         for (txid_bytes, vout) in utxos.iter() {
+            total_utxos_checked += 1;
+            
             // Check spent status using natural byte order (matching Pass 1)
             let is_spent = spent_outputs.contains(&(txid_bytes.clone(), *vout));
+            
+            if is_spent {
+                total_spent_found += 1;
+            }
+            
+            // DEBUG: Log first 3 lookups for the test address
+            if address == "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6" && utxos_unspent.len() < 3 {
+                let txid_hex = hex::encode(txid_bytes);
+                println!("   🔍 DEBUG: Address {} UTXO lookup:", address);
+                println!("      txid (as-is): {}... vout={} → is_spent={}", &txid_hex[..16], vout, is_spent);
+            }
 
             if !is_spent {
                 utxos_unspent.push((txid_bytes.clone(), *vout));
@@ -338,6 +403,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     println!("   Total spent outputs marked: {}", spent_outputs.len());
     println!("   Unique addresses with balances: {}", written);
     println!("   ✅ Total received/sent calculated for all addresses");
+    println!();
+    println!("📊 Spent detection statistics:");
+    println!("   Total UTXOs checked: {}", total_utxos_checked);
+    println!("   Found as spent: {} ({:.2}%)", total_spent_found, 
+             (total_spent_found as f64 / total_utxos_checked as f64) * 100.0);
+    println!("   Kept as unspent: {} ({:.2}%)", total_utxos_checked - total_spent_found,
+             ((total_utxos_checked - total_spent_found) as f64 / total_utxos_checked as f64) * 100.0);
     println!();
     
     Ok(())

@@ -1,7 +1,32 @@
-/// Chainstate-based UTXO Enrichment
+/// Chainstate-based UTXO Enrichment - PIVX Core Verification Approach
 /// 
-/// Uses PIVX Core's chainstate LevelDB as the source of truth for current UTXOs
-/// This ensures our balances match Core exactly
+/// **Purpose:** Uses PIVX Core's chainstate LevelDB as the authoritative source
+/// 
+/// **When to use:**
+/// - One-time verification against PIVX Core
+/// - Recovery when transaction database is corrupted
+/// - Initial import from existing PIVX Core node
+/// - Debugging balance discrepancies (Core is always correct)
+/// 
+/// **Algorithm:**
+/// 1. Copies PIVX Core's chainstate directory
+/// 2. Parses raw UTXO data from Core's LevelDB
+/// 3. Decompresses amounts and scripts
+/// 4. Builds address -> UTXOs mapping
+/// 
+/// **Advantages:**
+/// - 100% matches PIVX Core balances (source of truth)
+/// - Fastest for initial import (no transaction parsing needed)
+/// - Authoritative for dispute resolution
+/// 
+/// **Disadvantages:**
+/// - Requires PIVX Core to be stopped (file copying)
+/// - No transaction history (just current UTXO set)
+/// - One-time snapshot (not incremental)
+/// 
+/// **Normal Operation:**
+/// For regular sync, use `enrich_addresses.rs` instead. This module is primarily
+/// for verification and recovery scenarios.
 
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};

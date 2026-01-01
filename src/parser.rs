@@ -380,13 +380,58 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
             return vec![address];
         }
     }
-    // P2SH: a914{20 byte script hash}87
-    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
-        let script_hash = &script[2..22];
-        if let Some(address) = encode_pivx_address(script_hash, 13) {
+    // P2PKH with a single leading prefix byte (exchange wrapper -> EXM)
+    if script.len() == 26 && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
+        && script[24] == 0x88 && script[25] == 0xac {
+        let pubkey_hash = &script[4..24];
+        // This variant is used by exchange-wrapped P2PKH outputs where a
+        // custom OP_EXCHANGEADDR (0xe0) prefix is prepended. Encode using
+        // the 3-byte EXM prefix so the explorer surfaces the EXM address.
+        if let Some(address) = encode_pivx_exchange_address(pubkey_hash) {
             return vec![address];
         }
     }
+    // P2SH: a914{20 byte script hash}87
+    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
+        let script_hash = &script[2..22];
+        let mut addresses = Vec::new();
+        // Standard P2SH encoding (version 13)
+        if let Some(address) = encode_pivx_address(script_hash, 13) {
+            addresses.push(address);
+        }
+        // Also include Exchange (EXM) encoding when present - some services
+        // use the same script pattern but different base58 prefix.
+        if let Some(ex_addr) = encode_pivx_exchange_address(script_hash) {
+            if !addresses.contains(&ex_addr) {
+                addresses.push(ex_addr);
+            }
+        }
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
+    // P2SH with a single leading prefix byte
+    if script.len() == 24 && script[1] == 0xa9 && script[2] == 0x14 && script[23] == 0x87 {
+        let script_hash = &script[3..23];
+        let mut addresses = Vec::new();
+        if let Some(address) = encode_pivx_address(script_hash, 13) {
+            addresses.push(address);
+        }
+        if let Some(ex_addr) = encode_pivx_exchange_address(script_hash) {
+            if !addresses.contains(&ex_addr) {
+                addresses.push(ex_addr);
+            }
+        }
+        if !addresses.is_empty() {
+            return addresses;
+        }
+    }
+    
+    // P2SH Exchange Address: Same pattern as P2SH but encoded with exchange prefix
+    // Note: Exchange addresses use the same script pattern but different encoding
+    // This is detected the same way as P2SH, but we'll keep standard P2SH for now
+    // and let the wallet handle exchange address encoding when needed
+    
     // P2PK: {push_opcode}{pubkey} OP_CHECKSIG (0xac)
     // Compressed pubkey: 0x21 (push 33) + 33 bytes + 0xac = 35 bytes total
     // Uncompressed pubkey: 0x41 (push 65) + 65 bytes + 0xac = 67 bytes total
@@ -431,9 +476,22 @@ pub fn get_script_type(script: &[u8]) -> &str {
         return "pubkeyhash";
     }
     
+    // Exchange-wrapped P2PKH: single leading prefix byte + standard P2PKH
+    // Example: 0xe0 76 a9 14 {20} 88 ac  (26 bytes)
+    if script.len() == 26 && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
+        && script[24] == 0x88 && script[25] == 0xac {
+        return "exchangeaddress";
+    }
+    
     // P2SH (Pay to Script Hash)
     if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
         return "scripthash";
+    }
+    
+    // Exchange-wrapped P2SH: single leading prefix byte + standard P2SH
+    // Example: <prefix> a9 14 {20} 87 (24 bytes)
+    if script.len() == 24 && script[1] == 0xa9 && script[2] == 0x14 && script[23] == 0x87 {
+        return "exchangeaddress";
     }
     
     // P2PK (Pay to Public Key)
@@ -458,6 +516,23 @@ pub fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
     data.extend_from_slice(hash);
     
     // Calculate checksum: first 4 bytes of SHA256(SHA256(version + hash))
+    let first_hash = Sha256::digest(&data);
+    let second_hash = Sha256::digest(&first_hash);
+    data.extend_from_slice(&second_hash[..4]);
+    
+    // Encode to base58
+    Some(bs58::encode(&data).into_string())
+}
+
+/// Encode PIVX exchange address (EXM prefix)
+/// Exchange addresses use a 3-byte prefix: [0x01, 0xb9, 0xa2]
+pub fn encode_pivx_exchange_address(hash: &[u8]) -> Option<String> {
+    // PIVX exchange address: 3-byte prefix + 20-byte hash + 4-byte checksum
+    let mut data = Vec::with_capacity(27);
+    data.extend_from_slice(&[0x01, 0xb9, 0xa2]); // EXCHANGE_ADDRESS prefix
+    data.extend_from_slice(hash);
+    
+    // Calculate checksum: first 4 bytes of SHA256(SHA256(prefix + hash))
     let first_hash = Sha256::digest(&data);
     let second_hash = Sha256::digest(&first_hash);
     data.extend_from_slice(&second_hash[..4]);
