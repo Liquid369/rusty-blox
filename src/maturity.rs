@@ -12,6 +12,7 @@
 /// can show coins as spendable when they are not yet available per consensus.
 
 use crate::tx_type::{TransactionType, COINBASE_MATURITY, COINSTAKE_MATURITY};
+use crate::constants::{is_canonical_height, HEIGHT_ORPHAN};
 use crate::types::CTransaction;
 use std::sync::Arc;
 use rocksdb::DB;
@@ -33,8 +34,8 @@ pub fn is_output_spendable(
     output_height: i32,
     current_height: i32,
 ) -> bool {
-    // Negative heights are invalid
-    if output_height < 0 || current_height < 0 {
+    // Orphaned or unresolved heights are invalid
+    if !is_canonical_height(output_height) || !is_canonical_height(current_height) {
         return false;
     }
     
@@ -98,8 +99,8 @@ pub fn is_output_index_spendable(
 /// # Returns
 /// Current sync height or error
 pub fn get_current_height(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_metadata")
-        .ok_or("chain_metadata CF not found")?;
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
     
     let height = match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => {
@@ -170,8 +171,8 @@ pub async fn filter_spendable_utxos(
             };
             let output_height = i32::from_le_bytes(height_bytes);
             
-            // Skip orphaned transactions
-            if output_height == -1 {
+            // Skip orphaned and unresolved transactions
+            if output_height == HEIGHT_ORPHAN {
                 continue;
             }
             
@@ -218,7 +219,7 @@ pub fn get_maturity_status(
     output_height: i32,
     current_height: i32,
 ) -> (bool, i32) {
-    if output_height < 0 || current_height < 0 {
+    if !is_canonical_height(output_height) || !is_canonical_height(current_height) {
         return (false, i32::MAX);
     }
     

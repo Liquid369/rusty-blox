@@ -544,7 +544,12 @@ pub fn encode_pivx_exchange_address(hash: &[u8]) -> Option<String> {
 pub async fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {
     let mut hash_bytes = [0u8; 32];
     let _ = cursor.read_exact(&mut hash_bytes); // Ignore errors
-    let hash = hex::encode(hash_bytes);
+    
+    // Reverse hash for display (match blocks.rs and transactions.rs behavior)
+    // Database keys use reversed/display format: 't' + reversed_txid
+    let reversed_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+    let hash = hex::encode(&reversed_hash);
+    
     let n = cursor.read_u32::<LittleEndian>().unwrap_or(0);
     
     COutPoint { hash, n }

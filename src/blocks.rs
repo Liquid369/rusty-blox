@@ -423,8 +423,24 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // Try to get height from chain_metadata (if leveldb was parsed)
         let cf_metadata = db.cf_handle("chain_metadata");
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
-            // Genesis block has height 0
-            Some(0)
+            // Genesis block - verify hash matches known genesis
+            // Fix for Phase 2, Issue #1: Improved genesis detection
+            const PIVX_GENESIS_HASH: &str = "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818";
+            
+            // Compare in display format (reversed)
+            let mut block_hash_display = block_hash_vec.clone();
+            block_hash_display.reverse();
+            let block_hash_hex = hex::encode(&block_hash_display);
+            
+            if block_hash_hex == PIVX_GENESIS_HASH {
+                Some(0)  // Confirmed genesis
+            } else {
+                // Block with null prev_hash but non-genesis hash - very suspicious!
+                eprintln!("⚠️  Block with null prev_hash but non-genesis hash: {}", block_hash_hex);
+                eprintln!("   Expected genesis: {}", PIVX_GENESIS_HASH);
+                eprintln!("   This block will be marked as orphan (no height).");
+                None  // Orphan or corrupted
+            }
         } else if let Some(cf) = cf_metadata {
             // Try to look up height from chain_metadata using 'h' + block_hash
             let mut height_key = vec![b'h'];
@@ -441,7 +457,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                     ]);
                     Some(height)
                 }
-                _ => None  // Height not in metadata yet
+                _ => None  // Height not in metadata - block is orphan
             }
         } else {
             None

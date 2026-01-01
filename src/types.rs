@@ -5,6 +5,7 @@ use std::fmt;
 use std::hash::Hash as StdHash;
 use std::sync::Arc;
 use rocksdb::DB;
+use crate::cache::CacheManager;
 
 // Helper functions to serialize large byte arrays
 fn serialize_bytes<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
@@ -84,6 +85,23 @@ pub enum AddressType {
     ZerocoinPublicSpend,
     Staking(String, String),
     Sapling,
+}
+
+/// PIVX Core-compatible script classification
+/// Used for correct transaction attribution matching Core's IsMine() logic
+#[derive(Debug, Clone)]
+pub enum ScriptClassification {
+    P2PKH(String),           // Single address receives value
+    P2SH(String),            // Single address receives value
+    P2PK(String),            // Single address receives value
+    ColdStake {              // TWO addresses with different roles
+        staker: String,      // Receives delegation (S-address) - gets the VALUE
+        owner: String,       // Retains ownership (D-address) - can SPEND
+    },
+    OpReturn,                // OP_RETURN (no address, no value attribution)
+    Coinbase,                // Coinbase marker
+    Coinstake,               // Coinstake marker
+    Nonstandard,             // Non-standard script
 }
 
 pub struct CBlockHeader {
@@ -335,6 +353,7 @@ impl std::fmt::Debug for OutputDescription {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<DB>,
+    pub cache: Arc<CacheManager>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

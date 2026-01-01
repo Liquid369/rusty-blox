@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, SeekFrom};
 use rocksdb::DB;
 use crate::batch_writer::BatchWriter;
+use crate::constants::HEIGHT_UNRESOLVED;
 use crate::db_utils::{perform_rocksdb_get, perform_rocksdb_put, perform_rocksdb_del};
 use crate::types::{CTransaction, CTxIn, CTxOut, AddressType, CScript, SpendDescription, OutputDescription, SaplingTxData, COutPoint};
 use crate::address::{scriptpubkey_to_address, address_type_to_string};
@@ -530,7 +531,18 @@ async fn process_transaction_v1(
     tx_key.extend_from_slice(&reversed_txid);
     
     let version_bytes = block_version.to_le_bytes().to_vec();
-    let height_bytes = block_height.unwrap_or(0).to_le_bytes().to_vec();
+    
+    // DEFENSIVE CHECK: Prevent height=0 bug
+    // Fix for Phase 2, Issue #1: Transaction Height Assignment Race
+    // Should never happen if metadata validation works, but prevents silent corruption
+    let height_bytes = match block_height {
+        Some(h) => h.to_le_bytes().to_vec(),
+        None => {
+            // Block has no height - likely an orphan block not in canonical chain
+            // This is EXPECTED for blocks in blk files that aren't on canonical chain
+            HEIGHT_UNRESOLVED.to_le_bytes().to_vec()
+        }
+    };
     
     let mut full_data = version_bytes.clone();
     full_data.extend(&height_bytes);
