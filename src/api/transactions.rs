@@ -264,10 +264,21 @@ async fn compute_transaction_details(
                 "zkproof": hex::encode(output.zkproof),
             })).collect();
             
+            // Determine transaction type based on value_balance
+            let tx_type = if sap.value_balance < 0 {
+                "shielding" // Transparent → Shielded (negative balance means adding to shield pool)
+            } else if sap.value_balance > 0 {
+                "unshielding" // Shielded → Transparent (positive balance means removing from shield pool)
+            } else {
+                "shielded_transfer" // Shielded → Shielded (zero balance means pure shielded transfer)
+            };
+            
             serde_json::json!({
                 "value_balance": format_piv_amount(sap.value_balance),
+                "value_balance_sat": sap.value_balance,
                 "shielded_spend_count": sap.vshielded_spend.len(),
                 "shielded_output_count": sap.vshielded_output.len(),
+                "transaction_type": tx_type,
                 "binding_sig": hex::encode(sap.binding_sig),
                 "spends": spends,
                 "outputs": outputs,

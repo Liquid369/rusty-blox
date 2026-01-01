@@ -8,6 +8,8 @@ use rocksdb::DB;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::constants::HEIGHT_ORPHAN;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -90,7 +92,7 @@ pub async fn health_check_v2(
             if value.len() >= 8 {
                 let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
                 let height = i32::from_le_bytes(height_bytes);
-                if height == -1 {
+                if height == HEIGHT_ORPHAN {
                     orphaned_txs += 1;
                 } else {
                     valid_txs += 1;
@@ -173,7 +175,12 @@ pub async fn money_supply_v2(
 }
 
 /// Compute money supply from PIVX RPC (direct TCP call for compatibility)
-async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
+    compute_money_supply_blocking()
+}
+
+/// Blocking version of compute_money_supply for use in spawn_blocking contexts
+pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
     let config = get_global_config();
     let rpc_host = config
         .get_string("rpc.host")

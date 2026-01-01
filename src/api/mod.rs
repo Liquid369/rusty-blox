@@ -12,6 +12,10 @@ pub mod addresses;
 pub mod masternodes;
 pub mod governance;
 pub mod search;
+pub mod analytics;
+
+#[cfg(test)]
+mod xpub_tests;
 
 // Re-export all public items
 pub use types::*;
@@ -23,15 +27,34 @@ pub use addresses::*;
 pub use masternodes::*;
 pub use governance::*;
 pub use search::*;
+pub use analytics::*;
 
 // Keep root and api handlers for backward compatibility
 pub async fn root_handler() -> axum::response::Html<String> {
-    match std::fs::read_to_string("frontend/index.html") {
-        Ok(html) => axum::response::Html(html),
-        Err(_) => axum::response::Html(
-            "<h1>Error: Frontend not found</h1><p>Please ensure frontend/index.html exists.</p>".to_string()
-        ),
+    // Try multiple frontend locations in priority order:
+    // 1. Production build (frontend-vue/dist)
+    // 2. Legacy frontend (frontend or frontend-legacy)
+    let frontend_paths = [
+        "frontend-vue/dist/index.html",
+        "frontend/index.html",
+        "frontend-legacy/index.html",
+    ];
+    
+    for path in &frontend_paths {
+        if let Ok(html) = std::fs::read_to_string(path) {
+            return axum::response::Html(html);
+        }
     }
+    
+    axum::response::Html(
+        r#"<h1>Error: Frontend not found</h1>
+<p>Please ensure one of the following exists:</p>
+<ul>
+  <li><code>frontend-vue/dist/index.html</code> (production build: <code>cd frontend-vue && npm run build</code>)</li>
+  <li><code>frontend/index.html</code> (legacy frontend)</li>
+</ul>
+<p>For development, run the Vue frontend separately: <code>cd frontend-vue && npm run dev</code></p>"#.to_string()
+    )
 }
 
 pub async fn api_handler() -> &'static str {

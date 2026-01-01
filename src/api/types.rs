@@ -49,6 +49,18 @@ pub struct XPubInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "usedTokens")]
     pub used_tokens: Option<u32>,
+    /// Total number of tokens (addresses) available (for pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "totalTokens")]
+    pub total_tokens: Option<u32>,
+    /// Current tokens page (for pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "tokensPage")]
+    pub tokens_page: Option<u32>,
+    /// Total tokens pages (for pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "totalTokensPages")]
+    pub total_tokens_pages: Option<u32>,
 }
 
 // ========== Address Types ==========
@@ -333,6 +345,25 @@ pub struct AddressQuery {
     pub details: String,
     pub contract: Option<String>,
     pub secondary: Option<String>,
+    /// BIP44 gap limit for xpub scanning (default: 20)
+    #[serde(default, rename = "gap")]
+    pub gap_limit: Option<u32>,
+    /// Controls which xpub-derived addresses are returned: nonzero|used|derived (default: nonzero)
+    #[serde(default = "default_tokens_filter")]
+    pub tokens: String,
+    /// Maximum total addresses to scan per request (default: 1000, max: 2000) - prevents excessive queries
+    #[serde(default, rename = "maxScan")]
+    pub max_scan: Option<u32>,
+    /// Tokens array pagination: page number (default: 1)
+    #[serde(default = "default_page", rename = "tokensPage")]
+    pub tokens_page: u32,
+    /// Tokens array pagination: items per page (default: 1000)
+    #[serde(default = "default_page_size", rename = "tokensPageSize")]
+    pub tokens_page_size: u32,
+}
+
+fn default_tokens_filter() -> String {
+    "nonzero".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
