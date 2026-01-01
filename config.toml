@@ -1,26 +1,100 @@
+# ========================================
+# RustyBlox Configuration
+# ========================================
+
 [paths]
-db_path = ""
-blk_dir = ""
-ldb_dir = ""
+# Database path for RocksDB storage
+db_path = "./data/blocks.db"
+
+# Directory containing PIVX blockchain files (blk*.dat)
+blk_dir = "/Users/liquid/Library/Application Support/PIVX/blocks"
+
+# LevelDB directory (used by some utilities)
+ldb_dir = "./data/leveldb"
+
+# PIVX data directory
+pivx_data_dir = "/Users/liquid/Library/Application Support/PIVX"
+
+# Directory where a copy of PIVX's chainstate LevelDB will be placed for
+# safe read-only parsing while the daemon is running. If this directory
+# already exists the copy step will be skipped; delete it to force a fresh
+# copy.
+chainstate_copy_dir = "/tmp/pivx_chainstate_current"
+
+# Directory where a copy of PIVX's block index LevelDB will be placed
+# to avoid read locks from the running daemon
+block_index_copy_dir = "/tmp/pivx_block_index_current"
+
+# Directory where blk*.dat files will be copied for safe reading
+# (optional - if empty, will read directly from blk_dir)
+blk_copy_dir = ""
 
 [sync]
+# Resync mode: if true, will clear all databases and rebuild from scratch
+resync = false
+
 # Fast sync mode: skip UTXO/address tracking for 10-20x speedup
 # Only indexes blocks and transactions (TXIDs)
-# Run with build_utxo = true later to build UTXO set
+# Run with enrich_addresses = true later to add address data
 fast_sync = true
-build_utxo = false
+enrich_addresses = true
+build_utxo = true
+
+# Use chainstate for UTXO enrichment during sync (NOT recommended!)
+# Chainstate only provides CURRENT transparent UTXOs (snapshot of unspent outputs)
+# Transaction-based enrichment finds ALL transparent address activity (full history)
+# Explorers need historical data, not just current state
+# Note: Chainstate is useful for verification (see import-chainstate tool)
+use_chainstate_for_utxos = false
+
+# Use PIVX Core's block index for transaction height resolution (recommended!)
+# This reads Core's canonical chain to fix heights BEFORE enrichment
+# Benefits: eliminates repair phase, marks orphans correctly, ~5 min overhead
+use_block_index_for_heights = true
 
 # Parallel file processing: number of concurrent blk*.dat files to process
 # Higher = faster but more CPU/memory usage. Recommended: 4-16
 parallel_files = 8
 
+[rocksdb]
+# RocksDB performance tuning options
+# These settings are optimized for high-throughput blockchain indexing
+
+# Memory settings (total budget ~2GB for write buffers + block cache)
+write_buffer_size = 256  # MB per column family (default: 64MB)
+max_write_buffer_number = 4  # Number of write buffers to maintain
+min_write_buffer_number_to_merge = 2  # Merge after this many buffers
+block_cache_size = 512  # MB for shared block cache (read cache)
+
+# File and compaction settings
+target_file_size_base = 256  # MB for SST files (default: 64MB)
+max_open_files = 5000  # File descriptor limit (-1 = unlimited, not recommended)
+level0_file_num_compaction_trigger = 8  # Trigger compaction after N L0 files
+level0_slowdown_writes_trigger = 20  # Slow down writes after N L0 files
+level0_stop_writes_trigger = 36  # Stop writes after N L0 files
+
+# Parallelism settings
+max_background_jobs = 8  # Background compaction/flush threads (CPU cores)
+max_subcompactions = 4  # Parallel subcompactions per compaction job
+
+# Compression (lz4 is fast, zstd is better ratio but slower)
+compression_type = "lz4"  # Options: none, snappy, zstd, lz4, zlib
+
+# Advanced tuning (usually don't need to change)
+enable_pipelined_write = true  # Better concurrency for writes
+allow_concurrent_memtable_write = true  # Allow multiple writers
+enable_write_thread_adaptive_yield = true  # Reduce lock contention
+
 [rpc]
-# Use a full link for host, ie; https://127.0.0.1/
-host = ""
-user = ""
-pass = ""
+# PIVX RPC connection settings
+host = "http://127.0.0.1:51472"
+user = "explorer"
+pass = "explorer_test_pass"
 
 [server]
+# Web server bind address and port
 host = "0.0.0.0"
 port = 3005
+
+# Number of worker threads for the web server
 worker_threads = "4"

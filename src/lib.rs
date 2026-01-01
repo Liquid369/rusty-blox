@@ -6,6 +6,7 @@ use std::ffi::c_void;
 pub mod chainwork;
 pub mod canonical_chain;
 pub mod config;
+pub mod constants;
 pub mod db_handles;
 pub mod tx_keys;
 pub mod enrich_addresses;

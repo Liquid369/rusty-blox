@@ -21,11 +21,14 @@ use rustyblox::api::{
     budget_info_v2, budget_votes_v2, budget_projection_v2,
     // Search module
     search_v2, mempool_v2, mempool_tx_v2,
+    // Analytics module
+    supply_analytics, transaction_analytics, staking_analytics,
+    network_health_analytics, rich_list, wealth_distribution,
 };
 use rustyblox::types::MyError;
 
 use std::sync::Arc;
-use rocksdb::{DB, ColumnFamilyDescriptor, Options};
+use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, SliceTransform, BlockBasedOptions};
 use axum::{Router, routing::{get, post}};
 use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::Mutex as TokioMutex;
@@ -99,6 +102,12 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/mnrawbudgetvote/{raw_vote_params}", get(api_handler))
+        .route("/api/v2/analytics/supply", get(supply_analytics))
+        .route("/api/v2/analytics/transactions", get(transaction_analytics))
+        .route("/api/v2/analytics/staking", get(staking_analytics))
+        .route("/api/v2/analytics/network", get(network_health_analytics))
+        .route("/api/v2/analytics/richlist", get(rich_list))
+        .route("/api/v2/analytics/wealth-distribution", get(wealth_distribution))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
@@ -155,34 +164,135 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .get_string("paths.blk_dir")
         .map_err(|_| MyError::new("Missing blk_dir in config"))?;
 
+    // ========================================
+    // RocksDB Configuration
+    // ========================================
+    
+    println!("⚙️  Configuring RocksDB with optimized settings...");
+    
+    // Load tuning parameters from config (with defaults)
+    let write_buffer_size_mb = config.get_int("rocksdb.write_buffer_size").unwrap_or(256);
+    let max_write_buffer_number = config.get_int("rocksdb.max_write_buffer_number").unwrap_or(4) as i32;
+    let min_write_buffer_number_to_merge = config.get_int("rocksdb.min_write_buffer_number_to_merge").unwrap_or(2) as i32;
+    let block_cache_size_mb = config.get_int("rocksdb.block_cache_size").unwrap_or(512);
+    let target_file_size_mb = config.get_int("rocksdb.target_file_size_base").unwrap_or(256);
+    let max_open_files = config.get_int("rocksdb.max_open_files").unwrap_or(5000) as i32;
+    let level0_file_num_compaction_trigger = config.get_int("rocksdb.level0_file_num_compaction_trigger").unwrap_or(8) as i32;
+    let level0_slowdown_writes_trigger = config.get_int("rocksdb.level0_slowdown_writes_trigger").unwrap_or(20) as i32;
+    let level0_stop_writes_trigger = config.get_int("rocksdb.level0_stop_writes_trigger").unwrap_or(36) as i32;
+    let max_background_jobs = config.get_int("rocksdb.max_background_jobs").unwrap_or(8) as i32;
+    let max_subcompactions = config.get_int("rocksdb.max_subcompactions").unwrap_or(4);
+    
+    let compression_type_str = config.get_string("rocksdb.compression_type").unwrap_or_else(|_| "lz4".to_string());
+    let compression_type = match compression_type_str.to_lowercase().as_str() {
+        "none" => rocksdb::DBCompressionType::None,
+        "snappy" => rocksdb::DBCompressionType::Snappy,
+        "zstd" => rocksdb::DBCompressionType::Zstd,
+        "lz4" => rocksdb::DBCompressionType::Lz4,
+        "zlib" => rocksdb::DBCompressionType::Zlib,
+        _ => {
+            println!("⚠️  Unknown compression type '{}', using lz4", compression_type_str);
+            rocksdb::DBCompressionType::Lz4
+        }
+    };
+    
+    let enable_pipelined_write = config.get_bool("rocksdb.enable_pipelined_write").unwrap_or(true);
+    let allow_concurrent_memtable_write = config.get_bool("rocksdb.allow_concurrent_memtable_write").unwrap_or(true);
+    let enable_write_thread_adaptive_yield = config.get_bool("rocksdb.enable_write_thread_adaptive_yield").unwrap_or(true);
+    
+    // Create shared block cache for all column families
+    let block_cache = Cache::new_lru_cache(block_cache_size_mb as usize * 1024 * 1024);
+    
+    // Create optimized options for each column family based on access patterns
     let mut cf_descriptors = vec![ColumnFamilyDescriptor::new("default", Options::default())];
-    for cf in COLUMN_FAMILIES.iter() {
-        cf_descriptors.push(ColumnFamilyDescriptor::new(
-            cf.to_string(),
-            Options::default(),
-        ));
+    
+    for cf_name in COLUMN_FAMILIES.iter() {
+        let mut cf_opts = Options::default();
+        
+        // Create block-based table options for this CF
+        let mut block_opts = BlockBasedOptions::default();
+        block_opts.set_block_cache(&block_cache);
+        
+        // Common settings for all CFs
+        cf_opts.set_write_buffer_size(write_buffer_size_mb as usize * 1024 * 1024);
+        cf_opts.set_max_write_buffer_number(max_write_buffer_number);
+        cf_opts.set_min_write_buffer_number_to_merge(min_write_buffer_number_to_merge);
+        cf_opts.set_compression_type(compression_type);
+        cf_opts.set_target_file_size_base(target_file_size_mb as u64 * 1024 * 1024);
+        cf_opts.set_level_zero_file_num_compaction_trigger(level0_file_num_compaction_trigger);
+        cf_opts.set_level_zero_slowdown_writes_trigger(level0_slowdown_writes_trigger);
+        cf_opts.set_level_zero_stop_writes_trigger(level0_stop_writes_trigger);
+        
+        // Per-CF optimizations based on access patterns
+        match *cf_name {
+            "blocks" => {
+                // Blocks: Append-only, large values, sequential reads
+                // Universal compaction is better for append-only workloads
+                cf_opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
+                cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(1)); // 'b' prefix
+            }
+            "transactions" => {
+                // Transactions: High write volume, prefix-based scans (by height)
+                cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(1)); // 't' prefix
+                cf_opts.optimize_for_point_lookup(256); // Bloom filter for point lookups (256MB)
+            }
+            "addr_index" => {
+                // Address index: High read volume, prefix scans (by address)
+                cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(1)); // 'a' prefix
+                cf_opts.optimize_for_point_lookup(512); // Larger bloom filter for addresses (512MB)
+                // More aggressive caching for frequently accessed addresses
+                block_opts.set_block_size(32 * 1024); // Larger blocks (32KB) for better compression
+            }
+            "utxo" => {
+                // UTXO: High read/write volume, point lookups
+                cf_opts.optimize_for_point_lookup(256);
+                cf_opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(1)); // 'u' prefix
+            }
+            "chain_metadata" | "chain_state" => {
+                // Metadata: Low volume, critical for correctness
+                // Use Level compaction (default) for better consistency
+                cf_opts.set_write_buffer_size(64 * 1024 * 1024); // Smaller buffer (less critical path)
+            }
+            _ => {
+                // Default settings for other CFs
+            }
+        }
+        
+        // Apply block-based table options to this CF
+        cf_opts.set_block_based_table_factory(&block_opts);
+        
+        cf_descriptors.push(ColumnFamilyDescriptor::new(cf_name.to_string(), cf_opts));
     }
 
-    // RocksDB optimizations for high-throughput writes
+    // Database-level options (apply to all CFs)
     let mut db_options = Options::default();
     db_options.create_if_missing(true);
     db_options.create_missing_column_families(true);
+    db_options.set_max_open_files(max_open_files);
+    db_options.set_max_background_jobs(max_background_jobs);
+    db_options.set_max_subcompactions(max_subcompactions as u32);
     
-    // Write buffer optimizations
-    db_options.set_write_buffer_size(256 * 1024 * 1024); // 256MB write buffer
-    db_options.set_max_write_buffer_number(4); // Allow up to 4 write buffers
-    db_options.set_min_write_buffer_number_to_merge(2); // Merge after 2 buffers
+    // Advanced concurrency settings
+    if enable_pipelined_write {
+        db_options.set_enable_pipelined_write(true);
+    }
+    if allow_concurrent_memtable_write {
+        db_options.set_allow_concurrent_memtable_write(true);
+    }
+    if enable_write_thread_adaptive_yield {
+        db_options.set_enable_write_thread_adaptive_yield(true);
+    }
     
-    // File size and compaction
-    db_options.set_target_file_size_base(256 * 1024 * 1024); // 256MB SST files
-    db_options.set_level_zero_file_num_compaction_trigger(8); // Trigger compaction after 8 L0 files
-    db_options.set_max_background_jobs(8); // Parallel background compaction/flush
+    // Logging and stats
+    db_options.set_stats_dump_period_sec(300); // Dump stats every 5 minutes
+    db_options.set_keep_log_file_num(3); // Keep last 3 log files
     
-    // Compression
-    db_options.set_compression_type(rocksdb::DBCompressionType::Lz4); // Fast compression
-    
-    // Increase parallelism (8 cores)
-    db_options.increase_parallelism(8);
+    println!("  Write buffer: {}MB per CF", write_buffer_size_mb);
+    println!("  Block cache: {}MB (shared)", block_cache_size_mb);
+    println!("  Max open files: {}", max_open_files);
+    println!("  Background jobs: {}", max_background_jobs);
+    println!("  Compression: {:?}", compression_type);
+    println!("  Pipelined writes: {}", enable_pipelined_write);
     
     let db = DB::open_cf_descriptors(
         &db_options,

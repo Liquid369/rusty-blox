@@ -50,6 +50,26 @@ path = "tools/export/export_txids.rs"
 name = "test-parser"
 path = "tools/testing/test_parser.rs"
 
+# Height revalidation tool
+[[bin]]
+name = "revalidate-heights"
+path = "tools/maintenance/revalidate_all_heights.rs"
+
+# Mark orphaned zero-height transactions
+[[bin]]
+name = "mark-orphaned-zero-height"
+path = "tools/maintenance/mark_orphaned_zero_height.rs"
+
+# Validate ALL transaction heights against canonical chain
+[[bin]]
+name = "validate-all-tx-heights"
+path = "tools/maintenance/validate_all_tx_heights.rs"
+
+# Chainstate import and verification
+[[bin]]
+name = "import-chainstate"
+path = "src/bin/import-chainstate.rs"
+
 [dependencies]
 hex = "0.4.3"
 rocksdb = "0.21.0"
@@ -81,6 +101,8 @@ pivx_rpc_rs = { path = "../pivx-rpc-rs", version = "0.1.0" }
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 num-bigint = "0.4"
 num-traits = "0.2"
+clap = { version = "4.0", features = ["derive"] }
+shellexpand = "3.0"
 
 [build-dependencies]
 cc = "1.0"
