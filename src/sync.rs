@@ -14,6 +14,69 @@ use tokio::fs;
 use crate::types::AppState;
 use crate::cache::CacheManager;
 use crate::parallel::process_files_parallel;
+
+/// Validate that canonical chain metadata is complete before parallel processing
+/// 
+/// Fix for Phase 2, Issue #1: Transaction Height Assignment Race
+/// 
+/// **Problem**: Parallel processing started before canonical metadata complete,
+/// causing transactions to get height=0 instead of correct height.
+/// 
+/// **Solution**: Validate metadata completeness before starting parallel processing.
+/// Counts height→hash mappings (4-byte keys) and ensures contiguous sequence 0→N.
+/// 
+/// **PIVX Core Comparison**: Core never assigns height until block is on canonical
+/// chain. We now match this behavior by failing fast if metadata incomplete.
+async fn validate_canonical_metadata_complete(
+    db: &Arc<DB>,
+    expected_chain_len: usize,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let cf_metadata = db.cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
+    
+    // Count height→hash mappings (4-byte keys)
+    let mut height_count = 0;
+    let mut max_height = -1i32;
+    let mut min_height = i32::MAX;
+    
+    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
+    for item in iter {
+        if let Ok((key, _)) = item {
+            if key.len() == 4 {
+                height_count += 1;
+                let height = i32::from_le_bytes([key[0], key[1], key[2], key[3]]);
+                if height > max_height {
+                    max_height = height;
+                }
+                if height < min_height {
+                    min_height = height;
+                }
+            }
+        }
+    }
+    
+    // Validate: must have contiguous heights from 0 to max
+    let is_complete = height_count == (max_height + 1) as usize
+                      && height_count == expected_chain_len
+                      && min_height == 0;
+    
+    if !is_complete {
+        eprintln!("⚠️  Canonical metadata INCOMPLETE:");
+        eprintln!("   Expected: {} heights (0..{})", expected_chain_len, expected_chain_len - 1);
+        eprintln!("   Found: {} heights ({}..{})", height_count, min_height, max_height);
+        eprintln!("   Status: Gaps or missing entries detected!");
+        eprintln!("");
+        eprintln!("   This will cause the height=0 bug where ALL transactions");
+        eprintln!("   get stored with height=0 instead of their correct heights.");
+        eprintln!("");
+        eprintln!("   Possible causes:");
+        eprintln!("   - LevelDB import incomplete or corrupted");
+        eprintln!("   - Disk I/O errors during metadata write");
+        eprintln!("   - Database corruption");
+    }
+    
+    Ok(is_complete)
+}
 use crate::config::get_global_config;
 use crate::monitor::run_block_monitor;
 use crate::websocket::EventBroadcaster;
@@ -254,6 +317,22 @@ async fn run_initial_sync_leveldb(
     
     println!("✅ Canonical chain metadata stored!");
     println!("   The parallel block processor will now index {} blocks from blk*.dat files", chain_len);
+    
+    // CRITICAL FIX: Validate metadata completeness BEFORE parallel processing
+    // This prevents the height=0 bug where transactions get wrong heights
+    println!("\n🔍 Validating canonical chain metadata completeness...");
+    let metadata_complete = validate_canonical_metadata_complete(&db, chain_len).await?;
+    
+    if !metadata_complete {
+        return Err("FATAL: Canonical metadata incomplete - cannot start parallel processing.\n\
+                   This would cause ALL blocks to get height=0.\n\
+                   Check leveldb import logs for errors.\n\
+                   Recommendation: Delete database and resync from scratch.".into());
+    }
+    
+    println!("✅ Canonical metadata validated: {} heights (0..{})", 
+             chain_len, chain_len - 1);
+    println!("   Metadata is complete and contiguous - safe to proceed");
     
     // Now process blk*.dat files to get the actual block data
     // The parallel processor will index all blocks it finds

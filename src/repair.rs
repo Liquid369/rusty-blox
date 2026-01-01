@@ -1,18 +1,24 @@
 /// Transaction repair utilities
 /// 
 /// Fixes database inconsistencies like transactions stored with height=0
+/// NOTE: After Fix #1, new transactions use HEIGHT_UNRESOLVED (-2) instead.
+///       This repair handles legacy databases that had the height=0 bug.
 
 use rocksdb::{DB, WriteBatch};
 use std::sync::Arc;
 use std::collections::HashMap;
+use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN};
 
 /// Fix all transactions that have height=0 by looking them up in the block index
 /// 
-/// This repairs a bug where transactions were stored with height=0 during initial sync
-/// when block heights hadn't been resolved yet. The fix:
-/// 1. Scans all transactions to find ones with height=0
+/// This repairs a LEGACY bug where transactions were stored with height=0 during initial sync
+/// when block heights hadn't been resolved yet. After Fix #1, new unresolved transactions
+/// use HEIGHT_UNRESOLVED (-2) instead.
+/// 
+/// The fix:
+/// 1. Scans all transactions to find ones with height=0 (excluding actual genesis)
 /// 2. Uses the 'B' (block transaction) index to find the correct height
-/// 3. Updates the transaction data with the correct height
+/// 3. Updates the transaction data with the correct height or marks as HEIGHT_ORPHAN
 /// 
 /// Returns (fixed_count, unfixable_count)
 pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize), Box<dyn std::error::Error>> {
@@ -39,7 +45,9 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
                     if value.len() >= 8 {
                         let height = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
                         
-                        if height == 0 {
+                        // Find transactions with HEIGHT_GENESIS that aren't actually genesis
+                        // (legacy bug - after Fix #1, unresolved use HEIGHT_UNRESOLVED instead)
+                        if height == HEIGHT_GENESIS {
                             zero_height_txs.push((key.to_vec(), value.to_vec()));
                         }
                     }

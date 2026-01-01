@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use rocksdb::DB;
 use crate::atomic_writer::AtomicBatchWriter;
+use crate::constants::HEIGHT_ORPHAN;
 use crate::parser::deserialize_transaction;
 use crate::address_rollback::rollback_address_index;
 
@@ -291,7 +292,7 @@ async fn disconnect_transaction(
                 
                 // 2. Restore spent outputs (resurrect UTXOs)
                 // NOTE: This requires tracking which UTXOs were spent
-                // For now, we mark transaction as orphaned (height = -1)
+                // For now, we mark transaction as orphaned (height = HEIGHT_ORPHAN)
                 // Full UTXO resurrection would require undo data (see PIVX Core's CCoinsViewCache)
                 
                 // 3. Update address index
@@ -303,9 +304,9 @@ async fn disconnect_transaction(
     }
     
     // 4. Delete transaction record (mark as orphaned)
-    // Instead of deleting, mark with height = -1 to indicate orphaned
+    // Instead of deleting, mark with HEIGHT_ORPHAN to indicate orphaned
     let mut orphan_data = vec![0u8; 4]; // version = 0
-    orphan_data.extend_from_slice(&(-1i32).to_le_bytes()); // height = -1
+    orphan_data.extend_from_slice(&HEIGHT_ORPHAN.to_le_bytes()); // height = HEIGHT_ORPHAN
     if let Some(ref data) = tx_data {
         if data.len() > 8 {
             orphan_data.extend_from_slice(&data[8..]); // Original tx bytes
