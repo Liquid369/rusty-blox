@@ -205,8 +205,10 @@ async fn compute_address_info(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
+            // Reverse to internal format for database lookup
+            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
             let mut key = vec![b't'];
-            key.extend(&txid_bytes);
+            key.extend(&txid_internal);
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
@@ -659,8 +661,10 @@ async fn aggregate_xpub_data(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
+            // Reverse to internal format for database lookup
+            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
             let mut key = vec![b't'];
-            key.extend(&txid_bytes);
+            key.extend(&txid_internal);
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
