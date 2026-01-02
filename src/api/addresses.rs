@@ -201,6 +201,33 @@ async fn compute_address_info(
         })
         .collect();
     
+    // Sort transactions by block height (descending = newest first)
+    let mut txid_heights: Vec<(String, i32)> = Vec::new();
+    for txid in &unique_txids {
+        if let Ok(txid_bytes) = hex::decode(txid) {
+            let mut key = vec![b't'];
+            key.extend(&txid_bytes);
+            let db_clone = db.clone();
+            let height = tokio::task::spawn_blocking(move || -> i32 {
+                if let Some(cf) = db_clone.cf_handle("transactions") {
+                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
+                        if tx_data.len() >= 8 {
+                            return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                        }
+                    }
+                }
+                0
+            })
+            .await
+            .unwrap_or(0);
+            txid_heights.push((txid.clone(), height));
+        }
+    }
+    
+    // Sort by height descending (newest first = highest block)
+    txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+    let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
+    
     let tx_count = unique_txids.len() as u32;
     let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
     let total_pages = if total_pages == 0 { 1 } else { total_pages };
@@ -625,9 +652,35 @@ async fn aggregate_xpub_data(
         }
     }
     
-    // Convert txid set to sorted vec
-    let mut unique_txids: Vec<String> = all_txids.into_iter().collect();
-    unique_txids.sort();
+    // Convert txid set to vec
+    let unique_txids: Vec<String> = all_txids.into_iter().collect();
+    
+    // Sort transactions by block height (descending = newest first)
+    let mut txid_heights: Vec<(String, i32)> = Vec::new();
+    for txid in &unique_txids {
+        if let Ok(txid_bytes) = hex::decode(txid) {
+            let mut key = vec![b't'];
+            key.extend(&txid_bytes);
+            let db_clone = db.clone();
+            let height = tokio::task::spawn_blocking(move || -> i32 {
+                if let Some(cf) = db_clone.cf_handle("transactions") {
+                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
+                        if tx_data.len() >= 8 {
+                            return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                        }
+                    }
+                }
+                0
+            })
+            .await
+            .unwrap_or(0);
+            txid_heights.push((txid.clone(), height));
+        }
+    }
+    
+    // Sort by height descending (newest first = highest block)
+    txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+    let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
     
     let tx_count = unique_txids.len() as u32;
     let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
@@ -887,6 +940,9 @@ async fn compute_utxos(
             }
         }
     }
+    
+    // Sort by confirmations ascending (newest first = least confirmations first)
+    utxo_list.sort_by(|a, b| a.confirmations.cmp(&b.confirmations));
     
     Ok(utxo_list)
 }
