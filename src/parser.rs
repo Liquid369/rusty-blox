@@ -2,7 +2,7 @@ use std::io::{Cursor, Read};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript, SaplingTxData, SpendDescription, OutputDescription};
 use sha2::{Sha256, Digest};
-use ripemd160::{Ripemd160, Digest as RipemdDigest};
+use ripemd160::{Ripemd160};
 use bs58;
 
 pub async fn reverse_bytes(array: &[u8]) -> Vec<u8> {

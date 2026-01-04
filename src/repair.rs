@@ -7,7 +7,7 @@
 use rocksdb::{DB, WriteBatch};
 use std::sync::Arc;
 use std::collections::HashMap;
-use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN};
+use crate::constants::{HEIGHT_GENESIS};
 
 /// Fix all transactions that have height=0 by looking them up in the block index
 /// 

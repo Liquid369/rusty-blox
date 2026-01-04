@@ -88,7 +88,7 @@ pub fn decompress_script(data: &[u8]) -> Vec<u8> {
 
             // Use secp256k1 to decompress
             if let Ok(pk) = PublicKey::from_slice(&compressed) {
-                let secp = Secp256k1::new();
+                let _secp = Secp256k1::new();
                 let uncompressed = pk.serialize_uncompressed(); // [u8;65]
                 let mut script = Vec::with_capacity(67);
                 // push 65-byte pubkey as PUSHDATA
@@ -186,7 +186,7 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
     let mut unspent_outputs: Vec<(usize, u64, Vec<u8>, OutputKind, Vec<String>)> = Vec::new();
 
     // Count set bits in mask to know how many outputs to expect
-    let expected_bits = mask_bytes.iter().map(|b| b.count_ones() as usize).sum::<usize>();
+    let _expected_bits = mask_bytes.iter().map(|b| b.count_ones() as usize).sum::<usize>();
     let mut parsed_count = 0usize;
 
     // Walk mask bits; for each set bit read amount and script

@@ -217,7 +217,7 @@ pub async fn resolve_heights_from_block_index(
     println!("   Processing only {} transactions with height=0 or HEIGHT_UNRESOLVED", fixed_count);
     
     let mut batch = WriteBatch::default();
-    let not_found_in_index = 0;
+    let _not_found_in_index = 0;
     
     // Read 'B' entries and update ONLY if txid is in our HashSet
     // Format: 'B' + height(4) + tx_index(8) -> txid_hex

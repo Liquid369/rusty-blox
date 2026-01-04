@@ -14,7 +14,7 @@
 /// **Advantages:**
 /// - Works with our own database (no dependency on PIVX Core)
 
-use crate::constants::{HEIGHT_ORPHAN, should_index_transaction};
+use crate::constants::{should_index_transaction};
 /// - Fast incremental updates
 /// - Proper UTXO tracking (spent vs unspent)
 /// 
@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use rocksdb::DB;
 use crate::parser::{deserialize_transaction, serialize_utxos};
 use crate::tx_keys::{tx_cf_key, txid_from_key, txid_from_hex};
-use crate::types::{CTransaction, CTxOut, AddressType, ScriptClassification};
+use crate::types::{CTransaction, CTxOut, ScriptClassification};
 
 /// Detect coinstake transaction (PIVX Core parity)
 /// Coinstake has: vin[0]=stake input, vout[0]=empty OP_RETURN marker, vout[1+]=rewards
@@ -382,7 +382,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     
     // O1: Track cache performance in Pass 2b
     let mut pass2b_cache_hits = 0;
-    let mut pass2b_cache_misses = 0;
+    let mut _pass2b_cache_misses = 0;
     let mut pass2b_db_reads = 0;
     
     let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
@@ -404,7 +404,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             pass2b_cache_hits += 1;
             Arc::clone(cached_tx)
         } else {
-            pass2b_cache_misses += 1;
+            _pass2b_cache_misses += 1;
             let raw_tx = &value[8..];
             let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
             tx_with_header.extend_from_slice(&[0u8; 4]);

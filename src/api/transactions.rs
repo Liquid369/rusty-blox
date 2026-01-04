@@ -3,7 +3,7 @@
 // Endpoints for querying and broadcasting transactions.
 // Confirmed transactions are immutable and cached heavily.
 
-use axum::{Json, Extension, extract::Path, http::StatusCode};
+use axum::{Json, Extension, http::StatusCode};
 use rocksdb::DB;
 use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::config::get_global_config;
 use crate::parser::{get_script_type, deserialize_transaction_blocking};
-use super::types::{BlockbookError, SendTxResponse, TxError};
+use super::types::{BlockbookError, SendTxResponse};
 use super::helpers::format_piv_amount;
 
 pub use axum::extract::Path as AxumPath;

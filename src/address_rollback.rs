@@ -213,7 +213,7 @@ pub async fn build_address_undo_from_block(
     let db_clone = db.clone();
     let cf_transactions = db_clone.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
-    let cf_addr_index = db_clone.cf_handle("addr_index")
+    let _cf_addr_index = db_clone.cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
     
     // Process each transaction in the block

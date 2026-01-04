@@ -19,6 +19,7 @@ const MIN_BLOCK_SIZE: u64 = 81; // Minimum: 80-byte header + 1 byte for varint t
 const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB maximum block size (PIVX protocol limit)
 
 // Helper to read varint from async reader
+#[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u64, std::io::Error> {
     let first = reader.read_u8().await?;
     let value = match first {
@@ -43,6 +44,7 @@ async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u64, std
 }
 
 // Helper to read script
+#[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_script<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>, std::io::Error> {
     let script_length = read_varint(reader).await?;
     let mut script = vec![0u8; script_length as usize];
@@ -51,6 +53,7 @@ async fn read_script<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>,
 }
 
 // Helper to read outpoint
+#[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_outpoint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<COutPoint, std::io::Error> {
     let mut hash = [0u8; 32];
     reader.read_exact(&mut hash).await?;
@@ -67,6 +70,7 @@ async fn read_outpoint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<COutPo
 }
 
 // Parse transaction inputs
+#[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
     reader: &mut R,
     block_version: u32,
@@ -109,6 +113,7 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
 }
 
 // Parse transaction outputs
+#[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<CTxOut>, std::io::Error> {
     let output_count = read_varint(reader).await?;
     let mut outputs = Vec::new();
@@ -140,7 +145,6 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
     reader: &mut R,
     magic: &[u8; 4]
 ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::AsyncReadExt;
     
     let mut buffer = [0u8; 4];
     let start_pos = reader.stream_position().await?;

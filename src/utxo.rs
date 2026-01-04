@@ -398,7 +398,7 @@ pub fn parse_ccoins(data: &[u8]) -> Result<CCoins, ChainstateError> {
 pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String, u64> {
     let mut balances: HashMap<String, u64> = HashMap::new();
     let mut parse_errors = 0;
-    let mut script_errors = 0;
+    let _script_errors = 0;
     let mut total_utxos = 0;
     let mut no_address_count = 0;
     

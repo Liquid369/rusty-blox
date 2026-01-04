@@ -52,6 +52,7 @@ pub mod script_validation;
 pub mod sapling_validation;
 
 #[repr(C)]
+#[allow(non_snake_case)] // C FFI struct - must match quark hash C implementation
 pub struct sph_blake_big_context {
 
     buf: [u8; 128],

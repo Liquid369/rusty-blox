@@ -293,11 +293,11 @@ async fn validate_balance(tx: &CTransaction, sapling_data: &SaplingTxData) -> Op
     }
     
     // Calculate transparent balance
-    let transparent_in: i64 = tx.inputs.iter()
+    let _transparent_in: i64 = tx.inputs.iter()
         .filter(|input| input.coinbase.is_none())
         .count() as i64 * 0; // We don't have input values here easily
     
-    let transparent_out: i64 = tx.outputs.iter()
+    let _transparent_out: i64 = tx.outputs.iter()
         .map(|output| output.value)
         .sum();
     

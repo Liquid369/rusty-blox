@@ -123,7 +123,7 @@ impl PosValidationConfig {
 /// ValidationResult indicating if coinstake is valid
 pub fn validate_coinstake_transaction(
     coinstake_tx: &crate::types::CTransaction,
-    block_height: i32,
+    _block_height: i32,
 ) -> BlockValidationResult {
     // Check: Must have at least 1 input
     if coinstake_tx.inputs.is_empty() {

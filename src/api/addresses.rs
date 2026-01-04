@@ -13,7 +13,6 @@ use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
 use crate::parser::{deserialize_utxos, deserialize_transaction, deserialize_transaction_blocking};
 use crate::maturity::{filter_spendable_utxos, get_current_height};
 use super::types::{AddressInfo, AddressQuery, XPubInfo, UTXO, UtxoQuery};
-use super::helpers::format_piv_amount;
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"

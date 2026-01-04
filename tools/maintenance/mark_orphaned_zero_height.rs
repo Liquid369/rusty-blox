@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = "data/pivx";
     println!("📂 Opening database: {}", db_path);
     
-    let mut opts = Options::default();
+    let opts = Options::default();
     let cfs = vec![
         ColumnFamilyDescriptor::new("default", Options::default()),
         ColumnFamilyDescriptor::new("blocks", Options::default()),

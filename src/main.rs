@@ -28,7 +28,7 @@ use rustyblox::api::{
 use rustyblox::types::MyError;
 
 use std::sync::Arc;
-use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, SliceTransform, BlockBasedOptions};
+use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, BlockBasedOptions};
 use axum::{Router, routing::{get, post}};
 use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::Mutex as TokioMutex;

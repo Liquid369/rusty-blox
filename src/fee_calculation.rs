@@ -141,7 +141,7 @@ fn extract_input_prevouts(inputs: &[CTxIn]) -> Vec<(Vec<u8>, u64)> {
 pub async fn calculate_transaction_fee(
     db: Arc<DB>,
     tx: &CTransaction,
-    height: i32,
+    _height: i32,
 ) -> Result<FeeCalculation, Box<dyn std::error::Error + Send + Sync>> {
     // Determine transaction type
     let tx_type = detect_transaction_type(tx);

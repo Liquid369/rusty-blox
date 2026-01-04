@@ -10,7 +10,7 @@ pub fn address_type_to_string_blocking(address: Option<AddressType>) -> Vec<Stri
 // address.rs
 
 use sha2::{Sha256, Digest};
-use ripemd160::{Ripemd160, Digest as RipemdDigest};
+use ripemd160::{Ripemd160};
 use bs58;
 use crate::types::{CScript, AddressType};
 
@@ -29,12 +29,14 @@ pub async fn hash_address(hash: &[u8], prefix: u8) -> String {
     bs58::encode(extended_hash).into_string()
 }
 
+#[allow(dead_code)] // Crypto utility - may be needed for address validation
 fn sha256(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().to_vec()
 }
 
+#[allow(dead_code)] // Crypto utility - may be needed for address validation
 fn ripemd160_hash(data: &[u8]) -> Vec<u8> {
     let mut hasher = Ripemd160::new();
     hasher.update(data);

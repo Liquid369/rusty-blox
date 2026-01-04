@@ -9,7 +9,7 @@
 /// - Transaction's block hash doesn't match canonical chain at that height
 
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use rocksdb::{DB, Options, ColumnFamilyDescriptor, WriteBatch, IteratorMode};
 
 #[tokio::main]

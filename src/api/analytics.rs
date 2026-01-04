@@ -19,7 +19,6 @@ use crate::chain_state::get_chain_state;
 use crate::parser::deserialize_transaction_blocking;
 use super::helpers::format_piv_amount;
 use crate::tx_type::{detect_transaction_type, TransactionType};
-use super::network::compute_money_supply;
 
 // ========================================
 // Query Parameters
@@ -255,11 +254,11 @@ pub async fn wealth_distribution(
 
 async fn compute_supply_analytics(
     db: &Arc<DB>,
-    range: &str,
+    _range: &str,
 ) -> Result<SupplyAnalytics, Box<dyn std::error::Error + Send + Sync>> {
     // Get current chain state for total supply
     let chain_state = get_chain_state(db).map_err(|e| e.to_string())?;
-    let current_height = chain_state.height;
+    let _current_height = chain_state.height;
     
     // Get real supply data from PIVX RPC
     let money_supply = super::network::compute_money_supply().await?;
@@ -301,7 +300,7 @@ fn compute_transaction_analytics(
     let days = parse_time_range(range) as i32;
     
     let tx_cf = db.cf_handle("transactions").ok_or("transactions CF not found")?;
-    let metadata_cf = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let _metadata_cf = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     
     let blocks_per_day = 1440i32;
     let start_height = std::cmp::max(1, current_height - (days * blocks_per_day));

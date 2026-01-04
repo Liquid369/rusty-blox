@@ -2,7 +2,6 @@ use serde::Serialize;
 use serde::Deserialize;
 use serde::{Serializer, Deserializer};
 use std::fmt;
-use std::hash::Hash as StdHash;
 use std::sync::Arc;
 use rocksdb::DB;
 use crate::cache::CacheManager;
@@ -15,6 +14,7 @@ where
     serializer.serialize_bytes(bytes)
 }
 
+#[allow(dead_code)] // Deserialization helper - paired with serialize_bytes for completeness
 fn deserialize_bytes<'de, D, const N: usize>(deserializer: D) -> Result<[u8; N], D::Error>
 where
     D: Deserializer<'de>,

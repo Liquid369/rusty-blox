@@ -107,7 +107,7 @@ fn add_u256(a: &mut [u64; 4], b: &[u64; 4]) -> bool {
 }
 
 // Divide 320-bit by 256-bit, returns 256-bit quotient
-fn div_u256(dividend: [u64; 5], divisor: [u64; 4]) -> [u64; 4] {
+fn div_u256(_dividend: [u64; 5], divisor: [u64; 4]) -> [u64; 4] {
     // Simplified division approximation for chainwork comparison
     let mut shift = 0;
     if divisor[3] != 0 {

@@ -116,7 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stored = 0;
     let mut skipped = 0;
     
-    for (height, hash, opt_file, opt_pos) in &canonical_chain {
+    for (_height, hash, opt_file, opt_pos) in &canonical_chain {
         if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
             // Key: 'o' + internal_hash (33 bytes total)
             let mut off_key = vec![b'o'];

@@ -1,5 +1,4 @@
 use rocksdb::{DB, Options};
-use std::sync::Arc;
 use rustyblox::config::{load_config, get_db_path};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cf_names = vec!["default"];
     cf_names.extend(["blocks", "transactions", "addr_index", "utxo", "chain_metadata", "pubkey", "chain_state"]);
     
-    let mut opts = Options::default();
+    let opts = Options::default();
     let db = DB::open_cf_for_read_only(&opts, db_path, &cf_names, false)?;
     
     let cf_metadata = db.cf_handle("chain_metadata").unwrap();

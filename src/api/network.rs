@@ -17,7 +17,6 @@ use crate::cache::CacheManager;
 use crate::chain_state::{get_chain_state, ChainState};
 use crate::config::get_global_config;
 use super::types::{BlockbookError, MoneySupply};
-use super::helpers::internal_error;
 
 /// GET /api/v2/status
 /// Returns the current status of the blockchain and explorer.

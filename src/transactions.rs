@@ -12,11 +12,13 @@ use std::error::Error;
 use std::io::{self, Cursor};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use byteorder::{LittleEndian, ReadBytesExt};
+use byteorder::{LittleEndian};
 use tokio::fs::File;
 use sha2::{Sha256, Digest};
 
+#[allow(dead_code)] // PIVX magic bytes - may be needed for raw block validation
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
+#[allow(dead_code)] // Size limit for transaction payloads - may be needed for validation
 const MAX_PAYLOAD_SIZE: usize = 10000;
 
 /// Priority 1.3: Wrapper to make Cursor AsyncRead compatible
@@ -596,25 +598,26 @@ async fn read_outpoint<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<CO
     Ok(COutPoint { hash: hex_hash, n })
 }
 
+#[allow(dead_code)] // Sapling transaction parser - reserved for future Sapling support
 async fn parse_sapling_tx_data(
     reader: &mut BufReader<File>,
     start_pos: u64,
     _db: Arc<DB>,
-    batch: &mut BatchWriter,
+    _batch: &mut BatchWriter,
 ) -> Result<SaplingTxData, io::Error> {
-    let cf_transactions = _db
+    let _cf_transactions = _db
         .cf_handle("transactions")
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "transactions CF not found"))?;
-    let cf_pubkey = _db
+    let _cf_pubkey = _db
         .cf_handle("pubkey")
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pubkey CF not found"))?;
-    let cf_utxo = _db
+    let _cf_utxo = _db
         .cf_handle("utxo")
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "utxo CF not found"))?;
 
     // Set empty vectors for later access
-    let inputs: Vec<CTxIn> = Vec::new();
-    let outputs: Vec<CTxOut> = Vec::new();
+    let _inputs: Vec<CTxIn> = Vec::new();
+    let _outputs: Vec<CTxOut> = Vec::new();
     // Potential Vin Vector
     let input_count = read_varint(reader).await? as u64;
     println!("Input Count: {}", input_count);
@@ -672,10 +675,10 @@ async fn parse_sapling_tx_data(
         }
     }
 
-    let lock_time_buff = reader.read_u32_le().await?;
+    let _lock_time_buff = reader.read_u32_le().await?;
     //println!("Lock Time: {}", lock_time_buff);
     // Hacky fix for getting proper values/spends/outputs for Sapling
-    let value_count = read_varint(reader).await?;
+    let _value_count = read_varint(reader).await?;
     let value_balance = reader.read_i64_le().await?;
     //println!("Value: {}", value_balance);
     // Read the SaplingTxData
@@ -747,12 +750,14 @@ async fn parse_sapling_tx_data(
 
     for tx_out in &outputs {
         let address_type = get_address_type(tx_out, &general_address_type).await;
-        handle_address(
+        if let Err(e) = handle_address(
             _db.clone(),
             &address_type,
             reversed_txid.clone(),
             tx_out.index.try_into().unwrap_or(0),
-        ).await;
+        ).await {
+            eprintln!("Warning: Failed to handle address for output: {:?}", e);
+        }
 
         let mut key_pubkey = vec![b'p'];
         key_pubkey.extend_from_slice(&tx_out.script_pubkey.script);
@@ -780,6 +785,7 @@ async fn parse_sapling_tx_data(
     Ok(sapling_tx_data)
 }
 
+#[allow(dead_code)] // Sapling shield parser - reserved for future Sapling support
 async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<SpendDescription>, io::Error> {
     // Read the number of vShieldSpend entries
     let count = read_varint(reader).await? as usize;
@@ -826,6 +832,7 @@ async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<SpendD
     Ok(vshield_spends)
 }
 
+#[allow(dead_code)] // Sapling shield parser - reserved for future Sapling support
 async fn parse_vshield_outputs(
     reader: &mut BufReader<File>,
 ) -> Result<Vec<OutputDescription>, io::Error> {
@@ -874,6 +881,7 @@ async fn parse_vshield_outputs(
     Ok(vshield_outputs)
 }
 
+#[allow(dead_code)] // Payload parser - reserved for future transaction payload support
 async fn parse_payload_data(reader: &mut BufReader<File>) -> Result<Option<Vec<u8>>, io::Error> {
     let mut prefix_found = false;
     let mut byte_count = 0;
@@ -946,6 +954,7 @@ pub async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> io::Result<
 }
 
 /// Priority 1.3: Synchronous varint reader for Cursor-based parsing
+#[allow(dead_code)] // Alternative varint reader - may be needed for sync parsing contexts
 fn read_varint_sync<R: io::Read>(reader: &mut R) -> io::Result<u64> {
     use byteorder::ReadBytesExt;
     let first = reader.read_u8()?;
@@ -971,6 +980,7 @@ pub async fn read_varint2<R: AsyncReadExt + Unpin + ?Sized>(reader: &mut R) -> i
 }
 
 // Bitcoin varint128
+#[allow(dead_code)] // Alternative varint reader - may be needed for specific encoding contexts
 async fn read_varint128(data: &[u8]) -> (usize, u64) {
     let mut index = 0;
     let mut value: u64 = 0;
@@ -1033,12 +1043,14 @@ async fn handle_address(
         };
         
         existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
-        perform_rocksdb_put(
+        if let Err(e) = perform_rocksdb_put(
             _db.clone(),
             "addr_index",
             key_address,
             serialize_utxos(&existing_utxos).await
-        ).await;
+        ).await {
+            eprintln!("Warning: Failed to add UTXO to address index: {:?}", e);
+        }
     }
 
     Ok(())
@@ -1046,6 +1058,7 @@ async fn handle_address(
 
 // Helper function for fast_sync mode: Index addresses only (no spent tracking)
 // This is much faster than full UTXO tracking because it doesn't look up previous transactions
+#[allow(dead_code)] // Fast-sync optimization - reserved for future performance mode
 async fn handle_address_outputs_only(
     _db: Arc<DB>,
     address_type: &AddressType,
@@ -1070,12 +1083,14 @@ async fn handle_address_outputs_only(
         };
         
         existing_utxos.push((reversed_txid.clone(), tx_out_index.into()));
-        perform_rocksdb_put(
+        if let Err(e) = perform_rocksdb_put(
             _db.clone(),
             "addr_index",
             key_address,
             serialize_utxos(&existing_utxos).await
-        ).await;
+        ).await {
+            eprintln!("Warning: Failed to add zerocoin UTXO to address index: {:?}", e);
+        }
     }
 
     Ok(())
@@ -1115,12 +1130,14 @@ async fn remove_utxo_addr(
 
         // Update or delete the UTXO entry for this address
         if !existing_utxos.is_empty() {
-            perform_rocksdb_put(
+            if let Err(e) = perform_rocksdb_put(
                 _db.clone(),
                 "addr_index",
                 key_address,
                 serialize_utxos(&existing_utxos).await
-            ).await;
+            ).await {
+                eprintln!("Warning: Failed to update address index after UTXO removal: {:?}", e);
+            }
         } else {
             perform_rocksdb_del(_db.clone(), "addr_index", key_address).await.ok();
         }

@@ -29,7 +29,7 @@ async fn index_block_by_offset(
     block_hash: &[u8], // internal format
     height: i32,
     db: Arc<DB>,
-    state: AppState,
+    _state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Construct blk file path
     let filename = format!("blk{:05}.dat", file_num);
@@ -53,7 +53,7 @@ async fn index_block_by_offset(
     // Read block size
     let mut size_buf = [0u8; 4];
     reader.read_exact(&mut size_buf).await?;
-    let block_size = u32::from_le_bytes(size_buf) as u64;
+    let _block_size = u32::from_le_bytes(size_buf) as u64;
 
     // Read header version to determine header size
     let mut version_bytes = [0u8; 4];
@@ -166,6 +166,7 @@ fn parse_block_header_sync(
 
 struct ParsedBlockHeader {
     block_hash: Vec<u8>,
+    #[allow(dead_code)] // Previous block hash - reserved for chain validation
     hash_prev_block: [u8; 32],
 }
 

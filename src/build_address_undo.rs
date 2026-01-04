@@ -93,7 +93,6 @@ pub async fn check_address_undo_coverage(
     end_height: i32,
 ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
     let total_blocks = (end_height - start_height + 1) as usize;
-    let mut blocks_with_undo = 0;
     
     let db_clone = db.clone();
     
@@ -116,7 +115,7 @@ pub async fn check_address_undo_coverage(
     })
     .await??;
     
-    blocks_with_undo = results;
+    let blocks_with_undo = results;
     
     Ok((blocks_with_undo, total_blocks))
 }
