@@ -83,7 +83,7 @@ use crate::websocket::EventBroadcaster;
 use crate::leveldb_index::build_canonical_chain_from_leveldb;
 use crate::chain_state::set_network_height;
 use crate::pivx_copy::get_block_index_path;
-use pivx_rpc_rs::BitcoinRpcClient;
+use pivx_rpc_rs::PivxRpcClient;
 use crate::repair;
 
 /// Get current sync status from database
@@ -170,7 +170,7 @@ async fn update_network_height(db: &Arc<DB>) {
     };
     
     // Create RPC client
-    let rpc_client = BitcoinRpcClient::new(
+    let rpc_client = PivxRpcClient::new(
         rpc_host,
         Some(rpc_user),
         Some(rpc_pass),
@@ -240,7 +240,7 @@ async fn run_initial_sync_leveldb(
     let rpc_user = config.get_string("rpc.user").unwrap_or_else(|_| "explorer".to_string());
     let rpc_pass = config.get_string("rpc.pass").unwrap_or_else(|_| "explorer_test_pass".to_string());
     
-    let rpc_client = BitcoinRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+    let rpc_client = PivxRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
     
     match rpc_client.getblockcount() {
         Ok(network_height) => {

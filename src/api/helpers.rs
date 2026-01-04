@@ -2,7 +2,7 @@
 //
 // Shared utilities used across API modules.
 
-use pivx_rpc_rs::BitcoinRpcClient;
+use pivx_rpc_rs::PivxRpcClient;
 use crate::config::get_global_config;
 use axum::{Json, http::StatusCode};
 use std::sync::Arc;
@@ -33,7 +33,7 @@ pub fn format_piv_amount(amount: i64) -> String {
 /// - `rpc.host` (default: "127.0.0.1:51472")
 /// - `rpc.user`
 /// - `rpc.pass`
-pub fn create_rpc_client() -> Result<Arc<BitcoinRpcClient>, String> {
+pub fn create_rpc_client() -> Result<Arc<PivxRpcClient>, String> {
     let config = get_global_config();
     
     let rpc_host = config
@@ -46,7 +46,7 @@ pub fn create_rpc_client() -> Result<Arc<BitcoinRpcClient>, String> {
         .get_string("rpc.pass")
         .unwrap_or_default();
     
-    Ok(BitcoinRpcClient::new(
+    Ok(PivxRpcClient::new(
         rpc_host,
         Some(rpc_user),
         Some(rpc_pass),

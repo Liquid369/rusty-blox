@@ -67,7 +67,7 @@ impl ReorgInfo {
 /// Height of last common block, or error if not found
 pub async fn find_fork_point(
     db: &Arc<DB>,
-    rpc_client: &Arc<pivx_rpc_rs::BitcoinRpcClient>,
+    rpc_client: &Arc<pivx_rpc_rs::PivxRpcClient>,
     start_height: i32,
 ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
     let cf_metadata = db.cf_handle("chain_metadata")
@@ -368,7 +368,7 @@ async fn update_sync_height(
 /// ReorgInfo with details about what was rolled back
 pub async fn handle_reorg(
     db: Arc<DB>,
-    rpc_client: &Arc<pivx_rpc_rs::BitcoinRpcClient>,
+    rpc_client: &Arc<pivx_rpc_rs::PivxRpcClient>,
     current_height: i32,
     rpc_height: i32,
 ) -> Result<ReorgInfo, Box<dyn std::error::Error + Send + Sync>> {

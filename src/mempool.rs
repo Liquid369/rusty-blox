@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use pivx_rpc_rs::BitcoinRpcClient;
+use pivx_rpc_rs::PivxRpcClient;
 use serde::{Serialize, Deserialize};
 
 use crate::config::get_global_config;
@@ -78,7 +78,7 @@ pub async fn run_mempool_monitor(
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
     
-    let rpc_client = Arc::new(BitcoinRpcClient::new(
+    let rpc_client = Arc::new(PivxRpcClient::new(
         rpc_host.clone(),
         Some(rpc_user),
         Some(rpc_pass),
@@ -105,8 +105,8 @@ pub async fn run_mempool_monitor(
             Ok(mempool_result) => {
                 // Extract txids based on RawMemPool variant
                 let txids: Vec<String> = match mempool_result {
-                    pivx_rpc_rs::RawMemPool::False(txid_list) => txid_list,
-                    pivx_rpc_rs::RawMemPool::True(_) => {
+                    pivx_rpc_rs::RawMemPool::TxIds(txid_list) => txid_list,
+                    pivx_rpc_rs::RawMemPool::Verbose(_) => {
                         eprintln!("Unexpected verbose mempool response");
                         continue;
                     }

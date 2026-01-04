@@ -5,7 +5,7 @@
 
 use axum::{Json, Extension, extract::Path, http::StatusCode};
 use rocksdb::DB;
-use pivx_rpc_rs::BitcoinRpcClient;
+use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -358,7 +358,7 @@ async fn send_transaction_internal(
     let rpc_user = config.get::<String>("rpc.user");
     let rpc_pass = config.get::<String>("rpc.pass");
 
-    let client = BitcoinRpcClient::new(
+    let client = PivxRpcClient::new(
         rpc_host.unwrap_or_else(|_| "127.0.0.1:9998".to_string()),
         Some(rpc_user.unwrap_or_default()),
         Some(rpc_pass.unwrap_or_default()),

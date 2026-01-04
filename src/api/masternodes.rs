@@ -3,7 +3,7 @@
 // Endpoints that proxy to PIVX RPC for masternode information.
 
 use axum::{Json, Extension, extract::Path as AxumPath, http::StatusCode};
-use pivx_rpc_rs::{BitcoinRpcClient, MasternodeList};
+use pivx_rpc_rs::{PivxRpcClient, MasternodeList};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -161,7 +161,7 @@ pub async fn relay_mnb_v2(
     let rpc_user = config.get::<String>("rpc.user");
     let rpc_pass = config.get::<String>("rpc.pass");
 
-    let client = BitcoinRpcClient::new(
+    let client = PivxRpcClient::new(
         rpc_host.unwrap_or_else(|_| "127.0.0.1:51472".to_string()),
         Some(rpc_user.unwrap_or_default()),
         Some(rpc_pass.unwrap_or_default()),

@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use rocksdb::DB;
-use pivx_rpc_rs::BitcoinRpcClient;
+use pivx_rpc_rs::PivxRpcClient;
 use serde_json::Value;
 
 use crate::config::get_global_config;
@@ -25,7 +25,7 @@ pub struct ChainTip {
 
 /// Get current chain tip from RPC node
 fn get_rpc_chain_tip(
-    rpc_client: &BitcoinRpcClient,
+    rpc_client: &PivxRpcClient,
 ) -> Result<ChainTip, Box<dyn std::error::Error>> {
     // Get block count (height)
     let height_i64 = rpc_client.getblockcount()?;
@@ -86,7 +86,7 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
 
 /// Fetch and index a single block from RPC
 async fn index_block_from_rpc(
-    rpc_client: &BitcoinRpcClient,
+    rpc_client: &PivxRpcClient,
     height: i32,
     db: &Arc<DB>,
     broadcaster: &Option<Arc<EventBroadcaster>>,
@@ -709,7 +709,7 @@ pub async fn run_block_monitor(
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
     
-    let rpc_client = Arc::new(BitcoinRpcClient::new(
+    let rpc_client = Arc::new(PivxRpcClient::new(
         rpc_host.clone(),
         Some(rpc_user),
         Some(rpc_pass),
