@@ -1,32 +1,32 @@
 /**
  * Format PIV amount with proper decimal places.
  * 
- * CRITICAL: Backend API always returns PIV amounts as decimal strings (e.g., "1.00000000"),
- * never as satoshis. This function formats these strings consistently.
+ * Backend API returns satoshi values as strings (e.g., "100000000" = 1 PIV).
+ * This function converts from satoshis to PIV by dividing by 100,000,000.
  * 
- * @param {number|string} value - PIV amount (backend always sends decimal strings like "1.00000000")
+ * @param {number|string} value - Amount in satoshis from backend
  * @param {number} decimals - Number of decimal places to display (default: 8)
  * @returns {string} Formatted PIV value
  */
 export function formatPIV(value, decimals = 8) {
   if (value === null || value === undefined) return '0.00000000'
   
-  // Handle string input (most common from API)
+  // Convert from satoshis to PIV
+  let satoshis
   if (typeof value === 'string') {
     const trimmed = value.trim()
     if (trimmed.length === 0) return '0.00000000'
-    
-    const parsed = parseFloat(trimmed)
-    if (isNaN(parsed) || !isFinite(parsed)) return '0.00000000'
-    
-    return parsed.toFixed(decimals)
+    satoshis = parseFloat(trimmed)
+  } else {
+    satoshis = Number(value)
   }
   
-  // Handle numeric input (rare, but support for computed values)
-  const numValue = Number(value)
-  if (!isFinite(numValue) || isNaN(numValue)) return '0.00000000'
+  // Validate
+  if (isNaN(satoshis) || !isFinite(satoshis)) return '0.00000000'
   
-  return numValue.toFixed(decimals)
+  // Convert satoshis to PIV (1 PIV = 100,000,000 satoshis)
+  const piv = satoshis / 100000000
+  return piv.toFixed(decimals)
 }
 
 /**
