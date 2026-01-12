@@ -7,7 +7,7 @@
         {{ label }}
       </div>
       <div class="stat-value" :class="valueClass">
-        {{ value }}
+        {{ value }}<span v-if="suffix" class="stat-suffix">{{ suffix }}</span>
       </div>
       <div v-if="subtitle" class="stat-subtitle">
         {{ subtitle }}
@@ -25,6 +25,12 @@ defineProps({
   value: {
     type: [String, Number],
     required: true
+  },  suffix: {
+    type: String,
+    default: ''
+  },  suffix: {
+    type: String,
+    default: ''
   },
   subtitle: {
     type: String,
@@ -107,13 +113,26 @@ defineProps({
 }
 
 .stat-value {
-  font-size: var(--text-3xl);
-  font-weight: var(--weight-extrabold);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
   color: var(--text-primary);
-  line-height: 1.1;
+  line-height: 1.2;
   font-family: var(--font-mono);
   margin-bottom: var(--space-2);
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  word-break: break-all;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.stat-suffix {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  font-family: var(--font-primary);
+  text-transform: uppercase;
 }
 
 .stat-value.text-success {

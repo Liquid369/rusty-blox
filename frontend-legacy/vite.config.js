@@ -10,7 +10,7 @@ export default defineConfig({
     }
   },
   server: {
-    port: 3000,
+    port: 3001,
     host: true, // Listen on all addresses
     allowedHosts: ['.trycloudflare.com'], // Allow Cloudflare tunnel domains
     proxy: {

@@ -45,20 +45,20 @@
         <div class="stats-grid">
           <StatCard
             label="Balance"
-            :value="formatPIV(addressData.balance)"
+            :value="formatPIV(addressData.balance, 2)"
             suffix="PIV"
             icon="💰"
             variant="primary"
           />
           <StatCard
             label="Total Received"
-            :value="formatPIV(addressData.totalReceived)"
+            :value="formatPIV(addressData.totalReceived, 2)"
             suffix="PIV"
             icon="📥"
           />
           <StatCard
             label="Total Sent"
-            :value="formatPIV(addressData.totalSent)"
+            :value="formatPIV(addressData.totalSent, 2)"
             suffix="PIV"
             icon="📤"
           />
@@ -220,6 +220,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useChainStore } from '@/stores/chainStore'
 import { addressService } from '@/services/addressService'
 import { transactionService } from '@/services/transactionService'
 import { formatPIV, formatNumber } from '@/utils/formatters'
@@ -240,6 +241,7 @@ import QRCode from 'qrcode'
 
 const route = useRoute()
 const router = useRouter()
+const chainStore = useChainStore()
 
 const address = ref(route.params.address)
 const addressData = ref(null)
