@@ -121,7 +121,7 @@ export function meetsVotingThreshold(proposal, passingThreshold) {
  * Calculate which proposals will be funded based on budget constraints
  * 
  * PIVX Core algorithm:
- * 1. Filter to proposals meeting voting threshold
+ * 1. Filter to proposals meeting voting threshold AND with remaining payments
  * 2. Sort by net votes (descending) - highest votes win
  * 3. Allocate budget in order until 432,000 PIV cap reached
  * 
@@ -131,11 +131,12 @@ export function meetsVotingThreshold(proposal, passingThreshold) {
  * @returns {Object} { funded: Array, unfunded: Array }
  */
 export function calculateFundedProposals(proposals, passingThreshold, currentHeight) {
-  // Filter to active proposals that meet voting threshold
+  // Filter to active proposals that meet voting threshold AND have remaining payments
   const eligible = proposals.filter(p => 
     p.IsValid && 
     !isProposalCompleted(p, currentHeight) &&
-    meetsVotingThreshold(p, passingThreshold)
+    meetsVotingThreshold(p, passingThreshold) &&
+    (p.RemainingPaymentCount > 0) // Only proposals still receiving payments
   )
   
   // Sort by net votes (descending) - PIVX Core priority

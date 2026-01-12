@@ -313,24 +313,27 @@ const timeUntilNextPayout = computed(() => {
   }
 })
 
-// Active proposals (not completed, valid)
+// Active proposals (not completed, valid, and still has remaining payments)
 const activeProposals = computed(() => {
   if (!proposals.value.length || !currentBlockHeight.value || !governanceStats.value) {
     return []
   }
   return proposals.value.filter(p => {
     const status = getProposalStatusForProposal(p)
-    return status !== ProposalStatus.COMPLETED && status !== ProposalStatus.INVALID
+    return status !== ProposalStatus.COMPLETED && 
+           status !== ProposalStatus.INVALID &&
+           (p.RemainingPaymentCount || 0) > 0 // Only show proposals with remaining payments
   })
 })
 
-// Failing proposals (active but not meeting threshold)
+// Failing proposals (active but not meeting threshold, and has remaining payments)
 const failingProposals = computed(() => {
   if (!proposals.value.length || !currentBlockHeight.value || !governanceStats.value) {
     return []
   }
   return proposals.value.filter(p => {
-    return getProposalStatusForProposal(p) === ProposalStatus.FAILING
+    return getProposalStatusForProposal(p) === ProposalStatus.FAILING &&
+           (p.RemainingPaymentCount || 0) > 0 // Only show proposals with remaining payments
   })
 })
 
@@ -349,16 +352,24 @@ const getProposalStatusForProposal = (proposal) => {
 }
 
 const filteredProposals = computed(() => {
+  // Apply status filter
+  let filtered
   switch (statusFilter.value) {
     case 'active':
-      return activeProposals.value
+      filtered = activeProposals.value
+      break
     case 'passing':
-      return passingProposals.value
+      filtered = passingProposals.value
+      break
     case 'failing':
-      return failingProposals.value
+      filtered = failingProposals.value
+      break
     default:
-      return proposals.value
+      // 'all' - show all proposals with remaining payments
+      filtered = proposals.value.filter(p => (p.RemainingPaymentCount || 0) > 0)
+      break
   }
+  return filtered
 })
 
 // Get display information for a proposal
