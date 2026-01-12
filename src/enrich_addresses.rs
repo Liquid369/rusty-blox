@@ -124,6 +124,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut spent_outputs: HashSet<(Vec<u8>, u64)> = HashSet::new();
     let mut tx_cache: HashMap<Vec<u8>, Arc<CTransaction>> = HashMap::new();
     println!("   🚀 O1 Transaction Cache enabled (eliminates 2x redundant deserialization)");
+    
+    // Phase 2 Instrumentation: Track deserialization metrics
+    let mut pass1_tx_total = 0;
+    let mut pass1_tx_deserialized = 0;
+    let mut pass1_tx_failed = 0;
+    let mut pass1_inputs_processed = 0;
+    
     let iter1 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     
     for item in iter1 {
@@ -146,17 +153,35 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
         tx_with_header.extend_from_slice(&[0u8; 4]);
         tx_with_header.extend_from_slice(raw_tx);
-        if let Ok(tx) = deserialize_transaction(&tx_with_header).await {
-            // O1: Extract txid and cache the transaction
-            let txid_bytes = txid_from_key(&key);
-            if !txid_bytes.is_empty() {
-                tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
+        
+        pass1_tx_total += 1;
+        
+        let tx = match deserialize_transaction(&tx_with_header).await {
+            Ok(tx) => {
+                pass1_tx_deserialized += 1;
+                // O1: Extract txid and cache the transaction
+                let txid_bytes = txid_from_key(&key);
+                if !txid_bytes.is_empty() {
+                    tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
+                }
+                Arc::new(tx)
             }
-            
-            for input in &tx.inputs {
+            Err(e) => {
+                pass1_tx_failed += 1;
+                // CRITICAL: Log deserialization failures
+                let txid_bytes = txid_from_key(&key);
+                let txid_hex = hex::encode(&txid_bytes);
+                eprintln!("⚠️  Pass 1: Failed to deserialize transaction {} at height {}: {}", 
+                         txid_hex, height, e);
+                continue;
+            }
+        };
+        
+        for input in &tx.inputs {
                 if input.coinbase.is_some() {
                     continue;
                 }
+                pass1_inputs_processed += 1;
                 if let Some(prevout) = &input.prevout {
                     // FIXED: parser.rs now returns prevout.hash in DISPLAY format (reversed)
                     // This matches the format used in database keys ('t' + reversed_txid)
@@ -176,7 +201,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                         spent_outputs.insert((prev_txid_display, prevout.n as u64));
                     }
                 }
-            }
         }
         processed += 1;
         if processed % 100000 == 0 {
@@ -185,7 +209,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     }
     
     println!("   ✅ Pass 1 complete: {} transactions scanned, {} spent outputs found", processed, spent_outputs.len());
-    println!("   💾 Transaction cache: {} entries (~{:.1} MB)", 
+    println!("   � Pass 1 Metrics: {} total, {} deserialized, {} FAILED, {} inputs", 
+        pass1_tx_total, pass1_tx_deserialized, pass1_tx_failed, pass1_inputs_processed);
+    println!("   �💾 Transaction cache: {} entries (~{:.1} MB)", 
         tx_cache.len(), 
         (tx_cache.len() as f64 * 0.5) / 1000.0  // Estimate ~500 bytes per tx
     );
@@ -222,6 +248,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut cache_hits = 0;
     let mut cache_misses = 0;
     
+    // Phase 2 Instrumentation: Track Pass 2 metrics
+    let mut pass2_tx_total = 0;
+    let mut pass2_tx_deserialized = 0;
+    let mut pass2_tx_failed = 0;
+    let mut pass2_outputs_processed = 0;
+    
     let iter2 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     for item in iter2 {
         let (key, value) = item?;
@@ -246,9 +278,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             continue; // Invalid key format
         }
         
+        pass2_tx_total += 1;
+        
         // O1: Try to get transaction from cache first
         let tx = if let Some(cached_tx) = tx_cache.get(&txid_bytes) {
             cache_hits += 1;
+            pass2_tx_deserialized += 1;
             Arc::clone(cached_tx)
         } else {
             cache_misses += 1;
@@ -257,8 +292,17 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             tx_with_header.extend_from_slice(&[0u8; 4]); // Dummy block version
             tx_with_header.extend_from_slice(raw_tx);
             match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => Arc::new(tx),
-                Err(_) => continue,
+                Ok(tx) => {
+                    pass2_tx_deserialized += 1;
+                    Arc::new(tx)
+                }
+                Err(e) => {
+                    pass2_tx_failed += 1;
+                    let txid_hex = hex::encode(&txid_bytes);
+                    eprintln!("⚠️  Pass 2: Failed to deserialize transaction {} at height {}: {}",
+                             txid_hex, height, e);
+                    continue;
+                }
             }
         };
         
@@ -368,6 +412,18 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     };
     println!("   ✅ Pass 2 complete: Cache hit rate: {:.1}% ({} hits, {} misses)", 
         cache_hit_rate, cache_hits, cache_misses);
+    println!("   📊 Pass 2 Metrics: {} total, {} deserialized, {} FAILED, {} outputs",
+        pass2_tx_total, pass2_tx_deserialized, pass2_tx_failed, pass2_outputs_processed);
+    
+    // CRITICAL: Detect asymmetric failures between passes
+    if pass1_tx_total != pass2_tx_total {
+        eprintln!("⚠️  DIVERGENCE: Pass 1 saw {} txs, Pass 2 saw {} txs (diff: {})",
+                 pass1_tx_total, pass2_tx_total, (pass1_tx_total as i64 - pass2_tx_total as i64).abs());
+    }
+    if pass1_tx_failed != pass2_tx_failed {
+        eprintln!("⚠️  ASYMMETRIC FAILURES: Pass 1 failed {}, Pass 2 failed {} (diff: {})",
+                 pass1_tx_failed, pass2_tx_failed, (pass1_tx_failed as i64 - pass2_tx_failed as i64).abs());
+    }
     
     println!("\n📝 Writing address index to database...");
     println!("   {} unique addresses found", address_map.len());
@@ -385,6 +441,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut _pass2b_cache_misses = 0;
     let mut pass2b_db_reads = 0;
     
+    // Phase 2 Instrumentation: Track Pass 2b metrics
+    let mut pass2b_tx_total = 0;
+    let mut pass2b_tx_deserialized = 0;
+    let mut pass2b_tx_failed = 0;
+    let mut pass2b_coinstake_skipped = 0;
+    let mut pass2b_inputs_processed = 0;
+    
     let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     let mut input_processed: usize = 0;
     for item in iter3 {
@@ -399,9 +462,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let current_txid_bytes = txid_from_key(&key);
         if current_txid_bytes.is_empty() { continue; }
         
+        pass2b_tx_total += 1;
+        
         // O1: Try cache first for current transaction
         let tx = if let Some(cached_tx) = tx_cache.get(&current_txid_bytes) {
             pass2b_cache_hits += 1;
+            pass2b_tx_deserialized += 1;
             Arc::clone(cached_tx)
         } else {
             _pass2b_cache_misses += 1;
@@ -410,8 +476,17 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             tx_with_header.extend_from_slice(&[0u8; 4]);
             tx_with_header.extend_from_slice(raw_tx);
             match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => Arc::new(tx),
-                Err(_) => continue,
+                Ok(tx) => {
+                    pass2b_tx_deserialized += 1;
+                    Arc::new(tx)
+                }
+                Err(e) => {
+                    pass2b_tx_failed += 1;
+                    let txid_hex = hex::encode(&current_txid_bytes);
+                    eprintln!("⚠️  Pass 2b: Failed to deserialize transaction {} at height {}: {}",
+                             txid_hex, height, e);
+                    continue;
+                }
             }
         };
         
@@ -419,6 +494,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         // Stake inputs are consumed for staking, NOT counted as "sent"
         let tx_is_coinstake = is_coinstake(&*tx);
         if tx_is_coinstake {
+            pass2b_coinstake_skipped += 1;
             // Coinstake transactions don't count inputs as "sent"
             // The stake is consumed, rewards go to staker/owner
             input_processed += 1;
@@ -438,6 +514,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         // For every input, find the prevout's addresses and attribute this tx to them
         for input in &tx.inputs {
             if input.coinbase.is_some() { continue; }
+            pass2b_inputs_processed += 1;
             if let Some(prevout) = &input.prevout {
                 // prevout.hash from parser.rs is already in internal (reversed) format
                 if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
@@ -522,9 +599,34 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         0.0
     };
     println!("   ✅ Pass 2b complete: scanned {} transactions for inputs", input_processed);
+    println!("   � Pass 2b Metrics: {} total, {} deserialized, {} FAILED, {} coinstake skipped, {} inputs",
+        pass2b_tx_total, pass2b_tx_deserialized, pass2b_tx_failed, pass2b_coinstake_skipped, pass2b_inputs_processed);
     println!("   💾 Cache performance: {:.1}% hit rate ({} cache hits, {} DB reads)", 
         pass2b_cache_hit_rate, pass2b_cache_hits, pass2b_db_reads);
     println!("   🚀 Eliminated ~{} DB reads + deserializations (15-30 min time savings!)", pass2b_cache_hits);
+    
+    // CRITICAL: Final divergence check across all passes
+    println!("\n🔍 CROSS-PASS DIVERGENCE CHECK:");
+    if pass1_tx_total != pass2_tx_total || pass2_tx_total != pass2b_tx_total {
+        eprintln!("   ⚠️  TX COUNT MISMATCH:");
+        eprintln!("      Pass 1:  {} transactions", pass1_tx_total);
+        eprintln!("      Pass 2:  {} transactions (diff: {})", pass2_tx_total, (pass1_tx_total as i64 - pass2_tx_total as i64).abs());
+        eprintln!("      Pass 2b: {} transactions (diff: {})", pass2b_tx_total, (pass1_tx_total as i64 - pass2b_tx_total as i64).abs());
+    } else {
+        println!("   ✅ All passes saw {} transactions (consistent)", pass1_tx_total);
+    }
+    
+    if pass1_tx_failed > 0 || pass2_tx_failed > 0 || pass2b_tx_failed > 0 {
+        eprintln!("   ⚠️  DESERIALIZATION FAILURES:");
+        eprintln!("      Pass 1:  {} failed", pass1_tx_failed);
+        eprintln!("      Pass 2:  {} failed", pass2_tx_failed);
+        eprintln!("      Pass 2b: {} failed", pass2b_tx_failed);
+        if pass1_tx_failed != pass2_tx_failed || pass2_tx_failed != pass2b_tx_failed {
+            eprintln!("      ⚠️  ASYMMETRIC FAILURES - will cause balance errors!");
+        }
+    } else {
+        println!("   ✅ No deserialization failures");
+    }
     
     println!("\n📝 Writing address index to database...");
     println!("   {} unique addresses found", address_map.len());
