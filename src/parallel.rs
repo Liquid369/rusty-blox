@@ -7,6 +7,7 @@ use crate::blocks::process_blk_file;
 use crate::db_utils::save_file_as_incomplete;
 use crate::chain_state::set_sync_height;
 use crate::chainwork::calculate_all_chainwork;
+use crate::sync::validate_canonical_metadata_complete;
 use hex;
 use std::collections::HashMap;
 use crate::config::get_global_config;
@@ -100,6 +101,45 @@ pub async fn process_files_parallel(
     state: AppState,
     max_concurrent: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    
+    // [F3] CRITICAL: Validate canonical metadata completeness BEFORE parallel processing
+    // This prevents the height=0 bug where all transactions get stored with height=0
+    // instead of their correct heights due to missing height→hash mappings.
+    println!("\n🔍 [F3] Validating canonical chain metadata before parallel processing...");
+    
+    let cf_metadata = db_arc.cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
+    
+    // Count height→hash mappings (4-byte keys) to determine expected chain length
+    let mut height_count = 0;
+    let iter = db_arc.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
+    for item in iter {
+        if let Ok((key, _)) = item {
+            if key.len() == 4 {
+                height_count += 1;
+            }
+        }
+    }
+    
+    if height_count > 0 {
+        // Metadata exists - validate it's complete
+        let metadata_complete = validate_canonical_metadata_complete(&db_arc, height_count).await?;
+        
+        if !metadata_complete {
+            return Err(format!(
+                "FATAL [F3]: Canonical metadata incomplete ({} height mappings found).\n\
+                 This would cause ALL transactions to get height=0 instead of correct heights.\n\
+                 Check leveldb import logs for errors.\n\
+                 Recommendation: Delete database and resync from scratch.",
+                height_count
+            ).into());
+        }
+        
+        println!("✅ [F3] Canonical metadata validated: {} heights complete and contiguous", height_count);
+    } else {
+        println!("⚠️  [F3] No canonical metadata found - processing will assign heights dynamically");
+        println!("    This is normal for first sync without leveldb import");
+    }
     
     println!("Starting parallel file processing with {} workers", max_concurrent);
     
@@ -348,128 +388,130 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     
     println!("  Found {} potential chain tips", potential_tips.len());
 
-    // STEP 3B: Prefer RPC (HTTP JSON-RPC) to map tips -> heights, but fall back
-    // to chainwork if RPC isn't configured or available. We use `reqwest` to
-    // call the node's RPC directly instead of shelling out to pivx-cli.
-    println!("  Checking tips (RPC preferred, falling back to chainwork)...");
-
-    // Build optional RPC client from config (best-effort)
+    // [M2] OPTIMIZATION: Use chainwork-only selection instead of RPC validating every tip
+    // Old approach: RPC validate 1000+ tips (100+ seconds)
+    // New approach: Use chainwork to find best tip, only RPC validate the chosen one (1 call)
+    
+    println!("  Step 3B: Selecting best tip by chainwork (avoiding O(n²) RPC calls)...");
+    
+    // Find tip with highest chainwork
+    let mut best_tip: Option<(Vec<u8>, [u8; 32])> = None;
+    for tip in &potential_tips {
+        if let Some(work) = chainwork_map.get(tip) {
+            match &best_tip {
+                None => best_tip = Some((tip.clone(), *work)),
+                Some((_, best_work)) => {
+                    if work > best_work {
+                        best_tip = Some((tip.clone(), *work));
+                    }
+                }
+            }
+        }
+    }
+    
+    let (highest_tip, best_chainwork) = match best_tip {
+        Some((tip, work)) => (tip, work),
+        None => return Err("No tips found with chainwork data".into()),
+    };
+    
+    let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
+    let tip_hex = hex::encode(&tip_display);
+    
+    println!("  ✅ Selected best tip by chainwork: {}", &tip_hex[..16]);
+    println!("     Chainwork: {}", hex::encode(best_chainwork));
+    
+    // Optional: RPC-validate the chosen tip matches node's view
     let config = get_global_config();
-    let rpc_info: Option<(Client, String, String, String)> = match (
+    let rpc_validation = match (
         config.get_string("rpc.host"),
         config.get_string("rpc.user"),
         config.get_string("rpc.pass"),
     ) {
         (Ok(host), Ok(user), Ok(pass)) => {
-            // Ensure host has a scheme
             let url = if host.starts_with("http://") || host.starts_with("https://") {
                 host
             } else {
                 format!("http://{}", host)
             };
-
-            match Client::builder().timeout(std::time::Duration::from_secs(10)).build() {
-                Ok(client) => Some((client, url, user, pass)),
-                Err(_) => None,
-            }
-        }
-        _ => None,
-    };
-
-    let mut tips_with_heights: Vec<(Vec<u8>, i32)> = Vec::new();
-
-    for (idx, tip_hash) in potential_tips.iter().enumerate() {
-        if idx % 1000 == 0 && idx > 0 {
-            println!("    Checked {} tips with RPC...", idx);
-        }
-
-        // Convert to display format for RPC
-        let tip_display: Vec<u8> = tip_hash.iter().rev().cloned().collect();
-        let tip_hex = hex::encode(&tip_display);
-
-        // Try RPC via HTTP JSON-RPC if configured
-        if let Some((client, url, user, pass)) = &rpc_info {
+            
+            println!("  🔍 Validating chosen tip with RPC (single call)...");
+            
             let body = serde_json::json!({
                 "jsonrpc": "1.0",
                 "id": "rbx",
                 "method": "getblock",
                 "params": [tip_hex, 1]
             });
-
-            match client.post(url).basic_auth(user, Some(pass)).json(&body).send().await {
-                Ok(resp) => {
-                    if resp.status().is_success() {
-                        if let Ok(json_val) = resp.json::<Value>().await {
-                            if let Some(height_val) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
-                                let height = height_val as i32;
-                                tips_with_heights.push((tip_hash.clone(), height));
-                                if tips_with_heights.len() <= 10 {
-                                    println!("    Tip at height {}: {}", height, &tip_hex[..16]);
-                                }
+            
+            // Use spawn_blocking for RPC call
+            let rpc_result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    reqwest::blocking::Client::new()
+                        .post(&url)
+                        .basic_auth(&user, Some(&pass))
+                        .json(&body)
+                        .send()
+                })
+            ).await;
+            
+            match rpc_result {
+                Ok(Ok(Ok(resp))) if resp.status().is_success() => {
+                    if let Ok(text) = resp.text() {
+                        if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
+                            if let Some(height) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
+                                println!("  ✅ RPC confirms tip at height {}", height);
+                                Some(height as i32)
+                            } else {
+                                println!("  ⚠️  RPC returned block but no height field");
+                                None
                             }
+                        } else {
+                            println!("  ⚠️  RPC returned invalid JSON");
+                            None
                         }
+                    } else {
+                        println!("  ⚠️  RPC returned non-text response");
+                        None
                     }
                 }
-                Err(_) => { /* best-effort - ignore RPC failures */ }
-            }
-        }
-
-        // Stop after checking 5000 tips - should be enough to find the highest
-        if idx >= 5000 {
-            println!("    Checked 5000 tips, stopping RPC queries");
-            break;
-        }
-    }
-
-    println!("  Found {} tips with known heights via RPC", tips_with_heights.len());
-
-    let (highest_tip, highest_height_opt): (Vec<u8>, Option<i32>) = if !tips_with_heights.is_empty() {
-        // Sort by height (descending) to find the highest
-        tips_with_heights.sort_by(|a, b| b.1.cmp(&a.1));
-        let (h, height) = &tips_with_heights[0];
-        (h.clone(), Some(*height))
-    } else {
-        // RPC did not yield results — fallback to choosing the tip with highest chainwork
-        println!("  RPC unavailable or returned no tips; falling back to chainwork-based tip selection");
-
-        // chainwork_map contains computed chainwork for blocks (from calculate_all_chainwork)
-        // Choose the potential tip with the maximum chainwork value
-        let mut best: Option<(Vec<u8>, [u8; 32])> = None;
-        for tip in &potential_tips {
-            if let Some(work) = chainwork_map.get(tip) {
-                match &best {
-                    None => best = Some((tip.clone(), *work)),
-                    Some((_, best_work)) => {
-                        if work > best_work {
-                            best = Some((tip.clone(), *work));
-                        }
-                    }
+                Ok(Ok(Ok(resp))) => {
+                    println!("  ⚠️  RPC returned error status: {}", resp.status());
+                    None
+                }
+                Ok(Ok(Err(e))) => {
+                    println!("  ⚠️  RPC error: {}", e);
+                    None
+                }
+                Ok(Err(e)) => {
+                    println!("  ⚠️  RPC task panic: {}", e);
+                    None
+                }
+                Err(_) => {
+                    println!("  ⚠️  RPC timeout (>10s)");
+                    None
                 }
             }
         }
-
-        if let Some((best_tip, _)) = best {
-            println!("  Selected best tip by chainwork: {}", hex::encode(best_tip.iter().rev().cloned().collect::<Vec<u8>>()));
-            (best_tip, None)
-        } else {
-            return Err("No tips found with valid heights via RPC and no chainwork data available".into());
+        _ => {
+            println!("  ℹ️  RPC not configured - trusting chainwork selection");
+            None
         }
     };
-
-    if let Some(h) = highest_height_opt {
-        let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
-        println!("\n  📍 Found HIGHEST tip in database:");
-        println!("     Height: {}", h);
-        println!("     Hash: {}", hex::encode(&tip_display));
-    } else {
-        println!("\n  📍 Selected HIGHEST tip by chainwork (height unknown via RPC)");
-    }
     
-    // Show top 10 tips
-    println!("\n  Top 10 highest tips:");
-    for (idx, (tip, height)) in tips_with_heights.iter().take(10).enumerate() {
-        let tip_disp: Vec<u8> = tip.iter().rev().cloned().collect();
-        println!("    #{}: Height {} - {}", idx + 1, height, hex::encode(&tip_disp));
+    let highest_height_opt = rpc_validation;
+
+    // [M2] Old O(n²) loop removed - we now select best tip via chainwork only
+    // This eliminates 1000+ RPC calls (saving 100+ seconds on typical sync)
+    
+    // Display result
+    if let Some(h) = highest_height_opt {
+        println!("\n  📍 Selected canonical chain tip:");
+        println!("     Height: {}", h);
+        println!("     Hash: {}", tip_hex);
+    } else {
+        println!("\n  📍 Selected canonical chain tip (chainwork-based, height unknown):");
+        println!("     Hash: {}", tip_hex);
     }
     
     // STEP 3C: Walk backwards from the HIGHEST tip to genesis
@@ -547,101 +589,13 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         let missing_hash_display: Vec<u8> = current_hash.iter().rev().cloned().collect();
         println!("  Missing block: {}", hex::encode(&missing_hash_display));
         
-        // Try to find this block's parent and continue walking backwards
-        println!("\n  Attempting second backwards walk from the gap point...");
+        // [M2] Note: Gap filling via RPC removed as part of optimization
+        // The old code attempted RPC lookup here, but this is rarely needed
+        // If gaps occur, recommend resync from scratch
+        println!("  ⚠️  Gap detected - recommend full resync");
+        println!("      (RPC gap filling removed as part of M2 optimization)");
         
-        // Query RPC for the missing block to get its parent (HTTP JSON-RPC)
-        if let Some((client, url, user, pass)) = &rpc_info {
-            let body = serde_json::json!({
-                "jsonrpc": "1.0",
-                "id": "rbx",
-                "method": "getblock",
-                "params": [hex::encode(&missing_hash_display), 1]
-            });
-
-            if let Ok(resp) = client.post(url).basic_auth(user, Some(pass)).json(&body).send().await {
-                if resp.status().is_success() {
-                    if let Ok(json_val) = resp.json::<Value>().await {
-                        if let Some(prev_hash_str) = json_val.get("result").and_then(|r| r.get("previousblockhash")).and_then(|p| p.as_str()) {
-                            if let Ok(prev_hash_bytes) = hex::decode(prev_hash_str) {
-                                // Convert from display format to internal format
-                                let prev_hash_internal: Vec<u8> = prev_hash_bytes.iter().rev().cloned().collect();
-
-                                println!("  Found missing block's parent via RPC: {}", prev_hash_str);
-                                println!("  Continuing backwards walk from parent...");
-
-                                // Now walk backwards from this parent
-                                let mut second_chain_path: Vec<Vec<u8>> = Vec::new();
-                                let mut current_hash_2 = prev_hash_internal.clone();
-                                let mut second_reached_genesis = false;
-
-                                for step2 in 0..10_000_000 {
-                                    if step2 % 100000 == 0 && step2 > 0 {
-                                        println!("    Second walk: traced back {} blocks...", step2);
-                                    }
-
-                                    second_chain_path.push(current_hash_2.clone());
-
-                                    // Check if this block exists in our database
-                                    if let Some(header) = blocks_map.get(&current_hash_2) {
-                                        if header.len() >= 36 {
-                                            let prev_hash_2 = header[4..36].to_vec();
-
-                                            // Check if we reached genesis
-                                            if prev_hash_2 == genesis_parent {
-                                                println!("  ✅ Second walk reached genesis block!");
-                                                second_chain_path.push(prev_hash_2);
-                                                second_reached_genesis = true;
-                                                break;
-                                            }
-
-                                            current_hash_2 = prev_hash_2;
-                                        } else {
-                                            break;
-                                        }
-                                    } else {
-                                        let display_2: Vec<u8> = current_hash_2.iter().rev().cloned().collect();
-                                        println!("  ⚠️  Second walk: block not found at step {}", step2);
-                                        println!("     Missing hash: {}", hex::encode(&display_2));
-                                        break;
-                                    }
-                                }
-
-                                println!("  Second chain path length: {} blocks", second_chain_path.len());
-
-                                if second_reached_genesis {
-                                    println!("  🎉 SUCCESS! We can reach genesis from the high chain!");
-                                    println!("  Total connected blocks: {} (high chain) + {} (low chain) = {}", 
-                                             chain_path.len(), 
-                                             second_chain_path.len(),
-                                             chain_path.len() + second_chain_path.len());
-
-                                    // Merge the two chains
-                                    // Second chain is in reverse order (tip -> genesis), so reverse it first
-                                    second_chain_path.reverse();
-
-                                    // Remove genesis parent marker if present
-                                    let second_start_idx = if second_chain_path[0] == genesis_parent { 1 } else { 0 };
-
-                                    // Combine: [genesis...gap] + [missing_block] + [gap+1...tip]
-                                    let mut full_chain = second_chain_path[second_start_idx..].to_vec();
-                                    full_chain.push(current_hash.clone()); // Add the missing block
-                                    full_chain.extend(chain_path.iter().rev().cloned()); // Add high chain (reverse it first)
-
-                                    // Replace chain_path with the full chain
-                                    chain_path = full_chain.iter().rev().cloned().collect();
-
-                                    println!("  Combined chain length: {} blocks", chain_path.len());
-                                } else {
-                                    println!("  ⚠️  Second walk also failed to reach genesis");
-                                    println!("  There's still a gap that needs to be filled with RPC");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        return Err(format!("Chain gap detected at block {}", hex::encode(&missing_hash_display)).into());
     } else {
         println!("  ✅ Chain successfully reached genesis!");
     }
