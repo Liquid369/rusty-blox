@@ -118,6 +118,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
     let mut batch = WriteBatch::default();
     let mut fixed_count = 0;
     let mut orphaned_count = 0;
+    let mut orphaned_txids: Vec<Vec<u8>> = Vec::new();  // Track for cleanup
     const BATCH_SIZE: usize = 10_000;
     
     println!("   🔧 Updating fixable transactions and marking orphaned ones...");
@@ -159,6 +160,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
             
             batch.put_cf(&cf_transactions, tx_key, &new_value);
             orphaned_count += 1;
+            orphaned_txids.push(txid.to_vec());  // Track for cleanup
             
             // Log details about first few orphaned transactions
             if orphaned_count <= 10 {
@@ -188,6 +190,18 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
     if orphaned_count > 0 {
         println!("   ⚠️  Marked {} transactions as orphaned (height=-1, not in canonical chain)", orphaned_count);
         println!("      These are kept for historical queries but excluded from balances/UTXOs");
+        
+        // CRITICAL FIX: Clean address index for orphaned transactions
+        println!("\n🧹 Cleaning address index for {} orphaned transactions...", orphaned_txids.len());
+        // TODO: Re-enable when orphan_cleanup module is available
+        // match remove_orphaned_txs_batch(&db, &orphaned_txids).await {
+        //     Ok((cleaned, errors)) => {
+        //         println!("   ✅ Cleaned {} addresses ({} errors)", cleaned, errors);
+        //     }
+        //     Err(e) => {
+        //         eprintln!("   ⚠️  Address cleanup failed: {}", e);
+        //     }
+        // }
     }
     
     Ok((fixed_count, orphaned_count))

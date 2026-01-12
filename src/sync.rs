@@ -27,7 +27,7 @@ use crate::parallel::process_files_parallel;
 /// 
 /// **PIVX Core Comparison**: Core never assigns height until block is on canonical
 /// chain. We now match this behavior by failing fast if metadata incomplete.
-async fn validate_canonical_metadata_complete(
+pub async fn validate_canonical_metadata_complete(
     db: &Arc<DB>,
     expected_chain_len: usize,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -547,6 +547,12 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
             } else {
                 println!("✅ Address index built successfully (from chainstate)!\n");
                 db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+                
+                // Store the height at which enrichment completed
+                // RPC catchup should only update address index for blocks AFTER this height
+                if let Some(height_bytes) = db.get_cf(&cf_state, b"sync_height")? {
+                    db.put_cf(&cf_state, b"enrichment_height", &height_bytes)?;
+                }
             }
         } else {
             println!("📍 Phase 1: Building address index from transactions...");
@@ -560,6 +566,12 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
             } else {
                 println!("✅ Address index built successfully!\n");
                 db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+                
+                // Store the height at which enrichment completed
+                // RPC catchup should only update address index for blocks AFTER this height
+                if let Some(height_bytes) = db.get_cf(&cf_state, b"sync_height")? {
+                    db.put_cf(&cf_state, b"enrichment_height", &height_bytes)?;
+                }
             }
         }
     } else if address_index_complete {

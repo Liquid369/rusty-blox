@@ -18,6 +18,10 @@ const TX_BATCH_SIZE: usize = 10000; // Increased from 1000 for better throughput
 const MIN_BLOCK_SIZE: u64 = 81; // Minimum: 80-byte header + 1 byte for varint tx count
 const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB maximum block size (PIVX protocol limit)
 
+// Priority [F2]: Varint bounds validation constants (prevent DoS via massive allocations)
+const MAX_TX_INPUTS: u64 = 100_000;
+const MAX_TX_OUTPUTS: u64 = 100_000;
+
 // Helper to read varint from async reader
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_varint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u64, std::io::Error> {
@@ -77,6 +81,12 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
     tx_version: i16,
 ) -> Result<Vec<CTxIn>, std::io::Error> {
     let input_count = read_varint(reader).await?;
+    if input_count > MAX_TX_INPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction input count {} exceeds maximum {}", input_count, MAX_TX_INPUTS)
+        ));
+    }
     let mut inputs = Vec::new();
     
     for i in 0..input_count {
@@ -116,6 +126,12 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<CTxOut>, std::io::Error> {
     let output_count = read_varint(reader).await?;
+    if output_count > MAX_TX_OUTPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction output count {} exceeds maximum {}", output_count, MAX_TX_OUTPUTS)
+        ));
+    }
     let mut outputs = Vec::new();
     
     for i in 0..output_count {
@@ -486,20 +502,21 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
         
         // If we have a height (genesis or previously resolved), store mappings
+        // CRITICAL FIX: Now uses tx_batch for atomic writes with transactions
         if let Some(height) = block_height {
-            let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-            
             // Store: 'h' + block_hash -> height (for parent lookup, uses internal byte order)
             let mut height_key = vec![b'h'];
             height_key.extend_from_slice(&block_hash_vec);
             let height_bytes = height.to_le_bytes().to_vec();
-            db.put_cf(&cf_metadata, &height_key, &height_bytes)
-                .map_err(|e| format!("Failed to store height: {}", e))?;
+            
+            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+            tx_batch.put("chain_metadata", height_key, height_bytes.clone());
             
             // Store: height -> block_hash (for height-based queries, use display format - reversed)
             let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
-            db.put_cf(&cf_metadata, &height_bytes, &reversed_hash)
-                .map_err(|e| format!("Failed to store height mapping: {}", e))?;
+            
+            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+            tx_batch.put("chain_metadata", height_bytes.clone(), reversed_hash);
             
             // Calculate and store chainwork
             if n_bits > 0 {
@@ -512,6 +529,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                     let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
                     chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
                     
+                    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
                     match db.get_cf(&cf_metadata, &chainwork_key)? {
                         Some(parent_work_bytes) => {
                             if parent_work_bytes.len() == 32 {
@@ -549,8 +567,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 // Store chainwork: 'w' + height -> chainwork (32 bytes)
                 let mut chainwork_key = vec![b'w'];
                 chainwork_key.extend_from_slice(&height.to_le_bytes());
-                db.put_cf(&cf_metadata, &chainwork_key, chainwork)
-                    .map_err(|e| format!("Failed to store chainwork: {}", e))?;
+                
+                // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+                tx_batch.put("chain_metadata", chainwork_key, chainwork.to_vec());
             }
         }
         
