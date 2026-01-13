@@ -7,6 +7,7 @@
 use rocksdb::{DB, WriteBatch};
 use std::sync::Arc;
 use std::collections::HashMap;
+use tracing::{info, warn};
 use crate::constants::{HEIGHT_GENESIS};
 
 /// Fix all transactions that have height=0 by looking them up in the block index
@@ -22,7 +23,7 @@ use crate::constants::{HEIGHT_GENESIS};
 /// 
 /// Returns (fixed_count, unfixable_count)
 pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    println!("\n🔧 Checking for transactions with height=0...");
+    info!("Checking for transactions with height=0");
     
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
@@ -53,27 +54,25 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
                     }
                     
                     if total_txs % 500_000 == 0 {
-                        println!("   Scanned {} transactions, found {} with height=0...", 
-                                 total_txs, zero_height_txs.len());
+                        info!(scanned = total_txs, found_zero = zero_height_txs.len(), "Scanning transactions");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("⚠️  Error reading transaction: {}", e);
+                warn!(error = %e, "Error reading transaction");
             }
         }
     }
     
     if zero_height_txs.is_empty() {
-        println!("   ✅ No transactions with height=0 found");
+        info!("No transactions with height=0 found");
         return Ok((0, 0));
     }
     
-    println!("   📊 Found {} transactions with height=0 out of {} total", 
-             zero_height_txs.len(), total_txs);
+    info!(found_zero = zero_height_txs.len(), total = total_txs, "Found transactions with height=0");
     
     // Step 2: Build txid -> height mapping using the 'B' index
-    println!("   🔍 Looking up correct heights from block index...");
+    info!("Looking up correct heights from block index");
     
     let mut txid_to_height: HashMap<Vec<u8>, i32> = HashMap::new();
     
@@ -104,7 +103,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
                     }
                     
                     if block_entries % 100_000 == 0 {
-                        println!("      Processed {} block index entries...", block_entries);
+                        info!(processed = block_entries, "Processing block index entries");
                     }
                 }
             }
@@ -112,7 +111,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
         }
     }
     
-    println!("   📈 Found heights for {} transactions in block index", txid_to_height.len());
+    info!(found_heights = txid_to_height.len(), "Found heights for transactions in block index");
     
     // Step 3: Update fixable transactions and MARK orphaned ones (don't delete)
     let mut batch = WriteBatch::default();
@@ -121,7 +120,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
     let mut orphaned_txids: Vec<Vec<u8>> = Vec::new();  // Track for cleanup
     const BATCH_SIZE: usize = 10_000;
     
-    println!("   🔧 Updating fixable transactions and marking orphaned ones...");
+    info!("Updating fixable transactions and marking orphaned ones");
     
     for (tx_key, tx_value) in &zero_height_txs {
         // Extract txid from key (skip 't' prefix)
@@ -143,7 +142,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
             if fixed_count % BATCH_SIZE == 0 {
                 db.write(batch)?;
                 batch = WriteBatch::default();
-                println!("      Fixed {} transactions...", fixed_count);
+                info!(fixed = fixed_count, "Fixed transactions");
             }
         } else {
             // Transaction not in block index = orphaned transaction (from non-canonical block)
@@ -165,7 +164,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
             // Log details about first few orphaned transactions
             if orphaned_count <= 10 {
                 let txid_hex: Vec<u8> = txid.iter().rev().cloned().collect();
-                eprintln!("      ⚠️  Marking as orphaned (not in canonical chain): {}", hex::encode(&txid_hex));
+                warn!(txid = %hex::encode(&txid_hex), "Marking as orphaned (not in canonical chain)");
             }
         }
         
@@ -175,8 +174,7 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
             batch = WriteBatch::default();
             
             if (fixed_count + orphaned_count) % 10_000 == 0 {
-                println!("      Processed {} transactions ({} fixed, {} orphaned)...", 
-                         fixed_count + orphaned_count, fixed_count, orphaned_count);
+                info!(processed = fixed_count + orphaned_count, fixed = fixed_count, orphaned = orphaned_count, "Processing transactions");
             }
         }
     }
@@ -186,20 +184,20 @@ pub async fn fix_zero_height_transactions(db: &Arc<DB>) -> Result<(usize, usize)
         db.write(batch)?;
     }
     
-    println!("\n   ✅ Fixed {} transactions with correct heights", fixed_count);
+    info!(fixed = fixed_count, "Fixed transactions with correct heights");
     if orphaned_count > 0 {
-        println!("   ⚠️  Marked {} transactions as orphaned (height=-1, not in canonical chain)", orphaned_count);
-        println!("      These are kept for historical queries but excluded from balances/UTXOs");
+        warn!(orphaned = orphaned_count, "Marked transactions as orphaned (height=-1, not in canonical chain)");
+        info!("Orphaned transactions kept for historical queries but excluded from balances/UTXOs");
         
         // CRITICAL FIX: Clean address index for orphaned transactions
-        println!("\n🧹 Cleaning address index for {} orphaned transactions...", orphaned_txids.len());
+        info!(count = orphaned_txids.len(), "Cleaning address index for orphaned transactions");
         // TODO: Re-enable when orphan_cleanup module is available
         // match remove_orphaned_txs_batch(&db, &orphaned_txids).await {
         //     Ok((cleaned, errors)) => {
-        //         println!("   ✅ Cleaned {} addresses ({} errors)", cleaned, errors);
+        //         info!(cleaned = cleaned, errors = errors, "Cleaned addresses");
         //     }
         //     Err(e) => {
-        //         eprintln!("   ⚠️  Address cleanup failed: {}", e);
+        //         warn!(error = %e, "Address cleanup failed");
         //     }
         // }
     }

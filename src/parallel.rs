@@ -13,6 +13,9 @@ use std::collections::HashMap;
 use crate::config::get_global_config;
 use reqwest::Client;
 use serde_json::Value;
+use tracing::{info, warn, debug, info_span};
+use crate::metrics;
+use crate::telemetry::ProgressCounter;
 
 /// Update sync_height by finding the highest block in chain_metadata
 /// This allows incremental progress updates as files are processed
@@ -43,7 +46,7 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
     // Only update if we found a valid height and it's higher than current
     if max_height >= 0 {
         set_sync_height(db, max_height)?;
-        println!("  Updated sync_height to: {}", max_height);
+        info!(height = max_height, "Updated sync_height");
     }
     
     Ok(())
@@ -101,11 +104,16 @@ pub async fn process_files_parallel(
     state: AppState,
     max_concurrent: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _span = info_span!("parallel_processing",
+        file_count = %"calculating",
+        max_workers = max_concurrent
+    ).entered();
+    info!("Starting parallel block file processing");
     
     // [F3] CRITICAL: Validate canonical metadata completeness BEFORE parallel processing
     // This prevents the height=0 bug where all transactions get stored with height=0
     // instead of their correct heights due to missing height→hash mappings.
-    println!("\n🔍 [F3] Validating canonical chain metadata before parallel processing...");
+    info!("[F3] Validating canonical chain metadata before parallel processing");
     
     let cf_metadata = db_arc.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
@@ -135,13 +143,12 @@ pub async fn process_files_parallel(
             ).into());
         }
         
-        println!("✅ [F3] Canonical metadata validated: {} heights complete and contiguous", height_count);
+        info!(height_count = height_count, "[F3] Canonical metadata validated - complete and contiguous");
     } else {
-        println!("⚠️  [F3] No canonical metadata found - processing will assign heights dynamically");
-        println!("    This is normal for first sync without leveldb import");
+        info!("[F3] No canonical metadata found - will assign heights dynamically (normal for first sync)");
     }
     
-    println!("Starting parallel file processing with {} workers", max_concurrent);
+    info!(workers = max_concurrent, "Starting parallel file processing");
     
     // Filter for .dat files
     let mut blk_files: Vec<_> = entries
@@ -160,9 +167,12 @@ pub async fn process_files_parallel(
     blk_files.sort_by(|a, b| b.cmp(a));
     
     let total_files = blk_files.len();
-    println!("Found {} block files to process (processing in REVERSE order - newest first)", total_files);
-    println!("First file: {:?}", blk_files.first().map(|p| p.file_name()));
-    println!("Last file: {:?}", blk_files.last().map(|p| p.file_name()));
+    info!(
+        total_files = total_files,
+        first_file = ?blk_files.first().map(|p| p.file_name()),
+        last_file = ?blk_files.last().map(|p| p.file_name()),
+        "Processing blk files in REVERSE order (newest first)"
+    );
     
     // Semaphore to limit concurrent file processing
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
@@ -180,18 +190,28 @@ pub async fn process_files_parallel(
             let completed_clone = completed.clone();
             
             async move {
+                let file_name = file_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                
+                let _file_span = info_span!("process_blk_file",
+                    file_name = file_name
+                ).entered();
+                
+                debug!(file_name = file_name, "Processing blk file");
+                
                 // Acquire permit - if this fails, semaphore is closed (shutdown)
                 let _permit = match sem.acquire().await {
                     Ok(permit) => permit,
                     Err(e) => {
-                        eprintln!("Failed to acquire semaphore permit: {}", e);
+                        warn!(error = %e, "Failed to acquire semaphore permit");
                         return;
                     }
                 };
                 
                 // Process file (this is async but not Send, so we run it directly)
                 if let Err(e) = process_blk_file(st, file_path.clone(), db.clone()).await {
-                    eprintln!("Failed to process {}: {}", file_path.display(), e);
+                    warn!(file = %file_path.display(), error = %e, "Failed to process blk file");
                     let _ = save_file_as_incomplete(&db, &file_path).await;
                 }
                 
@@ -202,11 +222,11 @@ pub async fn process_files_parallel(
                 drop(count);
                 
                 let progress = (current as f64 / total_files as f64) * 100.0;
-                println!("\n📊 File Progress: {}/{} ({:.1}%) complete", current, total_files, progress);
+                info!(current = current, total = total_files, progress_pct = format!("{:.1}", progress), "File progress");
                 
                 // Update sync_height incrementally to show progress
                 if let Err(e) = update_sync_height_from_metadata(&db).await {
-                    eprintln!("Warning: Failed to update sync_height: {}", e);
+                    warn!(error = %e, "Failed to update sync_height");
                 }
             }
         })
@@ -215,11 +235,11 @@ pub async fn process_files_parallel(
     // Execute all tasks concurrently
     futures::future::join_all(tasks).await;
     
-    println!("\n✅ All blk*.dat files processed!");
+    info!("All blk*.dat files processed");
     
     // CRITICAL: Update sync_height to reflect all blocks processed
     // This ensures the next phase (RPC monitoring) knows our true current height
-    println!("\n🔄 Updating sync height from all processed blocks...");
+    info!("Updating sync height from all processed blocks");
     update_sync_height_from_metadata(&db_arc).await?;
     
     // Check if canonical chain metadata already exists (from leveldb phase)
@@ -244,27 +264,22 @@ pub async fn process_files_parallel(
     let has_canonical_metadata = height_key_count > 1; // more than just genesis
 
     if has_canonical_metadata {
-        println!("\n✅ Canonical chain metadata already exists (from leveldb)");
-        println!("   Using pre-built canonical chain ({} height mappings found)", height_key_count);
-        println!("   Resolving any NEW blocks from blk files...");
+        info!(height_mappings = height_key_count, "Canonical chain metadata exists (from leveldb) - extending with new blocks");
         // CRITICAL: Always resolve to pick up new blocks beyond the leveldb import
         resolve_block_heights(&db_arc).await?;
-        println!("✅ Chain resolution complete (extended chain with new blocks)!");
+        info!("Chain resolution complete (extended with new blocks)");
     } else {
         // FALLBACK: Only resolve if no canonical metadata exists
-        println!("\n🔗 Phase 2: Resolving block heights (building chain)...");
-        println!("   (No leveldb metadata found, building chain from blk files)");
+        info!("No leveldb metadata found - building chain from blk files");
         resolve_block_heights(&db_arc).await?;
-        println!("✅ Chain building complete!");
+        info!("Chain building complete");
     }
     
     // CRITICAL: Update sync_height AGAIN after chain resolution to pick up newly resolved heights
-    println!("\n🔄 Updating sync height after chain resolution...");
+    info!("Updating sync height after chain resolution");
     update_sync_height_from_metadata(&db_arc).await?;
     
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║        📦 BLK FILE PROCESSING COMPLETE 📦          ║");
-    println!("╚════════════════════════════════════════════════════╝");
+    info!("BLK FILE PROCESSING COMPLETE");
     
     Ok(())
 }
@@ -280,7 +295,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
     
-    println!("  Step 1: Building hash map (loading all blocks into memory)...");
+    info!("Building hash map (loading all blocks into memory)");
     
     // Build hash map: prev_hash -> Vec<(block_hash, header_bytes)>
     // Multiple children = fork, we'll need to pick the right one
@@ -300,43 +315,14 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                     .push((hash_vec, header_vec));
                 
                 total_blocks += 1;
-                if total_blocks % 100000 == 0 {
-                    println!("    Loaded {} blocks...", total_blocks);
-                }
             }
         }
     }
     
-    println!("  Loaded {} blocks into memory", total_blocks);
-    
-    // DEBUG: Check if block 2,678,400 is in children_map
-    let block_2678400_hash = match hex::decode("bde2ea24bba50fb80a9c98b67e76a4407d0251aa61ac13bbcfa7feccab57bce7") {
-        Ok(hash) => hash,
-        Err(e) => {
-            eprintln!("  DEBUG: Failed to decode debug hash: {}", e);
-            vec![] // Empty vec won't match anything in map
-        }
-    };
-    if !block_2678400_hash.is_empty() {
-        if let Some(children) = children_map.get(&block_2678400_hash) {
-            println!("  DEBUG: Block 2,678,400 has {} children in map (BEFORE chainwork calc)", children.len());
-            for (i, (child_hash, _)) in children.iter().enumerate() {
-                let display_hash: Vec<u8> = child_hash.iter().rev().cloned().collect();
-                println!("    Child {}: {}", i + 1, hex::encode(&display_hash));
-            }
-        } else {
-            println!("  DEBUG: Block 2,678,400 NOT FOUND in children_map!");
-        }
-    }
-    
-    // Store children_map size
-    let children_map_size_before = children_map.len();
-    let total_children_before: usize = children_map.values().map(|v| v.len()).sum();
-    println!("  DEBUG: children_map has {} parent hashes, {} total children (BEFORE)", 
-             children_map_size_before, total_children_before);
+    info!(total_blocks = total_blocks, "Loaded blocks into memory");
     
     // Build blocks_map for chainwork calculation (hash -> header_bytes)
-    println!("  Step 2: Calculating accumulated chainwork (Bitcoin consensus)...");
+    info!("Calculating accumulated chainwork (Bitcoin consensus)");
     let mut blocks_map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     let iter2 = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
     for item in iter2 {
@@ -346,28 +332,9 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     }
     
     let chainwork_map = calculate_all_chainwork(db, &blocks_map)?;
-    println!("  ✅ Chainwork calculated for {} blocks", chainwork_map.len());
+    info!(blocks = chainwork_map.len(), "Chainwork calculated");
     
-    // DEBUG: Check children_map AFTER chainwork calculation
-    println!("  DEBUG: Checking children_map AFTER chainwork calculation...");
-    let children_map_size_after = children_map.len();
-    let total_children_after: usize = children_map.values().map(|v| v.len()).sum();
-    println!("  DEBUG: children_map has {} parent hashes, {} total children (AFTER)", 
-             children_map_size_after, total_children_after);
-    
-    if let Some(children) = children_map.get(&block_2678400_hash) {
-        println!("  DEBUG: Block 2,678,400 STILL has {} children in map (AFTER chainwork calc)", children.len());
-    } else {
-        println!("  DEBUG: Block 2,678,400 NOW MISSING from children_map!");
-    }
-    
-    println!("  Step 3: Finding the best chain tip by checking highest blocks first...");
-    
-    // Strategy: Start from the HIGHEST blocks in the database and work backwards
-    // The daemon stores newest blocks in the last blk files (blk00141.dat)
-    // So we should find tips there and work backwards to genesis
-    
-    println!("  Finding potential tips and verifying with RPC...");
+    info!("Finding best chain tip");
     
     // STEP 3A: Find blocks with no children (potential tips)
     let mut all_blocks: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -386,13 +353,13 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         .cloned()
         .collect();
     
-    println!("  Found {} potential chain tips", potential_tips.len());
+    debug!(tips = potential_tips.len(), "Found potential chain tips");
 
     // [M2] OPTIMIZATION: Use chainwork-only selection instead of RPC validating every tip
     // Old approach: RPC validate 1000+ tips (100+ seconds)
     // New approach: Use chainwork to find best tip, only RPC validate the chosen one (1 call)
     
-    println!("  Step 3B: Selecting best tip by chainwork (avoiding O(n²) RPC calls)...");
+    debug!("Selecting best tip by chainwork");
     
     // Find tip with highest chainwork
     let mut best_tip: Option<(Vec<u8>, [u8; 32])> = None;
@@ -417,8 +384,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
     let tip_hex = hex::encode(&tip_display);
     
-    println!("  ✅ Selected best tip by chainwork: {}", &tip_hex[..16]);
-    println!("     Chainwork: {}", hex::encode(best_chainwork));
+    info!(tip = &tip_hex[..16], chainwork = %hex::encode(best_chainwork), "Selected best tip by chainwork");
     
     // Optional: RPC-validate the chosen tip matches node's view
     let config = get_global_config();
@@ -434,7 +400,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                 format!("http://{}", host)
             };
             
-            println!("  🔍 Validating chosen tip with RPC (single call)...");
+            debug!("Validating chosen tip with RPC");
             
             let body = serde_json::json!({
                 "jsonrpc": "1.0",
@@ -460,41 +426,41 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                     if let Ok(text) = resp.text() {
                         if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
                             if let Some(height) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
-                                println!("  ✅ RPC confirms tip at height {}", height);
+                                info!(height = height, "RPC confirms tip");
                                 Some(height as i32)
                             } else {
-                                println!("  ⚠️  RPC returned block but no height field");
+                                warn!("RPC returned block but no height field");
                                 None
                             }
                         } else {
-                            println!("  ⚠️  RPC returned invalid JSON");
+                            warn!("RPC returned invalid JSON");
                             None
                         }
                     } else {
-                        println!("  ⚠️  RPC returned non-text response");
+                        warn!("RPC returned non-text response");
                         None
                     }
                 }
                 Ok(Ok(Ok(resp))) => {
-                    println!("  ⚠️  RPC returned error status: {}", resp.status());
+                    warn!(status = %resp.status(), "RPC returned error status");
                     None
                 }
                 Ok(Ok(Err(e))) => {
-                    println!("  ⚠️  RPC error: {}", e);
+                    warn!(error = %e, "RPC error");
                     None
                 }
                 Ok(Err(e)) => {
-                    println!("  ⚠️  RPC task panic: {}", e);
+                    warn!(error = %e, "RPC task panic");
                     None
                 }
                 Err(_) => {
-                    println!("  ⚠️  RPC timeout (>10s)");
+                    warn!("RPC timeout (>10s)");
                     None
                 }
             }
         }
         _ => {
-            println!("  ℹ️  RPC not configured - trusting chainwork selection");
+            debug!("RPC not configured - trusting chainwork selection");
             None
         }
     };
@@ -506,12 +472,9 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     
     // Display result
     if let Some(h) = highest_height_opt {
-        println!("\n  📍 Selected canonical chain tip:");
-        println!("     Height: {}", h);
-        println!("     Hash: {}", tip_hex);
+        info!(height = h, hash = %tip_hex, "Selected canonical chain tip");
     } else {
-        println!("\n  📍 Selected canonical chain tip (chainwork-based, height unknown):");
-        println!("     Hash: {}", tip_hex);
+        info!(hash = %tip_hex, "Selected canonical chain tip (chainwork-based, height unknown)");
     }
     
     // STEP 3C: Walk backwards from the HIGHEST tip to genesis
@@ -520,9 +483,9 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     if let Some(h) = highest_height_opt {
         highest_height = h;
         have_highest_height = true;
-        println!("\n  Walking backwards from highest tip (height {}) to genesis...", highest_height);
+        info!(height = highest_height, "Walking backwards from highest tip to genesis");
     } else {
-        println!("\n  Walking backwards from highest tip (height unknown via RPC) to genesis...");
+        info!("Walking backwards from highest tip to genesis (height unknown)");
     }
     
     let mut chain_path: Vec<Vec<u8>> = Vec::new();
@@ -534,10 +497,6 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         chain_path.push(current_hash.clone());
         steps += 1;
         
-        if steps % 100000 == 0 {
-            println!("    Traced back {} blocks...", steps);
-        }
-        
         // Get the header to find prev_hash
         if let Some(header) = blocks_map.get(&current_hash) {
             if header.len() >= 36 {
@@ -545,7 +504,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                 
                 // Check if we reached genesis
                 if prev_hash == genesis_parent {
-                    println!("  ✅ Reached genesis block!");
+                    info!("Reached genesis block");
                     chain_path.push(prev_hash);
                     break;
                 }
@@ -553,51 +512,36 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                 // Move to parent block
                 current_hash = prev_hash;
             } else {
-                println!("  ⚠️  Block header too short at step {}", steps);
+                warn!(step = steps, "Block header too short");
                 break;
             }
         } else {
-            println!("  ⚠️  Block not found in blocks_map at step {}", steps);
-            let display: Vec<u8> = current_hash.iter().rev().cloned().collect();
-            println!("     Missing hash: {}", hex::encode(&display));
-            println!("     Chain breaks at approximately {} blocks from tip", steps);
-            println!("\n  🔍 DEBUG: Checking blocks_map for this hash...");
-            println!("     blocks_map size: {} blocks", blocks_map.len());
-            println!("     Searching for internal format: {:02x?}", &current_hash[..8]);
-            
-            // Check if this hash exists in the map with different format
-            let mut found_similar = 0;
-            for (hash_key, _) in blocks_map.iter().take(5) {
-                println!("     Sample key in map: {:02x?}", &hash_key[..8]);
-                found_similar += 1;
-                if found_similar >= 3 {
-                    break;
-                }
-            }
+            let display_hash: Vec<u8> = current_hash.iter().rev().cloned().collect();
+            warn!(
+                step = steps,
+                missing_hash = %hex::encode(&display_hash),
+                chain_breaks_at = steps,
+                "Block not found in blocks_map"
+            );
             break;
         }
     }
     
     let reached_genesis = chain_path.last().map(|h| h == &genesis_parent).unwrap_or(false);
     
-    println!("  Chain path length: {} blocks", chain_path.len());
+    debug!(chain_length = chain_path.len(), "Chain path built");
     
     if !reached_genesis {
-        println!("  ⚠️  Chain did NOT reach genesis on first pass - checking if gap continues to genesis...");
+        warn!("Chain did NOT reach genesis - checking for gap");
         
         // STEP 3C2: The chain broke - now walk backwards from the MISSING block to see if it reaches genesis
         let missing_hash_display: Vec<u8> = current_hash.iter().rev().cloned().collect();
-        println!("  Missing block: {}", hex::encode(&missing_hash_display));
+        warn!(missing_block = %hex::encode(&missing_hash_display), "Gap detected - recommend full resync");
         
         // [M2] Note: Gap filling via RPC removed as part of optimization
-        // The old code attempted RPC lookup here, but this is rarely needed
-        // If gaps occur, recommend resync from scratch
-        println!("  ⚠️  Gap detected - recommend full resync");
-        println!("      (RPC gap filling removed as part of M2 optimization)");
-        
         return Err(format!("Chain gap detected at block {}", hex::encode(&missing_hash_display)).into());
     } else {
-        println!("  ✅ Chain successfully reached genesis!");
+        info!("Chain successfully reached genesis");
     }
     
     // If we couldn't reach genesis and don't have an RPC-supplied tip height,
@@ -608,7 +552,7 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     }
 
     // STEP 3D: Reverse and assign heights
-    println!("  Assigning heights to canonical chain...");
+    info!("Assigning heights to canonical chain");
     chain_path.reverse();
     
     let start_idx = if reached_genesis && chain_path[0] == genesis_parent { 1 } else { 0 };
@@ -630,10 +574,6 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         // Store height -> hash mapping (in DISPLAY format)
         let display_hash: Vec<u8> = block_hash.iter().rev().cloned().collect();
         db.put_cf(&cf_metadata, height.to_le_bytes(), &display_hash)?;
-        
-        if height % 100000 == 0 || height < 5 || (have_highest_height && height >= highest_height - 5) {
-            println!("    Height {}: {}", height, hex::encode(&display_hash));
-        }
     }
     
     let chain_height = if reached_genesis {
@@ -642,18 +582,22 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
         highest_height
     };
 
-    println!("  ✅ Canonical chain established: {} blocks (height {} to {})", 
-             chain_path.len() - start_idx,
-             if reached_genesis { 0 } else { highest_height - (chain_path.len() - start_idx - 1) as i32 },
-             chain_height);
+    info!(
+        chain_blocks = chain_path.len() - start_idx,
+        start_height = if reached_genesis { 0 } else { highest_height - (chain_path.len() - start_idx - 1) as i32 },
+        tip_height = chain_height,
+        "Canonical chain established"
+    );
     
     // Calculate statistics
     let orphaned_count = total_blocks - (chain_path.len() - start_idx);
-    println!("\n📊 Chain Statistics:");
-    println!("  Total blocks loaded: {}", total_blocks);
-    println!("  Canonical chain length: {}", chain_path.len() - start_idx);
-    println!("  Chain tip height: {}", chain_height);
-    println!("  Orphaned blocks: {}", orphaned_count);
+    info!(
+        total_blocks = total_blocks,
+        canonical_chain = chain_path.len() - start_idx,
+        tip_height = chain_height,
+        orphaned = orphaned_count,
+        "Chain statistics"
+    );
     
     Ok(())
 }

@@ -12,6 +12,8 @@ use std::collections::HashSet;
 use rocksdb::DB;
 use pivx_rpc_rs::PivxRpcClient;
 use serde_json::Value;
+use tracing::{info, warn, error, info_span};
+use crate::metrics;
 
 use crate::config::get_global_config;
 use crate::websocket::EventBroadcaster;
@@ -36,12 +38,23 @@ struct FetchedBlock {
 fn get_rpc_chain_tip(
     rpc_client: &PivxRpcClient,
 ) -> Result<ChainTip, Box<dyn std::error::Error>> {
+    let timer = metrics::Timer::new();
+    
     // Get block count (height)
     let height_i64 = rpc_client.getblockcount()?;
     let height = height_i64 as i32;
     
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblockcount"])
+        .observe(timer.elapsed_secs());
+    
     // Get block hash at this height
+    let timer2 = metrics::Timer::new();
     let hash = rpc_client.getblockhash(height as i64)?;
+    
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblockhash"])
+        .observe(timer2.elapsed_secs());
     
     Ok(ChainTip {
         height,
@@ -107,9 +120,14 @@ async fn fetch_block_data(
     let client = reqwest::Client::new();
     
     // Get block hash at this height
+    let timer = metrics::Timer::new();
     let block_hash = rpc_client.getblockhash(height as i64)?;
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblockhash"])
+        .observe(timer.elapsed_secs());
     
     // Fetch block with full transaction data (verbosity=2)
+    let timer = metrics::Timer::new();
     let response = client
         .post(&url)
         .basic_auth(&user, Some(&pass))
@@ -126,6 +144,20 @@ async fn fetch_block_data(
     let result = json.get("result")
         .ok_or("No result in RPC response")?
         .clone();
+    
+    let elapsed = timer.elapsed_secs();
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblock"])
+        .observe(elapsed);
+    
+    if elapsed > 5.0 {
+        warn!(
+            method = "getblock",
+            height = height,
+            duration_secs = elapsed,
+            "Slow RPC call"
+        );
+    }
     
     Ok(FetchedBlock {
         height,
@@ -1043,6 +1075,8 @@ pub async fn run_block_monitor(
     poll_interval_secs: u64,
     broadcaster: Option<Arc<EventBroadcaster>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _span = info_span!("block_monitor", poll_interval_secs = poll_interval_secs).entered();
+    info!("Starting block monitor");
     
     // Initialize RPC client
     let config = get_global_config();
@@ -1062,12 +1096,17 @@ pub async fn run_block_monitor(
     // Test connection
     match rpc_client.getblockcount() {
         Ok(height) => {
+            info!(rpc_height = height, "RPC connection established");
+            metrics::set_rpc_connected(true);
+            
             // Connected successfully - store initial network height
             if let Err(e) = set_network_height(&db, height as i32) {
-                eprintln!("Failed to set initial network height: {}", e);
+                error!(error = %e, "Failed to set initial network height");
             }
         }
         Err(e) => {
+            error!(error = %e, "RPC connection failed");
+            metrics::set_rpc_connected(false);
             eprintln!("RPC connection failed: {}", e);
             eprintln!("Tip: Make sure PIVX node is running with RPC enabled");
             
@@ -1081,9 +1120,19 @@ pub async fn run_block_monitor(
     loop {
         // Get current tips
         let rpc_tip = match get_rpc_chain_tip(&rpc_client) {
-            Ok(tip) => tip,
+            Ok(tip) => {
+                info!(
+                    rpc_height = tip.height,
+                    rpc_hash = %crate::telemetry::truncate_hex(&tip.hash, 16),
+                    "RPC chain tip detected"
+                );
+                metrics::set_chain_tip_height("rpc", tip.height as i64);
+                tip
+            }
             Err(e) => {
-                eprintln!("Failed to get RPC tip: {}", e);
+                error!(error = %e, "Failed to get RPC tip");
+                metrics::increment_rpc_errors("getblockcount", "connection");
+                metrics::set_rpc_connected(false);
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
@@ -1091,7 +1140,7 @@ pub async fn run_block_monitor(
         
         // Update network height in database
         if let Err(e) = set_network_height(&db, rpc_tip.height) {
-            eprintln!("Failed to update network height: {}", e);
+            error!(error = %e, "Failed to update network height");
         }
         
         let db_tip = match get_db_chain_tip(&db) {
@@ -1139,6 +1188,21 @@ pub async fn run_block_monitor(
         if rpc_tip.height > db_tip.height {
             let blocks_behind = rpc_tip.height - db_tip.height;
             
+            let _catchup_span = info_span!(
+                "rpc_catchup",
+                current_height = db_tip.height,
+                target_height = rpc_tip.height,
+                blocks_behind = blocks_behind
+            ).entered();
+            
+            info!(
+                blocks_behind = blocks_behind,
+                current_height = db_tip.height,
+                target_height = rpc_tip.height,
+                "RPC catchup needed"
+            );
+            metrics::set_blocks_behind_tip(blocks_behind as i64);
+            
             println!("\n📡 RPC CATCHUP: {} blocks behind (heights {} → {})", 
                      blocks_behind, db_tip.height + 1, rpc_tip.height);
             
@@ -1181,6 +1245,8 @@ pub async fn run_block_monitor(
                 match result {
                     Ok(block) => fetched_blocks.push(block),
                     Err(e) => {
+                        error!(height = height, error = %e, "Failed to fetch block");
+                        metrics::increment_rpc_errors("getblock", "timeout");
                         eprintln!("❌ Failed to fetch block {}: {}", height, e);
                         fetch_errors += 1;
                     }
@@ -1188,6 +1254,11 @@ pub async fn run_block_monitor(
             }
             
             if fetch_errors > 0 {
+                warn!(
+                    fetch_errors = fetch_errors,
+                    retry_secs = poll_interval_secs,
+                    "Fetch errors occurred, retrying"
+                );
                 eprintln!("⚠️  {} fetch errors occurred, waiting {} seconds before retry...", 
                          fetch_errors, poll_interval_secs);
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
@@ -1261,6 +1332,14 @@ pub async fn run_block_monitor(
             };
             
             if new_db_tip.height >= rpc_tip.height {
+                info!(
+                    current_height = new_db_tip.height,
+                    network_height = rpc_tip.height,
+                    "RPC catchup complete - fully synced"
+                );
+                metrics::set_blocks_behind_tip(0);
+                metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
+                
                 println!("\n✅ RPC CATCHUP COMPLETE!");
                 println!("   📍 Current height: {}", new_db_tip.height);
                 println!("   🌐 Network height: {}", rpc_tip.height);
