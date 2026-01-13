@@ -4,6 +4,9 @@ use rustyblox::mempool::{MempoolState, run_mempool_monitor};
 use rustyblox::websocket::{EventBroadcaster, ws_blocks_handler, ws_transactions_handler, ws_mempool_handler};
 use rustyblox::block_detail::block_detail_v2;
 use rustyblox::cache::CacheManager;
+use rustyblox::telemetry::{TelemetryConfig, init_tracing};
+use rustyblox::metrics;
+use tracing::{error, warn, info};
 use rustyblox::api::{
     // Root handlers
     api_handler, root_handler,
@@ -29,13 +32,14 @@ use rustyblox::types::MyError;
 
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, BlockBasedOptions};
-use axum::{Router, routing::{get, post}};
+use axum::{Router, routing::{get, post}, response::IntoResponse};
 use tower_http::cors::{CorsLayer, Any};
 use tokio::sync::Mutex as TokioMutex;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::path::PathBuf;
 use lazy_static::lazy_static;
+use tracing::info_span;
 
 const COLUMN_FAMILIES: [&str; 8] = [
     "blocks",
@@ -50,6 +54,16 @@ const COLUMN_FAMILIES: [&str; 8] = [
 
 lazy_static! {
     static ref DB_MUTEX: TokioMutex<()> = TokioMutex::new(());
+}
+
+/// Prometheus metrics endpoint handler
+async fn metrics_handler() -> impl IntoResponse {
+    let metrics_output = metrics::gather_metrics();
+    (
+        axum::http::StatusCode::OK,
+        [("Content-Type", "text/plain; version=0.0.4")],
+        metrics_output,
+    )
 }
 
 async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, broadcaster: Arc<EventBroadcaster>) {
@@ -111,6 +125,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
+        .route("/metrics", get(metrics_handler))  // Prometheus metrics endpoint
         .layer(cors)
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
@@ -132,22 +147,40 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("FATAL: Failed to bind to {}: {}", addr, e);
-            eprintln!("       Check if port {} is already in use", server_port);
+            error!(addr = %addr, port = server_port, error = ?e, "FATAL: Failed to bind to address - check if port is already in use");
             std::process::exit(1);
         }
     };
     println!("Listening on {}", addr);
     
     if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("Web server error: {}", e);
+        error!(error = ?e, "Web server error");
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // ========================================
+    // STEP 1: Initialize Telemetry (FIRST!)
+    // ========================================
+    let telemetry_config = TelemetryConfig::default();
+    init_tracing(telemetry_config)?;
+    
+    let _span = info_span!("service_start").entered();
+    info!("Service starting");
+    
+    // ========================================
+    // STEP 2: Initialize Metrics
+    // ========================================
+    metrics::init_metrics()?;
+    info!("Metrics registry initialized");
+    
+    // ========================================
+    // STEP 3: Load Configuration
+    // ========================================
     init_global_config()?;
     let config = get_global_config();
+    info!("Configuration loaded");
 
     let worker_threads_str: String = config
         .get("server.worker_threads")
@@ -168,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RocksDB Configuration
     // ========================================
     
-    println!("⚙️  Configuring RocksDB with optimized settings...");
+    info!("Configuring RocksDB with optimized settings");
     
     // Load tuning parameters from config (with defaults)
     let write_buffer_size_mb = config.get_int("rocksdb.write_buffer_size").unwrap_or(256);
@@ -191,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "lz4" => rocksdb::DBCompressionType::Lz4,
         "zlib" => rocksdb::DBCompressionType::Zlib,
         _ => {
-            println!("⚠️  Unknown compression type '{}', using lz4", compression_type_str);
+            warn!(compression_type = %compression_type_str, "Unknown compression type, using lz4");
             rocksdb::DBCompressionType::Lz4
         }
     };
@@ -287,12 +320,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db_options.set_stats_dump_period_sec(300); // Dump stats every 5 minutes
     db_options.set_keep_log_file_num(3); // Keep last 3 log files
     
-    println!("  Write buffer: {}MB per CF", write_buffer_size_mb);
-    println!("  Block cache: {}MB (shared)", block_cache_size_mb);
-    println!("  Max open files: {}", max_open_files);
-    println!("  Background jobs: {}", max_background_jobs);
-    println!("  Compression: {:?}", compression_type);
-    println!("  Pipelined writes: {}", enable_pipelined_write);
+    info!(
+        write_buffer_mb = write_buffer_size_mb,
+        block_cache_mb = block_cache_size_mb,
+        max_open_files = max_open_files,
+        background_jobs = max_background_jobs,
+        compression = ?compression_type,
+        pipelined_writes = enable_pipelined_write,
+        "RocksDB configuration"
+    );
     
     let db = DB::open_cf_descriptors(
         &db_options,
@@ -303,10 +339,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize cached column family handles
     // This validates all required CFs exist at startup
-    println!("Initializing database column family handles...");
+    info!("Initializing database column family handles");
     let _db_handles = rustyblox::db_handles::DbHandles::new(Arc::clone(&db_arc))
         .map_err(|e| format!("Failed to initialize DB handles: {}", e))?;
-    println!("✅ Database handles validated");
+    info!("Database handles validated");
 
     let blk_dir_path = PathBuf::from(blk_dir);
     
@@ -318,7 +354,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mempool_clone = Arc::clone(&mempool_state);
     tokio::spawn(async move {
         if let Err(e) = run_mempool_monitor(mempool_clone, 10).await {
-            eprintln!("Mempool monitor error: {}", e);
+            error!(error = ?e, "Mempool monitor error");
         }
     });
 
@@ -330,7 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Prepare API clones now so they are available regardless of sync mode
     let api_db = Arc::clone(&db_arc);
     if auto_start_sync {
-        println!("\n🔄 Starting blockchain sync...");
+        info!("Starting blockchain sync");
         let sync_db = Arc::clone(&db_arc);
         let sync_broadcaster = Arc::clone(&broadcaster);
         let blk_dir_clone = blk_dir_path.clone();
@@ -340,7 +376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 if let Err(e) = run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await {
-                    eprintln!("Sync service error: {}", e);
+                    error!(error = ?e, "Sync service error");
                 }
             });
         });
@@ -360,20 +396,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Some(bytes)) if bytes.len() == 4 => {
                     let height = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                     if height >= 1000 {
-                        println!("\n✅ Minimum viable data indexed (height: {})", height);
-                        println!("   Starting web server...\n");
+                        info!(height = height, "Minimum viable data indexed - starting web server");
                         break;
                     }
-                    println!("📊 Indexing in progress (height: {})... waiting for minimum 1000 blocks", height);
+                    info!(height = height, "Indexing in progress - waiting for minimum 1000 blocks");
                 }
                 _ => {
-                    println!("📊 Indexing in progress... waiting for initial data");
+                    info!("Indexing in progress - waiting for initial data");
                 }
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     } else {
-        println!("⚠️  sync.auto_start=false - skipping sync service and starting web server in read-only mode");
+        warn!("sync.auto_start=false - skipping sync service and starting web server in read-only mode");
     }
     
     // NOW start web server (data is ready)

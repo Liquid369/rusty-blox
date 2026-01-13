@@ -48,6 +48,8 @@ pub mod maturity;
 pub mod reorg;
 pub mod spent_utxo;
 pub mod pos_validation;
+pub mod telemetry;
+pub mod metrics;
 pub mod address_rollback;
 pub mod build_address_undo;
 pub mod fee_calculation;
