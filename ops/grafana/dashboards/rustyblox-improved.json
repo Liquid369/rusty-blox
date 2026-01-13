@@ -1,0 +1,268 @@
+{
+  "id": 2,
+  "panels": [
+    {
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 95
+              },
+              {
+                "color": "green",
+                "value": 99
+              }
+            ]
+          },
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "(rustyblox_indexed_height{stage=\"block_index\"} / ignoring(stage,source) rustyblox_chain_tip_height{source=\"rpc\"}) * 100",
+          "refId": "A"
+        }
+      ],
+      "title": "Sync Progress %",
+      "type": "gauge"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 100
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "rustyblox_chain_tip_height{source=\"rpc\"} - ignoring(source,stage) rustyblox_indexed_height{stage=\"block_index\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Blocks Behind",
+      "type": "stat"
+    },
+    {
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "rustyblox_indexed_height{stage=\"block_index\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Indexed Height",
+      "type": "stat"
+    },
+    {
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "rustyblox_chain_tip_height{source=\"rpc\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Chain Tip Height",
+      "type": "stat"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblockhash\"}[5m])))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblockhash\"}[5m])))",
+          "legendFormat": "P95",
+          "refId": "B"
+        }
+      ],
+      "title": "RPC getblockhash Latency",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblockcount\"}[5m])))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblockcount\"}[5m])))",
+          "legendFormat": "P95",
+          "refId": "B"
+        }
+      ],
+      "title": "RPC getblockcount Latency",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblock\"}[5m])))",
+          "legendFormat": "P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rustyblox_rpc_call_duration_seconds_bucket{method=\"getblock\"}[5m])))",
+          "legendFormat": "P95",
+          "refId": "B"
+        }
+      ],
+      "title": "RPC getblock Latency",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, cf) (rate(rustyblox_db_batch_flush_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{cf}} P50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, cf) (rate(rustyblox_db_batch_flush_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{cf}} P95",
+          "refId": "B"
+        }
+      ],
+      "title": "DB Flush Latency by CF",
+      "type": "timeseries"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "rustyblox_db_batch_size_entries",
+          "legendFormat": "{{cf}}",
+          "refId": "A"
+        }
+      ],
+      "title": "DB Batch Size by CF",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 30,
+  "tags": [
+    "rustyblox",
+    "blockchain"
+  ],
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "rusty-blox Monitoring - Improved",
+  "uid": "rustyblox-improved",
+  "version": 1
+}
