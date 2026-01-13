@@ -9,6 +9,7 @@
 use rocksdb::{DB, WriteBatch, IteratorMode};
 use std::sync::Arc;
 use std::collections::{HashSet, HashMap};
+use tracing::{error, warn, info};
 use crate::leveldb_index::build_canonical_chain_from_leveldb;
 use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 
@@ -23,10 +24,6 @@ pub async fn resolve_heights_from_block_index(
     db: Arc<DB>,
     pivx_data_dir: Option<String>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║   RESOLVING HEIGHTS FROM PIVX CORE BLOCK INDEX    ║");
-    println!("╚════════════════════════════════════════════════════╝\n");
-    
     // 1. Determine PIVX data directory
     let pivx_dir = pivx_data_dir.unwrap_or_else(|| {
         std::env::var("HOME")
@@ -37,10 +34,7 @@ pub async fn resolve_heights_from_block_index(
     let block_index_src = format!("{}/blocks/index", pivx_dir);
     let block_index_copy = "/tmp/pivx_block_index_current";
     
-    println!("� Copying block index from PIVX Core...");
-    println!("   Source: {}", block_index_src);
-    println!("   Dest: {}", block_index_copy);
-    
+    // Copy block index to temp location
     // Remove old copy if exists
     std::fs::remove_dir_all(block_index_copy).ok();
     
@@ -54,25 +48,17 @@ pub async fn resolve_heights_from_block_index(
             String::from_utf8_lossy(&copy_result.stderr)).into());
     }
     
-    println!("✅ Block index copied!\n");
-    
     // 2. Build canonical chain from copied block index
-    println!("📂 Reading PIVX Core block index...");
-    println!("   Path: {}", block_index_copy);
     
     let canonical_chain = match build_canonical_chain_from_leveldb(block_index_copy) {
         Ok(chain) => chain,
         Err(e) => {
-            eprintln!("❌ Failed to read block index: {}", e);
-            eprintln!("   Make sure PIVX Core is installed and has synced");
+            error!(path = %block_index_copy, error = ?e, "Failed to read block index - make sure PIVX Core is installed and has synced");
             return Err(e);
         }
     };
     
-    println!("✅ Canonical chain built: {} blocks\n", canonical_chain.len());
-    
     // 3. Build lookup structures
-    println!("📊 Building canonical block lookup...");
     
     let mut canonical_blocks: HashSet<Vec<u8>> = HashSet::new();
     let mut blockhash_to_height: HashMap<Vec<u8>, i64> = HashMap::new();
@@ -82,11 +68,7 @@ pub async fn resolve_heights_from_block_index(
         blockhash_to_height.insert(block_hash.clone(), *height);
     }
     
-    println!("   ✅ Indexed {} canonical blocks", canonical_blocks.len());
-    println!("   ⏱️  Height range: 0 → {}\n", canonical_chain.last().map(|(h, _, _, _)| h).unwrap_or(&0));
-    
     // 4. Scan all transactions to collect which ones need fixing
-    println!("🔧 Scanning transactions to identify which need height updates...");
     
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
@@ -134,14 +116,9 @@ pub async fn resolve_heights_from_block_index(
                 } else {
                     already_correct += 1;
                 }
-                
-                if total_txs % 100_000 == 0 {
-                    println!("   Scanned {} transactions ({} need fixing)...", 
-                             total_txs, txids_needing_fix.len());
-                }
             }
             Err(e) => {
-                eprintln!("⚠️  Error reading transaction: {}", e);
+                warn!(error = ?e, "Error reading transaction during scan");
                 break;
             }
         }
@@ -150,29 +127,19 @@ pub async fn resolve_heights_from_block_index(
     let fixed_count = txids_needing_fix.len();
     let validate_count = txids_to_validate.len();
     
-    println!("\n📈 Transaction scan complete:");
-    println!("   Total: {}", total_txs);
-    println!("   Need fixing (height=0 or {}): {}", HEIGHT_UNRESOLVED, fixed_count);
-    println!("   Need validation (positive heights): {}", validate_count);
-    println!("   Already orphaned (height={}): {}", HEIGHT_ORPHAN, orphaned_count);
-    println!("   Already have heights: {}", already_correct);
-    println!();
-    
     // Early exit if nothing to fix or validate
     if fixed_count == 0 && validate_count == 0 {
-        println!("✅ All transaction heights already correct!");
+        info!("All transaction heights already correct");
         return Ok((0, 0));
     }
     
     // 5. Build a reverse lookup: height -> block_hash
-    println!("� Building height lookup table...");
     let mut height_to_blockhash: HashMap<i64, Vec<u8>> = HashMap::new();
     for (height, block_hash, _, _) in &canonical_chain {
         height_to_blockhash.insert(*height, block_hash.clone());
     }
-    println!("   ✅ Indexed {} heights\n", height_to_blockhash.len());    
+    
     // 5a. Build a 'B' key index for efficient validation (avoids per-tx prefix scans)
-    println!("🔧 Building block transaction index for validation...");
     let mut block_tx_index: HashSet<(i32, Vec<u8>)> = HashSet::new();  // (height, txid_bytes)
     
     let block_tx_iter = db.iterator_cf(&cf_transactions, IteratorMode::Start);
@@ -194,14 +161,12 @@ pub async fn resolve_heights_from_block_index(
         }
     }
     
-    println!("   ✅ Indexed {} 'B' keys (block transactions)\n", b_key_count);    
     // Initialize counters
     let mut updated = 0;
     let mut newly_orphaned = 0;
     
     // 5b. Validate positive heights against canonical chain
     if !txids_to_validate.is_empty() {
-        println!("🔍 Validating {} transactions with positive heights...", validate_count);
         let mut validated_batch = WriteBatch::default();
         let mut validated_orphaned = 0;
         let mut orphaned_txids_from_validation: Vec<Vec<u8>> = Vec::new();
@@ -235,15 +200,17 @@ pub async fn resolve_heights_from_block_index(
                     if validated_orphaned % BATCH_SIZE == 0 {
                         db.write(validated_batch)?;
                         validated_batch = WriteBatch::default();
-                        println!("      Marked {} as orphaned...", validated_orphaned);
                     }
                 }
             } else if has_block_index && !height_to_blockhash.contains_key(&(current_height as i64)) {
                 // Has 'B' key but height not in canonical lookup - this is OK, likely just incomplete chain build
-                // Log but don't mark as orphaned
-                if validated_orphaned == 0 {  // Only log once to avoid spam
-                    println!("   ℹ️  Transaction {} has 'B' key at height {} but height not in canonical lookup - keeping as valid", 
-                        hex::encode(&txid_internal[..8].to_vec()), current_height);
+                // Log at warn level (only first occurrence to avoid spam)
+                if validated_orphaned == 0 {
+                    warn!(
+                        txid = %hex::encode(&txid_internal[..8].to_vec()),
+                        height = current_height,
+                        "Transaction has 'B' key but height not in canonical lookup - keeping as valid"
+                    );
                 }
             }
         }
@@ -253,26 +220,26 @@ pub async fn resolve_heights_from_block_index(
             db.write(validated_batch)?;
         }
         
-        println!("   ✅ Marked {} transactions with non-canonical heights as orphaned\n", validated_orphaned);
+        info!(orphaned = validated_orphaned, "Marked transactions with non-canonical heights as orphaned");
         newly_orphaned += validated_orphaned;
         
         // CRITICAL FIX: Clean address index for newly orphaned transactions
         if validated_orphaned > 0 {
-            println!("🧹 Cleaning address index for {} orphaned transactions...", orphaned_txids_from_validation.len());
+            info!(count = orphaned_txids_from_validation.len(), "Cleaning address index for orphaned transactions");
             // TODO: Re-enable when orphan_cleanup module is available
             // match remove_orphaned_txs_batch(&db, &orphaned_txids_from_validation).await {
             //     Ok((cleaned, errors)) => {
-            //         println!("   ✅ Cleaned {} addresses ({} errors)", cleaned, errors);
+            //         info!(cleaned, errors, "Cleaned addresses from orphaned transactions");
             //     }
             //     Err(e) => {
-            //         eprintln!("   ⚠️  Address cleanup failed: {}", e);
+            //         warn!(error = ?e, "Address cleanup failed");
             //     }
             // }
         }
     }
-        // 6. Efficiently update ONLY the transactions that need fixing
-    println!("🔍 Updating transaction heights from block index...");
-    println!("   Processing only {} transactions with height=0, -1, or HEIGHT_UNRESOLVED", fixed_count);
+    
+    // 6. Efficiently update ONLY the transactions that need fixing
+    info!(count = fixed_count, "Updating transaction heights from block index");
     
     // DEBUG: Track specific problematic txid
     const DEBUG_TXID: &str = "9e997ad2649b8ec1a73142a1c30c8d93c6688f96a5ae35dec72d8a087aa10621";
@@ -283,9 +250,9 @@ pub async fn resolve_heights_from_block_index(
     
     if let Some(ref dtx) = debug_txid_internal {
         if txids_needing_fix.contains(dtx) {
-            println!("🔍 DEBUG: Problematic txid {} IS in txids_needing_fix set", DEBUG_TXID);
+            info!(txid = DEBUG_TXID, "Problematic txid IS in txids_needing_fix set");
         } else {
-            println!("⚠️  DEBUG: Problematic txid {} NOT in txids_needing_fix set", DEBUG_TXID);
+            warn!(txid = DEBUG_TXID, "Problematic txid NOT in txids_needing_fix set");
         }
     }
     
@@ -333,8 +300,7 @@ pub async fn resolve_heights_from_block_index(
                                 if current_height == 0 || current_height == HEIGHT_UNRESOLVED || current_height == HEIGHT_ORPHAN {
                                     // DEBUG: Log if this is the problematic txid
                                     if debug_txid_internal.as_ref() == Some(&txid_internal) {
-                                        println!("🔍 DEBUG: Found problematic txid in 'B' key at height {}", height);
-                                        println!("         Current height in 't' key: {}", current_height);
+                                        info!(height, current_height, "Found problematic txid in 'B' key");
                                     }
                                     
                                     // Check if this height is in canonical chain
@@ -349,7 +315,7 @@ pub async fn resolve_heights_from_block_index(
                                         
                                         // DEBUG: Log update
                                         if debug_txid_internal.as_ref() == Some(&txid_internal) {
-                                            println!("✅ DEBUG: Updated problematic txid from height {} → {}", current_height, height);
+                                            info!(from_height = current_height, to_height = height, "Updated problematic txid");
                                         }
                                         
                                         // Remove from set so we don't process it again
@@ -358,8 +324,7 @@ pub async fn resolve_heights_from_block_index(
                                         if updated % BATCH_SIZE == 0 {
                                             db.write(batch)?;
                                             batch = WriteBatch::default();
-                                            println!("      Updated {} transactions ({} remaining)...", 
-                                                     updated, txids_needing_fix.len());
+
                                         }
                                     } else {
                                         // Height not in canonical chain - mark as orphaned
@@ -385,7 +350,7 @@ pub async fn resolve_heights_from_block_index(
                 }
             }
             Err(e) => {
-                eprintln!("⚠️  Error reading block-tx index: {}", e);
+                warn!(error = ?e, "Error reading block-tx index");
                 break;
             }
         }
@@ -400,9 +365,10 @@ pub async fn resolve_heights_from_block_index(
     let mut all_orphaned_txids: Vec<Vec<u8>> = Vec::new();
     
     if !txids_needing_fix.is_empty() {
-        println!("\n⚠️  {} transactions with height=0 or {} not found in block index", 
-                 txids_needing_fix.len(), HEIGHT_UNRESOLVED);
-        println!("   These are from orphaned blocks - marking as HEIGHT_ORPHAN...");
+        info!(
+            count = txids_needing_fix.len(),
+            "Transactions not found in block index - marking as orphaned"
+        );
         
         let mut orphan_batch = WriteBatch::default();
         let mut marked_orphan = 0;
@@ -430,7 +396,6 @@ pub async fn resolve_heights_from_block_index(
                         if marked_orphan % BATCH_SIZE == 0 {
                             db.write(orphan_batch)?;
                             orphan_batch = WriteBatch::default();
-                            println!("      Marked {} as orphaned...", marked_orphan);
                         }
                     }
                 }
@@ -442,27 +407,24 @@ pub async fn resolve_heights_from_block_index(
         }
         
         newly_orphaned += marked_orphan;
-        println!("   ✅ Marked {} additional transactions as HEIGHT_ORPHAN", marked_orphan);
+        info!(marked = marked_orphan, "Marked additional transactions as HEIGHT_ORPHAN");
     }
     
     // CRITICAL FIX: Clean address index for ALL newly orphaned transactions
     if !all_orphaned_txids.is_empty() {
-        println!("\n🧹 Cleaning address index for {} orphaned transactions...", all_orphaned_txids.len());
+        info!(count = all_orphaned_txids.len(), "Cleaning address index for orphaned transactions");
         // TODO: Re-enable when orphan_cleanup module is available
         // match remove_orphaned_txs_batch(&db, &all_orphaned_txids).await {
         //     Ok((cleaned, errors)) => {
-        //         println!("   ✅ Cleaned {} addresses ({} errors)", cleaned, errors);
+        //         info!(cleaned, errors, "Cleaned addresses from orphaned transactions");
         //     }
         //     Err(e) => {
-        //         eprintln!("   ⚠️  Address cleanup failed: {}", e);
+        //         warn!(error = ?e, "Address cleanup failed");
         //     }
         // }
     }
     
-    println!("\n✅ Height resolution complete!");
-    println!("   Updated: {} transactions", updated);
-    println!("   Orphaned: {} transactions", newly_orphaned);
-    println!();
+    info!(updated, newly_orphaned, "Height resolution complete");
     
     Ok((updated, newly_orphaned))
 }
