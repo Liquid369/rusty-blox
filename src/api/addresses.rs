@@ -7,6 +7,7 @@ use axum::{Json, Extension, extract::{Path as AxumPath, Query}};
 use rocksdb::DB;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
@@ -283,7 +284,7 @@ pub async fn xpub_v2(
         Ok(info) => Ok(Json(info)),
         Err(e) => {
             // Log error with redacted xpub (privacy protection)
-            eprintln!("xpub query error for {}: {}", redact_xpub(&xpub_str), e);
+            warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
             Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(super::types::BlockbookError::new(e.to_string()))

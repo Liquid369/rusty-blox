@@ -8,6 +8,7 @@ use rocksdb::DB;
 use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
@@ -143,7 +144,7 @@ async fn compute_transaction_details(
                     
                     if let Some(prev_data) = prev_data_opt {
                         if prev_data.len() > 10_000_000 {
-                            eprintln!("Warning: Previous transaction data too large for {}", prevout.hash);
+                            warn!(prevout_hash = %prevout.hash, size_bytes = prev_data.len(), "Previous transaction data too large");
                         } else if prev_data.len() >= 8 {
                             let prev_tx_data_len = prev_data.len() - 8;
                             if prev_tx_data_len > 0 {
