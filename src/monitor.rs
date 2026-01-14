@@ -1340,13 +1340,7 @@ pub async fn run_block_monitor(
                 metrics::set_blocks_behind_tip(0);
                 metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
                 
-                println!("\n✅ RPC CATCHUP COMPLETE!");
-                println!("   📍 Current height: {}", new_db_tip.height);
-                println!("   🌐 Network height: {}", rpc_tip.height);
-                println!("   🎯 Status: FULLY SYNCED\n");
-                println!("╔════════════════════════════════════════════════════╗");
-                println!("║     🎉 INDEXING COMPLETE - READY FOR USE 🎉        ║");
-                println!("╚════════════════════════════════════════════════════╝\n");
+
             }
         } else {
             // We're caught up - sleep before checking again
