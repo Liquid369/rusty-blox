@@ -1,19 +1,80 @@
 [package]
 name = "rustyblox"
 version = "0.1.0"
+authors = ["Liquid369"]
 edition = "2021"
 
 [[bin]]
 name = "rustyblox"
-path = "main.rs"
+path = "src/main.rs"
+
+# Essential diagnostic tools
+[[bin]]
+name = "check-db"
+path = "tools/diagnostics/check_db.rs"
+
+[[bin]]
+name = "diagnose-address"
+path = "tools/diagnostics/diagnose_address.rs"
+
+[[bin]]
+name = "count-orphans"
+path = "tools/diagnostics/count_orphans.rs"
+
+[[bin]]
+name = "inspect-leveldb"
+path = "tools/diagnostics/inspect_leveldb.rs"
+
+# Essential maintenance tools
+[[bin]]
+name = "rebuild-address-index"
+path = "tools/maintenance/rebuild_address_index.rs"
+
+# Essential validation tools
+[[bin]]
+name = "validate-sync"
+path = "tools/validation/validate_sync.rs"
+
+# Essential migration tools
+[[bin]]
+name = "backfill-offsets"
+path = "tools/migration/backfill_offsets.rs"
+
+# Essential export tools
+[[bin]]
+name = "export-txids"
+path = "tools/export/export_txids.rs"
+
+# Essential testing tools
+[[bin]]
+name = "test-parser"
+path = "tools/testing/test_parser.rs"
+
+# Height revalidation tool
+[[bin]]
+name = "revalidate-heights"
+path = "tools/maintenance/revalidate_all_heights.rs"
+
+# Mark orphaned zero-height transactions
+[[bin]]
+name = "mark-orphaned-zero-height"
+path = "tools/maintenance/mark_orphaned_zero_height.rs"
+
+# Validate ALL transaction heights against canonical chain
+[[bin]]
+name = "validate-all-tx-heights"
+path = "tools/maintenance/validate_all_tx_heights.rs"
+
+# Chainstate import and verification
+[[bin]]
+name = "import-chainstate"
+path = "src/bin/import-chainstate.rs"
 
 [dependencies]
 hex = "0.4.3"
 rocksdb = "0.21.0"
 byteorder = "1.3"
 bitcoin = "0.26.0"
-leveldb = "0.8.6"
-rusty-leveldb = "2.0.0"
 fs2 = "0.4.3"
 config = "0.13.1"
 serde_json = "1.0"
@@ -24,3 +85,27 @@ sha2 = "0.9"
 ripemd160 = "0.9.0"
 bs58 = "0.5.0"
 bincode = "1.3"
+secp256k1 = { version = "0.27", features = ["recovery", "global-context"] }
+tokio = { version = "1.0", features = ["full"] }
+once_cell = "1.8.0"
+lazy_static = "1.4.0"
+axum = { version = "0.8.4", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+futures = "0.3"
+tokio-stream = "0.1.15"
+tokio-util = { version = "0.7", features = ["io"] }
+lru = "0.12"
+rusty-leveldb = "3.0"
+throttled_json_rpc = "0.0.6"
+pivx_rpc_rs = "0.1.1"
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+clap = { version = "4.0", features = ["derive"] }
+shellexpand = "3.0"
+
+[build-dependencies]
+cc = "1.0"
+
+[dev-dependencies]
+tempfile = "3.8"

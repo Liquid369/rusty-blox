@@ -2,9 +2,9 @@ name: Rust Test Build
 
 on:
   push:
-    branches: [ master ]
+    branches: [ async-update ]
   pull_request:
-    branches: [ master ]
+    branches: [ async-update ]
 
 jobs:
   build:
