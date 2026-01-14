@@ -154,10 +154,10 @@
               <!-- Payment Info -->
               <div class="payment-info">
                 <InfoRow label="Monthly Payment">
-                  <span class="payment-amount">{{ formatPIV(proposal.MonthlyPayment) }} PIV</span>
+                  <span class="payment-amount">{{ proposal.MonthlyPayment }} PIV</span>
                 </InfoRow>
                 <InfoRow label="Total Payment">
-                  <span class="payment-amount">{{ formatPIV(proposal.TotalPayment) }} PIV</span>
+                  <span class="payment-amount">{{ proposal.TotalPayment }} PIV</span>
                 </InfoRow>
                 <InfoRow label="Payments Remaining">
                   {{ proposal.RemainingPaymentCount }} / {{ proposal.TotalPaymentCount }}

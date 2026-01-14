@@ -126,9 +126,9 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.sapling?.value_balance" label="Value Balance" icon="⚖️">
+            <InfoRow v-if="formatPIV(transaction.sapling?.value_balance)" label="Value Balance" icon="⚖️">
               <div class="value-balance">
-                <span class="balance-amount" :class="valueBalanceClass">{{ transaction.sapling.value_balance }} PIV</span>
+                <span class="balance-amount" :class="valueBalanceClass">{{ formatPIV(transaction.sapling.value_balance) }} PIV</span>
                 <span class="balance-explanation">{{ valueBalanceExplanation }}</span>
               </div>
             </InfoRow>
