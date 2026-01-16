@@ -350,6 +350,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mempool_state = Arc::new(MempoolState::new());
     let broadcaster = Arc::new(EventBroadcaster::new());
     
+    // Spawn database size sampler (background monitoring)
+    let sampler_db = Arc::clone(&db_arc);
+    tokio::spawn(async move {
+        rustyblox::db_sampler::start_db_size_sampler(sampler_db, 60).await;
+    });
+    
     // Spawn mempool monitor service (can start early)
     let mempool_clone = Arc::clone(&mempool_state);
     tokio::spawn(async move {

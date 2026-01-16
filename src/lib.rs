@@ -22,6 +22,7 @@ pub mod db_utils;
 pub mod batch_writer;
 pub mod atomic_writer;
 pub mod transactions;
+pub mod db_sampler;
 
 #[cfg(test)]
 mod batch_writer_tests;
