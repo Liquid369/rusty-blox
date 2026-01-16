@@ -15,6 +15,7 @@
 /// - Works with our own database (no dependency on PIVX Core)
 
 use crate::constants::{should_index_transaction};
+use crate::metrics;
 /// - Fast incremental updates
 /// - Proper UTXO tracking (spent vs unspent)
 /// 
@@ -26,7 +27,7 @@ use crate::constants::{should_index_transaction};
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use rocksdb::DB;
-use tracing::{info, warn, error, info_span};
+use tracing::{info, warn, info_span};
 use crate::parser::{deserialize_transaction, serialize_utxos};
 use crate::tx_keys::{tx_cf_key, txid_from_key, txid_from_hex};
 use crate::types::{CTransaction, CTxOut, ScriptClassification};
@@ -125,6 +126,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut pass1_tx_deserialized = 0;
     let mut pass1_tx_failed = 0;
     let mut pass1_inputs_processed = 0;
+    let mut pass1_sapling_count = 0;  // NEW: Track Sapling transactions
     
     let iter1 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     
@@ -159,6 +161,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 if !txid_bytes.is_empty() {
                     tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
                 }
+                
+                // NEW: Count Sapling transactions (version >= 3 with Sapling data)
+                if tx.sapling_data.is_some() {
+                    pass1_sapling_count += 1;
+                }
+                
                 Arc::new(tx)
             }
             Err(e) => {
@@ -199,6 +207,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         pass1_deserialized = pass1_tx_deserialized,
         pass1_failed = pass1_tx_failed,
         pass1_inputs = pass1_inputs_processed,
+        pass1_sapling = pass1_sapling_count,
         cache_entries = tx_cache.len(),
         cache_size_mb = (tx_cache.len() as f64 * 0.5) / 1000.0,
         "Pass 1 complete: Spent outputs set built"
@@ -659,6 +668,19 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         spent_found = total_spent_found,
         spent_rate = spent_rate,
         "Address index building complete"
+    );
+    
+    // UPDATE METRICS: Set current counts for Grafana/Prometheus
+    let total_unspent_utxos = total_utxos_checked - total_spent_found;
+    metrics::set_total_addresses_indexed(total_addresses as u64);
+    metrics::set_total_utxos_tracked(total_unspent_utxos as u64);
+    metrics::increment_sapling_transactions(pass1_sapling_count as u64);
+    
+    info!(
+        metric_addresses = total_addresses,
+        metric_utxos_tracked = total_unspent_utxos,
+        metric_sapling_tx = pass1_sapling_count,
+        "Metrics updated: addresses, UTXOs, and Sapling transactions"
     );
     
     Ok(())
