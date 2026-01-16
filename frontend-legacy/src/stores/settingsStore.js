@@ -71,6 +71,24 @@ export const useSettingsStore = defineStore('settings', () => {
     saveSettings()
   }
 
+  const setCurrency = (currency) => {
+    preferredCurrency.value = currency
+    saveSettings()
+  }
+
+  // Currency options
+  const availableCurrencies = [
+    { code: 'PIV', symbol: 'PIV', name: 'PIVX' },
+    { code: 'USD', symbol: '$', name: 'US Dollar' },
+    { code: 'EUR', symbol: '€', name: 'Euro' },
+    { code: 'BTC', symbol: '₿', name: 'Bitcoin' }
+  ]
+
+  const getCurrencySymbol = (currencyCode) => {
+    const currency = availableCurrencies.find(c => c.code === currencyCode)
+    return currency?.symbol || currencyCode
+  }
+
   const $reset = () => {
     theme.value = 'dark'
     searchHistory.value = []
@@ -90,11 +108,14 @@ export const useSettingsStore = defineStore('settings', () => {
     itemsPerPage,
     preferredCurrency,
     showTestnet,
+    availableCurrencies,
     // Actions
     setTheme,
     addToSearchHistory,
     clearSearchHistory,
     setItemsPerPage,
+    setCurrency,
+    getCurrencySymbol,
     loadSettings,
     saveSettings,
     $reset

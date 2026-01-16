@@ -101,15 +101,30 @@
             <div class="payment-details">
               <div class="payment-item">
                 <span class="payment-label">Monthly Payment</span>
-                <span class="payment-value">{{ formatPIV(proposal.MonthlyPayment) }} PIV</span>
+                <div class="payment-value-container">
+                  <span class="payment-value">{{ formatPIV(proposal.MonthlyPayment) }} PIV</span>
+                  <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
+                    ≈ {{ formatAmount(proposal.MonthlyPayment, { showPIV: false }) }}
+                  </span>
+                </div>
               </div>
               <div class="payment-item">
                 <span class="payment-label">Total Payment</span>
-                <span class="payment-value">{{ formatPIV(proposal.TotalPayment) }} PIV</span>
+                <div class="payment-value-container">
+                  <span class="payment-value">{{ formatPIV(proposal.TotalPayment) }} PIV</span>
+                  <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
+                    ≈ {{ formatAmount(proposal.TotalPayment, { showPIV: false }) }}
+                  </span>
+                </div>
               </div>
               <div class="payment-item">
                 <span class="payment-label">Allotted</span>
-                <span class="payment-value">{{ formatPIV(proposal.Allotted) }} PIV</span>
+                <div class="payment-value-container">
+                  <span class="payment-value">{{ formatPIV(proposal.Allotted) }} PIV</span>
+                  <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
+                    ≈ {{ formatAmount(proposal.Allotted, { showPIV: false }) }}
+                  </span>
+                </div>
               </div>
               <div class="payment-item">
                 <span class="payment-label">Ratio</span>
@@ -218,6 +233,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import { governanceService } from '@/services/governanceService'
 import { masternodeService } from '@/services/masternodeService'
 import { formatNumber, formatPIV } from '@/utils/formatters'
@@ -233,6 +249,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 const route = useRoute()
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
 
 const proposal = ref(null)
 const votes = ref(null)
@@ -415,11 +432,23 @@ watch(() => route.params.hash, (newHash) => {
   font-size: var(--text-sm);
 }
 
+.payment-value-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
 .payment-value {
   font-family: var(--font-mono);
   font-weight: 700;
   color: var(--text-accent);
   font-size: var(--text-lg);
+}
+
+.payment-fiat {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-weight: var(--weight-normal);
 }
 
 .voting-stats {

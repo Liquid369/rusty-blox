@@ -33,12 +33,16 @@
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { useChainStore } from '@/stores/chainStore'
 import { useWebSocketStore } from '@/stores/websocketStore'
+import { usePriceStore } from '@/stores/priceStore'
 
 const chainStore = useChainStore()
 const wsStore = useWebSocketStore()
+const priceStore = usePriceStore()
+
+let priceInterval = null
 
 onMounted(() => {
   // Initialize chain state on app mount
@@ -48,6 +52,16 @@ onMounted(() => {
   setInterval(() => {
     chainStore.fetchChainState()
   }, 10000)
+  
+  // Start price auto-refresh (60 second interval)
+  priceInterval = priceStore.startAutoRefresh()
+})
+
+onUnmounted(() => {
+  // Cleanup price interval
+  if (priceInterval) {
+    clearInterval(priceInterval)
+  }
 })
 </script>
 

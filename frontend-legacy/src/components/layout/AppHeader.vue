@@ -35,6 +35,9 @@
       <!-- Search Bar -->
       <SearchBar class="header-search" />
 
+      <!-- Price Widget -->
+      <PriceCard class="header-price" />
+
       <!-- Navigation -->
       <nav class="main-nav">
         <RouterLink to="/" class="nav-link">Dashboard</RouterLink>
@@ -69,6 +72,7 @@ import { useWebSocketStore } from '@/stores/websocketStore'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
 import SearchBar from './SearchBar.vue'
 import LiveIndicator from '@/components/common/LiveIndicator.vue'
+import PriceCard from '@/components/common/PriceCard.vue'
 
 const chainStore = useChainStore()
 const wsStore = useWebSocketStore()
@@ -182,6 +186,10 @@ onMounted(() => {
   flex: 1;
   min-width: 250px;
   max-width: 500px;
+}
+
+.header-price {
+  flex-shrink: 0;
 }
 
 .main-nav {

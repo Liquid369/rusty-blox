@@ -42,16 +42,29 @@
             </div>
             <div class="budget-stat">
               <div class="stat-label">Max Monthly Budget</div>
-              <div class="stat-value" :title="maxMonthlyBudget + ' PIV'">{{ formatNumber(maxMonthlyBudget) }} PIV</div>
+              <div class="stat-value" :title="maxMonthlyBudget + ' PIV'">
+                {{ formatNumber(maxMonthlyBudget) }} PIV
+                <div v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="stat-fiat">
+                  ≈ {{ formatAmount(maxMonthlyBudget, { showPIV: false }) }}
+                </div>
+              </div>
             </div>
             <div class="budget-stat">
               <div class="stat-label">Allocated (Approved)</div>
-              <div class="stat-value stat-warning" :title="allocatedBudget + ' PIV'">{{ formatNumber(allocatedBudget) }} PIV</div>
+              <div class="stat-value stat-warning" :title="allocatedBudget + ' PIV'">
+                {{ formatNumber(allocatedBudget) }} PIV
+                <div v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="stat-fiat">
+                  ≈ {{ formatAmount(allocatedBudget, { showPIV: false }) }}
+                </div>
+              </div>
             </div>
             <div class="budget-stat">
               <div class="stat-label">Remaining Budget</div>
               <div class="stat-value" :class="remainingBudget > 0 ? 'stat-success' : 'stat-danger'" :title="remainingBudget + ' PIV'">
                 {{ formatNumber(remainingBudget) }} PIV
+                <div v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="stat-fiat">
+                  ≈ {{ formatAmount(remainingBudget, { showPIV: false }) }}
+                </div>
               </div>
             </div>
             <div class="budget-stat">
@@ -154,10 +167,20 @@
               <!-- Payment Info -->
               <div class="payment-info">
                 <InfoRow label="Monthly Payment">
-                  <span class="payment-amount">{{ proposal.MonthlyPayment }} PIV</span>
+                  <span class="payment-amount">
+                    {{ proposal.MonthlyPayment }} PIV
+                    <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
+                      ≈ {{ formatAmount(proposal.MonthlyPayment, { showPIV: false }) }}
+                    </span>
+                  </span>
                 </InfoRow>
                 <InfoRow label="Total Payment">
-                  <span class="payment-amount">{{ proposal.TotalPayment }} PIV</span>
+                  <span class="payment-amount">
+                    {{ proposal.TotalPayment }} PIV
+                    <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
+                      ≈ {{ formatAmount(proposal.TotalPayment, { showPIV: false }) }}
+                    </span>
+                  </span>
                 </InfoRow>
                 <InfoRow label="Payments Remaining">
                   {{ proposal.RemainingPaymentCount }} / {{ proposal.TotalPaymentCount }}
@@ -211,6 +234,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import { governanceService } from '@/services/governanceService'
 import { masternodeService } from '@/services/masternodeService'
 import { formatNumber, formatPIV } from '@/utils/formatters'
@@ -234,6 +258,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
 
 const proposals = ref([])
 const mnCount = ref(null)
@@ -726,6 +751,21 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.stat-fiat {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-weight: var(--weight-normal);
+  margin-top: var(--space-1);
+}
+
+.payment-fiat {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-weight: var(--weight-normal);
+  margin-top: var(--space-1);
 }
 
 .proposal-dates {

@@ -27,6 +27,8 @@ use rustyblox::api::{
     // Analytics module
     supply_analytics, transaction_analytics, staking_analytics,
     network_health_analytics, rich_list, wealth_distribution,
+    // Price module
+    price_v2,
 };
 use rustyblox::types::MyError;
 
@@ -122,6 +124,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/analytics/network", get(network_health_analytics))
         .route("/api/v2/analytics/richlist", get(rich_list))
         .route("/api/v2/analytics/wealth-distribution", get(wealth_distribution))
+        .route("/api/v2/price", get(price_v2))  // PIVX price data endpoint
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
