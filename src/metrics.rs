@@ -288,6 +288,24 @@ lazy_static! {
         "Number of entries in address index"
     ).unwrap();
     
+    /// Total unique addresses indexed (gauge: current count in DB)
+    pub static ref TOTAL_ADDRESSES_INDEXED: IntGauge = IntGauge::new(
+        "rustyblox_total_addresses_indexed",
+        "Total unique addresses indexed in address index"
+    ).unwrap();
+    
+    /// Total UTXOs currently tracked (gauge: unspent count)
+    pub static ref TOTAL_UTXOS_TRACKED: IntGauge = IntGauge::new(
+        "rustyblox_total_utxos_tracked",
+        "Total unspent UTXOs currently tracked"
+    ).unwrap();
+    
+    /// Sapling transactions total (counter: cumulative count)
+    pub static ref SAPLING_TRANSACTIONS_TOTAL: IntCounter = IntCounter::new(
+        "rustyblox_sapling_transactions_total",
+        "Total Sapling transactions indexed (version >= 3 with Sapling data)"
+    ).unwrap();
+    
     // ========================================================================
     // 7. OPERATIONAL METRICS (9 metrics)
     // ========================================================================
@@ -403,6 +421,9 @@ pub fn init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     REGISTRY.register(Box::new(PENDING_REORG_DEPTH.clone()))?;
     REGISTRY.register(Box::new(RPC_CONNECTED.clone()))?;
     REGISTRY.register(Box::new(ADDRESS_INDEX_SIZE_ENTRIES.clone()))?;
+    REGISTRY.register(Box::new(TOTAL_ADDRESSES_INDEXED.clone()))?;
+    REGISTRY.register(Box::new(TOTAL_UTXOS_TRACKED.clone()))?;
+    REGISTRY.register(Box::new(SAPLING_TRANSACTIONS_TOTAL.clone()))?;
     
     // Operational metrics
     REGISTRY.register(Box::new(UPTIME_SECONDS.clone()))?;
@@ -572,6 +593,30 @@ pub fn set_reorg_depth(depth: i64) {
 /// Set RPC connected status
 pub fn set_rpc_connected(connected: bool) {
     RPC_CONNECTED.set(if connected { 1 } else { 0 });
+}
+
+// ============================================================================
+// NEW METRICS HELPERS - For the 4 missing metrics
+// ============================================================================
+
+/// Set total addresses indexed (gauge - current count)
+pub fn set_total_addresses_indexed(count: u64) {
+    TOTAL_ADDRESSES_INDEXED.set(count as i64);
+}
+
+/// Set total UTXOs tracked (gauge - current unspent count)
+pub fn set_total_utxos_tracked(count: u64) {
+    TOTAL_UTXOS_TRACKED.set(count as i64);
+}
+
+/// Increment sapling transactions counter
+pub fn increment_sapling_transactions(count: u64) {
+    SAPLING_TRANSACTIONS_TOTAL.inc_by(count);
+}
+
+/// Set database size for a column family (bytes)
+pub fn set_db_size_bytes(cf: &str, bytes: u64) {
+    DB_SIZE_BYTES.with_label_values(&[cf]).set(bytes as i64);
 }
 
 #[cfg(test)]
