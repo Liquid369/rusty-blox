@@ -82,7 +82,7 @@
             :class="['filter-tab', { active: statusFilter === 'all' }]"
             @click="statusFilter = 'all'"
           >
-            All ({{ proposals.length }})
+            All ({{ activeProposals.length }})
           </button>
           <button
             :class="['filter-tab', { active: statusFilter === 'active' }]"
