@@ -7,14 +7,14 @@
 
     <!-- Error State -->
     <div v-else-if="priceStore.error && !priceStore.hasValidPrices" class="price-error" title="Unable to load price">
-      <span class="price-icon">📊</span>
+      <img src="/PIVX-Shield.svg" alt="PIVX" class="price-icon" />
       <span class="price-label">PIVX:</span>
       <span class="price-value">--</span>
     </div>
 
     <!-- Price Display -->
     <div v-else class="price-content" @click="toggleCurrency" :title="`Click to change currency (${nextCurrency})`">
-      <span class="price-icon">📊</span>
+      <img src="/PIVX-Shield.svg" alt="PIVX" class="price-icon" />
       <span class="price-label">PIVX:</span>
       <span class="price-value">{{ formattedPrice }}</span>
       <span v-if="priceStore.isStale" class="price-stale" title="Price data is stale">⚠️</span>
@@ -104,7 +104,8 @@ const toggleCurrency = () => {
 }
 
 .price-icon {
-  font-size: 1.1rem;
+  width: 18px;
+  height: 18px;
   opacity: 0.9;
 }
 
