@@ -15,6 +15,7 @@
 /// - Works with our own database (no dependency on PIVX Core)
 
 use crate::constants::{should_index_transaction};
+use crate::metrics;
 /// - Fast incremental updates
 /// - Proper UTXO tracking (spent vs unspent)
 /// 
@@ -26,6 +27,7 @@ use crate::constants::{should_index_transaction};
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use rocksdb::DB;
+use tracing::{info, warn, info_span};
 use crate::parser::{deserialize_transaction, serialize_utxos};
 use crate::tx_keys::{tx_cf_key, txid_from_key, txid_from_hex};
 use crate::types::{CTransaction, CTxOut, ScriptClassification};
@@ -100,12 +102,8 @@ fn classify_output(output: &CTxOut) -> ScriptClassification {
 /// Build address index from all transactions
 /// This creates the addr_index CF entries for address lookups
 pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║          ADDRESS INDEX BUILDING STARTING           ║");
-    println!("╚════════════════════════════════════════════════════╝");
-    println!();
-    println!("Building address index from transactions...");
-    println!("This indexes addresses for API queries.\n");
+    let _span = info_span!("enrich_all_addresses").entered();
+    info!("Building address index from transactions");
 
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
@@ -116,14 +114,20 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut indexed_outputs = 0;
     let batch_size = 10000;
     
-    println!("📊 Two-pass address indexing:");
-    println!("   Pass 1: Building complete spent outputs set...");
+    info!("Pass 1: Building complete spent outputs set");
     
     // PASS 1: Build complete spent outputs set by scanning ALL transaction inputs
     // O1 OPTIMIZATION: Build transaction cache to avoid repeated deserialization
     let mut spent_outputs: HashSet<(Vec<u8>, u64)> = HashSet::new();
     let mut tx_cache: HashMap<Vec<u8>, Arc<CTransaction>> = HashMap::new();
-    println!("   🚀 O1 Transaction Cache enabled (eliminates 2x redundant deserialization)");
+    
+    // Phase 2 Instrumentation: Track deserialization metrics
+    let mut pass1_tx_total = 0;
+    let mut pass1_tx_deserialized = 0;
+    let mut pass1_tx_failed = 0;
+    let mut pass1_inputs_processed = 0;
+    let mut pass1_sapling_count = 0;  // NEW: Track Sapling transactions
+    
     let iter1 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     
     for item in iter1 {
@@ -146,17 +150,40 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
         tx_with_header.extend_from_slice(&[0u8; 4]);
         tx_with_header.extend_from_slice(raw_tx);
-        if let Ok(tx) = deserialize_transaction(&tx_with_header).await {
-            // O1: Extract txid and cache the transaction
-            let txid_bytes = txid_from_key(&key);
-            if !txid_bytes.is_empty() {
-                tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
+        
+        pass1_tx_total += 1;
+        
+        let tx = match deserialize_transaction(&tx_with_header).await {
+            Ok(tx) => {
+                pass1_tx_deserialized += 1;
+                // O1: Extract txid and cache the transaction
+                let txid_bytes = txid_from_key(&key);
+                if !txid_bytes.is_empty() {
+                    tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
+                }
+                
+                // NEW: Count Sapling transactions (version >= 3 with Sapling data)
+                if tx.sapling_data.is_some() {
+                    pass1_sapling_count += 1;
+                }
+                
+                Arc::new(tx)
             }
-            
-            for input in &tx.inputs {
+            Err(e) => {
+                pass1_tx_failed += 1;
+                // CRITICAL: Log deserialization failures
+                let txid_bytes = txid_from_key(&key);
+                let txid_hex = hex::encode(&txid_bytes);
+                warn!(txid = %txid_hex, height = height, error = ?e, "Pass 1: Failed to deserialize transaction");
+                continue;
+            }
+        };
+        
+        for input in &tx.inputs {
                 if input.coinbase.is_some() {
                     continue;
                 }
+                pass1_inputs_processed += 1;
                 if let Some(prevout) = &input.prevout {
                     // FIXED: parser.rs now returns prevout.hash in DISPLAY format (reversed)
                     // This matches the format used in database keys ('t' + reversed_txid)
@@ -165,47 +192,33 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                         // prev_txid_display is in display/reversed format
                         // This NOW matches the database key format
                         
-                        // DEBUG: Log first few insertions
-                        if spent_outputs.len() < 3 {
-                            println!("   🔍 DEBUG Pass 1 INSERT:");
-                            println!("      prevout.hash (hex string, DISPLAY format): {}", &prevout.hash[..32]);
-                            println!("      decoded (display bytes): {}", hex::encode(&prev_txid_display)[..32].to_string());
-                            println!("      vout={}", prevout.n);
-                        }
-                        
                         spent_outputs.insert((prev_txid_display, prevout.n as u64));
                     }
                 }
-            }
         }
         processed += 1;
-        if processed % 100000 == 0 {
-            println!("     Scanned {} transactions, {} spent outputs found", processed, spent_outputs.len());
-        }
     }
     
-    println!("   ✅ Pass 1 complete: {} transactions scanned, {} spent outputs found", processed, spent_outputs.len());
-    println!("   💾 Transaction cache: {} entries (~{:.1} MB)", 
-        tx_cache.len(), 
-        (tx_cache.len() as f64 * 0.5) / 1000.0  // Estimate ~500 bytes per tx
+    
+    info!(
+        transactions_scanned = processed,
+        spent_outputs_found = spent_outputs.len(),
+        pass1_total = pass1_tx_total,
+        pass1_deserialized = pass1_tx_deserialized,
+        pass1_failed = pass1_tx_failed,
+        pass1_inputs = pass1_inputs_processed,
+        pass1_sapling = pass1_sapling_count,
+        cache_entries = tx_cache.len(),
+        cache_size_mb = (tx_cache.len() as f64 * 0.5) / 1000.0,
+        "Pass 1 complete: Spent outputs set built"
     );
-    println!();
-    
-    // DEBUG: Sample the spent_outputs to see what format they're in
-    println!("   🔍 DEBUG: First 3 entries from spent_outputs HashSet:");
-    let mut debug_txids: Vec<String> = Vec::new();
-    for (i, (txid, vout)) in spent_outputs.iter().take(3).enumerate() {
-        let txid_hex = hex::encode(txid);
-        debug_txids.push(txid_hex.clone());
-        println!("      {}. SPENT: {} vout {}", i+1, &txid_hex[..32], vout);
-    }
-    println!();
     
     // Store for comparison in Pass 2
-    let debug_txid_1 = debug_txids.get(0).cloned().unwrap_or_default();
+    let debug_txid_1 = spent_outputs.iter().take(1).next()
+        .map(|(txid, _)| hex::encode(txid))
+        .unwrap_or_default();
     
-    
-    println!("   Pass 2: Indexing outputs with spent flags...");
+    info!("Pass 2: Indexing outputs with spent flags");
     
     // Reset counter for pass 2
     processed = 0;
@@ -221,6 +234,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // O1: Track cache hit rate
     let mut cache_hits = 0;
     let mut cache_misses = 0;
+    
+    // Phase 2 Instrumentation: Track Pass 2 metrics
+    let mut pass2_tx_total = 0;
+    let mut pass2_tx_deserialized = 0;
+    let mut pass2_tx_failed = 0;
+    let mut pass2_outputs_processed = 0;
     
     let iter2 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     for item in iter2 {
@@ -246,9 +265,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             continue; // Invalid key format
         }
         
+        pass2_tx_total += 1;
+        
         // O1: Try to get transaction from cache first
         let tx = if let Some(cached_tx) = tx_cache.get(&txid_bytes) {
             cache_hits += 1;
+            pass2_tx_deserialized += 1;
             Arc::clone(cached_tx)
         } else {
             cache_misses += 1;
@@ -257,25 +279,18 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             tx_with_header.extend_from_slice(&[0u8; 4]); // Dummy block version
             tx_with_header.extend_from_slice(raw_tx);
             match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => Arc::new(tx),
-                Err(_) => continue,
+                Ok(tx) => {
+                    pass2_tx_deserialized += 1;
+                    Arc::new(tx)
+                }
+                Err(e) => {
+                    pass2_tx_failed += 1;
+                    let txid_hex = hex::encode(&txid_bytes);
+                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2: Failed to deserialize transaction");
+                    continue;
+                }
             }
         };
-        
-        // DEBUG: Print first transaction's TXID format for comparison
-        if processed == 0 {
-            let txid_hex = hex::encode(&txid_bytes);
-            println!("   🔍 DEBUG: First transaction in Pass 2:");
-            println!("      UTXO created by: {}", &txid_hex[..32]);
-            
-            // Check if this TXID is in our debug spent list
-            if txid_hex == debug_txid_1 {
-                println!("      ⚠️  This TXID was in spent_outputs from Pass 1!");
-            } else {
-                println!("      (Not in first 3 spent outputs)");
-            }
-            println!();
-        }
         
         // Track which addresses are involved in this transaction (for txs_map)
         let mut tx_addresses: HashSet<String> = HashSet::new();
@@ -355,9 +370,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         }
         
         processed += 1;
-        if processed % 50000 == 0 {
-            println!("  Processed {} transactions, {} outputs indexed", processed, indexed_outputs);
-        }
     }
     
     // O1: Report cache performance
@@ -366,24 +378,44 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     } else {
         0.0
     };
-    println!("   ✅ Pass 2 complete: Cache hit rate: {:.1}% ({} hits, {} misses)", 
-        cache_hit_rate, cache_hits, cache_misses);
+    info!(
+        cache_hit_rate = cache_hit_rate,
+        cache_hits = cache_hits,
+        cache_misses = cache_misses,
+        pass2_total = pass2_tx_total,
+        pass2_deserialized = pass2_tx_deserialized,
+        pass2_failed = pass2_tx_failed,
+        pass2_outputs = pass2_outputs_processed,
+        "Pass 2 complete"
+    );
     
-    println!("\n📝 Writing address index to database...");
-    println!("   {} unique addresses found", address_map.len());
-    println!("   spent_outputs HashSet size: {}", spent_outputs.len());
-
-    // SECONDARY PASS: Scan all inputs to discover addresses used as inputs (sent transactions)
-    // For each input, resolve the prevout's addresses (by reading the previous tx) and add
-    // the current txid to those addresses' txs_map so 't' contains both sent and received txs.
-    // ALSO calculate total_sent here!
-    println!("   Pass 2b: Scanning inputs to include sent transactions and calculate totals...");
-    println!("   🚀 O1 Cache will eliminate most DB lookups in Pass 2b (major speedup!)");
+    // CRITICAL: Detect asymmetric failures between passes
+    if pass1_tx_total != pass2_tx_total {
+        warn!(pass1_total = pass1_tx_total, pass2_total = pass2_tx_total, 
+              diff = (pass1_tx_total as i64 - pass2_tx_total as i64).abs(), 
+              "Pass divergence: Transaction count mismatch");
+    }
+    if pass1_tx_failed != pass2_tx_failed {
+        warn!(pass1_failed = pass1_tx_failed, pass2_failed = pass2_tx_failed,
+              diff = (pass1_tx_failed as i64 - pass2_tx_failed as i64).abs(),
+              "Asymmetric failures between passes - will cause balance errors");
+    }
+    
+    info!(unique_addresses = address_map.len(), spent_outputs = spent_outputs.len(), 
+          "Writing address index to database");
+    info!("Pass 2b: Scanning inputs to include sent transactions and calculate totals");
     
     // O1: Track cache performance in Pass 2b
     let mut pass2b_cache_hits = 0;
     let mut _pass2b_cache_misses = 0;
     let mut pass2b_db_reads = 0;
+    
+    // Phase 2 Instrumentation: Track Pass 2b metrics
+    let mut pass2b_tx_total = 0;
+    let mut pass2b_tx_deserialized = 0;
+    let mut pass2b_tx_failed = 0;
+    let mut pass2b_coinstake_skipped = 0;
+    let mut pass2b_inputs_processed = 0;
     
     let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     let mut input_processed: usize = 0;
@@ -399,9 +431,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let current_txid_bytes = txid_from_key(&key);
         if current_txid_bytes.is_empty() { continue; }
         
+        pass2b_tx_total += 1;
+        
         // O1: Try cache first for current transaction
         let tx = if let Some(cached_tx) = tx_cache.get(&current_txid_bytes) {
             pass2b_cache_hits += 1;
+            pass2b_tx_deserialized += 1;
             Arc::clone(cached_tx)
         } else {
             _pass2b_cache_misses += 1;
@@ -410,8 +445,16 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             tx_with_header.extend_from_slice(&[0u8; 4]);
             tx_with_header.extend_from_slice(raw_tx);
             match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => Arc::new(tx),
-                Err(_) => continue,
+                Ok(tx) => {
+                    pass2b_tx_deserialized += 1;
+                    Arc::new(tx)
+                }
+                Err(e) => {
+                    pass2b_tx_failed += 1;
+                    let txid_hex = hex::encode(&current_txid_bytes);
+                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2b: Failed to deserialize transaction");
+                    continue;
+                }
             }
         };
         
@@ -419,25 +462,17 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         // Stake inputs are consumed for staking, NOT counted as "sent"
         let tx_is_coinstake = is_coinstake(&*tx);
         if tx_is_coinstake {
+            pass2b_coinstake_skipped += 1;
             // Coinstake transactions don't count inputs as "sent"
             // The stake is consumed, rewards go to staker/owner
             input_processed += 1;
-            if input_processed % 200000 == 0 {
-                let total_lookups = pass2b_cache_hits + pass2b_db_reads;
-                let cache_hit_pct = if total_lookups > 0 {
-                    (pass2b_cache_hits as f64 / total_lookups as f64) * 100.0
-                } else {
-                    0.0
-                };
-                println!("     Scanned {} transactions | Cache: {:.1}% hits ({} DB reads avoided)", 
-                    input_processed, cache_hit_pct, pass2b_cache_hits);
-            }
             continue;
         }
         
         // For every input, find the prevout's addresses and attribute this tx to them
         for input in &tx.inputs {
             if input.coinbase.is_some() { continue; }
+            pass2b_inputs_processed += 1;
             if let Some(prevout) = &input.prevout {
                 // prevout.hash from parser.rs is already in internal (reversed) format
                 if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
@@ -502,16 +537,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         }
         input_processed += 1;
-        if input_processed % 200000 == 0 {
-            let total_lookups = pass2b_cache_hits + pass2b_db_reads;
-            let cache_hit_pct = if total_lookups > 0 {
-                (pass2b_cache_hits as f64 / total_lookups as f64) * 100.0
-            } else {
-                0.0
-            };
-            println!("     Scanned {} transactions | Cache: {:.1}% hits ({} DB reads avoided)", 
-                input_processed, cache_hit_pct, pass2b_cache_hits);
-        }
     }
     
     // O1: Final Pass 2b cache statistics
@@ -521,15 +546,36 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     } else {
         0.0
     };
-    println!("   ✅ Pass 2b complete: scanned {} transactions for inputs", input_processed);
-    println!("   💾 Cache performance: {:.1}% hit rate ({} cache hits, {} DB reads)", 
-        pass2b_cache_hit_rate, pass2b_cache_hits, pass2b_db_reads);
-    println!("   🚀 Eliminated ~{} DB reads + deserializations (15-30 min time savings!)", pass2b_cache_hits);
+    info!(
+        input_processed = input_processed,
+        pass2b_total = pass2b_tx_total,
+        pass2b_deserialized = pass2b_tx_deserialized,
+        pass2b_failed = pass2b_tx_failed,
+        pass2b_coinstake_skipped = pass2b_coinstake_skipped,
+        pass2b_inputs = pass2b_inputs_processed,
+        cache_hit_rate = pass2b_cache_hit_rate,
+        cache_hits = pass2b_cache_hits,
+        db_reads = pass2b_db_reads,
+        db_reads_eliminated = pass2b_cache_hits,
+        "Pass 2b complete"
+    );
     
-    println!("\n📝 Writing address index to database...");
-    println!("   {} unique addresses found", address_map.len());
-    println!("   Calculating balances and totals for each address...");
-    println!("   ⚠️  This may take a while for large address sets (DB lookups for each transaction)");
+    // CRITICAL: Final divergence check across all passes
+    if pass1_tx_total != pass2_tx_total || pass2_tx_total != pass2b_tx_total {
+        warn!(pass1_total = pass1_tx_total, pass2_total = pass2_tx_total, pass2b_total = pass2b_tx_total,
+              "TX count mismatch across passes");
+    }
+    
+    if pass1_tx_failed > 0 || pass2_tx_failed > 0 || pass2b_tx_failed > 0 {
+        if pass1_tx_failed != pass2_tx_failed || pass2_tx_failed != pass2b_tx_failed {
+            warn!(pass1_failed = pass1_tx_failed, pass2_failed = pass2_tx_failed, pass2b_failed = pass2b_tx_failed,
+                  "Asymmetric deserialization failures - will cause balance errors");
+        } else {
+            info!(failed = pass1_tx_failed, "Deserialization failures (consistent across passes)");
+        }
+    }
+    
+    info!(unique_addresses = address_map.len(), "Writing address index to database");
     
     // Write address mappings to database
     let mut batch = rocksdb::WriteBatch::default();
@@ -555,13 +601,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 total_spent_found += 1;
             }
             
-            // DEBUG: Log first 3 lookups for the test address
-            if address == "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6" && utxos_unspent.len() < 3 {
-                let txid_hex = hex::encode(txid_bytes);
-                println!("   🔍 DEBUG: Address {} UTXO lookup:", address);
-                println!("      txid (as-is): {}... vout={} → is_spent={}", &txid_hex[..16], vout, is_spent);
-            }
-
             if !is_spent {
                 utxos_unspent.push((txid_bytes.clone(), *vout));
             }
@@ -603,11 +642,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         
         written += 1;
         
-        // More frequent progress updates for visibility
-        if written % 10000 == 0 {
-            println!("  Processed {} / {} addresses ({:.1}%)...", written, total_addresses, (written as f64 / total_addresses as f64) * 100.0);
-        }
-        
         if batch.len() >= batch_size {
             db.write(batch)?;
             batch = rocksdb::WriteBatch::default();
@@ -619,21 +653,43 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         db.write(batch)?;
     }
     
-    println!();
-    println!("✅ Address index building complete!");
-    println!("   Total transactions scanned: {}", processed);
-    println!("   Total outputs indexed: {}", indexed_outputs);
-    println!("   Total spent outputs marked: {}", spent_outputs.len());
-    println!("   Unique addresses with balances: {}", written);
-    println!("   ✅ Total received/sent calculated for all addresses");
-    println!();
-    println!("📊 Spent detection statistics:");
-    println!("   Total UTXOs checked: {}", total_utxos_checked);
-    println!("   Found as spent: {} ({:.2}%)", total_spent_found, 
-             (total_spent_found as f64 / total_utxos_checked as f64) * 100.0);
-    println!("   Kept as unspent: {} ({:.2}%)", total_utxos_checked - total_spent_found,
-             ((total_utxos_checked - total_spent_found) as f64 / total_utxos_checked as f64) * 100.0);
-    println!();
+    let spent_rate = if total_utxos_checked > 0 {
+        (total_spent_found as f64 / total_utxos_checked as f64) * 100.0
+    } else {
+        0.0
+    };
+    
+    info!(
+        transactions_scanned = processed,
+        outputs_indexed = indexed_outputs,
+        spent_outputs = spent_outputs.len(),
+        unique_addresses = written,
+        total_utxos_checked = total_utxos_checked,
+        spent_found = total_spent_found,
+        spent_rate = spent_rate,
+        "Address index building complete"
+    );
+    
+    // UPDATE METRICS: Set current counts for Grafana/Prometheus
+    let total_unspent_utxos = total_utxos_checked - total_spent_found;
+    metrics::set_total_addresses_indexed(total_addresses as u64);
+    metrics::set_total_utxos_tracked(total_unspent_utxos as u64);
+    metrics::set_sapling_transactions_count(pass1_sapling_count as u64);
+    metrics::increment_sapling_transactions(pass1_sapling_count as u64);
+    
+    info!(
+        metric_addresses = total_addresses,
+        metric_utxos_tracked = total_unspent_utxos,
+        metric_sapling_tx = pass1_sapling_count,
+        "Metrics updated: addresses, UTXOs, and Sapling transactions"
+    );
+    
+    // Persist metrics to database after enrichment completes
+    if let Err(e) = metrics::save_metrics_to_db(&db) {
+        warn!(error = %e, "Failed to persist metrics to database after enrichment");
+    } else {
+        info!("Metrics persisted to database after enrichment");
+    }
     
     Ok(())
 }

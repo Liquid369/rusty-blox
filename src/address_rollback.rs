@@ -317,19 +317,21 @@ pub async fn build_address_undo_from_block(
 /// 
 /// # Arguments
 /// * `db` - Database handle
+/// * `writer` - Atomic batch writer for database operations (shared for atomicity)
+/// * `db` - Database handle
 /// * `current_height` - Current blockchain height
 /// * `rollback_to_height` - Target height to rollback to
 /// 
 /// # Returns
 /// Number of blocks rolled back
 pub async fn rollback_address_index(
+    writer: &mut AtomicBatchWriter,
     db: Arc<DB>,
     current_height: i32,
     rollback_to_height: i32,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     println!("  📍 Rolling back address index from {} to {}", current_height, rollback_to_height);
     
-    let mut writer = AtomicBatchWriter::new(db.clone(), 100000);
     let blocks_to_remove = (current_height - rollback_to_height) as usize;
     
     // Process each block in reverse order
@@ -340,16 +342,15 @@ pub async fn rollback_address_index(
         
         // Load undo data for this block
         if let Some(undo) = load_address_undo(db.clone(), height).await? {
-            // Reverse address changes
-            reverse_address_block(&mut writer, &db, &undo).await?;
+            // Reverse address changes (using shared writer for atomicity)
+            reverse_address_block(writer, &db, &undo).await?;
             
-            // Delete undo data
-            delete_address_undo(db.clone(), height).await?;
+            // Delete undo data (using shared writer)
+            let mut undo_key = b"addr_undo".to_vec();
+            undo_key.extend_from_slice(&height.to_le_bytes());
+            writer.delete("chain_state", undo_key);
             
-            // Flush periodically
-            if writer.should_flush() {
-                writer.flush().await?;
-            }
+            // Note: Periodic flushes removed - caller handles flushing
         } else {
             // No undo data - this is expected for blocks indexed before undo tracking
             // In this case, we'll need to rebuild from scratch
@@ -357,10 +358,7 @@ pub async fn rollback_address_index(
         }
     }
     
-    // Final flush
-    if writer.pending_count() > 0 {
-        writer.flush().await?;
-    }
+    // Note: Final flush removed - caller is responsible for flushing shared writer
     
     println!("  ✅ Address index rollback complete");
     

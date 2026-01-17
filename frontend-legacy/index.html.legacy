@@ -1,0 +1,3536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#642D8F">
+    <title>PIVX Blockchain Explorer</title>
+    <script src="https://cdn.jsdelivr.net/npm/vue@3.3.4/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios@1.5.0/dist/axios.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            /* Exact colors from SVG design */
+            --primary: #642D8F;
+            --secondary: #5F308C;
+            --accent: #59FCB3;
+            --success: #59FCB3;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --dark: rgba(15, 10, 23, 0.74);
+            --darker: #150F21;
+            --light: #f3f4f6;
+            --border: #5F308C;
+            --text-primary: #FFFFFF;
+            --text-secondary: #B2B2B2;
+            --text-tertiary: #642D8F;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #150F21 0%, #201634 25%, #271B3F 52%, #201634 78%, #1A122A 100%);
+            background-attachment: fixed;
+            color: #e5e7eb;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        header {
+            position: relative;
+            background: var(--dark);
+            backdrop-filter: blur(50px);
+            border: 3px solid var(--border);
+            border-radius: 26px;
+            padding: 40px;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+
+        .ws-status-wrapper {
+            position: absolute;
+            top: 24px;
+            right: 32px;
+        }
+
+        .header-content {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .header-logo {
+            height: 80px;
+            flex-shrink: 0;
+        }
+
+        .header-text {
+            text-align: left;
+            flex: 1;
+            min-width: 0;
+        }
+
+        h1 {
+            font-size: 3.6rem;
+            color: #642D8F;
+            font-weight: 700;
+            margin-bottom: 8px;
+            padding: 0;
+            letter-spacing: -0.02em;
+            line-height: 1;
+        }
+
+        .subtitle {
+            color: #9ca3af;
+            font-size: 1.05rem;
+            padding: 0;
+            margin-bottom: 0;
+            font-weight: 400;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 0;
+        }
+
+        .stat-card {
+            background: transparent;
+            border: 1px solid rgba(95, 48, 140, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--border);
+            background: rgba(95, 48, 140, 0.1);
+        }
+
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-syncing {
+            background: var(--warning);
+            box-shadow: 0 0 10px var(--warning);
+        }
+
+        .status-synced {
+            background: var(--accent);
+            box-shadow: 0 0 8px rgba(89, 252, 179, 0.5);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .search-bar {
+            background: rgba(31, 41, 55, 0.8);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 30px;
+        }
+
+        .search-input {
+            width: 100%;
+            background: var(--darker);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 20px;
+            color: #fff;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(89, 252, 179, 0.2);
+        }
+
+        .search-input::placeholder {
+            color: #6b7280;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            border-bottom: 2px solid var(--border);
+            padding-bottom: 0;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 500;
+            border-radius: 8px 8px 0 0;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .tab:hover {
+            color: #fff;
+            background: rgba(89, 252, 179, 0.05);
+        }
+
+        .tab.active {
+            color: #fff;
+            background: transparent;
+        }
+
+        .tab.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--accent);
+            border-radius: 3px 3px 0 0;
+        }
+
+        .data-section {
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            margin-bottom: 30px;
+        }
+
+        .block-list, .tx-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .block-item, .tx-item {
+            background: var(--dark);
+            border: 3px solid var(--border);
+            border-radius: 26px;
+            padding: 20px 24px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+        }
+
+        .block-item:hover, .tx-item:hover {
+            border-color: var(--border);
+            transform: translateY(-2px);
+            background: rgba(15, 10, 23, 0.9);
+        }
+
+        .block-item.new-block {
+            animation: slideIn 0.5s ease;
+            border-color: var(--accent);
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .block-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .block-height {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .block-time {
+            color: #9ca3af;
+            font-size: 0.85rem;
+        }
+
+        .block-hash {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.75rem;
+            color: #6b7280;
+            word-break: break-all;
+            opacity: 0.8;
+        }
+
+        .tx-count {
+            display: inline-block;
+            background: rgba(102, 45, 145, 0.2);
+            color: #a78bfa;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #9ca3af;
+        }
+
+        .spinner {
+            border: 3px solid rgba(108, 46, 185, 0.2);
+            border-top: 3px solid var(--primary);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 16px;
+            color: #fca5a5;
+            margin-bottom: 20px;
+        }
+
+        .ws-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+            color: #9ca3af;
+            background: rgba(30, 21, 40, 0.6);
+            padding: 8px 16px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: rgba(14, 10, 20, 0.8);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 12px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), #59FCB3);
+            transition: width 0.5s ease;
+            border-radius: 3px;
+            box-shadow: 0 0 10px rgba(89, 252, 179, 0.4);
+        }
+        
+        .sync-details {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: #9ca3af;
+        }
+
+        .ws-connected {
+            color: var(--success);
+        }
+
+        .ws-disconnected {
+            color: var(--danger);
+        }
+
+        code {
+            background: var(--darker);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.9em;
+            color: var(--secondary);
+        }
+
+        .detail-view {
+            background: var(--darker);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .detail-row {
+            display: flex;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+
+        .detail-label {
+            flex: 0 0 200px;
+            color: #9ca3af;
+            font-weight: 500;
+        }
+
+        .detail-value {
+            flex: 1;
+            color: #fff;
+            word-break: break-all;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .badge-success {
+            background: rgba(89, 252, 179, 0.2);
+            color: var(--accent);
+            border: 1px solid rgba(89, 252, 179, 0.3);
+        }
+
+        .badge-warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+        }
+
+        /* Modal Styles */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            padding: 20px;
+        }
+
+        .modal-content {
+            background: var(--dark);
+            backdrop-filter: blur(50px);
+            border: 3px solid var(--border);
+            border-radius: 26px;
+            max-width: 1200px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 24px 30px;
+            border-bottom: 3px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--darker);
+            z-index: 10;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            color: #fff;
+            font-size: 1.8rem;
+        }
+
+        .close-button {
+            background: none;
+            border: none;
+            color: #fff;
+            font-size: 2.5rem;
+            cursor: pointer;
+            line-height: 1;
+            padding: 0;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            transition: all 0.2s;
+        }
+
+        .close-button:hover {
+            background: rgba(255, 255, 255, 0.1);
+            transform: rotate(90deg);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #642D8F, #5F308C);
+            border: 2px solid var(--border);
+            color: #fff;
+            padding: 12px 24px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: 18px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(100, 45, 143, 0.3);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(100, 45, 143, 0.4);
+            border-color: var(--accent);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .modal-body {
+            padding: 30px;
+        }
+
+        .detail-section {
+            margin-bottom: 30px;
+        }
+
+        .detail-section h3 {
+            color: var(--secondary);
+            font-size: 1.4rem;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .detail-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .detail-table tr {
+            border-bottom: 1px solid var(--border);
+        }
+
+        .detail-table tr:last-child {
+            border-bottom: none;
+        }
+
+        .detail-table td {
+            padding: 12px 16px;
+        }
+
+        .detail-table td:first-child {
+            color: #9ca3af;
+            font-weight: 600;
+            width: 200px;
+        }
+
+        .detail-table td:last-child {
+            color: #fff;
+        }
+
+        .hash-code {
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.9rem;
+            word-break: break-all;
+            color: var(--secondary);
+        }
+
+        .hash-link {
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+
+        .hash-link:hover {
+            color: var(--primary);
+            text-decoration: underline;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #9ca3af;
+            padding: 40px 20px;
+            background: rgba(31, 41, 55, 0.5);
+            border-radius: 8px;
+        }
+
+        .transactions-list {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .transaction-item {
+            background: rgba(31, 41, 55, 0.6);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            transition: all 0.3s;
+        }
+
+        .transaction-item:hover {
+            border-color: var(--primary);
+            box-shadow: 0 4px 20px rgba(108, 46, 185, 0.2);
+        }
+
+        .tx-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .tx-type {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: #fff;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .tx-details {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: 20px;
+            margin-bottom: 16px;
+        }
+
+        .tx-io-section h4 {
+            color: #9ca3af;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        .tx-io-item {
+            background: rgba(17, 24, 39, 0.5);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+        }
+
+        .tx-arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--secondary);
+            font-size: 2rem;
+            font-weight: bold;
+        }
+
+        .address-link {
+            color: var(--secondary);
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 0.85rem;
+            word-break: break-all;
+            margin-bottom: 4px;
+        }
+
+        .value-amount {
+            color: var(--success);
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .coinbase-badge {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 6px;
+            text-align: center;
+            font-weight: 600;
+        }
+
+        .tx-footer {
+            display: flex;
+            justify-content: space-between;
+            color: #9ca3af;
+            font-size: 0.9rem;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Masternode Table Styles */
+        .table-container {
+            overflow-x: auto;
+            border-radius: 18px;
+            background: var(--dark);
+            backdrop-filter: blur(50px);
+            border: 3px solid var(--border);
+        }
+
+        .modern-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        .modern-table thead {
+            background: linear-gradient(135deg, #642D8F, #5F308C);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .modern-table thead tr th {
+            color: #fff;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 16px 20px;
+            text-align: left;
+            font-size: 0.85rem;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .modern-table tbody tr {
+            border-bottom: 1px solid var(--border);
+            transition: all 0.2s ease;
+        }
+
+        .modern-table tbody tr:hover {
+            background: rgba(89, 252, 179, 0.05);
+            transform: translateX(4px);
+        }
+
+        .modern-table tbody tr:last-child {
+            border-bottom: none;
+        }
+
+        .modern-table tbody td {
+            padding: 16px 20px;
+            color: #d1d5db;
+        }
+
+        .modern-table tbody td:first-child {
+            font-weight: 600;
+        }
+
+        .modern-table .badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+
+        .modern-table tbody td code {
+            background: rgba(17, 24, 39, 0.6);
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+
+        /* Masternode Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+
+        .stat-card {
+            background: var(--dark);
+            backdrop-filter: blur(50px);
+            border: 3px solid var(--border);
+            border-radius: 26px;
+            padding: 24px;
+            text-align: center;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(89, 252, 179, 0.2);
+            border-color: var(--accent);
+        }
+
+        .stat-label {
+            color: #9ca3af;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+            font-weight: 600;
+        }
+
+        .stat-value {
+            color: #fff;
+            font-size: 2.5rem;
+            font-weight: 700;
+            line-height: 1;
+            background: linear-gradient(135deg, #fff, var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* ============================================
+           MOBILE OPTIMIZATIONS
+           ============================================ */
+
+        /* Tablet and smaller */
+        @media (max-width: 768px) {
+            .container {
+                padding: 12px;
+            }
+
+            /* Header mobile optimization */
+            header {
+                padding: 20px 16px;
+                border-radius: 16px;
+                border-width: 2px;
+            }
+
+            .ws-status-wrapper {
+                position: static;
+                display: flex;
+                justify-content: center;
+                margin-bottom: 16px;
+            }
+
+            .header-content {
+                flex-direction: column;
+                text-align: center;
+                gap: 16px;
+            }
+
+            .header-logo {
+                height: 60px;
+            }
+
+            .header-text {
+                text-align: center;
+            }
+
+            h1 {
+                font-size: 2rem;
+                margin-bottom: 8px;
+                line-height: 1.2;
+            }
+
+            .subtitle {
+                font-size: 0.9rem;
+            }
+
+            /* Stack stats grid on mobile - 2x2 */
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 14px 10px;
+                border-radius: 10px;
+                border-width: 2px;
+            }
+
+            .stat-label {
+                font-size: 0.65rem;
+                margin-bottom: 6px;
+            }
+
+            .stat-value {
+                font-size: 1.4rem;
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            /* Search bar mobile */
+            .search-bar {
+                padding: 16px;
+                margin-bottom: 20px;
+                border-radius: 12px;
+            }
+
+            .search-input {
+                padding: 12px 16px;
+                font-size: 0.9rem;
+            }
+
+            /* Tabs - scrollable horizontal on tablet */
+            .tabs {
+                display: flex;
+                flex-wrap: nowrap;
+                overflow-x: auto;
+                gap: 6px;
+                margin-bottom: 20px;
+                scrollbar-width: none;
+                -ms-overflow-style: none;
+                padding-bottom: 0;
+            }
+
+            .tabs::-webkit-scrollbar {
+                display: none;
+            }
+
+            .tab {
+                padding: 10px 16px;
+                font-size: 0.85rem;
+                white-space: nowrap;
+                flex-shrink: 0;
+            }
+
+            /* Content cards */
+            .data-section {
+                margin-bottom: 20px;
+            }
+
+            .block-list, .tx-list {
+                gap: 10px;
+            }
+
+            .block-item, .tx-item {
+                padding: 14px 16px;
+                border-radius: 16px;
+                border-width: 2px;
+            }
+
+            .block-item:hover, .tx-item:hover {
+                transform: none; /* Disable transform on mobile for better performance */
+            }
+
+            .block-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 8px;
+            }
+
+            .block-height {
+                font-size: 1.1rem;
+            }
+
+            .block-hash {
+                font-size: 0.75rem;
+                word-break: break-all;
+            }
+
+            .block-stats {
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }
+
+            .block-stat {
+                padding: 8px 12px;
+            }
+
+            .block-stat-label {
+                font-size: 0.7rem;
+            }
+
+            .block-stat-value {
+                font-size: 0.85rem;
+            }
+
+            /* Transaction details */
+            .tx-details {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+
+            .tx-arrow {
+                display: none; /* Hide arrow on mobile, too wide */
+            }
+
+            .tx-io-section h4 {
+                font-size: 0.8rem;
+            }
+
+            .tx-io-item {
+                padding: 10px;
+            }
+
+            .address-link {
+                font-size: 0.75rem;
+                word-break: break-all;
+            }
+
+            .value-amount {
+                font-size: 0.85rem;
+            }
+
+            /* Tables - mobile optimization */
+            .table-container {
+                border-radius: 12px;
+                border-width: 2px;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .modern-table {
+                font-size: 0.75rem;
+                min-width: 600px; /* Allow horizontal scroll */
+            }
+
+            .modern-table thead tr th {
+                padding: 12px 8px;
+                font-size: 0.7rem;
+                position: sticky;
+                top: 0;
+            }
+
+            .modern-table tbody td {
+                padding: 10px 8px;
+            }
+
+            /* Make first two columns sticky on mobile for better UX */
+            .modern-table th:first-child,
+            .modern-table td:first-child {
+                position: sticky;
+                left: 0;
+                background: var(--dark);
+                z-index: 5;
+            }
+
+            .modern-table th:first-child {
+                z-index: 15;
+            }
+
+            /* Code/hash elements wrap better */
+            .modern-table tbody td code {
+                font-size: 0.7rem;
+                padding: 4px 6px;
+                word-break: break-all;
+                max-width: 150px;
+                display: inline-block;
+            }
+
+            /* Masternode/Governance stats grid mobile */
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 14px 12px;
+            }
+
+            .stat-label {
+                font-size: 0.65rem;
+            }
+
+            .stat-value {
+                font-size: 1.4rem;
+            }
+
+            /* Info grid */
+            .info-grid {
+                grid-template-columns: 1fr;
+                gap: 12px;
+            }
+
+            .info-item {
+                padding: 12px;
+            }
+
+            .info-label {
+                font-size: 0.75rem;
+            }
+
+            .info-value {
+                font-size: 0.9rem;
+            }
+
+            /* Transaction hash and long text */
+            .tx-hash,
+            .mono-text,
+            code {
+                font-size: 0.7rem;
+                word-break: break-all;
+            }
+
+            /* Governance/proposal specific wrapping helpers */
+            .proposal-hash,
+            .proposal-address,
+            .proposal-url,
+            .proposal-name {
+                overflow-wrap: anywhere;
+                word-break: break-word;
+                max-width: 100%;
+                display: inline-block;
+            }
+
+            /* Ensure code blocks in proposals wrap and don't force container overflow */
+            .proposal-address code,
+            .proposal-hash code {
+                white-space: normal !important;
+                word-break: break-all;
+            }
+
+            /* Buttons */
+            .action-button,
+            .primary-button {
+                padding: 10px 16px;
+                font-size: 0.85rem;
+            }
+
+            /* Modals */
+            .modal-content {
+                width: 95%;
+                max-width: 95%;
+                max-height: 90vh;
+                overflow-y: auto;
+            }
+
+            .modal-header h3 {
+                font-size: 1.2rem;
+            }
+
+            .modal-body {
+                padding: 16px;
+            }
+
+            /* Status badges */
+            .status-badge {
+                padding: 4px 8px;
+                font-size: 0.75rem;
+            }
+        }
+
+        /* Mobile phones only */
+        @media (max-width: 480px) {
+            .container {
+                padding: 8px;
+            }
+
+            /* Header compact */
+            header {
+                padding: 16px 12px;
+                border-radius: 12px;
+            }
+
+            .ws-status-wrapper {
+                margin-bottom: 12px;
+            }
+
+            .ws-status {
+                font-size: 0.75rem;
+                padding: 6px 12px;
+            }
+
+            .header-content {
+                gap: 12px;
+            }
+
+            .header-logo {
+                height: 50px;
+            }
+
+            h1 {
+                font-size: 1.5rem;
+                line-height: 1.3;
+            }
+
+            .subtitle {
+                font-size: 0.8rem;
+            }
+
+            /* Single column stats for very small screens */
+            .stats-grid {
+                grid-template-columns: 1fr;
+                gap: 8px;
+            }
+
+            .stat-card {
+                padding: 12px 10px;
+            }
+
+            .stat-label {
+                font-size: 0.65rem;
+            }
+
+            .stat-value {
+                font-size: 1.3rem;
+            }
+
+            /* Search compact */
+            .search-bar {
+                padding: 12px;
+                border-radius: 10px;
+            }
+
+            .search-input {
+                padding: 10px 14px;
+                font-size: 0.85rem;
+            }
+
+            /* Tabs - scrollable with better touch */
+            .tabs {
+                gap: 4px;
+                padding: 0 8px;
+                margin-bottom: 16px;
+            }
+
+            .tab {
+                padding: 8px 12px;
+                font-size: 0.8rem;
+                min-width: auto;
+            }
+
+            /* Content */
+            .data-section {
+                margin-bottom: 16px;
+            }
+
+            .block-list, .tx-list {
+                gap: 8px;
+            }
+
+            .block-item, .tx-item {
+                padding: 12px;
+                border-radius: 12px;
+            }
+
+            .block-height {
+                font-size: 1rem;
+            }
+
+            .block-hash {
+                font-size: 0.7rem;
+            }
+
+            .tx-type {
+                font-size: 0.75rem;
+                padding: 4px 10px;
+            }
+
+            /* Tables - show minimal info */
+            .modern-table {
+                font-size: 0.75rem;
+            }
+
+            .modern-table th,
+            .modern-table td {
+                padding: 8px 6px;
+            }
+
+            /* Hide less important columns on small phones, but keep key masternode info */
+            /* For masternodes: keep Rank, Status, Address, Last Paid; hide Protocol, Last Seen, Active Time */
+            .modern-table th:nth-child(4),
+            .modern-table td:nth-child(4),
+            .modern-table th:nth-child(5),
+            .modern-table td:nth-child(5),
+            .modern-table th:nth-child(6),
+            .modern-table td:nth-child(6) {
+                display: none;
+            }
+
+            /* Info items */
+            .info-item {
+                padding: 10px;
+            }
+
+            .info-label {
+                font-size: 0.7rem;
+            }
+
+            .info-value {
+                font-size: 0.85rem;
+            }
+
+            /* Footer */
+            .tx-footer {
+                flex-direction: column;
+                gap: 8px;
+                font-size: 0.8rem;
+            }
+
+            /* Buttons */
+            .action-button,
+            .primary-button {
+                padding: 8px 12px;
+                font-size: 0.8rem;
+            }
+        }
+
+        /* Landscape mobile optimization */
+        @media (max-width: 768px) and (orientation: landscape) {
+            header {
+                padding: 16px;
+            }
+
+            h1 {
+                font-size: 1.6rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .tab-button {
+                min-width: auto;
+            }
+        }
+
+        /* Touch-friendly improvements */
+        @media (hover: none) and (pointer: coarse) {
+            /* Larger touch targets */
+            .tab-button,
+            .action-button,
+            .primary-button,
+            .search-button {
+                min-height: 44px; /* iOS recommended touch target */
+            }
+
+            .block-item,
+            .tx-card,
+            .stat-card {
+                cursor: pointer;
+                -webkit-tap-highlight-color: rgba(89, 252, 179, 0.1);
+            }
+
+            /* Prevent text selection on double-tap */
+            .block-header,
+            .tx-header,
+            .stat-label {
+                -webkit-user-select: none;
+                user-select: none;
+            }
+
+            /* Remove hover effects on touch devices */
+            .stat-card:hover,
+            .block-item:hover,
+            .tx-card:hover {
+                transform: none;
+            }
+
+            /* Active states for touch feedback */
+            .tab-button:active,
+            .action-button:active,
+            .primary-button:active {
+                transform: scale(0.98);
+                opacity: 0.9;
+            }
+        }
+
+        /* High DPI screens (Retina displays) */
+        @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+            .tx-hash,
+            .address-link,
+            .mono-text {
+                -webkit-font-smoothing: antialiased;
+                -moz-osx-font-smoothing: grayscale;
+            }
+        }
+
+        /* Dark mode support (if device prefers dark) */
+        @media (prefers-color-scheme: dark) {
+            /* Already dark by default, but can add overrides if needed */
+        }
+
+        /* Reduce motion for accessibility */
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+        <header>
+            <!-- WebSocket Status (top-right) -->
+            <div class="ws-status-wrapper">
+                <div class="ws-status" :class="wsConnected ? 'ws-connected' : 'ws-disconnected'">
+                    <span class="status-indicator" :class="wsConnected ? 'status-synced' : 'status-syncing'"></span>
+                    {{ wsConnected ? 'Connected' : 'Disconnected' }}
+                </div>
+            </div>
+
+            <!-- Header Content -->
+            <div class="header-content">
+                <img src="PIVX-Horz-White.svg" 
+                     alt="PIVX Logo" 
+                     class="header-logo"
+                     onerror="this.style.display='none'">
+                
+                <div class="header-text">
+                    <h1>Blockchain Explorer</h1>
+                    <p class="subtitle">Real-time blockchain monitoring powered by RustyBlox</p>
+                </div>
+            </div>                <!-- Sync Progress Bar -->
+                <div v-if="chainState.sync_percentage < 100" style="margin-top: 24px;">
+                    <div class="progress-bar">
+                        <div class="progress-fill" :style="{ width: chainState.sync_percentage + '%' }"></div>
+                    </div>
+                    <div class="sync-details">
+                        <span>Syncing: {{ formatNumber(chainState.sync_height) }} / {{ formatNumber(chainState.network_height) }}</span>
+                        <span>{{ formatPercentage(chainState.sync_percentage) }}%</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Block Detail Modal -->
+            <div v-if="selectedBlock" class="modal-overlay" @click="closeBlockDetail">
+                <div class="modal-content" @click.stop>
+                    <div class="modal-header">
+                        <h2>Block #{{ formatNumber(selectedBlock.height) }}</h2>
+                        <button class="close-button" @click="closeBlockDetail">×</button>
+                    </div>
+                    
+                    <div class="modal-body">
+                        <!-- Summary Section -->
+                        <div class="detail-section">
+                            <h3>Summary</h3>
+                            <table class="detail-table">
+                                <tr>
+                                    <td>Height</td>
+                                    <td>{{ formatNumber(selectedBlock.height) }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Confirmations</td>
+                                    <td>{{ formatNumber(selectedBlock.confirmations) }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Timestamp</td>
+                                    <td>{{ formatDate(selectedBlock.time) }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Size (bytes)</td>
+                                    <td>{{ formatNumber(selectedBlock.size) }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Nonce</td>
+                                    <td>{{ selectedBlock.nonce }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Version</td>
+                                    <td>{{ selectedBlock.version }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Merkle Root</td>
+                                    <td><code class="hash-code">{{ selectedBlock.merkleroot }}</code></td>
+                                </tr>
+                                <tr>
+                                    <td>Bits</td>
+                                    <td>{{ selectedBlock.bits }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Difficulty</td>
+                                    <td>{{ formatDifficulty(selectedBlock.difficulty) }}</td>
+                                </tr>
+                                <tr>
+                                    <td>Block Hash</td>
+                                    <td><code class="hash-code">{{ selectedBlock.hash }}</code></td>
+                                </tr>
+                                <tr v-if="selectedBlock.previousblockhash">
+                                    <td>Previous Block</td>
+                                    <td>
+                                        <code class="hash-code hash-link" @click="loadBlockByHash(selectedBlock.previousblockhash)">
+                                            {{ selectedBlock.previousblockhash }}
+                                        </code>
+                                    </td>
+                                </tr>
+                                <tr v-if="selectedBlock.nextblockhash">
+                                    <td>Next Block</td>
+                                    <td>
+                                        <code class="hash-code hash-link" @click="loadBlockByHash(selectedBlock.nextblockhash)">
+                                            {{ selectedBlock.nextblockhash }}
+                                        </code>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+
+                        <!-- Transactions Section -->
+                        <div class="detail-section">
+                            <h3>Transactions ({{ selectedBlock.tx.length }})</h3>
+                            <div v-if="selectedBlock.tx.length === 0" class="empty-state">
+                                No transaction data available for this block
+                            </div>
+                            <div v-else class="transactions-list">
+                                <div v-for="(tx, index) in selectedBlock.tx" :key="index" class="transaction-item">
+                                    <div class="tx-header">
+                                        <span class="tx-type">{{ getTxType(tx, index) }}</span>
+                                        <code class="hash-code">{{ tx.txid }}</code>
+                                    </div>
+                                    <div class="tx-details">
+                                        <div class="tx-io-section">
+                                            <h4>Inputs ({{ tx.vin.length }})</h4>
+                                            <div v-for="(input, idx) in tx.vin" :key="idx" class="tx-io-item">
+                                                <div v-if="input.coinbase" class="coinbase-badge">
+                                                    ⭐ Newly Generated Coins (Coinbase)
+                                                </div>
+                                                <div v-else>
+                                                    <!-- Cold Staking Input -->
+                                                    <div v-if="input.type === 'coldstake' && input.addresses && input.addresses.length === 2" style="background: rgba(102, 45, 145, 0.15); padding: 8px; border-radius: 6px; border: 1px solid rgba(102, 45, 145, 0.3); margin-bottom: 6px;">
+                                                        <div style="color: #a78bfa; font-weight: bold; font-size: 0.75rem; margin-bottom: 4px;">
+                                                            ❄️ Cold Staking Contract
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 2px;">
+                                                            <span style="color: #9ca3af;">Staker:</span>
+                                                            <span style="color: #e5e7eb; margin-left: 4px;">{{ input.addresses[0] }}</span>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem;">
+                                                            <span style="color: #9ca3af;">Owner:</span>
+                                                            <span style="color: #e5e7eb; margin-left: 4px;">{{ input.addresses[1] }}</span>
+                                                        </div>
+                                                    </div>
+                                                    <!-- Regular Input -->
+                                                    <div v-else class="address-link">
+                                                        {{ input.address || 'Unknown Address' }}
+                                                    </div>
+                                                    
+                                                    <div class="value-amount">
+                                                        {{ input.value ? formatPIV(input.value) : '?.????????' }} PIV
+                                                    </div>
+                                                    <div style="font-size: 0.75rem; color: #6b7280; margin-top: 4px;">
+                                                        From: {{ input.txid ? input.txid.substring(0, 16) + '...' : 'N/A' }}:{{ input.vout }}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="tx-arrow">→</div>
+                                        <div class="tx-io-section">
+                                            <h4>Outputs ({{ tx.vout.length }})</h4>
+                                            <div v-for="(output, idx) in tx.vout" :key="idx" class="tx-io-item">
+                                                <!-- Cold Staking Output -->
+                                                <div v-if="output.type === 'coldstake' && output.addresses && output.addresses.length === 2" style="background: rgba(102, 45, 145, 0.15); padding: 10px; border-radius: 6px; border: 1px solid rgba(102, 45, 145, 0.3);">
+                                                    <div style="color: #a78bfa; font-weight: bold; font-size: 0.85rem; margin-bottom: 6px;">
+                                                        ❄️ Cold Staking Contract
+                                                    </div>
+                                                    <div style="font-size: 0.8rem; margin-bottom: 3px;">
+                                                        <span style="color: #9ca3af;">Staker:</span>
+                                                        <span style="color: #e5e7eb; margin-left: 6px;">{{ output.addresses[0] }}</span>
+                                                    </div>
+                                                    <div style="font-size: 0.8rem;">
+                                                        <span style="color: #9ca3af;">Owner:</span>
+                                                        <span style="color: #e5e7eb; margin-left: 6px;">{{ output.addresses[1] }}</span>
+                                                    </div>
+                                                </div>
+                                                <!-- Regular Output -->
+                                                <div v-else class="address-link">
+                                                    {{ getOutputAddress(output) }}
+                                                </div>
+                                                
+                                                <div class="value-amount">{{ formatPIV(output.value) }} PIV</div>
+                                                <div v-if="output.type || (output.scriptPubKey && output.scriptPubKey.type)" style="font-size: 0.75rem; color: #6b7280; margin-top: 4px;">
+                                                    Type: {{ output.type || output.scriptPubKey.type || 'unknown' }}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Sapling Privacy Transaction Section -->
+                                    <div v-if="tx.sapling" style="margin-top: 20px; padding: 15px; background: linear-gradient(135deg, rgba(108, 46, 185, 0.15), rgba(157, 78, 221, 0.15)); border: 1px solid var(--primary); border-radius: 8px;">
+                                        <h4 style="color: #fff; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                                            🛡️ Sapling Shielded Transaction
+                                            <span class="badge" style="background: var(--primary);">Version {{ tx.version }}</span>
+                                        </h4>
+                                        
+                                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px;">
+                                            <div style="padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                                <div style="color: #9ca3af; font-size: 0.85rem;">Value Balance</div>
+                                                <div style="color: #fff; font-weight: bold; font-size: 1.1rem; margin-top: 4px;">
+                                                    <span :style="tx.sapling.value_balance > 0 ? 'color: #10b981' : tx.sapling.value_balance < 0 ? 'color: #3b82f6' : ''">
+                                                        {{ tx.sapling.value_balance > 0 ? '+' : '' }}{{ formatPIV(tx.sapling.value_balance) }} PIV
+                                                    </span>
+                                                </div>
+                                                <div style="color: #6b7280; font-size: 0.75rem; margin-top: 2px;">
+                                                    {{ tx.sapling.value_balance > 0 ? '🛡️ → 💰 Unshielding' : tx.sapling.value_balance < 0 ? '💰 → 🛡️ Shielding' : 'Internal Transfer' }}
+                                                </div>
+                                            </div>
+                                            
+                                            <div style="padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                                <div style="color: #9ca3af; font-size: 0.85rem;">Shielded Spends</div>
+                                                <div style="color: #ef4444; font-weight: bold; font-size: 1.1rem; margin-top: 4px;">
+                                                    {{ tx.sapling.shielded_spend_count }}
+                                                </div>
+                                                <div style="color: #6b7280; font-size: 0.75rem; margin-top: 2px;">Inputs from pool</div>
+                                            </div>
+                                            
+                                            <div style="padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                                <div style="color: #9ca3af; font-size: 0.85rem;">Shielded Outputs</div>
+                                                <div style="color: #10b981; font-weight: bold; font-size: 1.1rem; margin-top: 4px;">
+                                                    {{ tx.sapling.shielded_output_count }}
+                                                </div>
+                                                <div style="color: #6b7280; font-size: 0.75rem; margin-top: 2px;">New notes created</div>
+                                            </div>
+                                        </div>
+                                        
+                                        <!-- Expandable Details -->
+                                        <details style="margin-top: 10px;">
+                                            <summary style="cursor: pointer; color: var(--secondary); font-weight: 500; user-select: none; padding: 8px; background: rgba(0, 0, 0, 0.2); border-radius: 4px;">
+                                                📋 View Detailed Cryptographic Data
+                                            </summary>
+                                            
+                                            <div style="margin-top: 15px; padding: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                                <!-- Binding Signature -->
+                                                <div style="margin-bottom: 15px;">
+                                                    <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 4px;">Binding Signature (64 bytes):</div>
+                                                    <code style="display: block; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #d1d5db;">{{ tx.sapling.binding_sig }}</code>
+                                                </div>
+                                                
+                                                <!-- Shielded Spends Details -->
+                                                <div v-if="tx.sapling.spends && tx.sapling.spends.length > 0" style="margin-bottom: 15px;">
+                                                    <h5 style="color: #fff; margin-bottom: 10px;">🔒 Shielded Spends ({{ tx.sapling.spends.length }})</h5>
+                                                    <div v-for="(spend, idx) in tx.sapling.spends" :key="'spend-' + idx" style="margin-bottom: 12px; padding: 10px; background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; border-radius: 4px;">
+                                                        <div style="color: #fbbf24; font-weight: 600; margin-bottom: 8px;">Spend #{{ idx }}</div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Nullifier:</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ spend.nullifier }}</code>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Anchor:</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ spend.anchor }}</code>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Value Commitment (cv):</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ spend.cv }}</code>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Randomized Key (rk):</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ spend.rk }}</code>
+                                                        </div>
+                                                        <details style="margin-top: 6px;">
+                                                            <summary style="cursor: pointer; color: #6b7280; font-size: 0.75rem;">View ZK Proof & Signature</summary>
+                                                            <div style="margin-top: 6px; font-size: 0.7rem;">
+                                                                <div style="margin-bottom: 4px;">
+                                                                    <span style="color: #9ca3af;">ZK Proof (192 bytes):</span>
+                                                                    <code style="display: block; margin-top: 4px; padding: 6px; background: var(--darker); border-radius: 3px; word-break: break-all; color: #9ca3af;">{{ spend.zkproof }}</code>
+                                                                </div>
+                                                                <div>
+                                                                    <span style="color: #9ca3af;">Spend Auth Sig (64 bytes):</span>
+                                                                    <code style="display: block; margin-top: 4px; padding: 6px; background: var(--darker); border-radius: 3px; word-break: break-all; color: #9ca3af;">{{ spend.spend_auth_sig }}</code>
+                                                                </div>
+                                                            </div>
+                                                        </details>
+                                                    </div>
+                                                </div>
+                                                
+                                                <!-- Shielded Outputs Details -->
+                                                <div v-if="tx.sapling.outputs && tx.sapling.outputs.length > 0">
+                                                    <h5 style="color: #fff; margin-bottom: 10px;">🔐 Shielded Outputs ({{ tx.sapling.outputs.length }})</h5>
+                                                    <div v-for="(output, idx) in tx.sapling.outputs" :key="'output-' + idx" style="margin-bottom: 12px; padding: 10px; background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981; border-radius: 4px;">
+                                                        <div style="color: #10b981; font-weight: 600; margin-bottom: 8px;">Output #{{ idx }}</div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Note Commitment (cmu):</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ output.cmu }}</code>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Ephemeral Key:</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ output.ephemeral_key }}</code>
+                                                        </div>
+                                                        <div style="font-size: 0.75rem; margin-bottom: 6px;">
+                                                            <span style="color: #9ca3af;">Value Commitment (cv):</span>
+                                                            <code style="margin-left: 8px; color: #e5e7eb; word-break: break-all;">{{ output.cv }}</code>
+                                                        </div>
+                                                        <details style="margin-top: 6px;">
+                                                            <summary style="cursor: pointer; color: #6b7280; font-size: 0.75rem;">View Encrypted Data & Proof</summary>
+                                                            <div style="margin-top: 6px; font-size: 0.7rem;">
+                                                                <div style="margin-bottom: 4px;">
+                                                                    <span style="color: #9ca3af;">Encrypted Note (580 bytes):</span>
+                                                                    <code style="display: block; margin-top: 4px; padding: 6px; background: var(--darker); border-radius: 3px; word-break: break-all; color: #9ca3af; max-height: 100px; overflow-y: auto;">{{ output.enc_ciphertext }}</code>
+                                                                </div>
+                                                                <div style="margin-bottom: 4px;">
+                                                                    <span style="color: #9ca3af;">Outgoing Ciphertext (80 bytes):</span>
+                                                                    <code style="display: block; margin-top: 4px; padding: 6px; background: var(--darker); border-radius: 3px; word-break: break-all; color: #9ca3af;">{{ output.out_ciphertext }}</code>
+                                                                </div>
+                                                                <div>
+                                                                    <span style="color: #9ca3af;">ZK Proof (192 bytes):</span>
+                                                                    <code style="display: block; margin-top: 4px; padding: 6px; background: var(--darker); border-radius: 3px; word-break: break-all; color: #9ca3af;">{{ output.zkproof }}</code>
+                                                                </div>
+                                                            </div>
+                                                        </details>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </details>
+                                    </div>
+                                    
+                                    <div class="tx-footer">
+                                        <span>Size: {{ formatNumber(tx.size) }} bytes</span>
+                                        <span v-if="tx.version">Version: {{ tx.version }}</span>
+                                        <span v-if="tx.fees !== undefined || tx.reward !== undefined">
+                                            <span v-if="tx.tx_type === 'coinbase' && tx.reward !== undefined && tx.reward !== null">
+                                                <span style="color: #10b981; font-weight: 600;">
+                                                    Mining Reward: {{ formatPIV(tx.reward) }} PIV
+                                                </span>
+                                            </span>
+                                            <span v-else-if="tx.tx_type === 'coinstake' && tx.reward !== undefined && tx.reward !== null">
+                                                Fee: {{ formatPIV(tx.fees) }} PIV | 
+                                                <span style="color: #10b981; font-weight: 600;">
+                                                    Staking Reward: {{ formatPIV(tx.reward) }} PIV
+                                                </span>
+                                            </span>
+                                            <span v-else>
+                                                Fee: {{ formatPIV(tx.fees) }} PIV
+                                            </span>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Error Display -->
+            <div v-if="error" class="error">
+                ⚠️ {{ error }}
+            </div>
+
+            <!-- Stats Grid -->
+            <div class="stats-grid" style="margin-bottom: 24px;">
+                <div class="stat-card" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                    <div class="stat-label">Network Height</div>
+                    <div class="stat-value">
+                        {{ formatNumber(chainState.network_height) }}
+                    </div>
+                </div>
+                <div class="stat-card" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                    <div class="stat-label">Indexed Height</div>
+                    <div class="stat-value">
+                        {{ formatNumber(chainState.sync_height) }}
+                    </div>
+                </div>
+                <div class="stat-card" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                    <div class="stat-label">Sync Progress</div>
+                    <div class="stat-value">
+                        {{ formatPercentage(chainState.sync_percentage) }}%
+                    </div>
+                </div>
+                <div class="stat-card" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                    <div class="stat-label">Blocks Behind</div>
+                    <div class="stat-value">
+                        {{ formatNumber(Math.max(0, chainState.network_height - chainState.sync_height)) }}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Main Content Container with Search -->
+            <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px; margin-bottom: 24px;">
+                <!-- Search Bar -->
+                <div style="margin-bottom: 20px;">
+                    <input 
+                        type="text" 
+                        class="search-input" 
+                        v-model="searchQuery"
+                        @keyup.enter="performSearch"
+                        placeholder="Search..."
+                        style="width: 100%; font-size: 1rem; padding: 14px 20px; border-radius: 18px; background: rgba(15, 10, 23, 0.9); border: 2px solid var(--border); box-shadow: none;"
+                    >
+                </div>
+
+            <!-- Tabs -->
+            <div class="tabs">
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'blocks' }"
+                    @click="activeTab = 'blocks'"
+                >
+                    📦 Recent Blocks
+                </button>
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'mempool' }"
+                    @click="activeTab = 'mempool'"
+                >
+                    ⏳ Mempool
+                </button>
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'masternodes' }"
+                    @click="activeTab = 'masternodes'; loadMasternodes();"
+                >
+                    🔐 Masternodes
+                </button>
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'governance' }"
+                    @click="activeTab = 'governance'; loadBudgetInfo();"
+                >
+                    🏛️ Governance
+                </button>
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'search' }"
+                    @click="activeTab = 'search'"
+                >
+                    🔍 Search Results
+                </button>
+                <button 
+                    class="tab" 
+                    :class="{ active: activeTab === 'address' }"
+                    @click="activeTab = 'address'"
+                    v-show="addressInfo"
+                >
+                    💰 Address Details
+                </button>
+            </div>
+
+            <!-- Blocks Tab -->
+            <div v-show="activeTab === 'blocks'" class="data-section">
+                <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                    <h2 style="margin-bottom: 20px; color: #fff; font-size: 1.3rem; font-weight: 600;">Recent Blocks</h2>
+                    <div v-if="loading" class="loading">
+                        <div class="spinner"></div>
+                        Loading blocks...
+                    </div>
+                    <div v-else class="block-list">
+                        <div 
+                            v-for="block in recentBlocks" 
+                            :key="block.height"
+                            class="block-item"
+                            :class="{ 'new-block': block.isNew }"
+                            @click="selectBlock(block)"
+                        >
+                            <div class="block-header">
+                                <span class="block-height">Block #{{ formatNumber(block.height) }}</span>
+                                <span class="block-time">{{ formatTime(block.timestamp) }}</span>
+                            </div>
+                            <div class="block-hash">{{ block.hash }}</div>
+                            <div style="margin-top: 8px;">
+                                <span class="tx-count">{{ block.tx_count }} transactions</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mempool Tab -->
+            <div v-show="activeTab === 'mempool'" class="data-section">
+                <h2 style="margin-bottom: 20px; color: #fff;">Mempool Transactions</h2>
+                <div v-if="loading" class="loading">
+                    <div class="spinner"></div>
+                    Loading mempool...
+                </div>
+                <div v-else-if="mempoolTxs.length === 0" class="loading">
+                    No pending transactions
+                </div>
+                <div v-else class="tx-list">
+                    <div 
+                        v-for="tx in mempoolTxs" 
+                        :key="tx.txid"
+                        class="tx-item"
+                    >
+                        <div style="font-family: monospace; color: var(--secondary); margin-bottom: 8px;">
+                            {{ tx.txid }}
+                        </div>
+                        <div style="color: #9ca3af; font-size: 0.9rem;">
+                            Time: {{ formatTime(tx.time) }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Masternodes Tab -->
+            <div v-show="activeTab === 'masternodes'" class="data-section">
+                <h2 style="color: #fff; margin-bottom: 20px;">🔐 PIVX Masternodes</h2>
+                
+                <!-- Masternode Stats -->
+                <div v-if="mnCount" class="stats-grid" style="margin-bottom: 30px;">
+                    <div class="stat-card">
+                        <div class="stat-label">Total Masternodes</div>
+                        <div class="stat-value">{{ formatNumber(mnCount.total) }}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Enabled</div>
+                        <div class="stat-value" style="color: var(--success);">{{ formatNumber(mnCount.enabled) }}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Stable</div>
+                        <div class="stat-value">{{ formatNumber(mnCount.stable) }}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">In Queue</div>
+                        <div class="stat-value" style="color: var(--warning);">{{ formatNumber(mnCount.inqueue) }}</div>
+                    </div>
+                </div>
+
+                <!-- Network Type Breakdown -->
+                <div v-if="mnCount" style="margin-bottom: 30px;">
+                    <h3 style="color: #fff; margin-bottom: 15px;">Network Distribution</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                        <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                            <div style="font-size: 0.85rem; color: #9ca3af; margin-bottom: 8px;">IPv4</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: #60a5fa;">{{ formatNumber(mnCount.ipv4) }}</div>
+                            <div style="font-size: 0.75rem; color: #9ca3af; margin-top: 4px;">{{ ((mnCount.ipv4 / mnCount.total) * 100).toFixed(1) }}%</div>
+                        </div>
+                        <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                            <div style="font-size: 0.85rem; color: #9ca3af; margin-bottom: 8px;">IPv6</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: #a78bfa;">{{ formatNumber(mnCount.ipv6) }}</div>
+                            <div style="font-size: 0.75rem; color: #9ca3af; margin-top: 4px;">{{ ((mnCount.ipv6 / mnCount.total) * 100).toFixed(1) }}%</div>
+                        </div>
+                        <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px;">
+                            <div style="font-size: 0.85rem; color: #9ca3af; margin-bottom: 8px;">Tor (Onion)</div>
+                            <div style="font-size: 1.8rem; font-weight: bold; color: #f472b6;">{{ formatNumber(mnCount.onion) }}</div>
+                            <div style="font-size: 0.75rem; color: #9ca3af; margin-top: 4px;">{{ ((mnCount.onion / mnCount.total) * 100).toFixed(1) }}%</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Masternodes List -->
+                <div v-if="masternodes.length > 0">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                        <h3 style="color: #fff;">Masternode List</h3>
+                        <div style="color: #9ca3af; font-size: 0.9rem;">
+                            Showing {{ masternodes.length }} masternodes
+                        </div>
+                    </div>
+                    
+                    <div class="table-container">
+                        <table class="modern-table">
+                            <thead>
+                                <tr>
+                                    <th>Rank</th>
+                                    <th>Status</th>
+                                    <th>Address</th>
+                                    <th>Protocol</th>
+                                    <th>Last Seen</th>
+                                    <th>Active Time</th>
+                                    <th>Last Paid</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="(mn, index) in paginatedMasternodes" :key="mn.txhash + '-' + mn.outidx">
+                                    <td><span class="badge">{{ mn.rank !== undefined ? mn.rank : (index + 1 + (mnCurrentPage - 1) * mnPageSize) }}</span></td>
+                                    <td>
+                                        <span class="badge" :style="getMNStatusColor(mn.status)">
+                                            {{ mn.status }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <code style="font-size: 0.85rem; color: #d1d5db;">{{ mn.addr }}</code>
+                                    </td>
+                                    <td>
+                                        <span style="color: #9ca3af;">v{{ mn.version }}</span>
+                                    </td>
+                                    <td>
+                                        <span style="color: #9ca3af; font-size: 0.9rem;">{{ formatTimeSince(mn.lastseen) }}</span>
+                                    </td>
+                                    <td>
+                                        <span style="color: #9ca3af; font-size: 0.9rem;">{{ formatDuration(mn.activetime) }}</span>
+                                    </td>
+                                    <td>
+                                        <span :style="mn.lastpaid > 0 ? 'color: var(--success);' : 'color: #6b7280;'" style="font-size: 0.9rem;">
+                                            {{ mn.lastpaid > 0 ? formatTimeSince(mn.lastpaid) : 'Never' }}
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Pagination -->
+                    <div v-if="totalMNPages > 1" style="display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 20px;">
+                        <button 
+                            @click="mnCurrentPage = Math.max(1, mnCurrentPage - 1)"
+                            :disabled="mnCurrentPage === 1"
+                            style="padding: 8px 16px; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem;"
+                            :style="mnCurrentPage === 1 ? 'opacity: 0.5; cursor: not-allowed;' : ''"
+                        >
+                            Previous
+                        </button>
+                        <span style="color: #9ca3af; font-size: 0.9rem;">
+                            Page {{ mnCurrentPage }} of {{ totalMNPages }}
+                        </span>
+                        <button 
+                            @click="mnCurrentPage = Math.min(totalMNPages, mnCurrentPage + 1)"
+                            :disabled="mnCurrentPage === totalMNPages"
+                            style="padding: 8px 16px; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem;"
+                            :style="mnCurrentPage === totalMNPages ? 'opacity: 0.5; cursor: not-allowed;' : ''"
+                        >
+                            Next
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div v-else-if="loading" class="loading">
+                    Loading masternode data...
+                </div>
+
+                <!-- Empty State -->
+                <div v-else class="loading">
+                    No masternode data available
+                </div>
+            </div>
+
+            <!-- Governance Tab -->
+            <div v-show="activeTab === 'governance'" class="data-section">
+                <h2 style="margin-bottom: 20px; color: #fff;">🏛️ PIVX Governance & Budget</h2>
+                
+                <!-- Loading State -->
+                <div v-if="budgetLoading" class="loading">
+                    <div class="spinner"></div>
+                    Loading budget data...
+                </div>
+                
+                <!-- Budget Summary -->
+                <div v-else-if="budgetInfo && budgetInfo.length > 0" style="margin-bottom: 30px;">
+                    <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 24px; margin-bottom: 20px;">
+                        <h3 style="color: var(--accent); margin-bottom: 15px;">📊 Budget Overview</h3>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                            <div style="background: rgba(15, 10, 23, 0.6); padding: 16px; border-radius: 18px; border: 2px solid var(--border);">
+                                <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 4px;">Active Proposals</div>
+                                <div style="color: #e5e7eb; font-size: 1.1rem; font-weight: bold;">
+                                    {{ getActiveProposals().length }}
+                                </div>
+                            </div>
+                            <div style="background: rgba(15, 10, 23, 0.6); padding: 16px; border-radius: 18px; border: 2px solid var(--border);">
+                                <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 4px;">Max Monthly Budget</div>
+                                <div style="color: #e5e7eb; font-size: 1.1rem; font-weight: bold;">
+                                    432,000 PIV
+                                </div>
+                            </div>
+                            <div style="background: rgba(15, 10, 23, 0.6); padding: 16px; border-radius: 18px; border: 2px solid var(--border);">
+                                <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 4px;">Allocated (Approved)</div>
+                                <div style="color: #e5e7eb; font-size: 1.1rem; font-weight: bold;">
+                                    {{ formatPIV(calculateAllocatedBudget()) }} PIV
+                                </div>
+                            </div>
+                            <div style="background: rgba(15, 10, 23, 0.6); padding: 16px; border-radius: 18px; border: 2px solid var(--border);">
+                                <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 4px;">Remaining Budget</div>
+                                <div :style="{ color: (432000 - calculateAllocatedBudget() / 100000000) > 0 ? 'var(--accent)' : '#ef4444', fontSize: '1.1rem', fontWeight: 'bold' }">
+                                    {{ formatPIV(Math.max(0, 43200000000000 - calculateAllocatedBudget())) }} PIV
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Active Proposals -->
+                    <h3 style="color: #fff; margin-bottom: 15px;">💼 Active Proposals (Sorted by Votes)</h3>
+                    <div v-if="getActiveProposals().length > 0">
+                        <div v-for="(proposal, index) in getActiveProposals()" :key="proposal.Hash" 
+                             :style="{ 
+                                 background: 'var(--dark)', 
+                                 backdropFilter: 'blur(50px)',
+                                 border: '3px solid var(--border)',
+                                 padding: '24px', 
+                                 marginBottom: '15px', 
+                                 borderRadius: '26px', 
+                                 borderLeft: '4px solid ' + getProposalStatusColor(proposal, index)
+                             }">
+                            
+                            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px; flex-wrap: wrap; gap: 10px;">
+                                <div style="flex: 1; min-width: 200px;">
+                                    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+                                        <h4 class="proposal-name" style="color: #fff; font-size: 1.1rem; margin: 0;">{{ proposal.Name }}</h4>
+                                        <span :style="{ 
+                                            background: getProposalStatusBg(proposal, index), 
+                                            color: getProposalStatusColor(proposal, index),
+                                            padding: '4px 10px',
+                                            borderRadius: '4px',
+                                            fontSize: '0.75rem',
+                                            fontWeight: 'bold'
+                                        }">
+                                            {{ getProposalStatus(proposal, index) }}
+                                        </span>
+                                    </div>
+                                    <div class="proposal-hash mono-text" style="color: #9ca3af; font-size: 0.85rem;">
+                                        {{ proposal.Hash }}
+                                    </div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div :style="{ 
+                                        background: getProposalStatus(proposal, index) === 'APPROVED' ? 'rgba(16, 185, 129, 0.2)' : 
+                                                   getProposalStatus(proposal, index) === 'UNPAID' ? 'rgba(239, 68, 68, 0.2)' : 
+                                                   'rgba(156, 163, 175, 0.2)',
+                                        color: getProposalStatus(proposal, index) === 'APPROVED' ? '#10b981' : 
+                                               getProposalStatus(proposal, index) === 'UNPAID' ? '#ef4444' : '#9ca3af',
+                                        padding: '6px 12px', 
+                                        borderRadius: '6px', 
+                                        fontWeight: 'bold', 
+                                        marginBottom: '4px'
+                                    }">
+                                        {{ formatPIV(proposal.MonthlyPayment || 0) }} PIV
+                                    </div>
+                                    <div style="color: #9ca3af; font-size: 0.85rem;">per month</div>
+                                </div>
+                            </div>
+                            
+                            <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 12px;">
+                                <div style="min-width: 200px; max-width: 100%;">
+                                    <span style="color: #9ca3af; font-size: 0.85rem;">Payment Address: </span>
+                                    <code class="proposal-address" style="color: #e5e7eb; background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px; font-size: 0.8rem;">{{ proposal.PaymentAddress }}</code>
+                                </div>
+                                <div>
+                                    <span style="color: #9ca3af; font-size: 0.85rem;">Payments: </span>
+                                    <span style="color: #e5e7eb;">{{ proposal.RemainingPaymentCount }} / {{ proposal.TotalPaymentCount }}</span>
+                                </div>
+                                <div>
+                                    <span style="color: #9ca3af; font-size: 0.85rem;">Votes: </span>
+                                    <span style="color: #10b981;">✓ {{ proposal.Yeas || 0 }}</span>
+                                    <span style="color: #9ca3af;"> / </span>
+                                    <span style="color: #ef4444;">✗ {{ proposal.Nays || 0 }}</span>
+                                </div>
+                                <div>
+                                    <span style="color: #9ca3af; font-size: 0.85rem;">Net: </span>
+                                    <span :style="{ color: (proposal.Yeas - proposal.Nays) > 0 ? '#10b981' : '#ef4444' }">
+                                        {{ proposal.Yeas - proposal.Nays }}
+                                    </span>
+                                </div>
+                                <div>
+                                    <span style="color: #9ca3af; font-size: 0.85rem;">Ratio: </span>
+                                    <span :style="{ color: (proposal.Ratio || 0) > 0 ? '#10b981' : '#ef4444' }">
+                                        {{ (proposal.Ratio || 0).toFixed(2) }}
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div v-if="proposal.URL" style="margin-top: 12px;">
+                                <span style="color: #9ca3af; font-size: 0.85rem;">More Info:</span>
+                                <a :href="proposal.URL" target="_blank" class="proposal-url" style="color: #a78bfa; margin-left: 8px; text-decoration: none; max-width:100%; display:inline-block;">
+                                    {{ proposal.URL }} ↗
+                                </a>
+                            </div>
+                            
+                            <!-- Vote Details Button -->
+                            <button 
+                                @click="loadProposalVotes(proposal.Name)"
+                                style="margin-top: 12px; background: rgba(167, 139, 250, 0.2); color: #a78bfa; border: 1px solid #a78bfa; padding: 8px 16px; border-radius: 6px; cursor: pointer;"
+                            >
+                                View Votes
+                            </button>
+                            
+                            <!-- Expanded Vote Details -->
+                            <div v-if="selectedProposal === proposal.Name && proposalVotes" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
+                                <h5 style="color: #a78bfa; margin-bottom: 10px;">Masternode Votes</h5>
+                                <div style="max-height: 300px; overflow-y: auto;">
+                                    <div v-for="(vote, mn) in proposalVotes" :key="mn" style="display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                        <code style="color: #9ca3af; font-size: 0.85rem;">{{ mn }}</code>
+                                        <span :style="{ color: vote === 'YES' ? '#10b981' : '#ef4444' }">
+                                            {{ vote }}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else style="text-align: center; padding: 40px; color: #9ca3af;">
+                        No active budget proposals at this time.
+                    </div>
+                    
+                    <!-- Completed Proposals Section -->
+                    <div v-if="getCompletedProposals().length > 0" style="margin-top: 40px;">
+                        <h3 style="color: #9ca3af; margin-bottom: 15px;">📋 Completed Proposals ({{ getCompletedProposals().length }})</h3>
+                        <div style="opacity: 0.7;">
+                            <div v-for="proposal in getCompletedProposals()" :key="proposal.Hash" 
+                                 style="background: rgba(107, 114, 128, 0.1); padding: 15px; margin-bottom: 10px; border-radius: 8px; border-left: 4px solid #6b7280;">
+                                
+                                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                                    <div style="flex: 1; min-width: 200px;">
+                                        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 4px;">
+                                            <h5 style="color: #d1d5db; font-size: 1rem; margin: 0;">{{ proposal.Name }}</h5>
+                                            <span style="background: rgba(107, 114, 128, 0.3); color: #9ca3af; padding: 3px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold;">
+                                                COMPLETED
+                                            </span>
+                                        </div>
+                                        <div style="color: #6b7280; font-size: 0.75rem; font-family: monospace;">
+                                            {{ proposal.Hash }}
+                                        </div>
+                                    </div>
+                                    <div style="display: flex; gap: 20px; align-items: center;">
+                                        <div>
+                                            <span style="color: #9ca3af; font-size: 0.8rem;">Total Paid: </span>
+                                            <span style="color: #d1d5db; font-weight: bold;">{{ formatPIV(proposal.TotalPayment || 0) }} PIV</span>
+                                        </div>
+                                        <div>
+                                            <span style="color: #9ca3af; font-size: 0.8rem;">Payments: </span>
+                                            <span style="color: #d1d5db;">{{ proposal.TotalPaymentCount }} / {{ proposal.TotalPaymentCount }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div v-else style="text-align: center; padding: 40px; color: #9ca3af;">
+                    Click on Governance tab to load budget data.
+                </div>
+            </div>
+
+            <!-- Search Results Tab -->
+            <div v-show="activeTab === 'search'" class="data-section">
+                <h2 style="margin-bottom: 20px; color: #fff; font-size: 1.8rem; font-weight: 700;">Search Results</h2>
+                <div v-if="searchLoading" class="loading">
+                    <div class="spinner"></div>
+                    Searching...
+                </div>
+                <div v-else-if="searchResult">
+                    <!-- Block Result -->
+                    <div v-if="searchResult.type === 'Block'" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px;">
+                        <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700; padding-bottom: 16px; border-bottom: 2px solid var(--border);">
+                            📦 Block Information
+                        </h3>
+                        <div class="detail-row">
+                            <div class="detail-label">Type</div>
+                            <div class="detail-value"><code>Block</code></div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Height</div>
+                            <div class="detail-value">{{ formatNumber(searchResult.height) }}</div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Hash</div>
+                            <div class="detail-value"><code>{{ searchResult.hash }}</code></div>
+                        </div>
+                        <button @click="viewBlock(searchResult.height)" class="btn" style="margin-top: 20px; width: 100%;">
+                            📦 View Full Block Details
+                        </button>
+                    </div>
+
+                    <!-- Transaction Result -->
+                    <div v-else-if="searchResult.type === 'Transaction'" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px;">
+                        <div v-if="!transactionDetail" style="padding: 20px; text-align: center;">
+                            <div class="spinner"></div>
+                            Loading transaction details...
+                        </div>
+                        <div v-else>
+                            <!-- Transaction Summary -->
+                            <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700; padding-bottom: 16px; border-bottom: 2px solid var(--border);">
+                                💳 Transaction Details
+                            </h3>
+                            <div class="detail-row">
+                                <div class="detail-label">Type</div>
+                                <div class="detail-value"><code>Transaction</code></div>
+                            </div>
+                            <div class="detail-row">
+                                <div class="detail-label">Transaction ID</div>
+                                <div class="detail-value"><code style="word-break: break-all;">{{ searchResult.txid }}</code></div>
+                            </div>
+                            <div class="detail-row">
+                                <div class="detail-label">Block Height</div>
+                                <div class="detail-value">
+                                    <span v-if="searchResult.block_height">{{ formatNumber(searchResult.block_height) }}</span>
+                                    <span v-else class="badge badge-warning">Unconfirmed</span>
+                                </div>
+                            </div>
+                            <div class="detail-row" v-if="transactionDetail.blockTime">
+                                <div class="detail-label">Timestamp</div>
+                                <div class="detail-value">{{ formatTimestamp(transactionDetail.blockTime) }}</div>
+                            </div>
+                            <div class="detail-row">
+                                <div class="detail-label">Size</div>
+                                <div class="detail-value">{{ transactionDetail.size }} bytes</div>
+                            </div>
+
+                            <!-- Inputs Section -->
+                            <div style="margin-top: 30px;">
+                                <h3 style="color: #fff; margin-bottom: 15px; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 10px;">
+                                    📥 Inputs ({{ transactionDetail.vin.length }})
+                                    <span style="font-size: 0.9rem; color: #9ca3af; font-weight: 400;">
+                                        Total: {{ calculateTotalInputs(transactionDetail.vin) }} PIVX
+                                    </span>
+                                </h3>
+                                <div v-for="(input, idx) in transactionDetail.vin" :key="'in-' + idx" 
+                                     style="background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; padding: 15px; margin-bottom: 10px; border-radius: 6px;">
+                                    <!-- Zerocoin Spend Input -->
+                                    <div v-if="input.coinbase && isZerocoinSpend(input.coinbase)">
+                                        <div style="background: rgba(168, 85, 247, 0.2); padding: 12px; border-radius: 6px; border: 1px solid rgba(168, 85, 247, 0.4);">
+                                            <div style="color: #c084fc; font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                                🔒 Zerocoin Spend (Privacy Transaction)
+                                            </div>
+                                            <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 6px;">
+                                                This is a zerocoin spend transaction from PIVX's legacy privacy protocol.
+                                            </div>
+                                            <div style="margin-top: 8px;">
+                                                <span style="color: #9ca3af; font-size: 0.85rem;">Type:</span>
+                                                <code style="margin-left: 8px; color: #c084fc; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;">
+                                                    {{ getZerocoinType(input.coinbase) }}
+                                                </code>
+                                            </div>
+                                            <details style="margin-top: 12px;">
+                                                <summary style="cursor: pointer; color: #9ca3af; font-size: 0.85rem;">View Raw Data</summary>
+                                                <code style="display: block; margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.3); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #6b7280;">{{ input.coinbase }}</code>
+                                            </details>
+                                        </div>
+                                    </div>
+                                    <!-- Regular Coinbase Input -->
+                                    <div v-else-if="input.coinbase">
+                                        <strong style="color: #fbbf24;">Coinbase (Newly Generated Coins)</strong>
+                                        <div style="margin-top: 8px; font-size: 0.9rem; color: #9ca3af;">
+                                            <code>{{ input.coinbase }}</code>
+                                        </div>
+                                    </div>
+                                    <!-- Regular UTXO Input -->
+                                    <div v-else>
+                                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                            <span style="color: #9ca3af;">Input #{{ idx }}</span>
+                                            <span v-if="input.value" style="color: #10b981; font-weight: bold;">
+                                                {{ formatPIV(input.value) }} PIVX
+                                            </span>
+                                        </div>
+                                        
+                                        <!-- Cold Staking Input -->
+                                        <div v-if="input.type === 'coldstake' && input.addresses && input.addresses.length === 2">
+                                            <div style="background: rgba(102, 45, 145, 0.2); padding: 12px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(102, 45, 145, 0.4);">
+                                                <div style="color: #a78bfa; font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                                    ❄️ Cold Staking Contract
+                                                </div>
+                                                <div style="margin-bottom: 6px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Staker:</span>
+                                                    <code style="margin-left: 8px; color: #e5e7eb; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;">{{ input.addresses[0] }}</code>
+                                                </div>
+                                                <div>
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Owner:</span>
+                                                    <code style="margin-left: 8px; color: #e5e7eb; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;">{{ input.addresses[1] }}</code>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <!-- Regular Input -->
+                                        <div v-else style="margin-bottom: 6px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">Address:</span>
+                                            <code style="margin-left: 8px; color: #e5e7eb;">{{ (input.addresses && input.addresses[0]) || input.address || 'N/A' }}</code>
+                                        </div>
+                                        
+                                        <div style="margin-bottom: 6px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">From TX:</span>
+                                            <code style="margin-left: 8px; color: #6b7280; font-size: 0.8rem;">{{ input.txid }}:{{ input.vout }}</code>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Outputs Section -->
+                            <div style="margin-top: 30px;">
+                                <h3 style="color: #fff; margin-bottom: 15px; font-size: 1.2rem; font-weight: 700; display: flex; align-items: center; gap: 10px;">
+                                    📤 Outputs ({{ transactionDetail.vout.length }})
+                                    <span style="font-size: 0.9rem; color: #9ca3af; font-weight: 400;">
+                                        Total: {{ calculateTotalOutputs(transactionDetail.vout) }} PIVX
+                                    </span>
+                                </h3>
+                                <div v-for="(output, idx) in transactionDetail.vout" :key="'out-' + idx" 
+                                     style="background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981; padding: 15px; margin-bottom: 10px; border-radius: 6px;">
+                                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                        <span style="color: #9ca3af;">Output #{{ output.n }}</span>
+                                        <span style="color: #10b981; font-weight: bold;">{{ formatPIV(output.value) }} PIVX</span>
+                                    </div>
+                                    
+                                    <!-- Cold Staking Output -->
+                                    <div v-if="output.type === 'coldstake' && output.addresses && output.addresses.length === 2">
+                                        <div style="background: rgba(102, 45, 145, 0.2); padding: 12px; border-radius: 6px; margin-bottom: 8px; border: 1px solid rgba(102, 45, 145, 0.4);">
+                                            <div style="color: #a78bfa; font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                                ❄️ Cold Staking Contract
+                                            </div>
+                                            <div style="margin-bottom: 6px;">
+                                                <span style="color: #9ca3af; font-size: 0.85rem;">Staker:</span>
+                                                <code style="margin-left: 8px; color: #e5e7eb; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;">{{ output.addresses[0] }}</code>
+                                            </div>
+                                            <div>
+                                                <span style="color: #9ca3af; font-size: 0.85rem;">Owner:</span>
+                                                <code style="margin-left: 8px; color: #e5e7eb; background: rgba(0,0,0,0.3); padding: 4px 8px; border-radius: 4px; font-size: 0.85rem;">{{ output.addresses[1] }}</code>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Regular Output -->
+                                    <div v-else-if="output.addresses && output.addresses.length > 0">
+                                        <span style="color: #9ca3af; font-size: 0.85rem;">Address:</span>
+                                        <code style="margin-left: 8px; color: #e5e7eb;">{{ output.addresses[0] }}</code>
+                                    </div>
+                                    
+                                    <div v-if="output.type" style="margin-top: 6px;">
+                                        <span style="color: #9ca3af; font-size: 0.85rem;">Type:</span>
+                                        <span style="margin-left: 8px; color: #6b7280;">{{ output.type }}</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Sapling Privacy Transaction Section -->
+                            <div v-if="transactionDetail.sapling" style="margin-top: 30px; padding: 20px; background: linear-gradient(135deg, rgba(108, 46, 185, 0.15), rgba(157, 78, 221, 0.15)); border: 1px solid var(--primary); border-radius: 8px;">
+                                <h3 style="color: #fff; margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                                    🛡️ Sapling Privacy Transaction
+                                    <span class="badge" style="background: var(--primary);">Version {{ transactionDetail.version }}</span>
+                                </h3>
+                                
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 15px;">
+                                    <div style="padding: 15px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                        <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 6px;">Value Balance</div>
+                                        <div style="color: #fff; font-weight: bold; font-size: 1.2rem;">
+                                            <span :style="transactionDetail.sapling.value_balance > 0 ? 'color: #10b981' : transactionDetail.sapling.value_balance < 0 ? 'color: #3b82f6' : ''">
+                                                {{ transactionDetail.sapling.value_balance > 0 ? '+' : '' }}{{ formatPIV(transactionDetail.sapling.value_balance) }} PIV
+                                            </span>
+                                        </div>
+                                        <div style="color: #6b7280; font-size: 0.8rem; margin-top: 4px;">
+                                            {{ transactionDetail.sapling.value_balance > 0 ? '🛡️ → 💰 Unshielding' : transactionDetail.sapling.value_balance < 0 ? '💰 → 🛡️ Shielding' : 'Internal Transfer' }}
+                                        </div>
+                                    </div>
+                                    
+                                    <div style="padding: 15px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                        <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 6px;">Shielded Spends</div>
+                                        <div style="color: #ef4444; font-weight: bold; font-size: 1.2rem;">
+                                            {{ transactionDetail.sapling.shielded_spend_count }}
+                                        </div>
+                                        <div style="color: #6b7280; font-size: 0.8rem; margin-top: 4px;">Notes consumed from pool</div>
+                                    </div>
+                                    
+                                    <div style="padding: 15px; background: rgba(0, 0, 0, 0.3); border-radius: 6px;">
+                                        <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 6px;">Shielded Outputs</div>
+                                        <div style="color: #10b981; font-weight: bold; font-size: 1.2rem;">
+                                            {{ transactionDetail.sapling.shielded_output_count }}
+                                        </div>
+                                        <div style="color: #6b7280; font-size: 0.8rem; margin-top: 4px;">New notes created</div>
+                                    </div>
+                                </div>
+                                
+                                <div style="padding: 12px; background: rgba(0, 0, 0, 0.3); border-radius: 6px; margin-bottom: 15px;">
+                                    <div style="color: #9ca3af; font-size: 0.85rem; margin-bottom: 6px;">Binding Signature (64 bytes):</div>
+                                    <code style="display: block; padding: 10px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #d1d5db;">{{ transactionDetail.sapling.binding_sig }}</code>
+                                </div>
+                                
+                                <!-- Shielded Spends Details -->
+                                <div v-if="transactionDetail.sapling.spends && transactionDetail.sapling.spends.length > 0" style="margin-bottom: 20px;">
+                                    <h4 style="color: #fff; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                                        🔒 Shielded Spends ({{ transactionDetail.sapling.spends.length }})
+                                    </h4>
+                                    <div v-for="(spend, idx) in transactionDetail.sapling.spends" :key="'spend-' + idx" style="margin-bottom: 15px; padding: 15px; background: rgba(239, 68, 68, 0.1); border-left: 3px solid #ef4444; border-radius: 6px;">
+                                        <div style="color: #fbbf24; font-weight: 600; margin-bottom: 10px; font-size: 1.05rem;">Spend #{{ idx }}</div>
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">Nullifier:</span>
+                                            <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #e5e7eb;">{{ spend.nullifier }}</code>
+                                        </div>
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">Anchor (Merkle Root):</span>
+                                            <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #e5e7eb;">{{ spend.anchor }}</code>
+                                        </div>
+                                        <details style="margin-top: 10px;">
+                                            <summary style="cursor: pointer; color: var(--secondary); font-weight: 500; user-select: none; padding: 6px; background: rgba(0, 0, 0, 0.2); border-radius: 4px;">
+                                                View Additional Cryptographic Data
+                                            </summary>
+                                            <div style="margin-top: 10px;">
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Value Commitment (cv):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #9ca3af;">{{ spend.cv }}</code>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Randomized Key (rk):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #9ca3af;">{{ spend.rk }}</code>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Zero-Knowledge Proof (192 bytes):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.7rem; word-break: break-all; color: #9ca3af; max-height: 100px; overflow-y: auto;">{{ spend.zkproof }}</code>
+                                                </div>
+                                                <div>
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Spend Authorization Signature (64 bytes):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #9ca3af;">{{ spend.spend_auth_sig }}</code>
+                                                </div>
+                                            </div>
+                                        </details>
+                                    </div>
+                                </div>
+                                
+                                <!-- Shielded Outputs Details -->
+                                <div v-if="transactionDetail.sapling.outputs && transactionDetail.sapling.outputs.length > 0">
+                                    <h4 style="color: #fff; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+                                        🔐 Shielded Outputs ({{ transactionDetail.sapling.outputs.length }})
+                                    </h4>
+                                    <div v-for="(output, idx) in transactionDetail.sapling.outputs" :key="'output-' + idx" style="margin-bottom: 15px; padding: 15px; background: rgba(16, 185, 129, 0.1); border-left: 3px solid #10b981; border-radius: 6px;">
+                                        <div style="color: #10b981; font-weight: 600; margin-bottom: 10px; font-size: 1.05rem;">Output #{{ idx }}</div>
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">Note Commitment (cmu):</span>
+                                            <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #e5e7eb;">{{ output.cmu }}</code>
+                                        </div>
+                                        <div style="margin-bottom: 8px;">
+                                            <span style="color: #9ca3af; font-size: 0.85rem;">Ephemeral Key:</span>
+                                            <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #e5e7eb;">{{ output.ephemeral_key }}</code>
+                                        </div>
+                                        <details style="margin-top: 10px;">
+                                            <summary style="cursor: pointer; color: var(--secondary); font-weight: 500; user-select: none; padding: 6px; background: rgba(0, 0, 0, 0.2); border-radius: 4px;">
+                                                View Encrypted Data & Additional Fields
+                                            </summary>
+                                            <div style="margin-top: 10px;">
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Value Commitment (cv):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #9ca3af;">{{ output.cv }}</code>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Encrypted Note for Recipient (580 bytes):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.7rem; word-break: break-all; color: #9ca3af; max-height: 150px; overflow-y: auto;">{{ output.enc_ciphertext }}</code>
+                                                </div>
+                                                <div style="margin-bottom: 8px;">
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Outgoing Ciphertext (80 bytes):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.75rem; word-break: break-all; color: #9ca3af;">{{ output.out_ciphertext }}</code>
+                                                </div>
+                                                <div>
+                                                    <span style="color: #9ca3af; font-size: 0.85rem;">Zero-Knowledge Proof (192 bytes):</span>
+                                                    <code style="display: block; margin-top: 4px; padding: 8px; background: var(--darker); border-radius: 4px; font-size: 0.7rem; word-break: break-all; color: #9ca3af; max-height: 100px; overflow-y: auto;">{{ output.zkproof }}</code>
+                                                </div>
+                                            </div>
+                                        </details>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Transaction Fee / Reward -->
+                            <div style="margin-top: 20px; padding: 15px; background: rgba(157, 78, 221, 0.1); border-radius: 6px;">
+                                <div v-if="transactionDetail.tx_type === 'coinbase' && transactionDetail.reward !== undefined && transactionDetail.reward !== null">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="color: #9ca3af; font-weight: bold;">Mining Reward:</span>
+                                        <span style="color: #10b981; font-weight: bold; font-size: 1.1rem;">
+                                            {{ formatPIV(transactionDetail.reward) }} PIV
+                                        </span>
+                                    </div>
+                                </div>
+                                <div v-else-if="transactionDetail.tx_type === 'coinstake' && transactionDetail.reward !== undefined && transactionDetail.reward !== null">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                        <span style="color: #9ca3af; font-weight: bold;">Transaction Fee:</span>
+                                        <span style="color: var(--secondary); font-weight: bold; font-size: 1.1rem;">
+                                            {{ formatPIV(transactionDetail.fees || 0) }} PIV
+                                        </span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="color: #9ca3af; font-weight: bold;">Staking Reward:</span>
+                                        <span style="color: #10b981; font-weight: bold; font-size: 1.1rem;">
+                                            {{ formatPIV(transactionDetail.reward) }} PIV
+                                        </span>
+                                    </div>
+                                </div>
+                                <div v-else style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span style="color: #9ca3af; font-weight: bold;">Transaction Fee:</span>
+                                    <span style="color: var(--secondary); font-weight: bold; font-size: 1.1rem;">
+                                        {{ formatPIV(transactionDetail.fees !== undefined ? transactionDetail.fees : calculateFeeFromInputsOutputs(transactionDetail.vin, transactionDetail.vout)) }} PIV
+                                    </span>
+                                </div>
+                            </div>
+
+                            <!-- Raw JSON -->
+                            <div style="margin-top: 30px;">
+                                <h3 style="color: #fff; margin-bottom: 15px;">📋 Raw JSON</h3>
+                                <pre style="background: var(--darker); padding: 15px; border-radius: 6px; overflow-x: auto; max-height: 400px; font-size: 0.85rem; border: 1px solid var(--border);">{{ JSON.stringify(transactionDetail, null, 2) }}</pre>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Address Result -->
+                    <div v-else-if="searchResult.type === 'Address'" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px;">
+                        <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700; padding-bottom: 16px; border-bottom: 2px solid var(--border);">
+                            💰 Address Information
+                        </h3>
+                        <div class="detail-row">
+                            <div class="detail-label">Type</div>
+                            <div class="detail-value"><code>Address</code></div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Address</div>
+                            <div class="detail-value"><code>{{ searchResult.address }}</code></div>
+                        </div>
+                        <button @click="loadAddressInfo(searchResult.address)" class="btn" style="margin-top: 20px; width: 100%;">
+                            💰 View Full Address Details
+                        </button>
+                    </div>
+
+                    <!-- Unknown Result -->
+                    <div v-else style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px;">
+                        <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700;">Search Result</h3>
+                        <pre style="background: var(--darker); padding: 15px; border-radius: 6px; overflow-x: auto;">{{ JSON.stringify(searchResult, null, 2) }}</pre>
+                    </div>
+                </div>
+                <div v-else class="loading">
+                    Enter a search query above
+                </div>
+            </div>
+
+            <!-- Address Tab -->
+            <div v-show="activeTab === 'address'" class="data-section">
+                <div v-if="addressLoading" class="loading">
+                    <div class="spinner"></div>
+                    Loading address details...
+                </div>
+                <div v-else-if="addressInfo" style="max-width: 1200px; margin: 0 auto;">
+                    <!-- Address Header -->
+                    <div style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px; margin-bottom: 24px;">
+                        <h2 style="color: #fff; margin: 0 0 20px 0; font-size: 1.8rem; font-weight: 700; display: flex; align-items: center; gap: 10px;">
+                            💰 Address Details
+                        </h2>
+                        <div style="display: flex; align-items: center; gap: 10px; background: var(--darker); padding: 18px; border-radius: 12px; border: 2px solid var(--border);">
+                            <code style="flex: 1; color: #a78bfa; font-size: 1.1rem; word-break: break-all; font-family: 'Monaco', 'Courier New', monospace; font-weight: 500;">{{ addressInfo.address }}</code>
+                            <button 
+                                @click="copyToClipboard(addressInfo.address)" 
+                                class="btn"
+                                style="padding: 10px 18px; min-width: auto;"
+                                title="Copy address"
+                            >
+                                📋 Copy
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Balance Cards -->
+                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px;">
+                        <!-- Current Balance -->
+                        <div class="stat-card">
+                            <div class="stat-label">
+                                <span>💰</span> CURRENT BALANCE
+                            </div>
+                            <div class="stat-value" style="font-family: 'Monaco', 'Courier New', monospace; font-size: 1.5rem;">
+                                {{ formatAmount(addressInfo.balance) }}
+                            </div>
+                            <div style="font-size: 0.75rem; color: #6b7280; font-weight: 500; margin-top: 4px;">PIV</div>
+                        </div>
+                        
+                        <!-- Total Received -->
+                        <div class="stat-card">
+                            <div class="stat-label">
+                                <span>📥</span> TOTAL RECEIVED
+                            </div>
+                            <div class="stat-value" style="font-family: 'Monaco', 'Courier New', monospace; font-size: 1.5rem; color: #10b981;">
+                                {{ formatAmount(addressInfo.totalReceived) }}
+                            </div>
+                            <div style="font-size: 0.75rem; color: #6b7280; font-weight: 500; margin-top: 4px;">PIV</div>
+                        </div>
+                        
+                        <!-- Total Sent (if available) -->
+                        <div v-if="addressInfo.totalSent !== undefined" class="stat-card">
+                            <div class="stat-label">
+                                <span>📤</span> TOTAL SENT
+                            </div>
+                            <div class="stat-value" style="font-family: 'Monaco', 'Courier New', monospace; font-size: 1.5rem; color: #ef4444;">
+                                {{ formatAmount(addressInfo.totalSent) }}
+                            </div>
+                            <div style="font-size: 0.75rem; color: #6b7280; font-weight: 500; margin-top: 4px;">PIV</div>
+                        </div>
+                        
+                        <!-- Transaction Count -->
+                        <div class="stat-card">
+                            <div class="stat-label">
+                                <span>📝</span> TRANSACTIONS
+                            </div>
+                            <div class="stat-value" style="font-family: 'Monaco', 'Courier New', monospace;">
+                                {{ formatNumber(addressInfo.txs || addressInfo.txCount || 0) }}
+                            </div>
+                            <div style="font-size: 0.75rem; color: #6b7280; font-weight: 500; margin-top: 4px;">Total Count</div>
+                        </div>
+                    </div>
+
+                    <!-- UTXOs Section -->
+                    <div v-if="addressUtxos && addressUtxos.length > 0" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px; margin-bottom: 24px;">
+                        <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700; display: flex; align-items: center; gap: 10px;">
+                            🔓 Unspent Outputs 
+                            <span style="background: rgba(102, 45, 145, 0.3); color: #a78bfa; padding: 6px 14px; border-radius: 12px; font-size: 0.9rem; font-weight: 600;">
+                                {{ addressUtxos.length }}
+                            </span>
+                            <span style="font-size: 0.85rem; color: #9ca3af; margin-left: auto; font-weight: 400;">
+                                ↑ Least Confirmations
+                            </span>
+                        </h3>
+                        <div style="overflow-x: auto;">
+                            <table class="data-table" style="width: 100%; border-collapse: separate; border-spacing: 0;">
+                                <thead>
+                                    <tr style="background: rgba(102, 45, 145, 0.2);">
+                                        <th style="padding: 15px; text-align: left; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4);">Transaction ID</th>
+                                        <th style="padding: 15px; text-align: center; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4); width: 120px;">Output Index</th>
+                                        <th style="padding: 15px; text-align: right; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4); width: 180px;">Amount (PIV)</th>
+                                        <th style="padding: 15px; text-align: center; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4); width: 140px;">Confirmations</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="utxo in addressUtxos" :key="utxo.txid + '-' + utxo.vout" style="border-bottom: 1px solid var(--border); transition: background 0.2s;" @mouseenter="$event.currentTarget.style.background='rgba(102, 45, 145, 0.1)'" @mouseleave="$event.currentTarget.style.background='transparent'">
+                                        <td style="padding: 15px;">
+                                            <code style="color: var(--primary); font-size: 0.85rem; word-break: break-all; font-family: 'Courier New', monospace;">
+                                                {{ utxo.txid }}
+                                            </code>
+                                        </td>
+                                        <td style="text-align: center; padding: 15px;">
+                                            <span style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; padding: 6px 14px; border-radius: 8px; font-weight: 600; font-size: 0.95rem;">
+                                                {{ utxo.vout }}
+                                            </span>
+                                        </td>
+                                        <td style="text-align: right; padding: 15px;">
+                                            <span style="font-weight: 600; color: #10b981; font-size: 1.05rem; font-family: 'Courier New', monospace;">
+                                                {{ formatAmount(utxo.value || utxo.amount) }}
+                                            </span>
+                                        </td>
+                                        <td style="text-align: center; padding: 15px;">
+                                            <span :style="{ 
+                                                background: utxo.confirmations >= 6 ? 'rgba(16, 185, 129, 0.2)' : 'rgba(251, 191, 36, 0.2)',
+                                                color: utxo.confirmations >= 6 ? '#10b981' : '#fbbf24',
+                                                padding: '6px 12px',
+                                                borderRadius: '8px',
+                                                fontWeight: '600',
+                                                fontSize: '0.9rem'
+                                            }">
+                                                {{ formatNumber(utxo.confirmations) }}
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div style="margin-top: 20px; padding: 16px; background: linear-gradient(135deg, rgba(102, 45, 145, 0.15), rgba(157, 78, 221, 0.1)); border-radius: 8px; border-left: 4px solid var(--secondary);">
+                            <div style="font-size: 1rem; color: #e5e7eb; display: flex; justify-content: space-between; align-items: center;">
+                                <strong style="color: var(--secondary); font-size: 1.05rem;">💎 Total UTXO Value:</strong> 
+                                <span style="font-family: 'Courier New', monospace; font-size: 1.3rem; font-weight: 700; color: #10b981;">
+                                    {{ formatAmount(addressUtxos.reduce((sum, utxo) => sum + parseFloat(utxo.value || utxo.amount || 0), 0)) }} PIV
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- No UTXOs Message -->
+                    <div v-else-if="addressUtxos && addressUtxos.length === 0" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px; margin-bottom: 24px; text-align: center;">
+                        <h3 style="color: #fff; margin: 0 0 15px 0; font-size: 1.4rem; font-weight: 700;">🔓 Unspent Outputs</h3>
+                        <p style="color: var(--text-secondary); margin: 0;">No unspent outputs found. This address has a zero balance or all outputs have been spent.</p>
+                    </div>
+
+                    <!-- Transactions Section -->
+                    <div v-if="addressInfo.txids && addressInfo.txids.length > 0" style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px;">
+                        <h3 style="color: #fff; margin: 0 0 20px 0; font-size: 1.4rem; font-weight: 700; display: flex; align-items: center; gap: 10px;">
+                            📝 Transaction History
+                            <span style="background: rgba(102, 45, 145, 0.3); color: #a78bfa; padding: 6px 14px; border-radius: 12px; font-size: 0.9rem; font-weight: 600;">
+                                {{ addressInfo.txids.length }}
+                            </span>
+                            <span style="font-size: 0.85rem; color: #9ca3af; margin-left: auto; font-weight: 400;">
+                                ↓ Newest First
+                            </span>
+                        </h3>
+                        <div style="overflow-x: auto;">
+                            <table class="data-table" style="width: 100%; border-collapse: separate; border-spacing: 0;">
+                                <thead>
+                                    <tr style="background: rgba(102, 45, 145, 0.2);">
+                                        <th style="padding: 15px; text-align: left; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4); width: 60px;">#</th>
+                                        <th style="padding: 15px; text-align: left; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4);">Transaction ID</th>
+                                        <th style="padding: 15px; text-align: center; color: #a78bfa; font-weight: 600; border-bottom: 2px solid rgba(102, 45, 145, 0.4); width: 120px;">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="(txid, index) in addressInfo.txids" :key="txid" 
+                                        style="border-bottom: 1px solid var(--border); transition: all 0.2s; cursor: pointer;" 
+                                        @click="loadTransaction(txid)"
+                                        @mouseenter="$event.currentTarget.style.background='rgba(102, 45, 145, 0.15)'; $event.currentTarget.style.transform='translateX(4px)'" 
+                                        @mouseleave="$event.currentTarget.style.background='transparent'; $event.currentTarget.style.transform='translateX(0)'">
+                                        <td style="padding: 15px; text-align: center; color: #9ca3af; font-weight: 600;">
+                                            {{ index + 1 }}
+                                        </td>
+                                        <td style="padding: 15px;">
+                                            <code style="color: var(--primary); font-size: 0.85rem; word-break: break-all; font-family: 'Courier New', monospace;">
+                                                {{ txid }}
+                                            </code>
+                                        </td>
+                                        <td style="text-align: center; padding: 15px;">
+                                            <span style="background: rgba(59, 130, 246, 0.2); color: #60a5fa; padding: 6px 14px; border-radius: 8px; font-weight: 600; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;">
+                                                🔍 View
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div style="margin-top: 20px; padding: 16px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(96, 165, 250, 0.1)); border-radius: 8px; border-left: 4px solid #3b82f6;">
+                            <div style="font-size: 0.9rem; color: var(--text-secondary); display: flex; align-items: center; gap: 8px;">
+                                💡 <strong style="color: #60a5fa;">Sorted by confirmations:</strong> Transactions are ordered from newest (least confirmations) to oldest (most confirmations)
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- No Transactions Message -->
+                    <div v-else style="background: var(--dark); backdrop-filter: blur(50px); border: 3px solid var(--border); border-radius: 26px; padding: 40px; text-align: center;">
+                        <h3 style="color: #fff; margin: 0 0 15px 0; font-size: 1.4rem; font-weight: 700;">📝 Transaction History</h3>
+                        <p style="color: var(--text-secondary); margin: 0;">No transactions found for this address.</p>
+                    </div>
+                </div>
+                <div v-else class="loading">
+                    Search for an address to view details
+                </div>
+            </div>
+            </div> <!-- End Main Content Container -->
+
+        <!-- Footer -->
+        <footer style="margin-top: 60px; padding: 30px 0; text-align: center; border-top: 1px solid var(--border); color: #9ca3af;">
+            <div style="display: flex; flex-direction: column; align-items: center; gap: 15px;">
+                <div style="display: flex; align-items: center; gap: 20px;">
+                    <img src="https://pivx.org/files/branding/PIVX-Shield.svg" 
+                         alt="PIVX Shield" 
+                         style="height: 40px; opacity: 0.7;"
+                         onerror="this.style.display='none'">
+                    <div style="text-align: left;">
+                        <div style="font-size: 0.9rem; color: #d1d5db; font-weight: 500;">Powered by PIVX</div>
+                        <div style="font-size: 0.75rem; color: #9ca3af;">Private. Instant. Verified Transactions.</div>
+                    </div>
+                </div>
+                <div style="font-size: 0.8rem;">
+                    <a href="https://pivx.org" target="_blank" style="color: var(--primary); text-decoration: none; margin: 0 10px; transition: color 0.3s;" onmouseover="this.style.color='var(--secondary)'" onmouseout="this.style.color='var(--primary)'">PIVX.org</a>
+                    <span style="color: #4b5563;">|</span>
+                    <a href="https://docs.pivx.org" target="_blank" style="color: var(--primary); text-decoration: none; margin: 0 10px; transition: color 0.3s;" onmouseover="this.style.color='var(--secondary)'" onmouseout="this.style.color='var(--primary)'">Docs</a>
+                    <span style="color: #4b5563;">|</span>
+                    <a href="https://discord.pivx.org" target="_blank" style="color: var(--primary); text-decoration: none; margin: 0 10px; transition: color 0.3s;" onmouseover="this.style.color='var(--secondary)'" onmouseout="this.style.color='var(--primary)'">Discord</a>
+                    <span style="color: #4b5563;">|</span>
+                    <a href="https://github.com/PIVX-Project" target="_blank" style="color: var(--primary); text-decoration: none; margin: 0 10px; transition: color 0.3s;" onmouseover="this.style.color='var(--secondary)'" onmouseout="this.style.color='var(--primary)'">GitHub</a>
+                </div>
+                <div style="font-size: 0.75rem; color: #6b7280;">
+                    © 2019-2025 PIVX Community | Built with RustyBlox
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    // Use relative URL so it works with Cloudflare Tunnel or local nginx
+                    // When accessed via tunnel: uses the tunnel domain
+                    // When accessed locally: uses localhost
+                    apiUrl: window.location.protocol === 'https:' 
+                        ? window.location.origin  // Use tunnel URL (https://...)
+                        : 'http://localhost:3005',  // Use local backend for http://
+                    wsUrl: window.location.protocol === 'https:'
+                        ? `wss://${window.location.host}`  // Use wss:// for HTTPS
+                        : 'ws://localhost:3005',  // Use ws:// for HTTP
+                    activeTab: 'blocks',
+                    chainState: {
+                        height: 0,
+                        sync_height: 0,
+                        network_height: 0,
+                        network_hash: '',
+                        sync_percentage: 0,
+                        synced: false
+                    },
+                    recentBlocks: [],
+                    mempoolTxs: [],
+                    searchQuery: '',
+                    searchResult: null,
+                    transactionDetail: null,
+                    searchLoading: false,
+                    selectedBlock: null,
+                    // Address data
+                    addressInfo: null,
+                    addressUtxos: [],
+                    addressLoading: false,
+                    loading: true,
+                    error: null,
+                    ws: null,
+                    wsConnected: false,
+                    // Masternode data
+                    mnCount: null,
+                    masternodes: [],
+                    mnCurrentPage: 1,
+                    mnPageSize: 50,
+                    // Budget/Governance data
+                    budgetInfo: [],
+                    budgetLoading: false,
+                    selectedProposal: null,
+                    proposalVotes: null
+                }
+            },
+            mounted() {
+                this.loadChainState();
+                this.loadRecentBlocks();
+                this.connectWebSocket();
+                
+                // Refresh data periodically
+                setInterval(() => {
+                    this.loadChainState();
+                }, 10000);
+            },
+            methods: {
+                // Zerocoin detection helpers
+                isZerocoinSpend(coinbaseHex) {
+                    if (!coinbaseHex || typeof coinbaseHex !== 'string') return false;
+                    const prefix = coinbaseHex.substring(0, 2).toLowerCase();
+                    return prefix === 'c1' || prefix === 'c2' || prefix === 'c3';
+                },
+                getZerocoinType(coinbaseHex) {
+                    if (!coinbaseHex || typeof coinbaseHex !== 'string') return 'Unknown';
+                    const prefix = coinbaseHex.substring(0, 2).toLowerCase();
+                    switch(prefix) {
+                        case 'c1': return 'Zerocoin Mint';
+                        case 'c2': return 'Zerocoin Spend';
+                        case 'c3': return 'Zerocoin PublicSpend';
+                        default: return 'Unknown';
+                    }
+                },
+                async loadChainState() {
+                    try {
+                        const response = await axios.get(`${this.apiUrl}/api/v2/status`);
+                        const data = response.data;
+                        
+                        // Map the API response to our chainState
+                        // API returns: { height, hash, synced, sync_percentage, network_height }
+                        this.chainState = {
+                            height: data.height || 0,
+                            sync_height: data.height || 0,  // height is the indexed height
+                            network_height: data.network_height || data.height || 0,
+                            network_hash: data.hash || '',
+                            sync_percentage: parseFloat(data.sync_percentage) || 0,
+                            synced: data.synced || false
+                        };
+                        
+                        console.log('Chain state loaded:', this.chainState);
+                    } catch (err) {
+                        console.error('Failed to load chain state:', err);
+                        this.error = 'Failed to connect to API: ' + err.message;
+                    }
+                },
+                async loadRecentBlocks() {
+                    try {
+                        this.loading = true;
+                        // Get current height first
+                        const statusResp = await axios.get(`${this.apiUrl}/api/v2/status`);
+                        const currentHeight = statusResp.data.network_height;
+                        
+                        // Fetch last 20 blocks
+                        const blocks = [];
+                        for (let i = 0; i < 20; i++) {
+                            const height = currentHeight - i;
+                            if (height < 0) break;
+                            
+                            try {
+                                const response = await axios.get(`${this.apiUrl}/api/block/${height}`);
+                                blocks.push({
+                                    height: height,
+                                    hash: response.data.hash || 'N/A',
+                                    timestamp: Date.now() / 1000, // Mock timestamp
+                                    tx_count: 0, // Will be updated by WebSocket
+                                    isNew: false
+                                });
+                            } catch (e) {
+                                console.error(`Failed to fetch block ${height}:`, e);
+                            }
+                        }
+                        
+                        this.recentBlocks = blocks;
+                        this.loading = false;
+                    } catch (err) {
+                        this.error = 'Failed to load blocks: ' + err.message;
+                        this.loading = false;
+                    }
+                },
+                async loadMempool() {
+                    try {
+                        const response = await axios.get(`${this.apiUrl}/api/v2/mempool`);
+                        this.mempoolTxs = response.data.transactions || [];
+                    } catch (err) {
+                        console.error('Failed to load mempool:', err);
+                    }
+                },
+                async performSearch() {
+                    const query = this.searchQuery.trim().replace(/\/+$/, '');
+                    if (!query) return;
+                    
+                    try {
+                        this.searchLoading = true;
+                        this.activeTab = 'search';
+                        this.transactionDetail = null;
+                        
+                        const response = await axios.get(`${this.apiUrl}/api/v2/search/${encodeURIComponent(query)}`);
+                        this.searchResult = response.data;
+                        
+                        // If it's a transaction, load the full details
+                        if (this.searchResult.type === 'Transaction') {
+                            await this.loadTransactionDetail(this.searchResult.txid);
+                        }
+                        
+                        this.searchLoading = false;
+                    } catch (err) {
+                        this.error = 'Search failed: ' + err.message;
+                        this.searchLoading = false;
+                    }
+                },
+                async loadTransactionDetail(txid) {
+                    try {
+                        const response = await axios.get(`${this.apiUrl}/api/v2/tx/${txid}`);
+                        this.transactionDetail = response.data;
+                    } catch (err) {
+                        console.error('Failed to load transaction details:', err);
+                        this.error = 'Failed to load transaction details: ' + err.message;
+                    }
+                },
+                async loadAddressInfo(address) {
+                    try {
+                        this.addressLoading = true;
+                        this.error = null;
+                        
+                        const [addrResponse, utxoResponse] = await Promise.all([
+                            axios.get(`${this.apiUrl}/api/v2/address/${address}`),
+                            axios.get(`${this.apiUrl}/api/v2/utxo/${address}`)
+                        ]);
+                        
+                        this.addressInfo = addrResponse.data;
+                        
+                        // Sort UTXOs by confirmations (least to most = newest first)
+                        this.addressUtxos = utxoResponse.data.sort((a, b) => {
+                            return (a.confirmations || 0) - (b.confirmations || 0);
+                        });
+                        
+                        this.activeTab = 'address';
+                    } catch (err) {
+                        console.error('Failed to load address:', err);
+                        this.error = 'Failed to load address: ' + err.message;
+                    } finally {
+                        this.addressLoading = false;
+                    }
+                },
+                async copyToClipboard(text) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        // Visual feedback
+                        const button = event.target;
+                        const originalText = button.textContent;
+                        button.textContent = '✓ Copied!';
+                        setTimeout(() => {
+                            button.textContent = originalText;
+                        }, 2000);
+                    } catch (err) {
+                        console.error('Failed to copy:', err);
+                    }
+                },
+                async loadTransaction(txid) {
+                    this.searchQuery = txid;
+                    await this.performSearch();
+                },
+                connectWebSocket() {
+                    // Connect to blocks WebSocket
+                    this.ws = new WebSocket(`${this.wsUrl}/ws/blocks`);
+                    
+                    this.ws.onopen = () => {
+                        console.log('WebSocket connected');
+                        this.wsConnected = true;
+                    };
+                    
+                    this.ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            console.log('WebSocket message:', data);
+                            
+                            if (data.type === 'NewBlock') {
+                                this.handleNewBlock(data);
+                            }
+                        } catch (err) {
+                            console.error('WebSocket message error:', err);
+                        }
+                    };
+                    
+                    this.ws.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        this.wsConnected = false;
+                    };
+                    
+                    this.ws.onclose = () => {
+                        console.log('WebSocket disconnected, reconnecting...');
+                        this.wsConnected = false;
+                        setTimeout(() => this.connectWebSocket(), 5000);
+                    };
+                },
+                handleNewBlock(data) {
+                    const newBlock = {
+                        height: data.height,
+                        hash: data.hash,
+                        timestamp: data.timestamp,
+                        tx_count: data.tx_count,
+                        isNew: true
+                    };
+                    
+                    // Add to top of list
+                    this.recentBlocks.unshift(newBlock);
+                    
+                    // Keep only 20 blocks
+                    if (this.recentBlocks.length > 20) {
+                        this.recentBlocks.pop();
+                    }
+                    
+                    // Remove new flag after animation
+                    setTimeout(() => {
+                        newBlock.isNew = false;
+                    }, 1000);
+                    
+                    // Update chain state
+                    this.loadChainState();
+                },
+                async selectBlock(block) {
+                    try {
+                        this.loading = true;
+                        const response = await axios.get(`${this.apiUrl}/api/v2/block-detail/${block.height}`);
+                        this.selectedBlock = response.data;
+                        console.log('Block detail loaded:', this.selectedBlock);
+                    } catch (err) {
+                        console.error('Failed to load block detail:', err);
+                        this.error = 'Failed to load block details: ' + err.message;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                closeBlockDetail() {
+                    this.selectedBlock = null;
+                },
+                async loadBlockByHash(hash) {
+                    try {
+                        // Search by hash to get the height
+                        const searchResponse = await axios.get(`${this.apiUrl}/api/v2/search/${hash}`);
+                        if (searchResponse.data && searchResponse.data.height) {
+                            const response = await axios.get(`${this.apiUrl}/api/v2/block-detail/${searchResponse.data.height}`);
+                            this.selectedBlock = response.data;
+                        }
+                    } catch (err) {
+                        console.error('Failed to load block by hash:', err);
+                        this.error = 'Failed to load block: ' + err.message;
+                    }
+                },
+                async viewBlock(height) {
+                    console.log('viewBlock called with height:', height);
+                    try {
+                        this.loading = true;
+                        const response = await axios.get(`${this.apiUrl}/api/v2/block-detail/${height}`);
+                        this.selectedBlock = response.data;
+                        console.log('Block detail loaded:', this.selectedBlock);
+                    } catch (err) {
+                        console.error('Failed to load block detail:', err);
+                        this.error = 'Failed to load block details: ' + err.message;
+                    } finally {
+                        this.loading = false;
+                    }
+                },
+                getOutputAddress(output) {
+                    if (!output) return 'Unknown';
+                    if (output.scriptPubKey && output.scriptPubKey.addresses && output.scriptPubKey.addresses.length > 0) {
+                        return output.scriptPubKey.addresses[0];
+                    }
+                    if (output.addresses && output.addresses.length > 0) {
+                        return output.addresses[0];
+                    }
+                    return 'Non-standard output';
+                },
+                getTxType(tx, index) {
+                    // Check for Sapling transaction first
+                    if (tx.sapling) {
+                        if (tx.tx_type === 'coinbase') return 'CoinBase (Sapling)';
+                        if (tx.tx_type === 'coinstake') return 'CoinStake (Sapling)';
+                        return 'Sapling Shielded TX';
+                    }
+                    
+                    // Use backend tx_type field if available
+                    if (tx.tx_type === 'coinbase') return 'CoinBase';
+                    if (tx.tx_type === 'coinstake') return 'CoinStake';
+                    
+                    // Fallback to old logic for backwards compatibility
+                    if (index === 0) return 'CoinBase';
+                    return 'Transaction';
+                },
+                formatPIV(value) {
+                    if (value === null || value === undefined) return '0.00000000';
+                    // If backend sends a string with a decimal point, it's already formatted as PIV
+                    if (typeof value === 'string') {
+                        // trimmed string
+                        const s = value.trim();
+                        if (s.length === 0) return '0.00000000';
+                        // If it contains a decimal point, assume it's already PIV (formatted)
+                        if (s.indexOf('.') !== -1) {
+                            const f = parseFloat(s);
+                            return isNaN(f) ? '0.00000000' : f.toFixed(8);
+                        }
+                        // Otherwise it's an integer string: treat as atomic units (satoshis)
+                        const i = parseInt(s, 10);
+                        return isNaN(i) ? '0.00000000' : (i / 100000000).toFixed(8);
+                    }
+                    // If numeric type: try to detect whether it's atomic (satoshis) or already PIV
+                    const numValue = Number(value);
+                    if (!isFinite(numValue) || isNaN(numValue)) return '0.00000000';
+                    // If has fractional part, it's already PIV
+                    if (Math.floor(numValue) !== numValue) {
+                        return numValue.toFixed(8);
+                    }
+                    // Integer numeric: use the old heuristic as a fallback (very large -> satoshis)
+                    if (numValue > 21000000) {
+                        return (numValue / 100000000).toFixed(8);
+                    }
+                    // Otherwise treat as PIV
+                    return numValue.toFixed(8);
+                },
+                formatDate(timestamp) {
+                    if (!timestamp) return 'N/A';
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString('en-US', {
+                        weekday: 'short',
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        timeZoneName: 'short'
+                    });
+                },
+                formatDifficulty(diff) {
+                    if (!diff) return '0';
+                    if (diff < 1000) return diff.toFixed(4);
+                    return diff.toExponential(2);
+                },
+                formatNumber(num) {
+                    if (num === null || num === undefined) return '0';
+                    return num?.toLocaleString() || '0';
+                },
+                formatTime(timestamp) {
+                    if (!timestamp) return 'N/A';
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleTimeString();
+                },
+                formatPercentage(num) {
+                    if (num === null || num === undefined) return '0.00';
+                    return parseFloat(num).toFixed(2);
+                },
+                formatTimestamp(timestamp) {
+                    if (!timestamp) return 'N/A';
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString('en-US', {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                        timeZoneName: 'short'
+                    });
+                },
+                formatAmount(amount) {
+                    if (amount === null || amount === undefined) return '0.00000000';
+                    // Accept either atomic integer (satoshis) or formatted PIV string/number
+                    const s = (typeof amount === 'string') ? amount.trim() : amount;
+                    if (typeof s === 'string') {
+                        if (s.indexOf('.') !== -1) {
+                            const f = parseFloat(s);
+                            return isNaN(f) ? '0.00000000' : f.toFixed(8);
+                        }
+                        const i = parseInt(s, 10);
+                        return isNaN(i) ? '0.00000000' : (i / 100000000).toFixed(8);
+                    }
+                    const n = Number(s);
+                    if (!isFinite(n) || isNaN(n)) return '0.00000000';
+                    if (Math.floor(n) !== n) return n.toFixed(8);
+                    return (n > 21000000 ? (n / 100000000).toFixed(8) : n.toFixed(8));
+                },
+                formatNumber(num) {
+                    if (num === null || num === undefined) return '0';
+                    return num.toLocaleString('en-US');
+                },
+                calculateTotalInputs(inputs) {
+                    if (!inputs || inputs.length === 0) return '0.00000000';
+                    const total = inputs.reduce((sum, input) => {
+                        if (input.coinbase) return sum; // Skip coinbase
+                        const v = input && input.value !== undefined ? input.value : 0;
+                        // parse to PIV numeric
+                        const parsed = (typeof v === 'string') ? (v.indexOf('.') !== -1 ? parseFloat(v) : (parseInt(v,10) || 0) / 100000000) : (typeof v === 'number' ? (Math.floor(v) !== v ? v : (v > 21000000 ? v/100000000 : v)) : 0);
+                        return sum + (parsed || 0);
+                    }, 0);
+                    return total.toFixed(8);
+                },
+                calculateTotalOutputs(outputs) {
+                    if (!outputs || outputs.length === 0) return '0.00000000';
+                    const total = outputs.reduce((sum, output) => {
+                        const v = output && output.value !== undefined ? output.value : 0;
+                        const parsed = (typeof v === 'string') ? (v.indexOf('.') !== -1 ? parseFloat(v) : (parseInt(v,10) || 0) / 100000000) : (typeof v === 'number' ? (Math.floor(v) !== v ? v : (v > 21000000 ? v/100000000 : v)) : 0);
+                        return sum + (parsed || 0);
+                    }, 0);
+                    return total.toFixed(8);
+                },
+                calculateFee(inputs, outputs) {
+                    // Deprecated - use calculateFeeFromInputsOutputs or backend fees field
+                    const totalIn = parseFloat(this.calculateTotalInputs(inputs));
+                    const totalOut = parseFloat(this.calculateTotalOutputs(outputs));
+                    const fee = totalIn - totalOut;
+                    return fee.toFixed(8);
+                },
+                calculateFeeFromInputsOutputs(inputs, outputs) {
+                    const totalIn = parseFloat(this.calculateTotalInputs(inputs));
+                    const totalOut = parseFloat(this.calculateTotalOutputs(outputs));
+                    const fee = totalIn - totalOut;
+                    // Handle coinstake (negative fee means it's a reward)
+                    return (fee < 0 ? 0 : fee).toFixed(8);
+                },
+                calculateStakingReward(inputs, outputs) {
+                    const totalIn = parseFloat(this.calculateTotalInputs(inputs));
+                    const totalOut = parseFloat(this.calculateTotalOutputs(outputs));
+                    const reward = totalOut - totalIn;
+                    return reward.toFixed(8);
+                },
+                isCoinStakeTransaction(tx) {
+                    // Use backend tx_type field if available
+                    if (tx.tx_type !== undefined) {
+                        return tx.tx_type === 'coinstake';
+                    }
+                    
+                    // Fallback: check for empty first output (coinstake marker)
+                    if (!tx || !tx.vin || !tx.vout) return false;
+                    if (tx.vin.length > 0 && tx.vin[0].coinbase) return false; // Not coinbase
+                    if (tx.vout.length > 0 && tx.vout[0].value === 0 && 
+                        (!tx.vout[0].addresses || tx.vout[0].addresses.length === 0)) {
+                        return true; // Empty first output = coinstake
+                    }
+                    return false;
+                },
+                // Masternode methods
+                async loadMasternodes() {
+                    try {
+                        this.loading = true;
+                        
+                        // Fetch masternode count
+                        const countResponse = await axios.get(`${this.apiUrl}/api/v2/mncount`);
+                        this.mnCount = countResponse.data;
+                        
+                        // Fetch masternode list
+                        const listResponse = await axios.get(`${this.apiUrl}/api/v2/mnlist`);
+                        this.masternodes = listResponse.data || [];
+                        
+                        this.loading = false;
+                    } catch (error) {
+                        console.error('Error loading masternodes:', error);
+                        this.error = 'Failed to load masternode data';
+                        this.loading = false;
+                    }
+                },
+                async loadBudgetInfo() {
+                    try {
+                        this.budgetLoading = true;
+                        
+                        // Fetch masternode count (needed for 10% threshold calculation)
+                        const countResponse = await axios.get(`${this.apiUrl}/api/v2/mncount`);
+                        this.mnCount = countResponse.data;
+                        
+                        // Fetch budget proposals (budgetinfo and budgetprojection return the same data)
+                        const budgetResponse = await axios.get(`${this.apiUrl}/api/v2/budgetinfo`);
+                        this.budgetInfo = budgetResponse.data || [];
+                        
+                        this.budgetLoading = false;
+                    } catch (error) {
+                        console.error('Error loading budget data:', error);
+                        this.error = 'Failed to load budget data';
+                        this.budgetLoading = false;
+                    }
+                },
+                async loadProposalVotes(proposalName) {
+                    // Toggle: if already viewing this proposal, close it
+                    if (this.selectedProposal === proposalName) {
+                        this.selectedProposal = null;
+                        this.proposalVotes = null;
+                        return;
+                    }
+                    
+                    try {
+                        this.selectedProposal = proposalName;
+                        const response = await axios.get(`${this.apiUrl}/api/v2/budgetvotes/${encodeURIComponent(proposalName)}`);
+                        this.proposalVotes = response.data || {};
+                    } catch (error) {
+                        console.error('Error loading proposal votes:', error);
+                        this.proposalVotes = null;
+                    }
+                },
+                getActiveProposals() {
+                    // Filter out completed proposals and sort by net votes
+                    return this.budgetInfo
+                        .filter(p => p.RemainingPaymentCount > 0)
+                        .sort((a, b) => {
+                            const netA = (a.Yeas || 0) - (a.Nays || 0);
+                            const netB = (b.Yeas || 0) - (b.Nays || 0);
+                            return netB - netA;
+                        });
+                },
+                getCompletedProposals() {
+                    // Get completed proposals sorted by name
+                    return this.budgetInfo
+                        .filter(p => p.RemainingPaymentCount === 0)
+                        .sort((a, b) => a.Name.localeCompare(b.Name));
+                },
+                getSortedProposals() {
+                    // Sort ALL proposals by net votes (for compatibility with existing code)
+                    return [...this.budgetInfo].sort((a, b) => {
+                        const netA = (a.Yeas || 0) - (a.Nays || 0);
+                        const netB = (b.Yeas || 0) - (b.Nays || 0);
+                        return netB - netA;
+                    });
+                },
+                calculateAllocatedBudget() {
+                    // Max monthly budget is 432,000 PIV = 43,200,000,000,000 satoshis
+                    const MAX_BUDGET = 43200000000000;
+                    let allocated = 0;
+
+                    // Get total masternode count for 10% NET yes threshold calculation
+                    const totalMNCount = this.mnCount?.total || 0;
+                    const requiredNetYes = Math.ceil(totalMNCount * 0.10); // 10% NET yes votes required
+
+                    // Get active proposals sorted by net votes
+                    const activeProposals = this.getActiveProposals();
+
+                    // Iterate over sorted list
+                    for (const proposal of activeProposals) {
+                        const netVotes = (proposal.Yeas || 0) - (proposal.Nays || 0);
+                        
+                        // Proposal must have net yes votes >= 10% of total MN count, be valid
+                        if (netVotes >= requiredNetYes && proposal.IsValid) {
+                            const proposalAmount = (proposal.MonthlyPayment || 0) * 100000000; // Convert to satoshis
+                            if (allocated + proposalAmount <= MAX_BUDGET) {
+                                allocated += proposalAmount;
+                            }
+                        }
+                    }
+
+                    return allocated;
+                },
+                getProposalStatus(proposal, index) {
+                    const MAX_BUDGET = 43200000000000;
+                    const netVotes = (proposal.Yeas || 0) - (proposal.Nays || 0);
+                    
+                    // Get total masternode count for 10% NET yes threshold
+                    const totalMNCount = this.mnCount?.total || 0;
+                    const requiredNetYes = Math.ceil(totalMNCount * 0.10); // 10% NET yes votes required
+                    
+                    if (!proposal.IsValid) return 'INVALID';
+                    if (proposal.RemainingPaymentCount === 0) return 'COMPLETED';
+                    if (netVotes <= 0) return 'REJECTED';
+                    
+                    // Check if proposal meets 10% NET yes threshold
+                    if (netVotes < requiredNetYes) return 'INSUFFICIENT_VOTES';
+                    
+                    // Check if proposal fits within budget (only check against ACTIVE proposals that meet threshold)
+                    const activeProposals = this.getActiveProposals();
+                    let budgetUsed = 0;
+                    for (let i = 0; i < activeProposals.length; i++) {
+                        const p = activeProposals[i];
+                        const pNetVotes = (p.Yeas || 0) - (p.Nays || 0);
+                        
+                        // Only count proposals that meet the 10% NET yes threshold
+                        if (pNetVotes >= requiredNetYes && p.IsValid) {
+                            const pAmount = (p.MonthlyPayment || 0) * 100000000;
+                            if (p.Hash === proposal.Hash) {
+                                // This is our proposal - check if it fits
+                                if (budgetUsed + pAmount <= MAX_BUDGET) {
+                                    return 'APPROVED';
+                                } else {
+                                    return 'UNPAID';
+                                }
+                            }
+                            budgetUsed += pAmount;
+                        }
+                    }
+                    return 'PENDING';
+                },
+                getProposalStatusColor(proposal, index) {
+                    const status = this.getProposalStatus(proposal, index);
+                    switch (status) {
+                        case 'APPROVED': return '#10b981';
+                        case 'UNPAID': return '#ef4444';
+                        case 'REJECTED': return '#ef4444';
+                        case 'INSUFFICIENT_VOTES': return '#f59e0b'; // Orange for needs more votes
+                        case 'INVALID': return '#6b7280';
+                        case 'COMPLETED': return '#6b7280';
+                        default: return '#f59e0b';
+                    }
+                },
+                getProposalStatusBg(proposal, index) {
+                    const status = this.getProposalStatus(proposal, index);
+                    switch (status) {
+                        case 'APPROVED': return 'rgba(16, 185, 129, 0.2)';
+                        case 'UNPAID': return 'rgba(239, 68, 68, 0.2)';
+                        case 'REJECTED': return 'rgba(239, 68, 68, 0.2)';
+                        case 'INSUFFICIENT_VOTES': return 'rgba(245, 158, 11, 0.2)'; // Orange for needs more votes
+                        case 'INVALID': return 'rgba(107, 114, 128, 0.2)';
+                        case 'COMPLETED': return 'rgba(107, 114, 128, 0.2)';
+                        default: return 'rgba(245, 158, 11, 0.2)';
+                    }
+                },
+                formatTimeSince(timestamp) {
+                    if (!timestamp || timestamp === 0) return 'Never';
+                    const now = Math.floor(Date.now() / 1000);
+                    const diff = now - timestamp;
+                    
+                    if (diff < 60) return `${diff}s ago`;
+                    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+                    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+                    return `${Math.floor(diff / 86400)}d ago`;
+                },
+                formatDuration(seconds) {
+                    if (!seconds || seconds === 0) return '0s';
+                    
+                    const days = Math.floor(seconds / 86400);
+                    const hours = Math.floor((seconds % 86400) / 3600);
+                    const mins = Math.floor((seconds % 3600) / 60);
+                    
+                    if (days > 0) return `${days}d ${hours}h`;
+                    if (hours > 0) return `${hours}h ${mins}m`;
+                    return `${mins}m`;
+                },
+                getMNStatusColor(status) {
+                    const colors = {
+                        'ENABLED': 'background: var(--success); color: white;',
+                        'EXPIRED': 'background: var(--danger); color: white;',
+                        'NEW_START_REQUIRED': 'background: var(--warning); color: #1f2937;',
+                        'PRE_ENABLED': 'background: var(--info); color: white;',
+                        'WATCHDOG_EXPIRED': 'background: var(--danger); color: white;',
+                        'REMOVE': 'background: #6b7280; color: white;'
+                    };
+                    return colors[status] || 'background: #6b7280; color: white;';
+                }
+            },
+            computed: {
+                paginatedMasternodes() {
+                    const start = (this.mnCurrentPage - 1) * this.mnPageSize;
+                    const end = start + this.mnPageSize;
+                    return this.masternodes.slice(start, end);
+                },
+                totalMNPages() {
+                    return Math.ceil(this.masternodes.length / this.mnPageSize);
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>

@@ -1,0 +1,124 @@
+/**
+ * PIVX Official Brand Colors
+ * Source: https://pivx.org/pressroom - PIVX Brand Identity Guide
+ */
+
+:root {
+  /* ===== PIVX Official Purple Palette ===== */
+  /* Primary - Official PIVX Purple */
+  --pivx-purple-primary: #662D91;    /* CMYK: 75 98 1 0 - Main brand color */
+  --pivx-purple-secondary: #4D3077;  /* CMYK: 85 97 20 8 - Secondary actions */
+  --pivx-purple-tertiary: #2A1B42;   /* CMYK: 88 94 42 47 - Tertiary elements */
+  --pivx-purple-deep: #130D1E;       /* CMYK: 80 77 56 76 - Deep backgrounds */
+
+  /* Derived Tints (for UI variations) */
+  --pivx-purple-light: #8547B3;      /* Lighter tint for hover states */
+  --pivx-purple-lighter: #A366CC;    /* Lightest tint for subtle backgrounds */
+
+  /* Accent - Teal/Cyan (from PIVX logo) */
+  --pivx-accent: #59FCB3;            /* Success, highlights, focus states */
+  --pivx-accent-dark: #3DD99B;       /* Darker accent for contrast */
+
+  /* ===== Background Scale (Dark Mode First) ===== */
+  --bg-primary: #130D1E;             /* Main background (official deep purple) */
+  --bg-secondary: #2A1B42;           /* Cards/elevated surfaces (official tertiary) */
+  --bg-tertiary: #4D3077;            /* Hover states/inputs (official secondary) */
+  --bg-quaternary: #3A2755;          /* Between tertiary and secondary */
+  --bg-elevated: #1A1229;            /* Slightly elevated from primary */
+
+  /* ===== Border Scale ===== */
+  --border-primary: #662D91;         /* Primary borders (official purple) */
+  --border-secondary: #4D3077;       /* Secondary borders */
+  --border-subtle: #2A1B42;          /* Subtle dividers */
+  --border-accent: #59FCB3;          /* Focus/active borders (accent) */
+
+  /* ===== Text Hierarchy ===== */
+  --text-primary: #FFFFFF;           /* Headlines, important data */
+  --text-secondary: #B2B2B2;         /* Body text, descriptions */
+  --text-tertiary: #8B8B8B;          /* Muted labels */
+  --text-accent: #59FCB3;            /* Links, highlights, interactive elements */
+  --text-purple: #A366CC;            /* Purple-tinted text for branding */
+
+  /* ===== Semantic Colors ===== */
+  --success: #59FCB3;                /* Confirmed, synced, positive actions */
+  --warning: #F59E0B;                /* Pending, syncing, caution */
+  --danger: #EF4444;                 /* Error, invalid, destructive */
+  --info: #8547B3;                   /* Informational (purple tint) */
+
+  /* ===== Typography (Montserrat - Official PIVX Font) ===== */
+  --font-primary: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Courier New', monospace;
+
+  /* Montserrat Weight Scale (Official PIVX Brand) */
+  --weight-extralight: 200;  /* Extra Light - Subheader Style 2 */
+  --weight-regular: 400;     /* Regular - Body/Paragraph, Header Style 2 */
+  --weight-bold: 700;        /* Bold - Subheader Style 1 */
+  --weight-extrabold: 800;   /* ExtraBold - Headers & Titles (H1) */
+
+  /* Type Scale */
+  --text-4xl: 2.5rem;        /* 40px - H1 */
+  --text-3xl: 2rem;          /* 32px - H1 */
+  --text-2xl: 1.5rem;        /* 24px - H2 */
+  --text-xl: 1.25rem;        /* 20px - H2 */
+  --text-lg: 1.125rem;       /* 18px - Subheader Bold */
+  --text-md: 1rem;           /* 16px - Subheader Light */
+  --text-base: 1rem;         /* 16px - Body */
+  --text-sm: 0.875rem;       /* 14px - Small */
+  --text-xs: 0.75rem;        /* 12px - Extra Small */
+
+  /* ===== Spacing System (8px Grid) ===== */
+  --space-1: 0.25rem;   /* 4px */
+  --space-2: 0.5rem;    /* 8px */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.25rem;   /* 20px */
+  --space-6: 1.5rem;    /* 24px */
+  --space-8: 2rem;      /* 32px */
+  --space-10: 2.5rem;   /* 40px */
+  --space-12: 3rem;     /* 48px */
+  --space-16: 4rem;     /* 64px */
+
+  /* ===== Border Radius ===== */
+  --radius-sm: 8px;      /* Buttons, badges */
+  --radius-md: 12px;     /* Cards, inputs */
+  --radius-lg: 16px;     /* Modals, containers */
+  --radius-xl: 24px;     /* Hero sections */
+
+  /* ===== Shadows ===== */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px rgba(89, 252, 179, 0.3);  /* Accent glow */
+
+  /* ===== Transitions ===== */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+
+  /* ===== Z-Index Scale ===== */
+  --z-dropdown: 1000;
+  --z-modal: 2000;
+  --z-toast: 3000;
+  --z-tooltip: 4000;
+}
+
+/* ===== Light Mode Overrides ===== */
+.theme-light {
+  --bg-primary: #F3F4F6;
+  --bg-secondary: #FFFFFF;
+  --bg-tertiary: #E5E7EB;
+  --bg-quaternary: #D1D5DB;
+  --bg-elevated: #FFFFFF;
+
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-tertiary: #9CA3AF;
+
+  --border-primary: #662D91;
+  --border-secondary: #D1D5DB;
+  --border-subtle: #E5E7EB;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.15);
+}

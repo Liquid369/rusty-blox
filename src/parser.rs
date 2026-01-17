@@ -5,6 +5,14 @@ use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160};
 use bs58;
 
+// Consensus limits to prevent DoS attacks via massive transactions
+// Bitcoin Core MAX_BLOCK_WEIGHT / MIN_TRANSACTION_WEIGHT = 400,000 theoretical max
+// PIVX has similar limits - use conservative 100,000 for safety
+const MAX_TX_INPUTS: u64 = 100_000;
+const MAX_TX_OUTPUTS: u64 = 100_000;
+const MAX_SAPLING_SPENDS: u64 = 5_000;
+const MAX_SAPLING_OUTPUTS: u64 = 5_000;
+
 pub async fn reverse_bytes(array: &[u8]) -> Vec<u8> {
     let mut vec = Vec::from(array);
     vec.reverse();
@@ -103,13 +111,20 @@ pub async fn deserialize_transaction(
 ) -> Result<CTransaction, std::io::Error> {
     let txid = hash_txid(&data[4..]).await;
     let mut cursor = Cursor::new(data);
-    let block_version = cursor.read_u32::<LittleEndian>().unwrap_or_default();
+    let block_version = cursor.read_u32::<LittleEndian>()?;
 
-    let version = cursor.read_u16::<LittleEndian>().unwrap_or_default();
-    let tx_type = cursor.read_u16::<LittleEndian>().unwrap_or_default();
+    let version = cursor.read_u16::<LittleEndian>()?;
+    let tx_type = cursor.read_u16::<LittleEndian>()?;
     
     let input_count = read_varint(&mut cursor).await?;
-    let mut inputs = Vec::new();
+    if input_count > MAX_TX_INPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction input count {} exceeds maximum {}", input_count, MAX_TX_INPUTS)
+        ));
+    }
+    // [M1] Optimize: Pre-allocate with known capacity to avoid reallocations
+    let mut inputs = Vec::with_capacity(input_count as usize);
     
     // Determine transaction type based on PIVX rules
     // Coinbase: 1 input with prev_hash all zeros, 1 output
@@ -125,19 +140,26 @@ pub async fn deserialize_transaction(
             version as u32,
             block_version,
             i == 0, // is_first_input
-        ).await);
+        ).await?);
     }
 
     let output_count = read_varint(&mut cursor).await?;
+    if output_count > MAX_TX_OUTPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction output count {} exceeds maximum {}", output_count, MAX_TX_OUTPUTS)
+        ));
+    }
     
     // Identify transaction type based on PIVX rules:
     // - Coinbase: first input has coinbase data (prev_hash all zeros), typically has multiple outputs
     // - Coinstake: first input has coinstake data, first output is ALWAYS empty (0 value, empty script)
     // - Normal: regular transaction with no coinbase/coinstake inputs
     
-    let mut outputs = Vec::new();
+    // [M1] Optimize: Pre-allocate with known capacity
+    let mut outputs = Vec::with_capacity(output_count as usize);
     for i in 0..output_count {
-        let mut output = deserialize_tx_out(&mut cursor, false).await;
+        let mut output = deserialize_tx_out(&mut cursor, false).await?;
         output.index = i;  // Set the correct vout index
         outputs.push(output);
     }
@@ -147,14 +169,21 @@ pub async fn deserialize_transaction(
     // For Sapling transactions (version >= 3), parse the Sapling-specific data
     let sapling_data = if is_sapling {
         // Read the value_count varint (from old transactions.rs code)
-        let _value_count = read_varint(&mut cursor).await.ok();
+        let _value_count = read_varint(&mut cursor).await?;
         
         // Read valueBalance (net value of spends - outputs)
-        let value_balance = cursor.read_i64::<LittleEndian>().ok().unwrap_or(0);
+        let value_balance = cursor.read_i64::<LittleEndian>()?;
         
         // Read vShieldedSpend count and parse each spend (384 bytes each)
-        let spend_count = read_varint(&mut cursor).await.unwrap_or(0);
-        let mut vshielded_spend = Vec::new();
+        let spend_count = read_varint(&mut cursor).await?;
+        if spend_count > MAX_SAPLING_SPENDS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Sapling spend count {} exceeds maximum {}", spend_count, MAX_SAPLING_SPENDS)
+            ));
+        }
+        // [M1] Optimize: Pre-allocate for Sapling spends
+        let mut vshielded_spend = Vec::with_capacity(spend_count as usize);
         for _ in 0..spend_count {
             // Read each spend field (SPENDDESCRIPTION_SIZE = 384 bytes)
             let mut cv = [0u8; 32];           // Value commitment
@@ -164,34 +193,40 @@ pub async fn deserialize_transaction(
             let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
             let mut spend_auth_sig = [0u8; 64]; // Spend authorization signature
             
-            if cursor.read_exact(&mut cv).is_ok() &&
-               cursor.read_exact(&mut anchor).is_ok() &&
-               cursor.read_exact(&mut nullifier).is_ok() &&
-               cursor.read_exact(&mut rk).is_ok() &&
-               cursor.read_exact(&mut zkproof).is_ok() &&
-               cursor.read_exact(&mut spend_auth_sig).is_ok() {
-                
-                // Reverse byte order for hash fields (network -> display format)
-                cv.reverse();
-                anchor.reverse();
-                nullifier.reverse();
-                rk.reverse();
-                // Note: zkproof and spend_auth_sig are NOT reversed (kept in original order)
-                
-                vshielded_spend.push(SpendDescription {
-                    cv,
-                    anchor,
-                    nullifier,
-                    rk,
-                    zkproof,
-                    spend_auth_sig,
-                });
-            }
+            cursor.read_exact(&mut cv)?;
+            cursor.read_exact(&mut anchor)?;
+            cursor.read_exact(&mut nullifier)?;
+            cursor.read_exact(&mut rk)?;
+            cursor.read_exact(&mut zkproof)?;
+            cursor.read_exact(&mut spend_auth_sig)?;
+            
+            // Reverse byte order for hash fields (network -> display format)
+            cv.reverse();
+            anchor.reverse();
+            nullifier.reverse();
+            rk.reverse();
+            // Note: zkproof and spend_auth_sig are NOT reversed (kept in original order)
+            
+            vshielded_spend.push(SpendDescription {
+                cv,
+                anchor,
+                nullifier,
+                rk,
+                zkproof,
+                spend_auth_sig,
+            });
         }
         
         // Read vShieldedOutput count and parse each output (948 bytes each)
-        let output_count = read_varint(&mut cursor).await.unwrap_or(0);
-        let mut vshielded_output = Vec::new();
+        let output_count = read_varint(&mut cursor).await?;
+        if output_count > MAX_SAPLING_OUTPUTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Sapling output count {} exceeds maximum {}", output_count, MAX_SAPLING_OUTPUTS)
+            ));
+        }
+        // [M1] Optimize: Pre-allocate for Sapling outputs
+        let mut vshielded_output = Vec::with_capacity(output_count as usize);
         for _ in 0..output_count {
             // Read each output field (OUTPUTDESCRIPTION_SIZE = 948 bytes)
             let mut cv = [0u8; 32];           // Value commitment
@@ -201,35 +236,32 @@ pub async fn deserialize_transaction(
             let mut out_ciphertext = [0u8; 80];  // Encrypted note for sender OVK
             let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
             
-            if cursor.read_exact(&mut cv).is_ok() &&
-               cursor.read_exact(&mut cmu).is_ok() &&
-               cursor.read_exact(&mut ephemeral_key).is_ok() &&
-               cursor.read_exact(&mut enc_ciphertext).is_ok() &&
-               cursor.read_exact(&mut out_ciphertext).is_ok() &&
-               cursor.read_exact(&mut zkproof).is_ok() {
-                
-                // Reverse byte order for hash fields (network -> display format)
-                cv.reverse();
-                cmu.reverse();
-                ephemeral_key.reverse();
-                // Note: ciphertexts and zkproof are NOT reversed (kept in original order)
-                
-                vshielded_output.push(OutputDescription {
-                    cv,
-                    cmu,
-                    ephemeral_key,
-                    enc_ciphertext,
-                    out_ciphertext,
-                    zkproof,
-                });
-            }
+            cursor.read_exact(&mut cv)?;
+            cursor.read_exact(&mut cmu)?;
+            cursor.read_exact(&mut ephemeral_key)?;
+            cursor.read_exact(&mut enc_ciphertext)?;
+            cursor.read_exact(&mut out_ciphertext)?;
+            cursor.read_exact(&mut zkproof)?;
+            
+            // Reverse byte order for hash fields (network -> display format)
+            cv.reverse();
+            cmu.reverse();
+            ephemeral_key.reverse();
+            // Note: ciphertexts and zkproof are NOT reversed (kept in original order)
+            
+            vshielded_output.push(OutputDescription {
+                cv,
+                cmu,
+                ephemeral_key,
+                enc_ciphertext,
+                out_ciphertext,
+                zkproof,
+            });
         }
         
         // Read bindingSig (BINDINGSIG_SIZE = 64 bytes)
         let mut binding_sig = [0u8; 64];
-        if cursor.position() + 64 <= cursor.get_ref().len() as u64 {
-            cursor.read_exact(&mut binding_sig).ok();
-        }
+        cursor.read_exact(&mut binding_sig)?;
         
         // For special transaction types (nType != 0), read extraPayload
         if tx_type != 0 {
@@ -272,7 +304,7 @@ pub async fn deserialize_tx_in(
     _tx_ver_out: u32, 
     _block_version: u32,
     _is_first_input: bool,
-) -> CTxIn {
+) -> Result<CTxIn, std::io::Error> {
     // Standard Bitcoin/PIVX transaction input format:
     // - prev_hash (32 bytes)
     // - prev_index (4 bytes)
@@ -281,11 +313,11 @@ pub async fn deserialize_tx_in(
     // - sequence (4 bytes)
     
     let mut prev_hash = [0u8; 32];
-    let _ = cursor.read_exact(&mut prev_hash);
-    let prev_index = cursor.read_u32::<LittleEndian>().unwrap_or(0);
+    cursor.read_exact(&mut prev_hash)?;
+    let prev_index = cursor.read_u32::<LittleEndian>()?;
     
-    let script_sig = read_script(cursor).await.unwrap_or(Vec::new());
-    let sequence = cursor.read_u32::<LittleEndian>().unwrap_or(0);
+    let script_sig = read_script(cursor).await?;
+    let sequence = cursor.read_u32::<LittleEndian>()?;
     
     // Check if this is TRULY coinbase: prev_hash is all zeros AND prev_index is 0xffffffff
     // CRITICAL: Coinstake transactions have REAL prevouts, not null!
@@ -303,33 +335,33 @@ pub async fn deserialize_tx_in(
     
     if is_coinbase {
         // TRUE coinbase - has null prevout (all zeros)
-        CTxIn {
+        Ok(CTxIn {
             prevout,
             script_sig: CScript { script: Vec::new() },
             sequence,
             index: 0,
             coinbase: Some(script_sig),
-        }
+        })
     } else {
         // Regular input OR coinstake input - both have real prevouts!
-        CTxIn {
+        Ok(CTxIn {
             prevout,
             script_sig: CScript { script: script_sig },
             sequence,
             index: 0,
             coinbase: None,  // NOT coinbase - has real prevout
-        }
+        })
     }
 }
 
-pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty: bool) -> CTxOut {
+pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty: bool) -> Result<CTxOut, std::io::Error> {
     // Standard Bitcoin/PIVX transaction output format:
     // - value (8 bytes, i64)
     // - script_pubkey_len (varint)
     // - script_pubkey (variable)
     
-    let value = cursor.read_i64::<LittleEndian>().unwrap_or(0);
-    let script_pubkey = read_script(cursor).await.unwrap_or(Vec::new());
+    let value = cursor.read_i64::<LittleEndian>()?;
+    let script_pubkey = read_script(cursor).await?;
     
     // Extract address from script if it's not empty
     let address = if script_pubkey.is_empty() {
@@ -338,13 +370,13 @@ pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty:
         extract_address_from_script(&script_pubkey)
     };
 
-    CTxOut {
+    Ok(CTxOut {
         value,
         script_length: script_pubkey.len() as i32,
         script_pubkey: CScript { script: script_pubkey },
         index: 0,
         address,
-    }
+    })
 }
 
 fn extract_address_from_script(script: &[u8]) -> Vec<String> {

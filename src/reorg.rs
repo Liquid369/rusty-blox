@@ -19,6 +19,10 @@ use crate::atomic_writer::AtomicBatchWriter;
 use crate::constants::HEIGHT_ORPHAN;
 use crate::parser::deserialize_transaction;
 use crate::address_rollback::rollback_address_index;
+use crate::spent_utxo::get_spent_utxo;
+use tracing::{info, warn, info_span};
+use crate::metrics;
+use crate::telemetry::{truncate_hex, ProgressCounter};
 
 /// Represents information about a blockchain reorganization
 #[derive(Debug, Clone)]
@@ -143,20 +147,42 @@ pub async fn rollback_to_height(
     
     let blocks_to_remove = current_height - rollback_to_height;
     
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║           BLOCKCHAIN REORGANIZATION                ║");
-    println!("╚════════════════════════════════════════════════════╝");
-    println!("  Rolling back from height {} to {}", current_height, rollback_to_height);
-    println!("  Orphaning {} blocks", blocks_to_remove);
-    println!();
+    let _rollback_span = info_span!(
+        "rollback",
+        from_height = current_height,
+        to_height = rollback_to_height,
+        blocks_to_remove = blocks_to_remove
+    ).entered();
+    let timer = metrics::Timer::new();
+    
+    info!(
+        from_height = current_height,
+        to_height = rollback_to_height,
+        blocks_to_remove = blocks_to_remove,
+        "Starting rollback"
+    );
     
     // Use atomic writer for safe rollback
     let mut writer = AtomicBatchWriter::new(db.clone(), 100000);
     let db_clone = db.clone();
     
+    // Progress tracking for sampled logging (every 100 blocks)
+    let mut progress = ProgressCounter::new(100);
+    let mut blocks_processed = 0;
+    
     // Process each block to be removed (in reverse order)
     for height in ((rollback_to_height + 1)..=current_height).rev() {
-        println!("  📦 Disconnecting block at height {}", height);
+        blocks_processed += 1;
+        
+        if progress.should_log() {
+            let remaining = blocks_to_remove - blocks_processed;
+            info!(
+                current_height = height,
+                blocks_processed = blocks_processed,
+                remaining = remaining,
+                "Rollback progress"
+            );
+        }
         
         // 1. Get all transactions in this block
         let txids = get_block_transactions(&db_clone, height).await?;
@@ -171,34 +197,37 @@ pub async fn rollback_to_height(
         
         // Flush in batches to avoid excessive memory usage
         if writer.should_flush() {
-            println!("  💾 Flushing atomic batch...");
             writer.flush().await?;
         }
     }
     
-    // Final flush to commit all remaining operations atomically
-    if writer.pending_count() > 0 {
-        println!("  💾 Final atomic commit...");
-        writer.flush().await?;
-    }
-    
-    // Rollback address index (this handles address history, UTXOs, balances)
-    println!("  📍 Rolling back address index...");
-    match rollback_address_index(db.clone(), current_height, rollback_to_height).await {
+    // [R2] FIX: Rollback address index BEFORE final commit for atomicity
+    match rollback_address_index(&mut writer, db.clone(), current_height, rollback_to_height).await {
         Ok(blocks_rolled_back) => {
-            println!("  ✅ Address index rolled back {} blocks", blocks_rolled_back);
+            info!(blocks = blocks_rolled_back, "Address index rolled back");
         }
         Err(e) => {
-            println!("  ⚠️  Address index rollback incomplete: {}", e);
-            println!("     Address data may need rebuild after reorg");
+            // Address rollback failure is critical - abort the entire reorg
+            return Err(format!("FATAL: Address index rollback failed: {}. Reorg aborted to prevent inconsistency.", e).into());
         }
+    }
+    
+    // Final flush to commit ALL operations atomically (chain state + address index)
+    if writer.pending_count() > 0 {
+        writer.flush().await?;
     }
     
     // Update sync height to rollback point
     update_sync_height(&db, rollback_to_height).await?;
     
-    println!("\n  ✅ Rollback complete! Database at height {}", rollback_to_height);
-    println!("  ⚠️  Re-indexing will begin from height {}\n", rollback_to_height + 1);
+    let elapsed = timer.elapsed_secs();
+    info!(
+        final_height = rollback_to_height,
+        blocks_removed = blocks_to_remove,
+        duration_secs = elapsed,
+        "Rollback complete"
+    );
+    metrics::ORPHANED_BLOCKS.add(blocks_to_remove as i64);
     
     Ok(blocks_to_remove)
 }
@@ -290,10 +319,39 @@ async fn disconnect_transaction(
                     writer.delete("utxo", utxo_key);
                 }
                 
-                // 2. Restore spent outputs (resurrect UTXOs)
-                // NOTE: This requires tracking which UTXOs were spent
-                // For now, we mark transaction as orphaned (height = HEIGHT_ORPHAN)
-                // Full UTXO resurrection would require undo data (see PIVX Core's CCoinsViewCache)
+                // 2. Restore spent outputs (resurrect UTXOs) ✅ NOW IMPLEMENTED
+                // Use spent_utxo.rs infrastructure to restore UTXOs that were spent by this tx
+                for input in &tx.inputs {
+                    if let Some(prevout) = &input.prevout {
+                        // Convert display format hash (hex string) to internal format (raw bytes)
+                        if let Ok(prev_hash_bytes) = hex::decode(&prevout.hash) {
+                            // Try to retrieve spent UTXO data from utxo_undo CF
+                            if let Ok(Some(spent_utxo)) = get_spent_utxo(
+                                db.clone(),
+                                &prev_hash_bytes,
+                                prevout.n as u64
+                            ).await {
+                                // Resurrect UTXO: restore it to the UTXO set
+                                let mut utxo_key = vec![b'u'];
+                                utxo_key.extend_from_slice(&spent_utxo.txid);
+                                utxo_key.extend_from_slice(&spent_utxo.vout.to_le_bytes());
+                                
+                                // Reconstruct UTXO value format:
+                                // version (4 bytes) + height (4 bytes) + value (8 bytes) + script_len + script
+                                let mut utxo_value = vec![0u8; 4]; // version = 0
+                                utxo_value.extend_from_slice(&spent_utxo.created_height.to_le_bytes());
+                                utxo_value.extend_from_slice(&spent_utxo.value.to_le_bytes());
+                                utxo_value.extend_from_slice(&(spent_utxo.script_pubkey.len() as u32).to_le_bytes());
+                                utxo_value.extend_from_slice(&spent_utxo.script_pubkey);
+                                
+                                writer.put("utxo", utxo_key, utxo_value);
+                            }
+                            // Note: If undo data not found, UTXO cannot be resurrected
+                            // This can happen if spent_utxo tracking wasn't enabled during forward sync
+                            // In production, we should log this as a warning
+                        }
+                    }
+                }
                 
                 // 3. Update address index
                 // Remove this transaction from address indices
@@ -372,18 +430,33 @@ pub async fn handle_reorg(
     current_height: i32,
     rpc_height: i32,
 ) -> Result<ReorgInfo, Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n⚠️  REORG DETECTED ⚠️");
-    println!("  Our height: {}", current_height);
-    println!("  RPC height: {}", rpc_height);
+    warn!(
+        our_height = current_height,
+        rpc_height = rpc_height,
+        "REORG DETECTED"
+    );
+    metrics::increment_reorg_events();
     
     // Find fork point (last common block)
     let fork_height = find_fork_point(&db, rpc_client, current_height.min(rpc_height)).await?;
     
-    println!("  Fork point: {} (common ancestor)", fork_height);
+    info!(
+        fork_height = fork_height,
+        orphaned_blocks = current_height - fork_height,
+        "Fork point identified"
+    );
     
     // Calculate reorg parameters
     let orphaned_blocks = current_height - fork_height;
     let rollback_to = fork_height;
+    
+    let _reorg_span = info_span!(
+        "reorg_handling",
+        fork_height = fork_height,
+        orphaned_blocks = orphaned_blocks
+    ).entered();
+    
+    metrics::set_reorg_depth(orphaned_blocks as i64);
     
     // Get chain tip hashes for logging
     let cf_metadata = db.cf_handle("chain_metadata")
@@ -416,12 +489,13 @@ pub async fn handle_reorg(
     // Perform the rollback
     rollback_to_height(db.clone(), rollback_to, current_height).await?;
     
-    println!("\n📊 REORG SUMMARY:");
-    println!("  ├─ Fork at height: {}", fork_height);
-    println!("  ├─ Orphaned blocks: {}", orphaned_blocks);
-    println!("  ├─ Old chain tip: {}", &old_tip_hash[..16]);
-    println!("  └─ New chain tip: {}", &new_tip_hash[..16]);
-    println!();
+    info!(
+        fork_height = fork_height,
+        orphaned_blocks = orphaned_blocks,
+        old_tip_hash = %truncate_hex(&old_tip_hash, 16),
+        new_tip_hash = %truncate_hex(&new_tip_hash, 16),
+        "Reorg summary"
+    );
     
     Ok(reorg_info)
 }

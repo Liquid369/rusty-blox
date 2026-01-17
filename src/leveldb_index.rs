@@ -10,6 +10,9 @@
 use rusty_leveldb::{DB, Options, LdbIterator};
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::{info, warn, info_span};
+use crate::metrics;
+use crate::telemetry::truncate_hex;
 
 // Parse PIVX's VARINT format
 pub fn read_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
@@ -161,8 +164,12 @@ pub struct BlockInfo {
 pub fn build_canonical_chain_from_leveldb(
     leveldb_path: &str,
 ) -> Result<Vec<(i64, Vec<u8>, Option<u64>, Option<u64>)>, Box<dyn std::error::Error>> {
+    let _span = info_span!("leveldb_import",
+        db_path = leveldb_path
+    ).entered();
+    info!("Starting leveldb import");
     
-    println!("📖 Reading PIVX leveldb block index from: {}", leveldb_path);
+    info!(path = %leveldb_path, "Reading PIVX leveldb block index");
     
     let opts = Options::default();
     let mut db = DB::open(Path::new(leveldb_path), opts)?;
@@ -227,19 +234,10 @@ pub fn build_canonical_chain_from_leveldb(
             blocks_with_data_flag += 1;
         }
         
-        // Debug: log first few blocks to verify parsing
-        if leveldb_count < 3 {
-            println!("  Block #{}: height={}, nStatus=0x{:x} (HAVE_DATA={}, HAVE_UNDO={})", 
-                     leveldb_count, height, status, has_data, has_undo);
-        }
-        
         if (status & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)) != 0 {
             if let Some(f) = read_varint_signed(&value, &mut offset) {
                 if f >= 0 {
                     n_file = Some(f as u64);
-                    if leveldb_count < 3 {
-                        println!("    → nFile={}", f);
-                    }
                 }
             }
         }
@@ -247,9 +245,6 @@ pub fn build_canonical_chain_from_leveldb(
         if (status & BLOCK_HAVE_DATA) != 0 {
             if let Some(pos) = read_varint(&value, &mut offset) {
                 n_data_pos = Some(pos);
-                if leveldb_count < 3 {
-                    println!("    → nDataPos={}", pos);
-                }
             }
         }
         
@@ -331,24 +326,26 @@ pub fn build_canonical_chain_from_leveldb(
     
     let max_height = *height_to_hashes.keys().max().unwrap_or(&0);
     
-    println!("✅ Parsed {} blocks from leveldb", leveldb_count);
-    println!("  Parse errors: {}", parse_errors);
-    println!("  Height range: 0 to {}", max_height);
-    println!("  Blocks with BLOCK_HAVE_DATA flag: {} ({:.2}%)", 
-             blocks_with_data_flag,
-             (blocks_with_data_flag as f64 / leveldb_count as f64) * 100.0);
-    println!("  Blocks with file AND position: {} ({:.2}%)", 
-             blocks_with_file_and_pos,
-             (blocks_with_file_and_pos as f64 / leveldb_count as f64) * 100.0);
+    info!(
+        parsed = leveldb_count,
+        errors = parse_errors,
+        max_height = max_height,
+        with_data_flag = blocks_with_data_flag,
+        data_pct = format!("{:.2}", (blocks_with_data_flag as f64 / leveldb_count as f64) * 100.0),
+        with_offset = blocks_with_file_and_pos,
+        offset_pct = format!("{:.2}", (blocks_with_file_and_pos as f64 / leveldb_count as f64) * 100.0),
+        "Parsed blocks from leveldb"
+    );
     
     if blocks_with_file_and_pos < leveldb_count / 2 {
-        println!("\n⚠️  WARNING: Less than 50% of blocks have offset data!");
-        println!("   This will limit Pattern A offset-based reading.");
-        println!("   Consider running: pivxd -reindex");
+        warn!(
+            offset_pct = (blocks_with_file_and_pos as f64 / leveldb_count as f64) * 100.0,
+            "Less than 50% of blocks have offset data - consider running pivxd -reindex"
+        );
     }
     
     // Step 2: Calculate chainwork for all blocks
-    println!("⚡ Calculating chainwork for all blocks...");
+    info!("Calculating chainwork for all blocks");
     
     // PIVX genesis hash (internal/little-endian byte order)
     let mut genesis_hash = hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")
@@ -385,16 +382,12 @@ pub fn build_canonical_chain_from_leveldb(
                 processed += 1;
             }
         }
-        
-        if height % 500_000 == 0 {
-            println!("  Calculated chainwork for blocks up to height {}", height);
-        }
     }
     
-    println!("✅ Chainwork calculated for {} blocks", processed);
+    info!(processed = processed, "Chainwork calculated");
     
     // Step 3: Find tip with highest chainwork
-    println!("🏆 Finding best chain tip (highest chainwork)...");
+    info!("Finding best chain tip (highest chainwork)");
     
     let mut best_tip: Option<(Vec<u8>, i64, [u64; 4])> = None;
     let mut blocks_without_chainwork = 0;
@@ -424,14 +417,14 @@ pub fn build_canonical_chain_from_leveldb(
     }
     
     if blocks_without_chainwork > 0 {
-        println!("⚠️  {} blocks at tip heights missing chainwork", blocks_without_chainwork);
+        warn!(count = blocks_without_chainwork, "Blocks at tip heights missing chainwork");
     }
     
     // Fallback: if no tip found with chainwork, just use max height
     let (best_tip_hash, best_tip_height, _) = if let Some(tip) = best_tip {
         tip
     } else {
-        println!("⚠️  No blocks found with valid chainwork, using max height as fallback");
+        warn!("No blocks found with valid chainwork, using max height as fallback");
         if let Some(hashes) = height_to_hashes.get(&max_height) {
             if let Some(hash) = hashes.first() {
                 (hash.clone(), max_height, [0, 0, 0, 0])
@@ -443,10 +436,10 @@ pub fn build_canonical_chain_from_leveldb(
         }
     };
     
-    println!("✅ Best tip: height {}, hash {}", best_tip_height, hex::encode(&best_tip_hash));
+    info!(height = best_tip_height, hash = %hex::encode(&best_tip_hash), "Best tip found");
     
     // Step 4: Build canonical chain by walking BACKWARDS from best tip
-    println!("⬇️  Building canonical chain (walking backwards from tip)...");
+    info!("Building canonical chain (walking backwards from tip)");
     
     let mut chain: Vec<(i64, Vec<u8>, Option<u64>, Option<u64>)> = Vec::new();
     let mut current_hash = best_tip_hash;
@@ -456,15 +449,11 @@ pub fn build_canonical_chain_from_leveldb(
         let block_info = match index.get(&current_hash) {
             Some(info) => info,
             None => {
-                println!("  ⚠️  Block not found - stopping at height {}", chain.last().map(|(h, _, _, _)| *h).unwrap_or(-1));
+                warn!(stopped_at_height = chain.last().map(|(h, _, _, _)| *h).unwrap_or(-1), "Block not found - stopping chain walk");
                 break;
             }
         };
         
-        if steps < 20 {
-            let hash_hex: String = current_hash.iter().rev().map(|b| format!("{:02x}", b)).collect();
-            println!("  Step {}: height={}, hash={}", steps, block_info.height, &hash_hex[..16]);
-        }
         steps += 1;
         
         chain.push((block_info.height, current_hash.clone(), block_info.file, block_info.data_pos));
@@ -476,18 +465,29 @@ pub fn build_canonical_chain_from_leveldb(
         
         // Move to parent
         current_hash = block_info.hash_prev.clone();
-        
-        if chain.len() % 500_000 == 0 {
-            println!("  Progress: {} blocks", chain.len());
-        }
     }
     
     // Reverse to get genesis -> tip order
     chain.reverse();
 
-    println!("✅ Built canonical chain: {} blocks (height 0 to {})", 
-             chain.len(), 
-             chain.last().map(|(h, _, _, _)| *h).unwrap_or(0));
+    let chain_len = chain.len();
+    let tip_height = chain.last().map(|(h, _, _, _)| *h).unwrap_or(0);
+    
+    info!(chain_len = chain_len, tip_height = tip_height, "Built canonical chain");
+    
+    info!(
+        blocks_found = chain_len,
+        tip_height = tip_height,
+        "Canonical chain built"
+    );
+    metrics::increment_blocks_processed("leveldb_import", chain_len as u64);
+    metrics::set_indexed_height("block_index", tip_height);
+    
+    info!(
+        blocks = chain_len,
+        tip_height = tip_height,
+        "Leveldb import complete"
+    );
 
     Ok(chain)
 }

@@ -8,6 +8,7 @@ use rocksdb::DB;
 use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
@@ -143,7 +144,7 @@ async fn compute_transaction_details(
                     
                     if let Some(prev_data) = prev_data_opt {
                         if prev_data.len() > 10_000_000 {
-                            eprintln!("Warning: Previous transaction data too large for {}", prevout.hash);
+                            warn!(prevout_hash = %prevout.hash, size_bytes = prev_data.len(), "Previous transaction data too large");
                         } else if prev_data.len() >= 8 {
                             let prev_tx_data_len = prev_data.len() - 8;
                             if prev_tx_data_len > 0 {
@@ -153,7 +154,7 @@ async fn compute_transaction_details(
                             
                                 if let Ok(prev_tx) = deserialize_transaction_blocking(&prev_tx_data_with_header) {
                                     if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
-                                        input_json["value"] = serde_json::json!(format_piv_amount(output.value));
+                                        input_json["value"] = serde_json::json!(output.value.to_string());
                                         value_in += output.value;
                                         if !output.address.is_empty() {
                                             input_json["addresses"] = serde_json::json!(output.address.clone());
@@ -180,7 +181,7 @@ async fn compute_transaction_details(
             value_out += output.value;
             let script_type = get_script_type(&output.script_pubkey.script);
             vout.push(serde_json::json!({
-                "value": format_piv_amount(output.value),
+                "value": output.value.to_string(),
                 "n": idx,
                 "hex": hex::encode(&output.script_pubkey.script),
                 "addresses": output.address,
@@ -274,7 +275,7 @@ async fn compute_transaction_details(
             };
             
             serde_json::json!({
-                "value_balance": format_piv_amount(sap.value_balance),
+                "value_balance": sap.value_balance.to_string(),
                 "value_balance_sat": sap.value_balance,
                 "shielded_spend_count": sap.vshielded_spend.len(),
                 "shielded_output_count": sap.vshielded_output.len(),
@@ -295,9 +296,9 @@ async fn compute_transaction_details(
             "blockHeight": block_height,
             "confirmations": confirmations,
             "blockTime": block_time,
-            "value": format_piv_amount(value_out),
-            "valueIn": format_piv_amount(value_in),
-            "fees": format_piv_amount(fees),
+            "value": value_out.to_string(),
+            "valueIn": value_in.to_string(),
+            "fees": fees.to_string(),
             "size": tx_size,
             "vsize": tx_vsize,
             "hex": hex::encode(&data[8..]),

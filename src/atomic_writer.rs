@@ -18,6 +18,8 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use rocksdb::{DB, WriteBatch};
+use tracing::{debug, warn, error, info};
+use crate::metrics;
 
 /// Atomic batch writer that commits writes across multiple column families atomically
 pub struct AtomicBatchWriter {
@@ -103,12 +105,17 @@ impl AtomicBatchWriter {
             return Ok(());
         }
 
+        let pending_ops = self.operations.len();
+        let timer = metrics::Timer::new();
+        
+        debug!(pending_ops = pending_ops, "Batch flush start");
+
         // Move operations out to process
         let operations = std::mem::take(&mut self.operations);
         let db = self.db.clone();
 
-        // Perform atomic commit in blocking task
-        tokio::task::spawn_blocking(move || {
+        // Perform atomic commit in blocking task  
+        let task_result = tokio::task::spawn_blocking(move || -> (Result<(), String>, HashMap<String, usize>) {
             // Create single WriteBatch for ALL operations across ALL CFs
             let mut batch = WriteBatch::default();
             
@@ -123,11 +130,21 @@ impl AtomicBatchWriter {
                     .or_default()
                     .push(op);
             }
+            
+            // Track batch sizes per CF for metrics
+            let mut cf_batch_sizes: HashMap<String, usize> = HashMap::new();
 
             // Add all operations to the single WriteBatch
             for (cf_name, ops) in cf_operations {
-                let cf = db.cf_handle(&cf_name)
-                    .ok_or_else(|| format!("Column family not found: {}", cf_name))?;
+                let cf = match db.cf_handle(&cf_name) {
+                    Some(cf) => cf,
+                    None => {
+                        let err_msg = format!("Column family not found: {}", cf_name);
+                        return (Err(err_msg), HashMap::new());
+                    }
+                };
+                
+                cf_batch_sizes.insert(cf_name.clone(), ops.len());
                 
                 for op in ops {
                     match op {
@@ -143,13 +160,64 @@ impl AtomicBatchWriter {
 
             // CRITICAL: Single atomic commit for ALL column families
             // Either everything succeeds, or nothing does
-            db.write(batch)
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            let write_result = db.write(batch)
+                .map_err(|e| e.to_string());
+            
+            // Return both the result and metadata regardless of success/failure
+            (write_result, cf_batch_sizes)
         })
         .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)??;
-
-        Ok(())
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        
+        let elapsed_secs = timer.elapsed_secs();
+        let elapsed_ms = elapsed_secs * 1000.0;
+        
+        let (write_result, cf_batch_sizes) = task_result;
+        
+        match write_result {
+            Ok(_) => {
+                // Record successful flush metrics for each CF
+                for (cf_name, batch_size) in &cf_batch_sizes {
+                    metrics::record_db_flush_duration(cf_name, elapsed_secs);
+                    metrics::BATCH_FLUSH_COUNT.with_label_values(&[cf_name]).inc();
+                    metrics::DB_BATCH_SIZE_ENTRIES.with_label_values(&[cf_name]).set(*batch_size as i64);
+                }
+                
+                // Warn on slow flushes
+                if elapsed_secs > 10.0 {
+                    let cf_list: Vec<String> = cf_batch_sizes.keys().cloned().collect();
+                    warn!(
+                        cf = cf_list.join(","),
+                        batch_size = pending_ops,
+                        duration_secs = elapsed_secs,
+                        "Slow database flush"
+                    );
+                } else {
+                    info!(
+                        cf_count = cf_batch_sizes.len(),
+                        batch_size = pending_ops,
+                        duration_ms = format!("{:.2}", elapsed_ms),
+                        "Flush complete"
+                    );
+                }
+                
+                Ok(())
+            }
+            Err(db_error) => {
+                // Record error metrics for each CF
+                for (cf_name, batch_size) in &cf_batch_sizes {
+                    error!(
+                        cf = cf_name,
+                        batch_size = batch_size,
+                        error = db_error,
+                        "Flush error"
+                    );
+                    metrics::increment_db_errors("flush", cf_name);
+                }
+                
+                Err(Box::from(db_error))
+            }
+        }
     }
 
     /// Clear all pending operations without writing

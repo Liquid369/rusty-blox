@@ -22,6 +22,10 @@ pub mod db_utils;
 pub mod batch_writer;
 pub mod atomic_writer;
 pub mod transactions;
+pub mod db_sampler;
+
+#[cfg(test)]
+mod batch_writer_tests;
 pub mod leveldb_index;
 pub mod block_index;
 pub mod offset_indexer;
@@ -45,11 +49,11 @@ pub mod maturity;
 pub mod reorg;
 pub mod spent_utxo;
 pub mod pos_validation;
+pub mod telemetry;
+pub mod metrics;
 pub mod address_rollback;
 pub mod build_address_undo;
 pub mod fee_calculation;
-pub mod script_validation;
-pub mod sapling_validation;
 
 #[repr(C)]
 #[allow(non_snake_case)] // C FFI struct - must match quark hash C implementation

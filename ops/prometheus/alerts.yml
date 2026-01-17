@@ -1,0 +1,228 @@
+# Prometheus Alert Rules for rusty-blox
+# METRICS_CATALOG.md compliance - all metric names match catalog
+
+groups:
+  - name: rustyblox_critical
+    interval: 30s
+    rules:
+      # ========================================================================
+      # CRITICAL ALERTS - Page immediately
+      # ========================================================================
+      
+      - alert: BlockProcessingStalled
+        expr: rate(rustyblox_blocks_processed_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: sync
+        annotations:
+          summary: "Blockchain indexing has stalled"
+          description: "No blocks have been processed in the last 5 minutes. Check sync service status and logs."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#scenario-sync-stalled"
+      
+      - alert: InvariantViolation
+        expr: increase(rustyblox_invariant_violations_total[5m]) > 0
+        for: 0m  # Immediate alert
+        labels:
+          severity: critical
+          component: data_integrity
+        annotations:
+          summary: "Data integrity violation detected"
+          description: "Invariant violation detected: {{ $labels.type }}. This indicates data corruption or logic error. STOP SERVICE and investigate immediately."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#invariant-violations"
+      
+      - alert: HighErrorRate
+        expr: (sum(rate(rustyblox_db_errors_total[5m])) + sum(rate(rustyblox_rpc_errors_total[5m]))) > 0.16
+        for: 5m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "High error rate detected (>10 errors/min)"
+          description: "Database or RPC errors exceeding 10/minute. Check logs and infrastructure health."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#high-error-rate"
+      
+      - alert: RPCConnectionLost
+        expr: rustyblox_rpc_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: rpc
+        annotations:
+          summary: "RPC connection to PIVX Core lost"
+          description: "Unable to connect to PIVX Core RPC. Check if pivxd is running and accessible."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#rpc-connection-lost"
+      
+      - alert: DatabaseWriteFailure
+        expr: rate(rustyblox_db_errors_total{op="flush"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Database write operations failing"
+          description: "Database flush operations are failing. Check disk space and database health."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#database-corruption"
+
+  - name: rustyblox_high
+    interval: 60s
+    rules:
+      # ========================================================================
+      # HIGH PRIORITY - Investigate soon
+      # ========================================================================
+      
+      - alert: HighRPCLatency
+        expr: histogram_quantile(0.95, rate(rustyblox_rpc_call_duration_seconds_bucket{method="getblock"}[5m])) > 10
+        for: 3m
+        labels:
+          severity: high
+          component: rpc
+        annotations:
+          summary: "RPC calls are very slow (P95 >10s)"
+          description: "95th percentile RPC latency for getblock is {{ $value }}s. This will slow down sync significantly."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#slow-rpc-catchup"
+      
+      - alert: SlowDatabaseFlush
+        expr: histogram_quantile(0.95, rate(rustyblox_db_batch_flush_duration_seconds_bucket[5m])) > 30
+        for: 5m
+        labels:
+          severity: high
+          component: database
+        annotations:
+          summary: "Database flushes are very slow (P95 >30s)"
+          description: "95th percentile database flush latency is {{ $value }}s. Check disk I/O and consider SSD upgrade."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#slow-sync"
+      
+      - alert: ExcessiveReorgs
+        expr: rate(rustyblox_reorg_events_total[10m]) > 0.01
+        for: 10m
+        labels:
+          severity: high
+          component: blockchain
+        annotations:
+          summary: "Excessive blockchain reorganizations"
+          description: "More than 1 reorg per 100 minutes. Check PIVX network health and connectivity."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#reorg-loop"
+      
+      - alert: RPCErrorRate
+        expr: sum(rate(rustyblox_rpc_errors_total[5m])) > 0.16
+        for: 5m
+        labels:
+          severity: high
+          component: rpc
+        annotations:
+          summary: "High RPC error rate (>10 errors/min)"
+          description: "RPC errors: {{ $labels.error_type }} for {{ $labels.method }}. Check PIVX Core logs."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#rpc-errors"
+      
+      - alert: HighBlockLag
+        expr: rustyblox_blocks_behind_tip > 100
+        for: 10m
+        labels:
+          severity: high
+          component: sync
+        annotations:
+          summary: "Blockchain indexer is >100 blocks behind"
+          description: "Currently {{ $value }} blocks behind chain tip. Catchup may be slow."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#rpc-catchup"
+      
+      - alert: CacheHitRateLow
+        expr: rate(rustyblox_tx_cache_hits_total[5m]) / (rate(rustyblox_tx_cache_hits_total[5m]) + rate(rustyblox_tx_cache_misses_total[5m])) < 0.80
+        for: 10m
+        labels:
+          severity: high
+          component: performance
+        annotations:
+          summary: "Transaction cache hit rate below 80%"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}. Consider increasing cache size."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#high-memory-usage"
+
+  - name: rustyblox_warning
+    interval: 120s
+    rules:
+      # ========================================================================
+      # WARNINGS - Monitor
+      # ========================================================================
+      
+      - alert: HighMemoryUsage
+        expr: rustyblox_process_resident_memory_bytes > 16 * 1024 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+          component: resources
+        annotations:
+          summary: "Memory usage exceeds 16GB"
+          description: "Process using {{ $value | humanize }}B of memory. May need tuning."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#high-memory-usage"
+      
+      - alert: DeepReorg
+        expr: rustyblox_reorg_depth_blocks > 10
+        for: 1m
+        labels:
+          severity: warning
+          component: blockchain
+        annotations:
+          summary: "Deep blockchain reorganization (>10 blocks)"
+          description: "Reorg depth: {{ $value }} blocks. Verify against PIVX community."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#deep-reorg"
+      
+      - alert: HighParseErrorRate
+        expr: rate(rustyblox_tx_parse_errors_total[5m]) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+          component: parser
+        annotations:
+          summary: "Transaction parse errors increasing"
+          description: "Parse errors: {{ $labels.error_type }}. May indicate corrupted blk files."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#parsing-errors"
+      
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint=~"/var.*"} / node_filesystem_size_bytes{mountpoint=~"/var.*"}) < 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: resources
+        annotations:
+          summary: "Disk space below 10%"
+          description: "Only {{ $value | humanizePercentage }} disk space remaining on {{ $labels.mountpoint }}."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#high-disk-usage"
+      
+      - alert: ServiceRestartDetected
+        expr: changes(rustyblox_service_start_timestamp_seconds[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: availability
+        annotations:
+          summary: "Service has been restarted"
+          description: "rusty-blox service restarted at {{ $value | humanizeTimestamp }}. Check for crashes."
+          runbook: "https://github.com/your-org/rusty-blox/blob/master/RUNBOOK.md#service-wont-start"
+
+  - name: rustyblox_info
+    interval: 300s
+    rules:
+      # ========================================================================
+      # INFORMATIONAL - Recording rules for dashboards
+      # ========================================================================
+      
+      - record: rustyblox:sync_progress:percent
+        expr: (rustyblox_indexed_height{stage="block_index"} / rustyblox_chain_tip_height{source="rpc"}) * 100
+      
+      - record: rustyblox:blocks_per_second:rate5m
+        expr: rate(rustyblox_blocks_processed_total[5m])
+      
+      - record: rustyblox:transactions_per_second:rate5m
+        expr: rate(rustyblox_transactions_processed_total[5m])
+      
+      - record: rustyblox:cache_hit_rate:rate5m
+        expr: rate(rustyblox_tx_cache_hits_total[5m]) / (rate(rustyblox_tx_cache_hits_total[5m]) + rate(rustyblox_tx_cache_misses_total[5m]))
+      
+      - record: rustyblox:error_rate:rate5m
+        expr: sum(rate(rustyblox_db_errors_total[5m])) + sum(rate(rustyblox_rpc_errors_total[5m]))
+      
+      - record: rustyblox:rpc_latency:p95
+        expr: histogram_quantile(0.95, sum(rate(rustyblox_rpc_call_duration_seconds_bucket[5m])) by (le, method))
+      
+      - record: rustyblox:db_flush_latency:p95
+        expr: histogram_quantile(0.95, sum(rate(rustyblox_db_batch_flush_duration_seconds_bucket[5m])) by (le, cf))

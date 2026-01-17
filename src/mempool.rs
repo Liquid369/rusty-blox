@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use pivx_rpc_rs::PivxRpcClient;
 use serde::{Serialize, Deserialize};
+use tracing::{error, warn};
 
 use crate::config::get_global_config;
 
@@ -92,7 +93,7 @@ pub async fn run_mempool_monitor(
             // Connected successfully
         }
         Err(e) => {
-            eprintln!("Mempool RPC connection failed: {}", e);
+            error!(error = ?e, rpc_host = %rpc_host, "Mempool RPC connection failed");
             return Ok(());
         }
     }
@@ -107,7 +108,7 @@ pub async fn run_mempool_monitor(
                 let txids: Vec<String> = match mempool_result {
                     pivx_rpc_rs::RawMemPool::TxIds(txid_list) => txid_list,
                     pivx_rpc_rs::RawMemPool::Verbose(_) => {
-                        eprintln!("Unexpected verbose mempool response");
+                        warn!("Unexpected verbose mempool response");
                         continue;
                     }
                 };
@@ -134,7 +135,7 @@ pub async fn run_mempool_monitor(
                 }
             }
             Err(e) => {
-                eprintln!("Failed to get mempool: {}", e);
+                error!(error = ?e, "Failed to get mempool");
             }
         }
     }
