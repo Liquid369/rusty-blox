@@ -347,6 +347,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to initialize DB handles: {}", e))?;
     info!("Database handles validated");
 
+    // Restore persisted metrics from database
+    // This ensures metrics survive restarts and maintain continuity
+    info!("Restoring metrics from database");
+    if let Err(e) = rustyblox::metrics::load_metrics_from_db(&db_arc) {
+        warn!(error = %e, "Failed to restore metrics from database - starting from defaults");
+    } else {
+        info!("Successfully restored metrics from database");
+    }
+
     let blk_dir_path = PathBuf::from(blk_dir);
     
     // Create shared state

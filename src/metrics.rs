@@ -306,6 +306,12 @@ lazy_static! {
         "Total Sapling transactions indexed (version >= 3 with Sapling data)"
     ).unwrap();
     
+    /// Sapling transactions count (gauge: current count in DB)
+    pub static ref SAPLING_TRANSACTIONS_COUNT: IntGauge = IntGauge::new(
+        "rustyblox_sapling_transactions_count",
+        "Current count of Sapling transactions in database (version >= 3)"
+    ).unwrap();
+    
     // ========================================================================
     // 7. OPERATIONAL METRICS (9 metrics)
     // ========================================================================
@@ -423,8 +429,7 @@ pub fn init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     REGISTRY.register(Box::new(ADDRESS_INDEX_SIZE_ENTRIES.clone()))?;
     REGISTRY.register(Box::new(TOTAL_ADDRESSES_INDEXED.clone()))?;
     REGISTRY.register(Box::new(TOTAL_UTXOS_TRACKED.clone()))?;
-    REGISTRY.register(Box::new(SAPLING_TRANSACTIONS_TOTAL.clone()))?;
-    
+    REGISTRY.register(Box::new(SAPLING_TRANSACTIONS_TOTAL.clone()))?;    REGISTRY.register(Box::new(SAPLING_TRANSACTIONS_COUNT.clone()))?;    
     // Operational metrics
     REGISTRY.register(Box::new(UPTIME_SECONDS.clone()))?;
     REGISTRY.register(Box::new(SERVICE_START_TIMESTAMP.clone()))?;
@@ -614,9 +619,90 @@ pub fn increment_sapling_transactions(count: u64) {
     SAPLING_TRANSACTIONS_TOTAL.inc_by(count);
 }
 
+/// Set sapling transactions count (gauge - current count in DB)
+pub fn set_sapling_transactions_count(count: u64) {
+    SAPLING_TRANSACTIONS_COUNT.set(count as i64);
+}
+
 /// Set database size for a column family (bytes)
 pub fn set_db_size_bytes(cf: &str, bytes: u64) {
     DB_SIZE_BYTES.with_label_values(&[cf]).set(bytes as i64);
+}
+
+// ============================================================================
+// METRICS PERSISTENCE - Save/Load from Database
+// ============================================================================
+
+/// Save aggregate metrics to database for persistence across restarts
+pub fn save_metrics_to_db(db: &std::sync::Arc<rocksdb::DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    
+    // Save TOTAL_ADDRESSES_INDEXED
+    let address_count = TOTAL_ADDRESSES_INDEXED.get() as u64;
+    db.put_cf(&cf_state, b"metric_total_addresses", &address_count.to_le_bytes())?;
+    
+    // Save TOTAL_UTXOS_TRACKED
+    let utxo_count = TOTAL_UTXOS_TRACKED.get() as u64;
+    db.put_cf(&cf_state, b"metric_total_utxos", &utxo_count.to_le_bytes())?;
+    
+    // Save SAPLING_TRANSACTIONS_COUNT (gauge)
+    let sapling_count = SAPLING_TRANSACTIONS_COUNT.get() as u64;
+    db.put_cf(&cf_state, b"metric_sapling_count", &sapling_count.to_le_bytes())?;
+    
+    // Save SAPLING_TRANSACTIONS_TOTAL (counter)
+    let sapling_total = SAPLING_TRANSACTIONS_TOTAL.get() as u64;
+    db.put_cf(&cf_state, b"metric_sapling_total", &sapling_total.to_le_bytes())?;
+    
+    Ok(())
+}
+
+/// Load aggregate metrics from database on startup
+pub fn load_metrics_from_db(db: &std::sync::Arc<rocksdb::DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    
+    // Load TOTAL_ADDRESSES_INDEXED
+    if let Some(bytes) = db.get_cf(&cf_state, b"metric_total_addresses")? {
+        if bytes.len() >= 8 {
+            let count = u64::from_le_bytes(bytes[0..8].try_into()?);
+            TOTAL_ADDRESSES_INDEXED.set(count as i64);
+            tracing::info!(count = count, "Restored metric: total_addresses_indexed");
+        }
+    }
+    
+    // Load TOTAL_UTXOS_TRACKED
+    if let Some(bytes) = db.get_cf(&cf_state, b"metric_total_utxos")? {
+        if bytes.len() >= 8 {
+            let count = u64::from_le_bytes(bytes[0..8].try_into()?);
+            TOTAL_UTXOS_TRACKED.set(count as i64);
+            tracing::info!(count = count, "Restored metric: total_utxos_tracked");
+        }
+    }
+    
+    // Load SAPLING_TRANSACTIONS_COUNT (gauge)
+    if let Some(bytes) = db.get_cf(&cf_state, b"metric_sapling_count")? {
+        if bytes.len() >= 8 {
+            let count = u64::from_le_bytes(bytes[0..8].try_into()?);
+            SAPLING_TRANSACTIONS_COUNT.set(count as i64);
+            tracing::info!(count = count, "Restored metric: sapling_transactions_count");
+        }
+    }
+    
+    // Load SAPLING_TRANSACTIONS_TOTAL (counter)
+    // Note: Counters can't be set directly, but we store the value for reference
+    // The counter will increment from this baseline as new transactions are processed
+    if let Some(bytes) = db.get_cf(&cf_state, b"metric_sapling_total")? {
+        if bytes.len() >= 8 {
+            let count = u64::from_le_bytes(bytes[0..8].try_into()?);
+            // We can't set a counter directly, so we need to increment it from 0 to the stored value
+            // This is a workaround - counters are designed to only increment
+            SAPLING_TRANSACTIONS_TOTAL.inc_by(count);
+            tracing::info!(count = count, "Restored metric: sapling_transactions_total");
+        }
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]

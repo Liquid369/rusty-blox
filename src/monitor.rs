@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use rocksdb::DB;
 use pivx_rpc_rs::PivxRpcClient;
 use serde_json::Value;
-use tracing::{info, warn, error, info_span};
+use tracing::{info, warn, error, debug, info_span};
 use crate::metrics;
 
 use crate::config::get_global_config;
@@ -608,6 +608,11 @@ async fn index_block_from_rpc(
             }
         };
         
+        // Track Sapling transactions for metrics
+        if parsed_tx.sapling_data.is_some() {
+            metrics::increment_sapling_transactions(1);
+        }
+        
         // Index addresses from outputs
         // CRITICAL FIX: Only modify address index for NEW blocks (after enrichment height)
         // Blocks processed by enrichment already have correct address index data
@@ -1031,6 +1036,9 @@ async fn index_block_from_rpc(
     height_hash_key.extend(&height.to_le_bytes());
     db.put_cf(&cf_state, &height_hash_key, block_hash.as_bytes())?;
     
+    // Update indexed height metric
+    metrics::set_indexed_height("rpc_monitor", height as i64);
+    
     // Processing marker will be cleaned up automatically by the guard's Drop impl
     
     // Broadcast new block event if broadcaster is available
@@ -1041,6 +1049,69 @@ async fn index_block_from_rpc(
             .as_secs();
         bc.broadcast_block(height, block_hash, timestamp, tx_count);
     }
+    
+    Ok(())
+}
+
+/// Update aggregate database metrics (address count, UTXO count, Sapling tx count)
+/// Should be called periodically during monitoring to keep metrics up to date
+fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_addr_index = db.cf_handle("addr_index")
+        .ok_or("addr_index CF not found")?;
+    
+    // Count unique addresses and their unspent UTXOs
+    // In addr_index CF:
+    //   - Keys starting with 'a' contain UTXO lists for addresses
+    //   - Value format: repeating (txid(32) + vout(8)) for each UTXO
+    let mut address_count: u64 = 0;
+    let mut utxo_count: u64 = 0;
+    let mut sample_checked = 0;
+    
+    let iter = db.iterator_cf(&cf_addr_index, rocksdb::IteratorMode::Start);
+    for item in iter {
+        if let Ok((key, value)) = item {
+            if !key.is_empty() {
+                let prefix = key[0];
+                // Count 'a' (address) keys - these contain UTXO lists
+                if prefix == b'a' {
+                    address_count += 1;
+                    
+                    // Count UTXOs for this address
+                    // Each UTXO is 40 bytes: txid(32) + vout(8)
+                    if !value.is_empty() {
+                        if value.len() % 40 == 0 {
+                            let utxos_for_address = value.len() / 40;
+                            utxo_count += utxos_for_address as u64;
+                        } else if sample_checked < 5 {
+                            // Log first few addresses with unexpected format for debugging
+                            debug!(
+                                address_key_len = key.len(),
+                                value_len = value.len(),
+                                "Address value length not multiple of 40"
+                            );
+                            sample_checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    debug!(
+        addresses = address_count,
+        utxos = utxo_count,
+        "Aggregate metrics updated from database scan"
+    );
+    
+    // Update metrics
+    metrics::set_total_addresses_indexed(address_count);
+    metrics::set_total_utxos_tracked(utxo_count);
+    
+    // NOTE: We don't update SAPLING_TRANSACTIONS_COUNT here because:
+    // 1. SAPLING_TRANSACTIONS_TOTAL (counter) is incremented as new txs are processed
+    // 2. SAPLING_TRANSACTIONS_COUNT (gauge) is set during enrichment phase
+    // 3. Counting from DB requires full parsing which is too expensive for periodic updates
+    // The counter (TOTAL) gives us the cumulative count which is what we need for monitoring
     
     Ok(())
 }
@@ -1340,9 +1411,35 @@ pub async fn run_block_monitor(
                 metrics::set_blocks_behind_tip(0);
                 metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
                 
-
+                // Update aggregate metrics after catchup completes
+                if let Err(e) = update_aggregate_metrics(&db) {
+                    warn!(error = %e, "Failed to update aggregate metrics");
+                } else {
+                    // Persist metrics to database for restart durability
+                    if let Err(e) = metrics::save_metrics_to_db(&db) {
+                        warn!(error = %e, "Failed to persist metrics to database");
+                    } else {
+                        debug!("Metrics persisted to database");
+                    }
+                }
             }
         } else {
+            // We're caught up - update aggregate metrics periodically
+            // Only update every 10 poll intervals to reduce overhead
+            static POLL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let count = POLL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            
+            if count % 10 == 0 {
+                if let Err(e) = update_aggregate_metrics(&db) {
+                    warn!(error = %e, "Failed to update aggregate metrics");
+                } else {
+                    // Persist metrics to database periodically
+                    if let Err(e) = metrics::save_metrics_to_db(&db) {
+                        warn!(error = %e, "Failed to persist metrics to database");
+                    }
+                }
+            }
+            
             // We're caught up - sleep before checking again
             tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
         }

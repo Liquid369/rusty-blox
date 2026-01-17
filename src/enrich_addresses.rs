@@ -674,6 +674,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let total_unspent_utxos = total_utxos_checked - total_spent_found;
     metrics::set_total_addresses_indexed(total_addresses as u64);
     metrics::set_total_utxos_tracked(total_unspent_utxos as u64);
+    metrics::set_sapling_transactions_count(pass1_sapling_count as u64);
     metrics::increment_sapling_transactions(pass1_sapling_count as u64);
     
     info!(
@@ -682,6 +683,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         metric_sapling_tx = pass1_sapling_count,
         "Metrics updated: addresses, UTXOs, and Sapling transactions"
     );
+    
+    // Persist metrics to database after enrichment completes
+    if let Err(e) = metrics::save_metrics_to_db(&db) {
+        warn!(error = %e, "Failed to persist metrics to database after enrichment");
+    } else {
+        info!("Metrics persisted to database after enrichment");
+    }
     
     Ok(())
 }
