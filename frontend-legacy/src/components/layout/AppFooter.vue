@@ -96,7 +96,7 @@ const currentYear = computed(() => new Date().getFullYear())
 }
 
 .footer-links a {
-  color: var(--color-primary);
+  color: var(--pivx-purple-primary);
   text-decoration: none;
   font-size: var(--text-sm);
   font-weight: var(--weight-bold);
