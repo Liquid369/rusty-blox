@@ -14,7 +14,7 @@ use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::config::get_global_config;
 use crate::parser::{get_script_type, deserialize_transaction_blocking};
-use super::types::{BlockbookError, SendTxResponse};
+use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutput};
 use super::helpers::format_piv_amount;
 
 pub use axum::extract::Path as AxumPath;
@@ -51,10 +51,17 @@ pub async fn tx_v2(
     }
 }
 
-async fn compute_transaction_details(
+/// Build Transaction struct from raw DB data
+/// 
+/// This is a public helper used by:
+/// - tx_v2 endpoint (single transaction)
+/// - address/xpub endpoints (batch transaction fetching for details=txs)
+/// 
+/// Returns Transaction struct compatible with Blockbook API schema
+pub(crate) async fn build_transaction_from_db(
     db: &Arc<DB>,
     txid: &str,
-) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Transaction, Box<dyn std::error::Error + Send + Sync>> {
     let db_clone = Arc::clone(db);
     let txid_clone = txid.to_string();
     
@@ -106,26 +113,35 @@ async fn compute_transaction_details(
         // Parse the binary transaction data
         let tx = deserialize_transaction_blocking(&tx_data_with_header)?;
         
-        // Convert to JSON format (Blockbook-compatible)
+        // Build vin (inputs)
         let mut vin = Vec::new();
         let mut value_in: i64 = 0;
         
         for (idx, input) in tx.inputs.iter().enumerate() {
             if let Some(coinbase_data) = &input.coinbase {
                 // Coinbase transaction
-                vin.push(serde_json::json!({
-                    "coinbase": hex::encode(coinbase_data),
-                    "sequence": input.sequence,
-                    "n": idx,
-                }));
+                vin.push(TxInput {
+                    txid: None,
+                    vout: None,
+                    sequence: Some(input.sequence as u64),
+                    n: idx as u32,
+                    addresses: None,
+                    is_address: None,
+                    value: None,
+                    hex: Some(hex::encode(coinbase_data)),
+                });
             } else if let Some(prevout) = &input.prevout {
                 // Regular input - look up previous output for value and address
-                let mut input_json = serde_json::json!({
-                    "txid": prevout.hash.clone(),
-                    "vout": prevout.n,
-                    "sequence": input.sequence,
-                    "n": idx,
-                });
+                let mut tx_input = TxInput {
+                    txid: Some(prevout.hash.clone()),
+                    vout: Some(prevout.n),
+                    sequence: Some(input.sequence as u64),
+                    n: idx as u32,
+                    addresses: None,
+                    is_address: None,
+                    value: None,
+                    hex: None,
+                };
                 
                 // Try to get value and address from previous transaction
                 if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
@@ -154,15 +170,12 @@ async fn compute_transaction_details(
                             
                                 if let Ok(prev_tx) = deserialize_transaction_blocking(&prev_tx_data_with_header) {
                                     if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
-                                        input_json["value"] = serde_json::json!(output.value.to_string());
+                                        tx_input.value = Some(output.value.to_string());
                                         value_in += output.value;
                                         if !output.address.is_empty() {
-                                            input_json["addresses"] = serde_json::json!(output.address.clone());
-                                            input_json["isAddress"] = serde_json::json!(true);
+                                            tx_input.addresses = Some(output.address.clone());
+                                            tx_input.is_address = Some(true);
                                         }
-                                        
-                                        let script_type = get_script_type(&output.script_pubkey.script);
-                                        input_json["type"] = serde_json::json!(script_type);
                                     }
                                 }
                             }
@@ -170,28 +183,27 @@ async fn compute_transaction_details(
                     }
                 }
                 
-                vin.push(input_json);
+                vin.push(tx_input);
             }
         }
         
+        // Build vout (outputs)
         let mut vout = Vec::new();
         let mut value_out: i64 = 0;
         
         for (idx, output) in tx.outputs.iter().enumerate() {
             value_out += output.value;
-            let script_type = get_script_type(&output.script_pubkey.script);
-            vout.push(serde_json::json!({
-                "value": output.value.to_string(),
-                "n": idx,
-                "hex": hex::encode(&output.script_pubkey.script),
-                "addresses": output.address,
-                "isAddress": !output.address.is_empty(),
-                "type": script_type,
-            }));
+            vout.push(TxOutput {
+                value: output.value.to_string(),
+                n: idx as u32,
+                hex: Some(hex::encode(&output.script_pubkey.script)),
+                addresses: if output.address.is_empty() { None } else { Some(output.address.clone()) },
+                is_address: Some(!output.address.is_empty()),
+                spent: None, // Not tracked in current implementation
+            });
         }
         
         let tx_size = data.len() - 8;
-        let tx_vsize = tx_size;
         
         // Get block hash and time if we have a valid height
         let (block_hash, block_time) = if block_height > 0 {
@@ -245,73 +257,38 @@ async fn compute_transaction_details(
             0
         };
         
-        // Convert Sapling data if present
-        let sapling_json = tx.sapling_data.as_ref().map(|sap| {
-            let spends: Vec<_> = sap.vshielded_spend.iter().map(|spend| serde_json::json!({
-                "cv": hex::encode(spend.cv),
-                "anchor": hex::encode(spend.anchor),
-                "nullifier": hex::encode(spend.nullifier),
-                "rk": hex::encode(spend.rk),
-                "zkproof": hex::encode(spend.zkproof),
-                "spend_auth_sig": hex::encode(spend.spend_auth_sig),
-            })).collect();
-            
-            let outputs: Vec<_> = sap.vshielded_output.iter().map(|output| serde_json::json!({
-                "cv": hex::encode(output.cv),
-                "cmu": hex::encode(output.cmu),
-                "ephemeral_key": hex::encode(output.ephemeral_key),
-                "enc_ciphertext": hex::encode(output.enc_ciphertext),
-                "out_ciphertext": hex::encode(output.out_ciphertext),
-                "zkproof": hex::encode(output.zkproof),
-            })).collect();
-            
-            // Determine transaction type based on value_balance
-            let tx_type = if sap.value_balance < 0 {
-                "shielding" // Transparent → Shielded (negative balance means adding to shield pool)
-            } else if sap.value_balance > 0 {
-                "unshielding" // Shielded → Transparent (positive balance means removing from shield pool)
-            } else {
-                "shielded_transfer" // Shielded → Shielded (zero balance means pure shielded transfer)
-            };
-            
-            serde_json::json!({
-                "value_balance": sap.value_balance.to_string(),
-                "value_balance_sat": sap.value_balance,
-                "shielded_spend_count": sap.vshielded_spend.len(),
-                "shielded_output_count": sap.vshielded_output.len(),
-                "transaction_type": tx_type,
-                "binding_sig": hex::encode(sap.binding_sig),
-                "spends": spends,
-                "outputs": outputs,
-            })
-        });
-        
-        let mut tx_json = serde_json::json!({
-            "txid": tx.txid,
-            "version": tx.version,
-            "lockTime": tx.lock_time,
-            "vin": vin,
-            "vout": vout,
-            "blockHash": block_hash,
-            "blockHeight": block_height,
-            "confirmations": confirmations,
-            "blockTime": block_time,
-            "value": value_out.to_string(),
-            "valueIn": value_in.to_string(),
-            "fees": fees.to_string(),
-            "size": tx_size,
-            "vsize": tx_vsize,
-            "hex": hex::encode(&data[8..]),
-        });
-        
-        if let Some(sapling) = sapling_json {
-            tx_json["sapling"] = sapling;
-        }
-        
-        Ok(tx_json)
+        Ok(Transaction {
+            txid: tx.txid,
+            version: Some(tx.version as i32),
+            lock_time: Some(tx.lock_time),
+            vin,
+            vout,
+            block_hash,
+            block_height,
+            confirmations,
+            block_time,
+            size: Some(tx_size),
+            vsize: Some(tx_size),
+            value: value_out.to_string(),
+            value_in: value_in.to_string(),
+            fees: fees.to_string(),
+            hex: hex::encode(&data[8..]),
+        })
     })
     .await
     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+}
+
+async fn compute_transaction_details(
+    db: &Arc<DB>,
+    txid: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    // Use the shared transaction builder
+    let tx = build_transaction_from_db(db, txid).await?;
+    
+    // Convert to JSON for current endpoint compatibility
+    // TODO: Eventually return Transaction struct directly
+    Ok(serde_json::to_value(tx)?)
 }
 
 /// GET /api/v2/sendtx/{hex}
@@ -385,4 +362,27 @@ async fn send_transaction_internal(
             ))
         },
     }
+}
+
+/// Batch fetch multiple transactions efficiently with parallel processing
+/// 
+/// Used by address/xpub endpoints when details=txs is requested
+/// Processes transactions in batches to avoid overwhelming the system
+pub(crate) async fn fetch_transactions_batch(
+    db: &Arc<DB>,
+    txids: &[String],
+) -> Vec<Transaction> {
+    const BATCH_SIZE: usize = 50;
+    let mut results = Vec::with_capacity(txids.len());
+    
+    for chunk in txids.chunks(BATCH_SIZE) {
+        let futures: Vec<_> = chunk.iter()
+            .map(|txid| build_transaction_from_db(db, txid))
+            .collect();
+        
+        let batch_results = futures::future::join_all(futures).await;
+        results.extend(batch_results.into_iter().filter_map(|r| r.ok()));
+    }
+    
+    results
 }
