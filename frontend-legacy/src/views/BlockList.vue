@@ -92,10 +92,15 @@ const fetchBlocks = async () => {
     const fetchedBlocks = await Promise.allSettled(blockPromises)
     blocks.value = fetchedBlocks
       .filter(result => result.status === 'fulfilled')
-      .map(result => ({
-        ...result.value,
-        txCount: result.value.tx?.length || 0
-      }))
+      .map(result => {
+        const block = result.value
+        return {
+          ...block,
+          txCount: block.tx?.length || 0,
+          // Detect PoS based on block height (PIVX switched to PoS after block 259200)
+          isPoS: block.height > 259200
+        }
+      })
   } catch (err) {
     console.error('Failed to fetch blocks:', err)
     error.value = err.message || 'Failed to load blocks'

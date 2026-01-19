@@ -163,6 +163,7 @@ import { useChainStore } from '@/stores/chainStore'
 import { blockService } from '@/services/blockService'
 import { transactionService } from '@/services/transactionService'
 import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatDifficulty } from '@/utils/formatters'
+import { LAST_POW_BLOCK } from '@/utils/constants'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -208,19 +209,16 @@ const fetchBlock = async (identifier) => {
     const blockData = await blockService.getBlockDetail(identifier)
     
     blockData.txCount = blockData.tx?.length || 0
+    
+    // Detect PoS vs PoW based on block height (from chainparams.cpp)
+    // PIVX switched to PoS after block 259200
+    blockData.isPoS = blockData.height > LAST_POW_BLOCK
+    
     block.value = blockData
 
     // Fetch transactions in parallel
     if (blockData.tx && blockData.tx.length > 0) {
       await fetchTransactions(blockData.tx)
-      
-      // Detect PoS vs PoW after transactions are loaded
-      if (transactions.value.length > 0) {
-        const firstTx = transactions.value[0]
-        blockData.isPoS = !(firstTx.vin?.[0]?.coinbase)
-      } else {
-        blockData.isPoS = false
-      }
     }
   } catch (err) {
     console.error('Failed to fetch block:', err)

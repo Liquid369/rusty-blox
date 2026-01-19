@@ -180,6 +180,8 @@ const fetchRecentBlocks = async () => {
     recentBlocks.value = result.map(block => ({
       ...block,
       txCount: block.tx?.length || 0,
+      // Detect PoS based on block height (PIVX switched to PoS after block 259200)
+      isPoS: block.height > 259200
       // Size is not in the basic API response, skip it
     }))
     

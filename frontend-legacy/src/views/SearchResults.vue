@@ -155,6 +155,16 @@ const performSearch = async () => {
       }))
     }
     
+    // Process blocks to add PoS detection
+    if (data.blocks) {
+      data.blocks = data.blocks.map(block => ({
+        ...block,
+        txCount: block.tx?.length || 0,
+        // Detect PoS based on block height (PIVX switched to PoS after block 259200)
+        isPoS: block.height > 259200
+      }))
+    }
+    
     results.value = data
   } catch (err) {
     console.error('Search error:', err)
