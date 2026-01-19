@@ -11,6 +11,7 @@ export const MAX_SUPPLY = 99100000 // Maximum PIV supply
 export const SATOSHIS_PER_PIV = 100000000
 export const BLOCK_TIME = 60 // Average block time in seconds
 export const CONFIRMATIONS_REQUIRED = 6 // Confirmations for "confirmed" status
+export const LAST_POW_BLOCK = 259200 // Last Proof of Work block (from chainparams.cpp)
 
 // Masternode Constants
 export const MASTERNODE_COLLATERAL = 10000 // PIV required for masternode
@@ -86,6 +87,7 @@ export default {
   SATOSHIS_PER_PIV,
   BLOCK_TIME,
   CONFIRMATIONS_REQUIRED,
+  LAST_POW_BLOCK,
   MASTERNODE_COLLATERAL,
   MAX_MONTHLY_BUDGET,
   GOVERNANCE_VOTE_THRESHOLD,
