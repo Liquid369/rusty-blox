@@ -34,9 +34,8 @@ export function useWebSocket(endpoint, options = {}) {
   // Get WebSocket URL based on current location
   const getWebSocketUrl = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = import.meta.env.VITE_WS_HOST || window.location.hostname
-    const port = import.meta.env.VITE_WS_PORT || '3005'
-    return `${protocol}//${host}:${port}${endpoint}`
+    const host = window.location.host // includes port if present
+    return `${protocol}//${host}${endpoint}`
   }
 
   const connect = () => {
