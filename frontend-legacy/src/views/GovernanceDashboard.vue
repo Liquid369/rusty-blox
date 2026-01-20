@@ -38,7 +38,7 @@
           <div class="budget-stats-grid">
             <div class="budget-stat">
               <div class="stat-label">Active Proposals</div>
-              <div class="stat-value stat-accent">{{ passingProposals.length }}</div>
+              <div class="stat-value stat-accent">{{ activeProposals.length }}</div>
             </div>
             <div class="budget-stat">
               <div class="stat-label">Max Monthly Budget</div>
