@@ -864,16 +864,19 @@ async fn aggregate_xpub_data(
         (None, None, None, None)
     };
     
-    let used_tokens = if params.details == "txs" || params.details == "tokens" || params.details == "tokenBalances" {
-        Some(used_addresses.len() as u32)
-    } else {
-        None
-    };
+    // Blockbook always returns usedTokens (count of addresses with activity)
+    // regardless of details mode
+    let used_tokens = Some(used_addresses.len() as u32);
     
     // Aggregate totals
     let xpub_total_received: i64 = used_addresses.iter().map(|(_, _, _, _, total_recv, _)| total_recv).sum();
     let xpub_total_sent: i64 = used_addresses.iter().map(|(_, _, _, _, _, total_snt)| total_snt).sum();
     let xpub_balance: i64 = used_addresses.iter().map(|(_, _, _, balance, _, _)| balance).sum();
+    
+    // Blockbook's txs field for xpub = total transfers across ALL addresses
+    // (not unique transactions). If an address appears in 2 txs, it counts as 2.
+    // This matches: sum of all per-address tx counts = total "transfers"
+    let total_transfers: usize = used_addresses.iter().map(|(_, _, tx_count, _, _, _)| tx_count).sum();
     
     Ok(XPubInfo {
         page: page,
@@ -885,7 +888,7 @@ async fn aggregate_xpub_data(
         total_sent: xpub_total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_tx_count as u32,  // Total tx count (not paginated count)
+        txs: total_transfers as u32,  // Total transfers (Blockbook compatibility)
         txids,
         tokens: tokens.0,
         transactions,  // Now properly populated when details=txs
