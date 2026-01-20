@@ -147,25 +147,32 @@ const performSearch = async () => {
   try {
     const data = await searchService.search(searchQuery.value)
     
-    // Process transactions to add type
-    if (data.transactions) {
-      data.transactions = data.transactions.map(tx => ({
-        ...tx,
-        type: detectTransactionType(tx)
-      }))
-    }
+    console.log('Search result:', data)
     
-    // Process blocks to add PoS detection
-    if (data.blocks) {
-      data.blocks = data.blocks.map(block => ({
-        ...block,
-        txCount: block.tx?.length || 0,
-        // Detect PoS based on block height (PIVX switched to PoS after block 259200)
-        isPoS: block.height > 259200
-      }))
+    // Backend returns a single SearchResult object with a "type" field
+    // Redirect to appropriate page based on result type
+    if (data.type === 'Block') {
+      // Keep searching state true during redirect
+      await router.push(`/block/${data.height}`)
+      return
+    } else if (data.type === 'Transaction') {
+      await router.push(`/tx/${data.txid}`)
+      return
+    } else if (data.type === 'Address') {
+      await router.push(`/address/${data.address}`)
+      return
+    } else if (data.type === 'XPub') {
+      console.log('Redirecting to xpub:', data.xpub)
+      await router.push(`/xpub/${data.xpub}`)
+      return
+    } else if (data.type === 'NotFound') {
+      // Show not found message
+      error.value = `No results found for "${searchQuery.value}"`
+      results.value = { blocks: [], transactions: [], addresses: [] }
+    } else {
+      // Fallback: show the raw result
+      results.value = data
     }
-    
-    results.value = data
   } catch (err) {
     console.error('Search error:', err)
     error.value = err.message || 'Failed to perform search'

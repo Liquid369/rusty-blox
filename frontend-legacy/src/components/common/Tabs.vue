@@ -8,7 +8,7 @@
         @click="$emit('update:modelValue', tab.value)"
       >
         {{ tab.label }}
-        <Badge v-if="tab.badge" size="sm" :variant="modelValue === tab.value ? 'primary' : 'secondary'">
+        <Badge v-if="tab.badge" size="sm" :variant="modelValue === tab.value ? 'accent' : 'default'">
           {{ tab.badge }}
         </Badge>
       </button>
