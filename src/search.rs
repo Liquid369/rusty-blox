@@ -25,6 +25,9 @@ pub enum SearchResult {
         address: String,
         balance: Option<String>,
     },
+    XPub {
+        xpub: String,
+    },
     NotFound {
         query: String,
     },
@@ -45,6 +48,11 @@ fn detect_query_type(query: &str) -> QueryType {
         return QueryType::HashOrTxid;
     }
     
+    // XPub (BIP32 extended public key): starts with "xpub" and is 111 chars
+    if q.starts_with("xpub") && q.len() >= 100 && q.len() <= 120 {
+        return QueryType::XPub;
+    }
+    
     // Starts with D = PIVX address
     if q.starts_with('D') && q.len() >= 26 && q.len() <= 35 {
         return QueryType::Address;
@@ -57,6 +65,7 @@ enum QueryType {
     BlockHeight,
     HashOrTxid,
     Address,
+    XPub,
     Unknown,
 }
 
@@ -68,6 +77,7 @@ pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::er
         QueryType::BlockHeight => search_block_by_height(db, query),
         QueryType::HashOrTxid => search_hash_or_txid(db, query),
         QueryType::Address => search_address(db, query),
+        QueryType::XPub => search_xpub(query),
         QueryType::Unknown => Ok(SearchResult::NotFound {
             query: query.to_string(),
         }),
@@ -216,5 +226,21 @@ fn search_address(db: &Arc<DB>, address: &str) -> Result<SearchResult, Box<dyn s
         None => Ok(SearchResult::NotFound {
             query: address.to_string(),
         }),
+    }
+}
+
+/// Search for XPub (extended public key)
+/// Just validates format and returns the xpub - actual data fetching happens in xpub endpoint
+fn search_xpub(xpub: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    // Basic validation: starts with "xpub" and has reasonable length
+    if xpub.starts_with("xpub") && xpub.len() >= 100 && xpub.len() <= 120 {
+        // Could add more validation (base58 checksum) but API endpoint will handle that
+        Ok(SearchResult::XPub {
+            xpub: xpub.to_string(),
+        })
+    } else {
+        Ok(SearchResult::NotFound {
+            query: xpub.to_string(),
+        })
     }
 }
