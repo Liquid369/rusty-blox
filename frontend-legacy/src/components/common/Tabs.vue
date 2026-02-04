@@ -72,8 +72,8 @@ defineEmits(['update:modelValue'])
 }
 
 .tab-button.active {
-  color: var(--text-accent);
-  border-bottom-color: var(--text-accent);
+  color: #fff;
+  border-bottom-color: var(--purple-accent);
 }
 
 .tabs-content {

@@ -114,10 +114,10 @@ const handleClick = (params) => {
 
 <style scoped>
 .chart-container {
-  background: var(--card-bg);
+  background: linear-gradient(180deg, #B359FC80, #B359FC10);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
-  border: 1px solid var(--border-color);
+  border: 2px solid var(--purple-main);
 }
 
 .chart-header {

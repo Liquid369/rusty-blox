@@ -43,8 +43,8 @@ const handleClick = (event) => {
 
 <style scoped>
 .card {
-  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-quaternary) 100%);
-  border: 2px solid var(--border-secondary);
+  background: linear-gradient(180deg, #B359FC80, #B359FC10);
+  border: 2px solid var(--purple-main);
   border-radius: var(--radius-lg);
   overflow: hidden;
   transition: all var(--transition-base);
@@ -58,7 +58,6 @@ const handleClick = (event) => {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--pivx-purple-primary) 0%, var(--pivx-accent) 100%);
   opacity: 0;
   transition: opacity var(--transition-base);
 }
@@ -68,10 +67,10 @@ const handleClick = (event) => {
 }
 
 .card-hover:hover {
-  border-color: var(--border-accent);
+  border-color: var(--purple-accent);
   box-shadow: 
-    0 8px 16px rgba(0, 0, 0, 0.4),
-    0 0 20px rgba(89, 252, 179, 0.15);
+    0 8px 16px #110B1B50,
+    0 0 20px #110B1B20;
   transform: translateY(-2px);
 }
 
@@ -84,7 +83,7 @@ const handleClick = (event) => {
   box-shadow: 
     0 12px 24px rgba(0, 0, 0, 0.5),
     0 0 30px rgba(89, 252, 179, 0.2);
-  border-color: var(--border-accent);
+  border-color: var(--purple-accent);
 }
 
 .card-clickable:active {
@@ -107,7 +106,7 @@ const handleClick = (event) => {
 .card-footer {
   padding: var(--space-4) var(--space-6);
   border-top: 1px solid var(--border-subtle);
-  background: rgba(42, 27, 66, 0.5);
+  background: #2a1b4280;
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }

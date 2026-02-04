@@ -53,13 +53,13 @@ defineEmits(['update:modelValue'])
 }
 
 .range-button:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--purple-mid);
   border-color: var(--text-accent);
   color: var(--text-primary);
 }
 
 .range-button.active {
-  background: var(--text-accent);
+  background: var(--purple-accent);
   border-color: var(--text-accent);
   color: var(--text-dark);
   font-weight: var(--weight-bold);

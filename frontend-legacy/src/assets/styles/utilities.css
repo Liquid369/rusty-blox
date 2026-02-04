@@ -218,3 +218,14 @@
 .break-word {
   word-break: break-word;
 }
+
+/* SVG Icons */
+.warning-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  background-image: url('@/assets/icons/pivx_icon_warning: .svg;');
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  display: inline-block;
+}

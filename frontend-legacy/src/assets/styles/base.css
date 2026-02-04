@@ -23,14 +23,7 @@ body {
   font-size: var(--text-base);
   font-weight: var(--weight-regular);
   color: var(--text-primary);
-  background: linear-gradient(
-    135deg,
-    #130D1E 0%,
-    #1A1229 25%,
-    #2A1B42 50%,
-    #1A1229 75%,
-    #130D1E 100%
-  );
+  background: linear-gradient(180deg, var(--purple-darkest), var(--purple-dark));
   background-attachment: fixed;
   min-height: 100vh;
 }

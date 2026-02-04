@@ -1,6 +1,6 @@
 <template>
   <header class="app-header">
-    <div class="header-container">
+    <div class= "header-container">
       <!-- Logo and Title -->
       <RouterLink to="/" class="logo-section">
         <img 
@@ -10,27 +10,8 @@
           @error="onLogoError"
         >
         <div class="title-section">
-          <h1 class="site-title">Explorer</h1>
-          <p class="site-subtitle">PIVX Blockchain</p>
         </div>
       </RouterLink>
-
-      <!-- Network Status -->
-      <div class="network-status" :class="{ synced: chainStore.synced }">
-        <LiveIndicator 
-          :connected="wsStore.anyConnected" 
-          :connecting="!wsStore.anyConnected"
-          class="status-indicator"
-        />
-        <div class="status-info">
-          <span class="status-text">
-            {{ chainStore.synced ? 'Synced' : 'Syncing' }}
-          </span>
-          <span class="status-height">
-            {{ formatNumber(chainStore.syncHeight) }}
-          </span>
-        </div>
-      </div>
 
       <!-- Search Bar -->
       <SearchBar class="header-search" />
@@ -89,13 +70,14 @@ onMounted(() => {
 
 <style scoped>
 .app-header {
-  background: var(--bg-secondary);
-  border-bottom: 3px solid var(--border-primary);
+  background: linear-gradient(180deg, var(--purple-mid), var(--purple-main));
+  border-bottom: 0px solid var(--border-primary);
   padding: var(--space-4) 0;
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
   backdrop-filter: blur(10px);
+  box-shadow: 0 0 20px #00000050;
 }
 
 .header-container {
@@ -106,6 +88,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--space-6);
   flex-wrap: wrap;
+  justify-content: center;
 }
 
 .logo-section {
@@ -121,7 +104,7 @@ onMounted(() => {
 }
 
 .logo {
-  height: 42px;
+  height: 60px;
   width: auto;
   display: block;
 }
@@ -195,7 +178,7 @@ onMounted(() => {
 .main-nav {
   display: flex;
   gap: var(--space-2);
-  margin-left: auto;
+  margin-center: auto;
 }
 
 .nav-link {
@@ -210,12 +193,12 @@ onMounted(() => {
 }
 
 .nav-link:hover {
-  background: var(--bg-tertiary);
+  background: var(--purple-mid);
   color: var(--text-primary);
 }
 
 .nav-link.router-link-active {
-  background: var(--color-primary);
+  background: var(--purple-accent);
   color: var(--text-primary);
 }
 
@@ -227,14 +210,14 @@ onMounted(() => {
 .progress-bar {
   width: 100%;
   height: 4px;
-  background: var(--bg-elevated);
+  background: var(--purple-dark);
   border-radius: 2px;
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--color-accent), var(--pivx-accent-dark));
+  background: linear-gradient(90deg, var(--purple-main), var(--purple-accent));
   transition: width var(--transition-slow);
   box-shadow: var(--shadow-glow);
 }

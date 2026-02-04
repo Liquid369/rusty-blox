@@ -18,7 +18,7 @@
     <!-- WebSocket reconnect failure banner -->
     <div v-if="wsStore.anyReconnectFailed" class="ws-error-banner">
       <div class="ws-error-content">
-        <span class="ws-error-icon">🔌</span>
+        <span class="ws-error-icon">⚠️</span>
         <div class="ws-error-text">
           <strong>Unable to Connect to Live Updates</strong>
           <span class="ws-error-details">
@@ -135,7 +135,7 @@ onUnmounted(() => {
   cursor: pointer;
   font-size: 18px;
   line-height: 1;
-  transition: background 0.2s;
+  transition: 0.2s;
   flex-shrink: 0;
 }
 
@@ -149,7 +149,8 @@ onUnmounted(() => {
   top: 0;
   left: 0;
   right: 0;
-  background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
+  background: linear-gradient(90deg, #ef4444, #4B0606);
+  backdrop-filter: blur(20px);
   color: white;
   padding: var(--space-3) var(--space-4);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
@@ -166,7 +167,7 @@ onUnmounted(() => {
 }
 
 .ws-error-icon {
-  font-size: 24px;
+  font-size: 36px;
   flex-shrink: 0;
 }
 
@@ -188,9 +189,9 @@ onUnmounted(() => {
 }
 
 .ws-error-retry {
-  background: rgba(255, 255, 255, 0.9);
+  background: #EF4444;
   border: none;
-  color: #e67e22;
+  color: #ffffff;
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -201,8 +202,9 @@ onUnmounted(() => {
 }
 
 .ws-error-retry:hover {
-  background: white;
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  background: #E61414;
+  border: 1px solid var(--pivx-danger);
+  transform: translateY(0px);
+  box-shadow: 0 2px 8px #4B0606;
 }
 </style>

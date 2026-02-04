@@ -138,7 +138,7 @@ const handleClick = (event) => {
 }
 
 .btn-ghost:hover:not(.btn-disabled) {
-  background: var(--bg-secondary);
+  background: var(--purple-accent);
   color: var(--text-primary);
 }
 
