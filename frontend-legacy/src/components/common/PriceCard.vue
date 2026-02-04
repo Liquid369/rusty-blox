@@ -74,8 +74,8 @@ const toggleCurrency = () => {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #110B1B50;
+  border: 1px solid 110B1B50;
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -84,9 +84,10 @@ const toggleCurrency = () => {
 }
 
 .price-widget:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: var(--pivx-accent);
-  transform: translateY(-1px);
+  background: #110B1B90;
+  border: 1px solid;
+  border-color: var(--purple-accent);
+  transform: translateY(0px);
 }
 
 .price-widget.loading {
@@ -110,12 +111,12 @@ const toggleCurrency = () => {
 }
 
 .price-label {
-  color: var(--text-secondary);
+  color: var(--text-primary);
   font-weight: 500;
 }
 
 .price-value {
-  color: var(--pivx-accent);
+  color: var(--purple-accent);
   font-weight: 700;
   font-size: 1rem;
 }
@@ -129,7 +130,7 @@ const toggleCurrency = () => {
   width: 16px;
   height: 16px;
   border: 2px solid rgba(255, 255, 255, 0.2);
-  border-top-color: var(--pivx-accent);
+  border-top-color: var(--purple-accent);
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }

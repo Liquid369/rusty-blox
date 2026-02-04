@@ -1,49 +1,58 @@
 /* PIVX Official Design Tokens - Based on Brand Identity Guide */
 
 :root {
-  /* ===== PIVX Official Purple Palette ===== */
-  /* Primary - Official PIVX Purple (CMYK: 75 98 1 0) */
-  --pivx-purple-primary: #662D91;
-  --pivx-purple-secondary: #4D3077;    /* CMYK: 85 97 20 8 */
-  --pivx-purple-tertiary: #2A1B42;     /* CMYK: 88 94 42 47 */
-  --pivx-purple-deep: #130D1E;         /* CMYK: 80 77 56 76 */
-  
+  /* Primary PIVX Color Palette - Modified by YuurinBee */
+  --pivx-purple-primary: #642D8F;
+  --pivx-purple-secondary: #452568;
+  --pivx-purple-tertiary: #201634;
+  --pivx-purple-deep: #110B1B;         
+
+  /* Updated Color Palette - YuurinBee */
+  /* (Lightest to Darkest) */
+  --purple-accent: #B359FC;
+  --purple-main: #642D8F;
+  --purple-mid: #452568;
+  --purple-dark: #201634;
+  --purple-darkest: #110B1B;
+  --green-accent: #B3FF78;
+  --green-accent-dark: #71BB3A;
+
   /* Derived Tints */
   --pivx-purple-light: #8547B3;
   --pivx-purple-lighter: #A366CC;
   
-  /* Accent - Teal/Cyan (from PIVX logo) */
-  --pivx-accent: #59FCB3;
-  --pivx-accent-dark: #3DD99B;
+  /* Accent - Green (Tetradic Colors from PIVX logo) */
+  --pivx-accent: #B3FF78;
+  --pivx-accent-dark: #71BB3A;
   
   /* ===== Semantic Mappings ===== */
-  --color-primary: var(--pivx-purple-primary);
-  --color-secondary: var(--pivx-purple-secondary);
-  --color-accent: var(--pivx-accent);
+  --color-primary: var(--purple-main);
+  --color-secondary: var(--purple-mid);
+  --color-accent: var(--purple-accent);
   
   /* ===== Backgrounds (Dark Mode First) ===== */
-  --bg-primary: #130D1E;          /* Main background */
-  --bg-secondary: #2A1B42;        /* Cards/elevated surfaces */
+  --bg-primary: #110B1B;          /* Main background */
+  --bg-secondary: #200734;        /* Cards/elevated surfaces */
   --bg-tertiary: #4D3077;         /* Hover states/inputs */
   --bg-quaternary: #3A2755;       /* Between tertiary and secondary */
   --bg-elevated: #1A1229;         /* Slightly elevated from primary */
   
   /* ===== Borders ===== */
-  --border-primary: #662D91;
-  --border-secondary: #4D3077;
+  --border-primary: #642D8F;
+  --border-secondary: #452568;
   --border-subtle: #2A1B42;
-  --border-accent: #59FCB3;
+  --border-accent: #B359FC;
   
   /* ===== Text Hierarchy ===== */
   --text-primary: #FFFFFF;
   --text-secondary: #B2B2B2;
   --text-tertiary: #8B8B8B;
-  --text-accent: #59FCB3;
+  --text-accent: #B3FF78;
   --text-purple: #A366CC;
   
   /* ===== Semantic Colors ===== */
-  --success: #59FCB3;
-  --warning: #F59E0B;
+  --success: #B3FF78;
+  --warning: #f6ff78;
   --danger: #EF4444;
   --info: #8547B3;
   

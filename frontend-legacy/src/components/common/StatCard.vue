@@ -53,8 +53,8 @@ defineProps({
 
 <style scoped>
 .stat-card {
-  background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-quaternary) 100%);
-  border: 2px solid var(--border-secondary);
+  background: linear-gradient(180deg, #B359FC80, #B359FC10);
+  border: 2px solid var(--purple-main);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
   transition: all var(--transition-base);
@@ -73,16 +73,16 @@ defineProps({
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--pivx-purple-primary) 0%, var(--pivx-accent) 100%);
   opacity: 0;
   transition: opacity var(--transition-base);
 }
 
 .stat-card:hover {
-  transform: translateY(-4px);
+  transform: translateY(-2px);
+  background: linear-gradient(180deg, #B359FC95, #B359FC30);
   box-shadow: 
     0 12px 24px rgba(0, 0, 0, 0.5),
-    0 0 30px rgba(89, 252, 179, 0.15);
+    0 0 10px var(--purple-accent);
   border-color: var(--border-accent);
 }
 

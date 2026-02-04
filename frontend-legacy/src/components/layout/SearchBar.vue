@@ -121,8 +121,8 @@ const hideSuggestions = () => {
   width: 100%;
   padding: var(--space-3) var(--space-4);
   padding-right: 48px;
-  background: var(--bg-tertiary);
-  border: 2px solid var(--border-secondary);
+  background: linear-gradient(270deg, var(--purple-dark), var(--purple-darkest));
+  border: 0px solid var(--purple-darkest);
   border-radius: var(--radius-lg);
   color: var(--text-primary);
   font-size: var(--text-base);
@@ -132,8 +132,11 @@ const hideSuggestions = () => {
 
 .search-input:focus {
   outline: none;
-  border-color: var(--border-accent);
-  box-shadow: var(--shadow-glow);
+  background: var(--purple-darkest);
+  border-color: var(--purple-accent);
+  border: 1px solid var(--purple-accent);
+  color: var(--purple-accent);
+  box-shadow: 0px 0px 10px var(--purple-darkest);
 }
 
 .search-input::placeholder {
@@ -148,7 +151,7 @@ const hideSuggestions = () => {
   transform: translateY(-50%);
   width: 40px;
   height: 40px;
-  background: var(--color-primary);
+  background: #110B1B00;
   border: none;
   border-radius: var(--radius-md);
   font-size: 18px;
@@ -160,7 +163,7 @@ const hideSuggestions = () => {
 }
 
 .search-button:hover:not(:disabled) {
-  background: var(--pivx-purple-light);
+  background: var(--purple-accent);
   transform: translateY(-50%) scale(1.05);
 }
 

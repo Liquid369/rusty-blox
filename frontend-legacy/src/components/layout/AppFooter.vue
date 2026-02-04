@@ -39,8 +39,8 @@ const currentYear = computed(() => new Date().getFullYear())
 
 <style scoped>
 .app-footer {
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border-subtle);
+  background: var(--purple-darkest);
+  border-top: 0px solid var(--border-subtle);
   margin-top: var(--space-16);
   padding: var(--space-8) 0;
 }
@@ -96,7 +96,7 @@ const currentYear = computed(() => new Date().getFullYear())
 }
 
 .footer-links a {
-  color: var(--pivx-purple-primary);
+  color: var(--purple-accent);
   text-decoration: none;
   font-size: var(--text-sm);
   font-weight: var(--weight-bold);
@@ -104,7 +104,7 @@ const currentYear = computed(() => new Date().getFullYear())
 }
 
 .footer-links a:hover {
-  color: var(--text-accent);
+  color: var(--purple-main);
 }
 
 .separator {
