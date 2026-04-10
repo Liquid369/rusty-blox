@@ -75,12 +75,26 @@ pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, boo
         Err(_) => return utxos,
     };
     
+    // CRITICAL: Validate count to prevent memory exhaustion
+    // A reasonable maximum is 1 million UTXOs per address
+    if count > 1_000_000 {
+        eprintln!("⚠️  Invalid UTXO count: {} (too large, data likely corrupted)", count);
+        return utxos;
+    }
+    
     for _ in 0..count {
         // Read txid length
         let txid_len = match cursor.read_u32::<byteorder::LittleEndian>() {
             Ok(len) => len as usize,
             Err(_) => break,
         };
+        
+        // CRITICAL: Validate txid_len before allocation to prevent memory exhaustion
+        // TXID should always be 32 bytes for Bitcoin-derived chains
+        if txid_len == 0 || txid_len > 64 {
+            eprintln!("⚠️  Invalid txid length: {} bytes (expected 32, data likely corrupted)", txid_len);
+            break;
+        }
         
         // Read txid
         let mut txid = vec![0u8; txid_len];

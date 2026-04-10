@@ -36,21 +36,35 @@ struct FetchedBlock {
 
 /// Get current chain tip from RPC node
 fn get_rpc_chain_tip(
-    rpc_client: &PivxRpcClient,
+    rpc_client: &Arc<PivxRpcClient>,
 ) -> Result<ChainTip, Box<dyn std::error::Error>> {
     let timer = metrics::Timer::new();
     
-    // Get block count (height)
-    let height_i64 = rpc_client.getblockcount()?;
+    // Get block count (height) - must use separate thread
+    let client = Arc::clone(rpc_client);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = client.getblockcount();
+        let _ = tx.send(result);
+    });
+    let height_i64 = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "RPC timeout")??;
     let height = height_i64 as i32;
     
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockcount"])
         .observe(timer.elapsed_secs());
     
-    // Get block hash at this height
+    // Get block hash at this height - must use separate thread
     let timer2 = metrics::Timer::new();
-    let hash = rpc_client.getblockhash(height as i64)?;
+    let client = Arc::clone(rpc_client);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = client.getblockhash(height as i64);
+        let _ = tx.send(result);
+    });
+    let hash = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "RPC timeout")??;
     
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockhash"])
@@ -109,7 +123,6 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
 /// Phase 1a: Fetch block data from RPC (without indexing)
 /// Returns parsed block JSON for later processing
 async fn fetch_block_data(
-    rpc_client: &PivxRpcClient,
     height: i32,
 ) -> Result<FetchedBlock, Box<dyn std::error::Error>> {
     let config = get_global_config();
@@ -119,12 +132,32 @@ async fn fetch_block_data(
     
     let client = reqwest::Client::new();
     
-    // Get block hash at this height
-    let timer = metrics::Timer::new();
-    let block_hash = rpc_client.getblockhash(height as i64)?;
-    metrics::RPC_CALL_DURATION
-        .with_label_values(&["getblockhash"])
-        .observe(timer.elapsed_secs());
+    // Get block hash at this height - must use separate thread
+    let (tx, rx) = std::sync::mpsc::channel();
+    let rpc_host = url.clone();
+    let rpc_user = user.clone();
+    let rpc_pass = pass.clone();
+    let height_i64 = height as i64;
+    
+    std::thread::spawn(move || {
+        let timer = metrics::Timer::new();
+        let client = PivxRpcClient::new(
+            rpc_host,
+            Some(rpc_user),
+            Some(rpc_pass),
+            3,
+            10,
+            30000,
+        );
+        let result = client.getblockhash(height_i64);
+        metrics::RPC_CALL_DURATION
+            .with_label_values(&["getblockhash"])
+            .observe(timer.elapsed_secs());
+        let _ = tx.send(result);
+    });
+    
+    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "RPC timeout getting block hash")??;
     
     // Fetch block with full transaction data (verbosity=2)
     let timer = metrics::Timer::new();
@@ -213,7 +246,7 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
 ///   is done via HashSet lookup instead of on-demand RPC fetching. This ensures
 ///   100% accurate spend detection matching the initial sync two-pass algorithm.
 async fn index_block_from_rpc(
-    rpc_client: &PivxRpcClient,
+    rpc_client: &Arc<PivxRpcClient>,
     height: i32,
     db: &Arc<DB>,
     broadcaster: &Option<Arc<EventBroadcaster>>,
@@ -242,8 +275,15 @@ async fn index_block_from_rpc(
         Some(enrich_height) => height > enrich_height,  // Only for NEW blocks
     };
     
-    // Get block hash at this height
-    let block_hash = rpc_client.getblockhash(height as i64)?;
+    // Get block hash at this height - must use separate thread
+    let client = Arc::clone(rpc_client);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = client.getblockhash(height as i64);
+        let _ = tx.send(result);
+    });
+    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| "RPC timeout")??;
     
     // CRITICAL FIX: Atomic check-and-reserve to prevent race conditions
     // Step 1: Check if already indexed OR being processed
@@ -592,7 +632,16 @@ async fn index_block_from_rpc(
         }
         
         // Prepend dummy block_version for parser compatibility
-        let mut tx_data_with_header = Vec::with_capacity(4 + raw_tx_bytes.len());
+        // Use safe checked addition to prevent overflow
+        let total_size = match 4_usize.checked_add(raw_tx_bytes.len()) {
+            Some(size) if size <= 10_000_004 => size,
+            _ => {
+                eprintln!("⚠️  Transaction {} size calculation overflow", txid);
+                tx_errors += 1;
+                continue;
+            }
+        };
+        let mut tx_data_with_header = Vec::with_capacity(total_size);
         tx_data_with_header.extend_from_slice(&[0u8; 4]);
         tx_data_with_header.extend_from_slice(&raw_tx_bytes);
         
@@ -651,7 +700,20 @@ async fn index_block_from_rpc(
                     
                     // Get existing UTXOs for this address
                     let mut existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
-                        Some(data) => deserialize_utxos(&data).await,
+                        Some(data) => {
+                            // Validate data size before deserialization
+                            // Each UTXO is 40 bytes (32 byte txid + 8 byte vout)
+                            // Limit to 100k UTXOs = 4MB
+                            if data.len() > 4_000_000 {
+                                eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                Vec::new()
+                            } else if data.len() % 40 != 0 {
+                                eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                Vec::new()
+                            } else {
+                                deserialize_utxos(&data).await
+                            }
+                        },
                         None => Vec::new(),
                     };
                     
@@ -830,7 +892,7 @@ async fn index_block_from_rpc(
             }
             
             if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
-                eprintln!("⚠️  Previous transaction {} too large", prev_txid_hex);
+                eprintln!("⚠️  Previous transaction {} too large: {} bytes", prev_txid_hex, prev_tx_data.len());
                 continue;
             }
             
@@ -843,8 +905,22 @@ async fn index_block_from_rpc(
                 continue;
             }
             
+            // Additional safety check: ensure raw_prev_tx length is reasonable
+            if raw_prev_tx.len() > 10_000_000 {
+                eprintln!("⚠️  Previous transaction {} raw data too large: {} bytes", prev_txid_hex, raw_prev_tx.len());
+                continue;
+            }
+            
             // Prepend dummy block_version for parser compatibility
-            let mut prev_tx_with_header = Vec::with_capacity(4 + raw_prev_tx.len());
+            // Use safe checked addition to prevent overflow
+            let total_size = match 4_usize.checked_add(raw_prev_tx.len()) {
+                Some(size) if size <= 10_000_004 => size,
+                _ => {
+                    eprintln!("⚠️  Previous transaction {} total size overflow or too large", prev_txid_hex);
+                    continue;
+                }
+            };
+            let mut prev_tx_with_header = Vec::with_capacity(total_size);
             prev_tx_with_header.extend_from_slice(&[0u8; 4]);
             prev_tx_with_header.extend_from_slice(raw_prev_tx);
             
@@ -866,7 +942,18 @@ async fn index_block_from_rpc(
                         
                         // Get existing UTXOs
                         let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
-                            Some(data) => deserialize_utxos(&data).await,
+                            Some(data) => {
+                                // Validate data size before deserialization
+                                if data.len() > 4_000_000 {
+                                    eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                    Vec::new()
+                                } else if data.len() % 40 != 0 {
+                                    eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                    Vec::new()
+                                } else {
+                                    deserialize_utxos(&data).await
+                                }
+                            },
                             None => Vec::new(),
                         };
                         
@@ -1155,18 +1242,31 @@ pub async fn run_block_monitor(
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
     
-    let rpc_client = Arc::new(PivxRpcClient::new(
-        rpc_host.clone(),
-        Some(rpc_user),
-        Some(rpc_pass),
-        3,     // Max retries
-        10,    // Connection timeout (seconds)
-        30000, // Read/write timeout (milliseconds) - increased for getblock calls
-    ));
+    // Create RPC client in completely separate OS thread
+    // PivxRpcClient uses reqwest::blocking which creates its own runtime
+    let (tx, rx) = std::sync::mpsc::channel();
+    let rpc_host_clone = rpc_host.clone();
     
-    // Test connection
-    match rpc_client.getblockcount() {
-        Ok(height) => {
+    std::thread::spawn(move || {
+        let client = PivxRpcClient::new(
+            rpc_host_clone.clone(),
+            Some(rpc_user),
+            Some(rpc_pass),
+            3,
+            10,
+            30000,
+        );
+        
+        // Test connection
+        let result = match client.getblockcount() {
+            Ok(height) => Ok((Arc::new(client), height)),
+            Err(e) => Err(e),
+        };
+        let _ = tx.send(result);
+    });
+    
+    let rpc_client = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok((client, height))) => {
             info!(rpc_height = height, "RPC connection established");
             metrics::set_rpc_connected(true);
             
@@ -1174,8 +1274,9 @@ pub async fn run_block_monitor(
             if let Err(e) = set_network_height(&db, height as i32) {
                 error!(error = %e, "Failed to set initial network height");
             }
+            client
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!(error = %e, "RPC connection failed");
             metrics::set_rpc_connected(false);
             eprintln!("RPC connection failed: {}", e);
@@ -1186,7 +1287,17 @@ pub async fn run_block_monitor(
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
             }
         }
-    }
+        Err(_) => {
+            error!("RPC connection timed out");
+            metrics::set_rpc_connected(false);
+            eprintln!("RPC connection timed out");
+            
+            // Just poll database for changes
+            loop {
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+            }
+        }
+    };
     
     loop {
         // Get current tips
@@ -1299,12 +1410,11 @@ pub async fn run_block_monitor(
             
             let mut fetch_futures = Vec::new();
             for height in start_height..=end_height {
-                let rpc = rpc_client.clone();
                 let sem = fetch_semaphore.clone();
                 
                 fetch_futures.push(async move {
                     let _permit = sem.acquire().await.unwrap();
-                    (height, fetch_block_data(&rpc, height).await)
+                    (height, fetch_block_data(height).await)
                 });
             }
             
