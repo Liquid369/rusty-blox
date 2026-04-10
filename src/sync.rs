@@ -167,27 +167,40 @@ async fn update_network_height(db: &Arc<DB>) {
         Err(_) => return,
     };
     
-    // Create RPC client
-    let rpc_client = PivxRpcClient::new(
-        rpc_host,
-        Some(rpc_user),
-        Some(rpc_pass),
-        3,     // Max retries
-        10,    // Connection timeout
-        30000, // Read timeout
-    );
+    // Get network height - must use a completely separate OS thread
+    // because PivxRpcClient uses reqwest::blocking which creates its own runtime
+    let db_clone = Arc::clone(db);
+    let (tx, rx) = std::sync::mpsc::channel();
     
-    // Get network height
-    match rpc_client.getblockcount() {
-        Ok(height) => {
-            if let Err(e) = set_network_height(db, height as i32) {
+    std::thread::spawn(move || {
+        let rpc_client = PivxRpcClient::new(
+            rpc_host,
+            Some(rpc_user),
+            Some(rpc_pass),
+            3,
+            10,
+            30000,
+        );
+        let result = rpc_client.getblockcount();
+        let _ = tx.send(result);
+    });
+    
+    // Wait for result with timeout
+    let result = rx.recv_timeout(std::time::Duration::from_secs(10));
+    
+    match result {
+        Ok(Ok(height)) => {
+            if let Err(e) = set_network_height(&db_clone, height as i32) {
                 tracing::error!(error = ?e, "Failed to set network height");
             } else {
                 info!(network_height = height, "Network height retrieved");
             }
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             tracing::warn!(error = ?e, "Failed to get network height from RPC");
+        }
+        Err(_) => {
+            tracing::warn!("RPC call timed out");
         }
     }
 }
@@ -243,10 +256,19 @@ async fn run_initial_sync_leveldb(
     let rpc_user = config.get_string("rpc.user").unwrap_or_else(|_| "explorer".to_string());
     let rpc_pass = config.get_string("rpc.pass").unwrap_or_else(|_| "explorer_test_pass".to_string());
     
-    let rpc_client = PivxRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+    // Verify against RPC - use separate OS thread to avoid runtime nesting
+    let (tx, rx) = std::sync::mpsc::channel();
     
-    match rpc_client.getblockcount() {
-        Ok(network_height) => {
+    std::thread::spawn(move || {
+        let rpc_client = PivxRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+        let result = rpc_client.getblockcount();
+        let _ = tx.send(result);
+    });
+    
+    let network_height_result = rx.recv_timeout(std::time::Duration::from_secs(10));
+    
+    match network_height_result {
+        Ok(Ok(network_height)) => {
             let blocks_behind = network_height as i32 - leveldb_height;
             if blocks_behind > 0 {
                 tracing::warn!(
@@ -259,8 +281,11 @@ async fn run_initial_sync_leveldb(
                 info!(network_height, "LevelDB copy is current with daemon");
             }
         }
-        Err(e) => {
-            tracing::warn!(error = ?e, "Could not verify LevelDB freshness via RPC - proceeding");
+        Ok(Err(e)) => {
+            tracing::warn!(error = ?e, "RPC error verifying LevelDB freshness");
+        }
+        Err(_) => {
+            tracing::warn!("RPC call timed out");
         }
     }
     

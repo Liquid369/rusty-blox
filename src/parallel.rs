@@ -409,21 +409,20 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                 "params": [tip_hex, 1]
             });
             
-            // Use spawn_blocking for RPC call
+            // Use async reqwest client to avoid runtime nesting issues
+            let client = reqwest::Client::new();
             let rpc_result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || {
-                    reqwest::blocking::Client::new()
-                        .post(&url)
-                        .basic_auth(&user, Some(&pass))
-                        .json(&body)
-                        .send()
-                })
+                client
+                    .post(&url)
+                    .basic_auth(&user, Some(&pass))
+                    .json(&body)
+                    .send()
             ).await;
             
             match rpc_result {
-                Ok(Ok(Ok(resp))) if resp.status().is_success() => {
-                    if let Ok(text) = resp.text() {
+                Ok(Ok(resp)) if resp.status().is_success() => {
+                    if let Ok(text) = resp.text().await {
                         if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
                             if let Some(height) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
                                 info!(height = height, "RPC confirms tip");
@@ -441,11 +440,11 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
                         None
                     }
                 }
-                Ok(Ok(Ok(resp))) => {
+                Ok(Ok(resp)) => {
                     warn!(status = %resp.status(), "RPC returned error status");
                     None
                 }
-                Ok(Ok(Err(e))) => {
+                Ok(Err(e)) => {
                     warn!(error = %e, "RPC error");
                     None
                 }

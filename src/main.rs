@@ -389,14 +389,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sync_broadcaster = Arc::clone(&broadcaster);
         let blk_dir_clone = blk_dir_path.clone();
 
-        tokio::task::spawn_blocking(move || {
-            // Use tokio runtime for async operations
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                if let Err(e) = run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await {
-                    error!(error = ?e, "Sync service error");
-                }
-            });
+        // Spawn sync in a completely separate OS thread with its own runtime
+        // This isolates it from the main tokio runtime and avoids nested runtime issues
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to build runtime");
+            
+            if let Err(e) = rt.block_on(async {
+                run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await
+            }) {
+                error!(error = ?e, "Sync service error");
+            }
         });
 
     // Wait for minimum viable sync before starting web server
