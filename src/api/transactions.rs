@@ -336,16 +336,28 @@ async fn send_transaction_internal(
     let rpc_user = config.get::<String>("rpc.user");
     let rpc_pass = config.get::<String>("rpc.pass");
 
-    let client = PivxRpcClient::new(
-        rpc_host.unwrap_or_else(|_| "127.0.0.1:9998".to_string()),
-        Some(rpc_user.unwrap_or_default()),
-        Some(rpc_pass.unwrap_or_default()),
-        3,    // Max retries
-        10,   // Connection timeout
-        1000, // Read/write timeout
-    );
+    // Must use separate OS thread to avoid runtime nesting
+    let (tx_channel, rx) = std::sync::mpsc::channel();
+    let tx_hex_clone = tx_hex.clone();
+    
+    std::thread::spawn(move || {
+        let client = PivxRpcClient::new(
+            rpc_host.unwrap_or_else(|_| "127.0.0.1:9998".to_string()),
+            Some(rpc_user.unwrap_or_default()),
+            Some(rpc_pass.unwrap_or_default()),
+            3,    // Max retries
+            10,   // Connection timeout
+            1000, // Read/write timeout
+        );
+        let result = client.sendrawtransaction(&tx_hex_clone, Some(false));
+        let _ = tx_channel.send(result);
+    });
 
-    let result = client.sendrawtransaction(&tx_hex, Some(false));
+    let result = rx.recv_timeout(std::time::Duration::from_secs(10))
+        .map_err(|_| (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(BlockbookError::new("RPC timeout"))
+        ))?;
 
     match result {
         Ok(txid) => {

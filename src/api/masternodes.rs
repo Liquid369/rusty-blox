@@ -161,15 +161,23 @@ pub async fn relay_mnb_v2(
     let rpc_user = config.get::<String>("rpc.user");
     let rpc_pass = config.get::<String>("rpc.pass");
 
-    let client = PivxRpcClient::new(
-        rpc_host.unwrap_or_else(|_| "127.0.0.1:51472".to_string()),
-        Some(rpc_user.unwrap_or_default()),
-        Some(rpc_pass.unwrap_or_default()),
-        3, 10, 1000,
-    );
+    // Must use separate OS thread to avoid runtime nesting
+    let (tx, rx) = std::sync::mpsc::channel();
+    let param_clone = param.clone();
+    
+    std::thread::spawn(move || {
+        let client = PivxRpcClient::new(
+            rpc_host.unwrap_or_else(|_| "127.0.0.1:51472".to_string()),
+            Some(rpc_user.unwrap_or_default()),
+            Some(rpc_pass.unwrap_or_default()),
+            3, 10, 1000,
+        );
+        let result = client.relaymasternodebroadcast(&param_clone);
+        let _ = tx.send(result);
+    });
 
-    match client.relaymasternodebroadcast(&param) {
-        Ok(mnb_relay) => Ok(Json(mnb_relay)),
-        Err(_) => Err(StatusCode::NOT_FOUND),
+    match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(Ok(mnb_relay)) => Ok(Json(mnb_relay)),
+        Ok(Err(_)) | Err(_) => Err(StatusCode::NOT_FOUND),
     }
 }
