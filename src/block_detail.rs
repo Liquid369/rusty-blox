@@ -8,6 +8,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockDetail {
@@ -357,10 +358,10 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                                 enrich_transaction_inputs(db, cf_transactions, &mut tx);
                                 transactions.push(tx);
                             } else {
-                                eprintln!("Failed to parse transaction: {}", txid_str);
+                                warn!(txid = %txid_str, "Failed to parse transaction");
                             }
                         } else {
-                            eprintln!("Transaction data not found for txid: {}", txid_str);
+                            warn!(txid = %txid_str, "Transaction data not found for txid");
                         }
                     }
                 }

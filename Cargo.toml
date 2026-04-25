@@ -104,6 +104,14 @@ num-traits = "0.2"
 clap = { version = "4.0", features = ["derive"] }
 shellexpand = "3.0"
 
+# Structured logging (tracing)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-appender = "0.2"
+
+# Metrics (Prometheus)
+prometheus = { version = "0.13", features = ["process"] }
+
 [build-dependencies]
 cc = "1.0"
 

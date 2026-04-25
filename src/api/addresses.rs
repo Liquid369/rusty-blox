@@ -7,12 +7,14 @@ use axum::{Json, Extension, extract::{Path as AxumPath, Query}};
 use rocksdb::DB;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
 use crate::parser::{deserialize_utxos, deserialize_transaction, deserialize_transaction_blocking};
 use crate::maturity::{filter_spendable_utxos, get_current_height};
 use super::types::{AddressInfo, AddressQuery, XPubInfo, UTXO, UtxoQuery};
+use super::transactions::{fetch_transactions_batch};
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
@@ -65,6 +67,7 @@ pub async fn addr_v2(
                 unconfirmed_txs: 0,
                 txs: 0,
                 txids: Some(vec![]),
+                transactions: None,
             })
         }
     }
@@ -227,30 +230,67 @@ async fn compute_address_info(
     
     // Sort by height descending (newest first = highest block)
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
-    let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
+    let all_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
     
-    let tx_count = unique_txids.len() as u32;
-    let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
-    let total_pages = if total_pages == 0 { 1 } else { total_pages };
+    // === PAGINATION LOGIC ===
+    // Validate and clamp parameters
+    const MAX_PAGE_SIZE: u32 = 1000;
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, MAX_PAGE_SIZE);
     
-    let txids = if params.details == "basic" {
-        None
+    let total_tx_count = all_txids.len();
+    let total_pages = if total_tx_count == 0 {
+        1
     } else {
-        Some(unique_txids)
+        ((total_tx_count as f64) / (page_size as f64)).ceil() as u32
+    };
+    
+    // Calculate pagination indices
+    let start_idx = ((page - 1) * page_size) as usize;
+    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    
+    // Handle page out of bounds - return empty result
+    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
+        (vec![], 0)
+    } else {
+        let slice = &all_txids[start_idx..end_idx];
+        (slice.to_vec(), slice.len())
+    };
+    
+    // === DETAILS MODE HANDLING ===
+    // Blockbook API:
+    // - basic: No transaction data (just balances)
+    // - txids: Transaction IDs only (default)
+    // - txs: Full transaction objects
+    let (txids, transactions) = match params.details.as_str() {
+        "basic" => {
+            // No transaction data at all
+            (None, None)
+        },
+        "txs" => {
+            // Full transaction objects - fetch them
+            let txs = fetch_transactions_batch(db, &paginated_txids).await;
+            (None, Some(txs))
+        },
+        _ => {
+            // Default: "txids" or any other value = just txid strings
+            (Some(paginated_txids), None)
+        }
     };
     
     Ok(AddressInfo {
-        page: Some(params.page),
+        page: Some(page),
         total_pages: Some(total_pages),
-        items_on_page: Some(params.page_size),
+        items_on_page: Some(actual_items as u32),  // Actual count, not pageSize
         address: address.to_string(),
         balance: balance.to_string(),
         total_received: total_received.to_string(),
         total_sent: total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: tx_count,
+        txs: total_tx_count as u32,  // Total tx count (not paginated count)
         txids,
+        transactions,
     })
 }
 
@@ -264,7 +304,7 @@ pub async fn xpub_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<XPubInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
-    let cache_key = format!("xpub:{}:{}", xpub_str, params.page);
+    let cache_key = format!("xpub:{}:{}:{}", xpub_str, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let xpub_clone = xpub_str.clone();
     let params_clone = params.clone();
@@ -283,7 +323,7 @@ pub async fn xpub_v2(
         Ok(info) => Ok(Json(info)),
         Err(e) => {
             // Log error with redacted xpub (privacy protection)
-            eprintln!("xpub query error for {}: {}", redact_xpub(&xpub_str), e);
+            warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
             Err((
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(super::types::BlockbookError::new(e.to_string()))
@@ -685,15 +725,54 @@ async fn aggregate_xpub_data(
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
     let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
     
-    let tx_count = unique_txids.len() as u32;
-    let total_pages = ((tx_count as f64) / (params.page_size as f64)).ceil() as u32;
-    let total_pages = if total_pages == 0 { 1 } else { total_pages };
+    // === PAGINATION LOGIC (same as address endpoint) ===
+    // Validate and clamp parameters
+    const MAX_PAGE_SIZE: u32 = 1000;
+    let page = params.page.max(1);
+    let page_size = params.page_size.clamp(1, MAX_PAGE_SIZE);
     
-    // Determine response details based on params
-    let txids = if params.details == "txids" {
-        Some(unique_txids.clone())
+    let total_tx_count = unique_txids.len();
+    let total_pages = if total_tx_count == 0 {
+        1
     } else {
-        None
+        ((total_tx_count as f64) / (page_size as f64)).ceil() as u32
+    };
+    
+    // Calculate pagination indices
+    let start_idx = ((page - 1) * page_size) as usize;
+    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    
+    // Handle page out of bounds - return empty result
+    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
+        (vec![], 0)
+    } else {
+        let slice = &unique_txids[start_idx..end_idx];
+        (slice.to_vec(), slice.len())
+    };
+    
+    // === DETAILS MODE HANDLING (same as address endpoint) ===
+    // Blockbook API:
+    // - basic: No transaction data (just balances)
+    // - txids: Transaction IDs only (default)
+    // - txs: Full transaction objects
+    let (txids, transactions) = match params.details.as_str() {
+        "basic" => {
+            // No transaction data at all
+            (None, None)
+        },
+        "txs" => {
+            // Full transaction objects - fetch them
+            let txs = fetch_transactions_batch(db, &paginated_txids).await;
+            (None, Some(txs))
+        },
+        "tokens" | "tokenBalances" => {
+            // Token modes don't return tx data
+            (None, None)
+        },
+        _ => {
+            // Default: "txids" or any other value = just txid strings
+            (Some(paginated_txids), None)
+        }
     };
     
     // Build tokens array if requested, filtered by tokens parameter
@@ -785,31 +864,34 @@ async fn aggregate_xpub_data(
         (None, None, None, None)
     };
     
-    let used_tokens = if params.details == "txs" || params.details == "tokens" || params.details == "tokenBalances" {
-        Some(used_addresses.len() as u32)
-    } else {
-        None
-    };
+    // Blockbook always returns usedTokens (count of addresses with activity)
+    // regardless of details mode
+    let used_tokens = Some(used_addresses.len() as u32);
     
     // Aggregate totals
     let xpub_total_received: i64 = used_addresses.iter().map(|(_, _, _, _, total_recv, _)| total_recv).sum();
     let xpub_total_sent: i64 = used_addresses.iter().map(|(_, _, _, _, _, total_snt)| total_snt).sum();
     let xpub_balance: i64 = used_addresses.iter().map(|(_, _, _, balance, _, _)| balance).sum();
     
+    // Blockbook's txs field for xpub = total transfers across ALL addresses
+    // (not unique transactions). If an address appears in 2 txs, it counts as 2.
+    // This matches: sum of all per-address tx counts = total "transfers"
+    let total_transfers: usize = used_addresses.iter().map(|(_, _, tx_count, _, _, _)| tx_count).sum();
+    
     Ok(XPubInfo {
-        page: params.page,
+        page: page,
         total_pages,
-        items_on_page: params.page_size,
+        items_on_page: actual_items as u32,  // Actual count, not pageSize
         address: xpub_str.to_string(),
         balance: xpub_balance.to_string(),
         total_received: xpub_total_received.to_string(),
         total_sent: xpub_total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: tx_count,
+        txs: total_transfers as u32,  // Total transfers (Blockbook compatibility)
         txids,
         tokens: tokens.0,
-        transactions: None, // TODO: Implement full tx details if needed
+        transactions,  // Now properly populated when details=txs
         used_tokens,
         total_tokens: tokens.1,
         tokens_page: tokens.2,

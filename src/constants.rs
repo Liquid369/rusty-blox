@@ -6,6 +6,11 @@
 /// Genesis block height (the first block in the chain)
 pub const HEIGHT_GENESIS: i32 = 0;
 
+/// Last Proof of Work block height (PIVX mainnet)
+/// After this block, all blocks are Proof of Stake
+/// Source: PIVX chainparams.cpp - consensus.nLastPOWBlock
+pub const LAST_POW_BLOCK: i32 = 259200;
+
 /// Orphan block marker - blocks that exist in blk files but are not on the canonical chain
 /// This includes:
 /// - Blocks from abandoned forks
@@ -45,6 +50,13 @@ pub fn is_unresolved_height(height: i32) -> bool {
 #[inline]
 pub fn is_genesis_height(height: i32) -> bool {
     height == HEIGHT_GENESIS
+}
+
+/// Check if a block at given height is Proof of Stake
+/// Returns true for blocks after the last PoW block
+#[inline]
+pub fn is_pos_block(height: i32) -> bool {
+    height > LAST_POW_BLOCK
 }
 
 /// Check if a transaction should be indexed in address enrichment

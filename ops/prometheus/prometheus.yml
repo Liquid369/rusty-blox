@@ -1,0 +1,41 @@
+# Prometheus Configuration for rusty-blox
+# Scrapes metrics from rustyblox service and self-monitors
+
+global:
+  scrape_interval: 15s      # Scrape targets every 15 seconds
+  evaluation_interval: 15s  # Evaluate alerting rules every 15 seconds
+  external_labels:
+    cluster: 'rustyblox-local'
+    environment: 'production'
+
+# Alertmanager configuration (optional - add if you want alerts)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Scrape rusty-blox blockchain indexer
+  - job_name: 'rustyblox'
+    static_configs:
+      - targets: ['localhost:3005']  # rustyblox API server with /metrics endpoint
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'rustyblox-indexer'
+    metric_relabel_configs:
+      # Ensure all rustyblox metrics have proper labels
+      - source_labels: [__name__]
+        regex: 'rustyblox_.*'
+        action: keep
+
+  # Scrape Prometheus itself (self-monitoring)
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

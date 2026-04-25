@@ -88,6 +88,8 @@ pub struct AddressInfo {
     pub txs: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transactions: Option<Vec<Transaction>>,
 }
 
 // ========== UTXO Types ==========

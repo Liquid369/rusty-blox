@@ -11,8 +11,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+    - name: Checkout code (with submodules)
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive   
+        fetch-depth: 0          
 
     - name: Install Rust
       uses: actions-rs/toolchain@v1

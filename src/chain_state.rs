@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use rocksdb::DB;
 use serde::{Serialize, Deserialize};
+use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainState {
@@ -96,7 +97,7 @@ pub fn mark_reorg(db: &Arc<DB>, height: i32, reason: &str) -> Result<(), Box<dyn
     
     db.put_cf(&cf_state, key.as_bytes(), value.as_bytes())?;
     
-    println!("REORG marked at height {}: {}", height, reason);
+    warn!(height = height, reason = %reason, "REORG marked in chain state");
     
     Ok(())
 }

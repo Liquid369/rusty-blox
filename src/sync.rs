@@ -10,10 +10,13 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use rocksdb::DB;
 use tokio::fs;
+use tracing::{info, info_span, warn};
 
 use crate::types::AppState;
 use crate::cache::CacheManager;
 use crate::parallel::process_files_parallel;
+use crate::metrics;
+use crate::telemetry::truncate_hex;
 
 /// Validate that canonical chain metadata is complete before parallel processing
 /// 
@@ -27,7 +30,7 @@ use crate::parallel::process_files_parallel;
 /// 
 /// **PIVX Core Comparison**: Core never assigns height until block is on canonical
 /// chain. We now match this behavior by failing fast if metadata incomplete.
-async fn validate_canonical_metadata_complete(
+pub async fn validate_canonical_metadata_complete(
     db: &Arc<DB>,
     expected_chain_len: usize,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -61,18 +64,13 @@ async fn validate_canonical_metadata_complete(
                       && min_height == 0;
     
     if !is_complete {
-        eprintln!("⚠️  Canonical metadata INCOMPLETE:");
-        eprintln!("   Expected: {} heights (0..{})", expected_chain_len, expected_chain_len - 1);
-        eprintln!("   Found: {} heights ({}..{})", height_count, min_height, max_height);
-        eprintln!("   Status: Gaps or missing entries detected!");
-        eprintln!("");
-        eprintln!("   This will cause the height=0 bug where ALL transactions");
-        eprintln!("   get stored with height=0 instead of their correct heights.");
-        eprintln!("");
-        eprintln!("   Possible causes:");
-        eprintln!("   - LevelDB import incomplete or corrupted");
-        eprintln!("   - Disk I/O errors during metadata write");
-        eprintln!("   - Database corruption");
+        tracing::error!(
+            expected_heights = expected_chain_len,
+            found_heights = height_count,
+            min_height,
+            max_height,
+            "Canonical metadata INCOMPLETE - will cause height=0 bug. Possible causes: LevelDB import incomplete, disk I/O errors, or database corruption"
+        );
     }
     
     Ok(is_complete)
@@ -169,27 +167,40 @@ async fn update_network_height(db: &Arc<DB>) {
         Err(_) => return,
     };
     
-    // Create RPC client
-    let rpc_client = PivxRpcClient::new(
-        rpc_host,
-        Some(rpc_user),
-        Some(rpc_pass),
-        3,     // Max retries
-        10,    // Connection timeout
-        30000, // Read timeout
-    );
+    // Get network height - must use a completely separate OS thread
+    // because PivxRpcClient uses reqwest::blocking which creates its own runtime
+    let db_clone = Arc::clone(db);
+    let (tx, rx) = std::sync::mpsc::channel();
     
-    // Get network height
-    match rpc_client.getblockcount() {
-        Ok(height) => {
-            if let Err(e) = set_network_height(db, height as i32) {
-                eprintln!("Failed to set network height: {}", e);
+    std::thread::spawn(move || {
+        let rpc_client = PivxRpcClient::new(
+            rpc_host,
+            Some(rpc_user),
+            Some(rpc_pass),
+            3,
+            10,
+            30000,
+        );
+        let result = rpc_client.getblockcount();
+        let _ = tx.send(result);
+    });
+    
+    // Wait for result with timeout
+    let result = rx.recv_timeout(std::time::Duration::from_secs(10));
+    
+    match result {
+        Ok(Ok(height)) => {
+            if let Err(e) = set_network_height(&db_clone, height as i32) {
+                tracing::error!(error = ?e, "Failed to set network height");
             } else {
-                println!("📡 Network height: {}", height);
+                info!(network_height = height, "Network height retrieved");
             }
         }
-        Err(e) => {
-            eprintln!("⚠️  Failed to get network height from RPC: {}", e);
+        Ok(Err(e)) => {
+            tracing::warn!(error = ?e, "Failed to get network height from RPC");
+        }
+        Err(_) => {
+            tracing::warn!("RPC call timed out");
         }
     }
 }
@@ -200,7 +211,10 @@ async fn run_initial_sync_leveldb(
     db: Arc<DB>,
     state: AppState,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    println!("\n🚀 Starting FAST initial sync using leveldb block index...\n");
+    let _span = info_span!("leveldb_import", 
+        db_path = %blk_dir.display()
+    ).entered();
+    info!("Starting FAST initial sync using leveldb block index");
     
     // Get PIVX data directory for leveldb
     let config = get_global_config();
@@ -217,7 +231,7 @@ async fn run_initial_sync_leveldb(
         .get_string("paths.block_index_copy_dir")
         .ok();
     
-    println!("� PIVX blocks directory: {}", pivx_blocks_dir);
+    info!(pivx_blocks_dir = %pivx_blocks_dir, "Using PIVX blocks directory");
     
     // Get the block index path (copies if needed)
     let leveldb_path = get_block_index_path(
@@ -225,50 +239,64 @@ async fn run_initial_sync_leveldb(
         block_index_copy_dir.as_deref(),
     )?;
     
-    println!("📍 Reading block index from: {}", leveldb_path);
-    println!("📍 Blk files directory: {}", blk_dir.display());
+    info!(leveldb_path = %leveldb_path, blk_dir = %blk_dir.display(), "Building canonical chain from leveldb");
     
     // Build canonical chain from leveldb
     let canonical_chain = build_canonical_chain_from_leveldb(&leveldb_path)?;
 
     let chain_len = canonical_chain.len();
     let leveldb_height = (chain_len - 1) as i32;
-    println!("\n📊 Canonical chain from LevelDB: {} blocks (height 0 to {})", chain_len, leveldb_height);
+    
+    info!(blocks = chain_len, tip_height = leveldb_height, "Canonical chain built from LevelDB");
+    metrics::increment_blocks_processed("leveldb_import", chain_len as u64);
+    metrics::set_indexed_height("block_index", leveldb_height as i64);
     
     // Verify against RPC to see if daemon has synced further
     let rpc_host = config.get_string("rpc.host").unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
     let rpc_user = config.get_string("rpc.user").unwrap_or_else(|_| "explorer".to_string());
     let rpc_pass = config.get_string("rpc.pass").unwrap_or_else(|_| "explorer_test_pass".to_string());
     
-    let rpc_client = PivxRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+    // Verify against RPC - use separate OS thread to avoid runtime nesting
+    let (tx, rx) = std::sync::mpsc::channel();
     
-    match rpc_client.getblockcount() {
-        Ok(network_height) => {
+    std::thread::spawn(move || {
+        let rpc_client = PivxRpcClient::new(rpc_host, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
+        let result = rpc_client.getblockcount();
+        let _ = tx.send(result);
+    });
+    
+    let network_height_result = rx.recv_timeout(std::time::Duration::from_secs(10));
+    
+    match network_height_result {
+        Ok(Ok(network_height)) => {
             let blocks_behind = network_height as i32 - leveldb_height;
             if blocks_behind > 0 {
-                println!("⚠️  LevelDB copy is {} blocks behind current daemon height {}", blocks_behind, network_height);
-                println!("   Will fetch missing blocks via RPC after processing blk files");
+                tracing::warn!(
+                    blocks_behind,
+                    network_height,
+                    leveldb_height,
+                    "LevelDB copy behind daemon - will fetch missing blocks via RPC"
+                );
             } else {
-                println!("✅ LevelDB copy is current (matches daemon height {})", network_height);
+                info!(network_height, "LevelDB copy is current with daemon");
             }
         }
-        Err(e) => {
-            println!("⚠️  Could not verify LevelDB freshness via RPC: {}", e);
-            println!("   Proceeding with LevelDB data as-is");
+        Ok(Err(e)) => {
+            tracing::warn!(error = ?e, "RPC error verifying LevelDB freshness");
+        }
+        Err(_) => {
+            tracing::warn!("RPC call timed out");
         }
     }
-    
-    println!("\n📊 Using canonical chain: {} blocks", chain_len);
     
     // SET SYNC_HEIGHT IMMEDIATELY from LevelDB
     // This ensures API has correct height even during blk file processing
     let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
     db.put_cf(&cf_state, b"sync_height", leveldb_height.to_le_bytes())?;
-    println!("✅ Set sync_height to {} (from LevelDB canonical chain)", leveldb_height);
+    info!(sync_height = leveldb_height, "Set sync_height from LevelDB canonical chain");
     
     // Store canonical chain metadata in our DB
     // This will guide the parallel block processor to know which blocks to index
-    println!("\n📦 Storing canonical chain metadata...");
     
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     
@@ -300,27 +328,17 @@ async fn run_initial_sync_leveldb(
         } else {
             offsets_missing += 1;
         }
-        
-        if *height % 500_000 == 0 {
-            println!("  Stored metadata for height {}", height);
-        }
     }
     
-    println!("✅ Canonical chain metadata stored:");
-    println!("   Total blocks: {}", canonical_chain.len());
-    println!("   Blocks WITH offsets: {} ({:.2}%)", 
-             offsets_stored,
-             (offsets_stored as f64 / canonical_chain.len() as f64) * 100.0);
-    println!("   Blocks WITHOUT offsets: {} ({:.2}%)", 
-             offsets_missing,
-             (offsets_missing as f64 / canonical_chain.len() as f64) * 100.0);
-    
-    println!("✅ Canonical chain metadata stored!");
-    println!("   The parallel block processor will now index {} blocks from blk*.dat files", chain_len);
+    info!(
+        total_blocks = canonical_chain.len(),
+        offsets_stored,
+        offsets_missing,
+        "Canonical chain metadata stored - parallel processor ready"
+    );
     
     // CRITICAL FIX: Validate metadata completeness BEFORE parallel processing
     // This prevents the height=0 bug where transactions get wrong heights
-    println!("\n🔍 Validating canonical chain metadata completeness...");
     let metadata_complete = validate_canonical_metadata_complete(&db, chain_len).await?;
     
     if !metadata_complete {
@@ -330,15 +348,11 @@ async fn run_initial_sync_leveldb(
                    Recommendation: Delete database and resync from scratch.".into());
     }
     
-    println!("✅ Canonical metadata validated: {} heights (0..{})", 
-             chain_len, chain_len - 1);
-    println!("   Metadata is complete and contiguous - safe to proceed");
+    info!(heights = chain_len, "Canonical metadata validated - complete and contiguous");
     
     // Now process blk*.dat files to get the actual block data
     // The parallel processor will index all blocks it finds
     // Because we stored the canonical chain metadata above, we know exactly which blocks to index
-    println!("\n📂 Processing blk*.dat files for block data...");
-    println!("   This will read all blocks and index the {} canonical blocks", chain_len);
     
     let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
     
@@ -352,7 +366,7 @@ async fn run_initial_sync_leveldb(
         }
     }
     
-    println!("Found {} blk*.dat files", entries.len());
+    info!(file_count = entries.len(), "Found blk*.dat files");
     
     // Process files in parallel (this will index all blocks, including orphans)
     // The chainwork calculation later will determine which ones are canonical
@@ -360,9 +374,16 @@ async fn run_initial_sync_leveldb(
     
     let final_height = (chain_len - 1) as i32;
     
-    println!("\n✅ Initial sync complete! Final height: {}", final_height);
-    println!("   All {} canonical blocks are now indexed", chain_len);
-    println!("   The explorer will now switch to RPC mode to catch new blocks");
+    let elapsed_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    info!(
+        final_height = final_height, 
+        canonical_blocks = chain_len,
+        "Leveldb import complete - switching to RPC mode"
+    );
     
     // Mark sync complete
     set_sync_height(&db, final_height).await?;
@@ -371,17 +392,13 @@ async fn run_initial_sync_leveldb(
     // This reads blocks directly by offset and compares with scanner results
     let validate_with_offset_indexer = config.get_bool("sync.validate_offset_indexing").unwrap_or(false);
     if validate_with_offset_indexer {
-        println!("\n📍 Running Pattern A validation (offset-based indexing)...");
-        println!("   This will re-index canonical blocks using file offsets");
-        println!("   to validate the offset-based approach works correctly.\n");
+        info!("Running Pattern A validation (offset-based indexing)");
         
         use crate::offset_indexer::index_canonical_blocks_by_offset;
         if let Err(e) = index_canonical_blocks_by_offset(blk_dir.clone(), db.clone(), state.clone()).await {
-            eprintln!("⚠️  Offset-based validation failed: {}", e);
-            eprintln!("   Continuing with scanner-based results");
+            tracing::warn!(error = ?e, "Offset-based validation failed - continuing with scanner results");
         } else {
-            println!("✅ Offset-based indexing validation complete!");
-            println!("   Pattern A approach verified - ready to switch over\n");
+            info!("Offset-based indexing validation complete");
         }
     }
     
@@ -440,11 +457,10 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
     let use_chainstate = config.get_bool("sync.use_chainstate_for_utxos").unwrap_or(false);
+    let _enrich_span = info_span!("post_sync_enrichment").entered();
     let use_block_index = config.get_bool("sync.use_block_index_for_heights").unwrap_or(true);
     
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║         POST-SYNC DATA ENRICHMENT                  ║");
-    println!("╚════════════════════════════════════════════════════╝\n");
+    info!("Starting post-sync data enrichment");
     
     // Check what enrichment steps have been completed
     let cf_state = db.cf_handle("chain_state")
@@ -483,141 +499,123 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
         }
         
         if !has_transactions {
-            println!("ℹ️  Phase 0: Height resolution skipped - no transactions in database yet");
-            println!("   Height resolution will run after blockchain sync completes\n");
+            info!("Height resolution skipped - no transactions in database yet");
             // Don't mark as complete - we'll run it later
         } else {
-            println!("📊 Phase 0: Resolving transaction heights from PIVX Core block index...");
-            println!("   This ensures heights are correct BEFORE enrichment");
-            println!("   Orphaned transactions will be identified from Core's canonical chain\n");
+            info!("Resolving transaction heights from PIVX Core block index");
             
             use crate::height_resolver::resolve_heights_from_block_index;
             
             match resolve_heights_from_block_index(Arc::clone(db), None).await {
                 Ok((fixed, orphaned)) => {
-                    if fixed > 0 {
-                        println!("   ✅ Resolved {} transaction heights from canonical chain", fixed);
-                    }
-                    if orphaned > 0 {
-                        println!("   ⚠️  Identified {} orphaned transactions (not in canonical chain)", orphaned);
-                    }
-                    if fixed == 0 && orphaned == 0 {
-                        println!("   ✅ All transaction heights already correct");
-                    }
-                    println!();
+                    info!(
+                        fixed_heights = fixed,
+                        orphaned_txs = orphaned,
+                        "Height resolution complete"
+                    );
                     db.put_cf(&cf_state, b"height_resolution_complete", [1u8])?;
                     
                     // Mark repair as complete too since we just did it
                     db.put_cf(&cf_state, b"repair_complete", [1u8])?;
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Height resolution failed: {}", e);
-                    eprintln!("   Will fall back to repair phase during enrichment\n");
+                    tracing::warn!(error = ?e, "Height resolution failed - will fall back to repair phase");
                 }
             }
         }
     } else if height_resolution_complete {
-        println!("✅ Phase 0: Height resolution already complete - skipping\n");
+        info!("Height resolution already complete - skipping");
     } else {
-        println!("ℹ️  Phase 0: Height resolution disabled (use_block_index_for_heights=false)");
-        println!("   Will use repair phase instead\n");
+        info!("Height resolution disabled - will use repair phase instead");
     }
     
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
         if use_chainstate {
-            println!("📍 Phase 1: Building address index from PIVX Core chainstate...");
-            println!("   Using chainstate as source of truth for current UTXOs");
-            println!("   This ensures balances match PIVX Core exactly\n");
+            info!("Building address index from PIVX Core chainstate");
             
             use crate::enrich_from_chainstate::enrich_from_chainstate;
             if let Err(e) = enrich_from_chainstate(Arc::clone(db)).await {
-                eprintln!("⚠️  Chainstate enrichment failed: {}", e);
-                eprintln!("   Falling back to transaction-based enrichment...\n");
+                tracing::warn!(error = ?e, "Chainstate enrichment failed - falling back to transaction-based");
                 
                 use crate::enrich_addresses::enrich_all_addresses;
                 if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
-                    eprintln!("⚠️  Address enrichment also failed: {}", e);
-                    eprintln!("   Continuing without address data.");
-                    eprintln!("   You can retry later by setting enrich_addresses=true\n");
+                    tracing::error!(error = ?e, "Address enrichment failed - continuing without address data");
                 } else {
-                    println!("✅ Address index built successfully (from transactions)!\n");
+                    info!("Address index built successfully from transactions");
                     db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
                 }
             } else {
-                println!("✅ Address index built successfully (from chainstate)!\n");
+                info!("Address index built successfully from chainstate");
                 db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+                
+                // Store the height at which enrichment completed
+                // RPC catchup should only update address index for blocks AFTER this height
+                if let Some(height_bytes) = db.get_cf(&cf_state, b"sync_height")? {
+                    db.put_cf(&cf_state, b"enrichment_height", &height_bytes)?;
+                }
             }
         } else {
-            println!("📍 Phase 1: Building address index from transactions...");
-            println!("   This allows searching by address and viewing address balances\n");
+            info!("Building address index from transactions");
             
             use crate::enrich_addresses::enrich_all_addresses;
             if let Err(e) = enrich_all_addresses(Arc::clone(db)).await {
-                eprintln!("⚠️  Address enrichment failed: {}", e);
-                eprintln!("   Continuing without address data.");
-                eprintln!("   You can retry later by setting enrich_addresses=true\n");
+                tracing::error!(error = ?e, "Address enrichment failed - continuing without address data");
             } else {
-                println!("✅ Address index built successfully!\n");
+                info!("Address index built successfully");
                 db.put_cf(&cf_state, b"address_index_complete", [1u8])?;
+                
+                // Store the height at which enrichment completed
+                // RPC catchup should only update address index for blocks AFTER this height
+                if let Some(height_bytes) = db.get_cf(&cf_state, b"sync_height")? {
+                    db.put_cf(&cf_state, b"enrichment_height", &height_bytes)?;
+                }
             }
         }
     } else if address_index_complete {
-        println!("✅ Phase 1: Address index already complete - skipping\n");
+        info!("Phase 1: Address index already complete - skipping");
     } else if fast_sync {
-        println!("ℹ️  Address enrichment disabled (enrich_addresses=false in config)");
-        println!("   Set enrich_addresses=true to enable address search\n");
+        info!("Address enrichment disabled in config (enrich_addresses=false)");
     }
     
     // 2. Transaction block index (B prefix entries for faster block tx lookups)
     if !tx_block_index_complete {
-        println!("📊 Phase 2: Building transaction block index...");
-        println!("   This speeds up block transaction queries\n");
+        info!("Phase 2: Building transaction block index");
         
         if let Err(e) = rebuild_transaction_block_index(db).await {
-            eprintln!("⚠️  Transaction block index failed: {}", e);
-            eprintln!("   Continuing without block tx index optimization\n");
+            warn!(error = ?e, "Transaction block index failed, continuing without optimization");
         } else {
-            println!("✅ Transaction block index built successfully!\n");
+            info!("Transaction block index built successfully");
             db.put_cf(&cf_state, b"tx_block_index_complete", [1u8])?;
         }
     } else {
-        println!("✅ Phase 2: Transaction block index already complete - skipping\n");
+        info!("Phase 2: Transaction block index already complete - skipping");
     }
     
     // 3. Fix transactions with height=0 (database repair) - skip if height resolution already ran
     if !repair_complete && !height_resolution_complete {
-        println!("🔧 Phase 3: Repairing transactions with incorrect heights...");
-        println!("   This fixes transactions stored with height=0 during initial sync\n");
+        info!("Phase 3: Repairing transactions with incorrect heights");
         
     match repair::fix_zero_height_transactions(db).await {
             Ok((fixed, orphaned)) => {
-                if fixed > 0 {
-                    println!("   ✅ Repaired {} transactions with correct heights", fixed);
-                }
-                if orphaned > 0 {
-                    println!("   ⚠️  Marked {} orphaned transactions (height=-1, excluded from balances)", orphaned);
-                }
-                if fixed == 0 && orphaned == 0 {
-                    println!("   ✅ No transactions needed repair");
-                }
-                println!();
+                info!(
+                    fixed_transactions = fixed,
+                    orphaned_transactions = orphaned,
+                    "Transaction repair completed"
+                );
                 db.put_cf(&cf_state, b"repair_complete", [1u8])?;
             }
             Err(e) => {
-                eprintln!("⚠️  Transaction repair failed: {}", e);
-                eprintln!("   Continuing - some transactions may show incorrect data\n");
+                warn!(error = ?e, "Transaction repair failed, continuing with potentially incorrect data");
             }
         }
     } else if height_resolution_complete {
-        println!("✅ Phase 3: Transaction repair not needed (heights resolved from block index)\n");
+        info!("Phase 3: Transaction repair not needed (heights resolved from block index)");
     } else {
-        println!("✅ Phase 3: Transaction repair already complete - skipping\n");
+        info!("Phase 3: Transaction repair already complete - skipping");
     }
     
-    println!("╔════════════════════════════════════════════════════╗");
-    println!("║     🎉 ENRICHMENT COMPLETE - READY FOR USE 🎉      ║");
-    println!("╚════════════════════════════════════════════════════╝\n");
+    info!("Post-sync enrichment complete - database ready");
     
     Ok(())
 }
@@ -723,6 +721,11 @@ async fn run_live_sync(
     current_height: i32,
     broadcaster: Option<Arc<EventBroadcaster>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _span = info_span!("live_sync", 
+        current_height = current_height
+    ).entered();
+    info!("Starting live sync mode");
+    
     println!("Starting SMART sync mode...");
     println!("Current DB height: {}", current_height);
     
@@ -740,6 +743,14 @@ async fn run_live_sync(
     
     let blocks_behind = network_height - current_height;
     println!("📊 Network height: {} | Blocks behind: {}", network_height, blocks_behind);
+    
+    metrics::set_chain_tip_height("rpc", network_height as i64);
+    metrics::set_blocks_behind_tip(blocks_behind as i64);
+    info!(
+        network_height = network_height, 
+        blocks_behind = blocks_behind,
+        "Network status"
+    );
     
     // Only process blk files if we're significantly behind (>1000 blocks)
     // This makes startup instant when we're nearly synced
@@ -808,8 +819,10 @@ async fn run_live_sync(
     
     // Switch to RPC for new blocks (or catchup if we skipped blk files)
     println!("Phase 2: Monitoring for new blocks via RPC...");
+    info!("Switching to RPC monitoring");
     run_block_monitor(db, 5, broadcaster).await?;
     
+    info!("Live sync complete");
     Ok(())
 }
 
@@ -819,6 +832,8 @@ pub async fn run_sync_service(
     db: Arc<DB>,
     broadcaster: Option<Arc<EventBroadcaster>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _span = info_span!("sync_pipeline").entered();
+    info!("Starting sync pipeline");
     
     // Create a dummy cache for sync - sync operations don't use the HTTP cache
     let cache = Arc::new(CacheManager::new());
@@ -877,10 +892,16 @@ pub async fn run_sync_service(
     
     // Check sync status
     println!("🔍 Checking database sync status...");
+    metrics::set_pipeline_stage("current", 0); // Stage 0: Initialization
+    info!("Sync stage: initialization");
+    
     match get_sync_status(&db).await? {
         SyncStatus::NeedInitialSync => {
             println!("\n🆕 NO EXISTING INDEX FOUND");
             println!("   Running initial sync from scratch...\n");
+            
+            metrics::set_pipeline_stage("current", 1); // Stage 1: LevelDB import
+            info!("Sync stage: leveldb_import");
             
             // Try leveldb-based sync first (MUCH faster!)
             let final_height = match run_initial_sync_leveldb(blk_dir.clone(), Arc::clone(&db), state.clone()).await {
@@ -891,6 +912,9 @@ pub async fn run_sync_service(
                 Err(e) => {
                     println!("⚠️  Leveldb sync failed: {}", e);
                     println!("⚠️  Falling back to traditional blk file scan...");
+                    
+                    metrics::set_pipeline_stage("current", 2); // Stage 2: Parallel blk file processing
+                    info!("Sync stage: parallel_processing (fallback)");
                     
                     // Fallback to traditional method
                     run_initial_sync(blk_dir.clone(), Arc::clone(&db), state.clone()).await?;
@@ -914,8 +938,15 @@ pub async fn run_sync_service(
                 }
             };
             
+            metrics::set_indexed_height("block_index", final_height as i64);
+            metrics::set_pipeline_stage("current", 3); // Stage 3: Post-sync enrichment
+            info!(height = final_height, "Sync stage: enrichment");
+            
             // Run post-sync enrichment (addresses + transaction indexing)
             run_post_sync_enrichment(&db).await?;
+            
+            metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
+            info!("Sync stage: rpc_monitoring");
             
             // Then switch to live mode
             println!("\n🔄 Switching to live sync mode...");
@@ -924,6 +955,8 @@ pub async fn run_sync_service(
         SyncStatus::Synced { height } => {
             println!("\n✅ EXISTING INDEX FOUND");
             println!("   Database height: {}\n", height);
+            
+            metrics::set_indexed_height("block_index", height as i64);
             
             // Get network height for comparison
             let cf_state = db.cf_handle("chain_state")
@@ -935,6 +968,8 @@ pub async fn run_sync_service(
             };
             
             let blocks_behind = network_height - height;
+            metrics::set_blocks_behind_tip(blocks_behind as i64);
+            metrics::set_chain_tip_height("rpc", network_height as i64);
             
             if blocks_behind <= 5 {
                 println!("🎉 ALREADY SYNCED! Only {} blocks behind", blocks_behind);
@@ -947,15 +982,22 @@ pub async fn run_sync_service(
                 println!("   Will process blk files for faster catchup\n");
             }
             
+            metrics::set_pipeline_stage("current", 3); // Stage 3: Enrichment check
+            info!(height = height, blocks_behind = blocks_behind, "Sync stage: enrichment_check");
+            
             // Only run enrichment if any phase is incomplete
             // The monitor handles incremental updates for new blocks
             run_post_sync_enrichment(&db).await?;
+            
+            metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
+            info!("Sync stage: rpc_monitoring");
             
             // Go straight to live mode (it will decide whether to scan blk files)
             run_live_sync(blk_dir, db, state, height, broadcaster).await?;
         }
     }
     
+    info!("Sync pipeline complete");
     Ok(())
 }
 

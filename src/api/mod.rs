@@ -13,6 +13,7 @@ pub mod masternodes;
 pub mod governance;
 pub mod search;
 pub mod analytics;
+pub mod price;
 
 #[cfg(test)]
 mod xpub_tests;
@@ -28,6 +29,7 @@ pub use masternodes::*;
 pub use governance::*;
 pub use search::*;
 pub use analytics::*;
+pub use price::*;
 
 // Keep root and api handlers for backward compatibility
 pub async fn root_handler() -> axum::response::Html<String> {

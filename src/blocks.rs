@@ -9,6 +9,8 @@ use crate::db_utils::batch_put_cf;
 use crate::transactions::process_transaction_from_buffer;
 use crate::batch_writer::BatchWriter;
 use crate::config::get_global_config;
+use tracing::{info, warn, error, debug};
+use crate::metrics;
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
 const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput
@@ -17,6 +19,10 @@ const TX_BATCH_SIZE: usize = 10000; // Increased from 1000 for better throughput
 // Priority 1.2: Block size validation constants
 const MIN_BLOCK_SIZE: u64 = 81; // Minimum: 80-byte header + 1 byte for varint tx count
 const MAX_BLOCK_SIZE: u64 = 4 * 1024 * 1024; // 4MB maximum block size (PIVX protocol limit)
+
+// Priority [F2]: Varint bounds validation constants (prevent DoS via massive allocations)
+const MAX_TX_INPUTS: u64 = 100_000;
+const MAX_TX_OUTPUTS: u64 = 100_000;
 
 // Helper to read varint from async reader
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
@@ -77,6 +83,12 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
     tx_version: i16,
 ) -> Result<Vec<CTxIn>, std::io::Error> {
     let input_count = read_varint(reader).await?;
+    if input_count > MAX_TX_INPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction input count {} exceeds maximum {}", input_count, MAX_TX_INPUTS)
+        ));
+    }
     let mut inputs = Vec::new();
     
     for i in 0..input_count {
@@ -116,6 +128,12 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
 async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<CTxOut>, std::io::Error> {
     let output_count = read_varint(reader).await?;
+    if output_count > MAX_TX_OUTPUTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Transaction output count {} exceeds maximum {}", output_count, MAX_TX_OUTPUTS)
+        ));
+    }
     let mut outputs = Vec::new();
     
     for i in 0..output_count {
@@ -194,7 +212,10 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
                 reader.seek(tokio::io::SeekFrom::Start(scan_pos)).await?;
                 
                 if scan_pos - start_pos > MAX_SCAN {
-                    eprintln!("  Scanned {}MB without finding valid magic+size, giving up", MAX_SCAN / 1024 / 1024);
+                    warn!(
+                        scanned_mb = MAX_SCAN / 1024 / 1024,
+                        "Scanned without finding valid magic+size, giving up"
+                    );
                     return Ok(None);
                 }
             },
@@ -208,13 +229,13 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 
 pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let file_path_ref = file_path.as_ref();
-    println!("Processing file: {}", file_path_ref.display());
+    info!(file = %file_path_ref.display(), "Processing block file");
     
     // Get fast_sync setting from config
     let config = get_global_config();
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
     if fast_sync {
-        println!("  Fast sync mode enabled (skipping UTXO tracking)");
+        info!("Fast sync mode enabled (skipping UTXO tracking)");
     }
 
     let file = tokio::fs::File::open(&file_path_ref).await?;
@@ -223,7 +244,11 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     // Priority 1.1: Get file size for bounds validation
     let file_size = reader.seek(std::io::SeekFrom::End(0)).await?;
     reader.seek(std::io::SeekFrom::Start(0)).await?;
-    println!("  File size: {} bytes ({:.2} MB)", file_size, file_size as f64 / 1_048_576.0);
+    info!(
+        file_size_bytes = file_size,
+        file_size_mb = format!("{:.2}", file_size as f64 / 1_048_576.0),
+        "Block file opened"
+    );
 
     let mut batch_items = Vec::new();
     let mut header_buffer = Vec::with_capacity(112);
@@ -246,9 +271,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // Priority 1.1: Check if we have enough bytes for magic (4 bytes)
         if block_start_pos + 4 > file_size {
             if block_count > 0 {
-                println!("  ✅ Successfully processed {} blocks, reached end of file (partial magic)", block_count);
+                info!(blocks_processed = block_count, "Reached end of file (partial magic)");
             } else {
-                eprintln!("  ⚠️ File too small for even one block header");
+                warn!("File too small for even one block header");
             }
             break;
         }
@@ -258,33 +283,38 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             Ok(_) => {},
             Err(e) => {
                 if block_count > 0 {
-                    println!("  ✅ Successfully processed {} blocks, reached current end of file", block_count);
-                    println!("     (File may have more blocks later - will be reprocessed during continuous sync)");
+                    info!(
+                        blocks_processed = block_count,
+                        "Reached current end of file (may have more blocks later)"
+                    );
                 } else {
-                    eprintln!("  ⚠️ Empty or unreadable file: {}", e);
+                    warn!(error = ?e, "Empty or unreadable file");
                 }
                 break;
             }
         }
 
         if magic_bytes != PREFIX {
-            eprintln!("  ⚠️ Invalid magic at block {}: {:02x?}, expected {:02x?}", 
-                     block_count, magic_bytes, PREFIX);
-            eprintln!("  Scanning ahead for next valid magic bytes...");
+            warn!(
+                block_num = block_count,
+                magic = ?magic_bytes,
+                expected = ?PREFIX,
+                "Invalid magic - scanning for next valid block"
+            );
             
             // Try to find next magic bytes by scanning ahead
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
-                    eprintln!("  ✓ Recovered! Found next magic at position {}", recovery_pos);
+                    info!(position = recovery_pos, "Recovered - found next magic");
                     // Reader is already positioned at magic bytes, continue to read them
                     continue;
                 },
                 Ok(None) => {
-                    eprintln!("  No more magic bytes found, reached end of file");
+                    info!("No more magic bytes found, reached end of file");
                     break;  // Genuine EOF
                 },
                 Err(e) => {
-                    eprintln!("  ❌ Failed to scan for magic bytes: {}", e);
+                    error!(error = ?e, "Failed to scan for magic bytes");
                     break;  // Unrecoverable error
                 }
             }
@@ -294,9 +324,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         match reader.read_exact(&mut size_buffer).await {
             Ok(_) => {},
             Err(e) => {
-                eprintln!("  ⚠️ Incomplete block at position {} (after {} complete blocks)", block_start_pos, block_count);
-                eprintln!("     Could not read block size: {}", e);
-                eprintln!("     This is normal if sync is ongoing - file will be reprocessed");
+                warn!(
+                    position = block_start_pos,
+                    blocks_processed = block_count,
+                    error = ?e,
+                    "Incomplete block - normal if sync ongoing"
+                );
                 break;
             }
         }
@@ -304,22 +337,26 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         
         // Priority 1.2: Validate block size is within acceptable range
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) {
-            eprintln!("  ⚠️ Invalid block size {} at position {} (valid range: {}-{} bytes)", 
-                     block_size, block_start_pos, MIN_BLOCK_SIZE, MAX_BLOCK_SIZE);
-            eprintln!("  Block size field may be corrupted, scanning for next magic bytes...");
+            warn!(
+                block_size,
+                position = block_start_pos,
+                min = MIN_BLOCK_SIZE,
+                max = MAX_BLOCK_SIZE,
+                "Invalid block size - scanning for next magic"
+            );
             
             // Try to recover by scanning for next magic
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
-                    eprintln!("  ✓ Recovered! Found next magic at position {}", recovery_pos);
+                    info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
                 },
                 Ok(None) => {
-                    eprintln!("  No more magic bytes found, reached end of file");
+                    info!("No more magic bytes found");
                     break;
                 },
                 Err(e) => {
-                    eprintln!("  ❌ Failed to scan for magic bytes: {}", e);
+                    error!(error = ?e, "Failed to scan for magic bytes");
                     break;
                 }
             }
@@ -329,9 +366,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         let current_pos = reader.stream_position().await?;
         let block_end_pos = current_pos + block_size;
         if block_end_pos > file_size {
-            eprintln!("  ⚠️ Block extends past file end at position {}", block_start_pos);
-            eprintln!("     Block size: {}, available bytes: {}", block_size, file_size - current_pos);
-            eprintln!("     This is normal if sync is ongoing - file will be reprocessed");
+            warn!(
+                position = block_start_pos,
+                block_size,
+                available_bytes = file_size - current_pos,
+                "Block extends past file end - normal if sync ongoing"
+            );
             break;
         }
         
@@ -344,9 +384,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         match reader.read_exact(&mut version_bytes).await {
             Ok(_) => {},
             Err(e) => {
-                eprintln!("  ⚠️ Incomplete block at position {} (after {} complete blocks)", block_start_pos, block_count);
-                eprintln!("     Could not read block version: {}", e);
-                eprintln!("     This is normal if sync is ongoing - file will be reprocessed");
+                warn!(
+                    position = block_start_pos,
+                    blocks_processed = block_count,
+                    error = ?e,
+                    "Could not read block version - normal if sync ongoing"
+                );
                 break;
             }
         }
@@ -358,21 +401,25 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         
         // Priority 2.2: Validate header size fits in block
         if header_size as u64 > block_size {
-            eprintln!("  ⚠️ Header size {} exceeds block size {} for version {} at block {}", 
-                     header_size, block_size, ver_as_int, block_count);
-            eprintln!("  Block is corrupt or truncated, scanning for next valid block...");
+            warn!(
+                header_size,
+                block_size,
+                version = ver_as_int,
+                block_num = block_count,
+                "Header exceeds block size - scanning for next valid block"
+            );
             
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
-                    eprintln!("  ✓ Recovered! Found next magic at position {}", recovery_pos);
+                    info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
                 },
                 Ok(None) => {
-                    eprintln!("  No more magic bytes found, reached end of file");
+                    info!("No more magic bytes found");
                     break;
                 },
                 Err(e) => {
-                    eprintln!("  ❌ Failed to scan for magic bytes: {}", e);
+                    error!(error = ?e, "Failed to scan for magic bytes");
                     break;
                 }
             }
@@ -387,14 +434,18 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 // Header read successfully - debug logging removed for performance
             },
             Err(e) => {
-                eprintln!("  ⚠️ Failed to read header (size {}) at block {}: {}", 
-                         header_size, block_count, e);
-                eprintln!("    Version: {}, expected {} bytes", ver_as_int, header_size);
-                eprintln!("  Seeking to next block position: {}", next_block_pos);
+                warn!(
+                    header_size,
+                    block_num = block_count,
+                    version = ver_as_int,
+                    error = ?e,
+                    next_block_pos,
+                    "Failed to read header - seeking to next block"
+                );
                 
                 // Seek to next block and continue instead of breaking
                 if let Err(seek_err) = reader.seek(std::io::SeekFrom::Start(next_block_pos)).await {
-                    eprintln!("  ❌ Failed to seek to next block: {}", seek_err);
+                    error!(error = ?seek_err, "Failed to seek to next block");
                     break;  // Only break if seek fails
                 }
                 continue;  // Skip this block, try next one
@@ -413,12 +464,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             // Block already indexed, skip to next block
             skipped_count += 1;
             if skipped_count == 1 || skipped_count % 100 == 0 {
-                println!("  Skipping already-indexed blocks ({} so far)...", skipped_count);
+                info!(skipped_count, "Skipping already-indexed blocks");
             }
             
             // Seek to next block position and continue
             if let Err(e) = reader.seek(std::io::SeekFrom::Start(next_block_pos)).await {
-                eprintln!("  Failed to seek to next block: {}", e);
+                error!(error = ?e, "Failed to seek to next block");
                 break;
             }
             continue;
@@ -440,9 +491,11 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 Some(0)  // Confirmed genesis
             } else {
                 // Block with null prev_hash but non-genesis hash - very suspicious!
-                eprintln!("⚠️  Block with null prev_hash but non-genesis hash: {}", block_hash_hex);
-                eprintln!("   Expected genesis: {}", PIVX_GENESIS_HASH);
-                eprintln!("   This block will be marked as orphan (no height).");
+                warn!(
+                    block_hash = %block_hash_hex,
+                    expected_genesis = PIVX_GENESIS_HASH,
+                    "Block with null prev_hash but non-genesis hash - marking as orphan"
+                );
                 None  // Orphan or corrupted
             }
         } else if let Some(cf) = cf_metadata {
@@ -486,20 +539,21 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
         
         // If we have a height (genesis or previously resolved), store mappings
+        // CRITICAL FIX: Now uses tx_batch for atomic writes with transactions
         if let Some(height) = block_height {
-            let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-            
             // Store: 'h' + block_hash -> height (for parent lookup, uses internal byte order)
             let mut height_key = vec![b'h'];
             height_key.extend_from_slice(&block_hash_vec);
             let height_bytes = height.to_le_bytes().to_vec();
-            db.put_cf(&cf_metadata, &height_key, &height_bytes)
-                .map_err(|e| format!("Failed to store height: {}", e))?;
+            
+            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+            tx_batch.put("chain_metadata", height_key, height_bytes.clone());
             
             // Store: height -> block_hash (for height-based queries, use display format - reversed)
             let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
-            db.put_cf(&cf_metadata, &height_bytes, &reversed_hash)
-                .map_err(|e| format!("Failed to store height mapping: {}", e))?;
+            
+            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+            tx_batch.put("chain_metadata", height_bytes.clone(), reversed_hash);
             
             // Calculate and store chainwork
             if n_bits > 0 {
@@ -512,6 +566,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                     let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
                     chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
                     
+                    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
                     match db.get_cf(&cf_metadata, &chainwork_key)? {
                         Some(parent_work_bytes) => {
                             if parent_work_bytes.len() == 32 {
@@ -549,17 +604,13 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 // Store chainwork: 'w' + height -> chainwork (32 bytes)
                 let mut chainwork_key = vec![b'w'];
                 chainwork_key.extend_from_slice(&height.to_le_bytes());
-                db.put_cf(&cf_metadata, &chainwork_key, chainwork)
-                    .map_err(|e| format!("Failed to store chainwork: {}", e))?;
+                
+                // CRITICAL FIX: Write to batch instead of direct db.put_cf()
+                tx_batch.put("chain_metadata", chainwork_key, chainwork.to_vec());
             }
         }
         
         block_count += 1;
-        
-        // Print progress every 5000 blocks
-        if block_count % 5000 == 0 {
-            println!("  Processed {} blocks", block_count);
-        }
         
         // Write batch when it reaches the target size
         if batch_items.len() >= BATCH_SIZE * 2 {
@@ -572,8 +623,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         let tx_section_size = block_size.saturating_sub(header_size as u64);
         
         if tx_section_size == 0 {
-            eprintln!("  ⚠️ Block {} has no transaction data (size: {}, header: {})", 
-                     block_count, block_size, header_size);
+            warn!(
+                block_num = block_count,
+                block_size,
+                header_size,
+                "Block has no transaction data"
+            );
             // Seek to next block and continue
             reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
             continue;
@@ -603,17 +658,16 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                         // Successfully processed transactions
                         if tx_batch.should_flush() {
                             if let Err(e) = tx_batch.flush().await {
-                                eprintln!("Warning: Failed to flush transaction batch: {}", e);
+                                warn!(error = ?e, "Failed to flush transaction batch");
                             }
                         }
                     },
                     Err(e) => {
-                        eprintln!("Warning: Failed to parse transactions for block {}: {}", block_count, e);
+                        warn!(block_num = block_count, error = ?e, "Failed to parse transactions");
                         // Even on error, flush any pending transactions
                         if tx_batch.pending_count() > 0 {
-                            eprintln!("         Flushing {} pending transaction operations", tx_batch.pending_count());
                             if let Err(flush_err) = tx_batch.flush().await {
-                                eprintln!("         Failed to flush: {}", flush_err);
+                                warn!(error = ?flush_err, pending = tx_batch.pending_count(), "Failed to flush pending transactions");
                             }
                         }
                     }
@@ -622,7 +676,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 // File cursor is already at next_block_pos since we read exact tx_section_size
             },
             Err(e) => {
-                eprintln!("  ⚠️ Failed to read transaction data for block {}: {}", block_count, e);
+                warn!(block_num = block_count, error = ?e, "Failed to read transaction data");
                 // Seek to next block position
                 reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
             }
@@ -639,11 +693,12 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         tx_batch.flush().await?;
     }
     
-    if skipped_count > 0 {
-        println!("✅ File complete: {} new blocks indexed, {} already in database", block_count, skipped_count);
-    } else {
-        println!("✅ File complete: {} blocks indexed", block_count);
-    }
+    info!(
+        new_blocks = block_count,
+        skipped_blocks = skipped_count,
+        "File processing complete"
+    );
+    
     Ok(())
 }
 
