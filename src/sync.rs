@@ -205,6 +205,61 @@ async fn update_network_height(db: &Arc<DB>) {
     }
 }
 
+/// Refresh canonical chain metadata ('h' + hash → height, height → hash, offsets)
+/// from PIVX Core's LevelDB block index.
+///
+/// The blk-file processor resolves each block's height at parse time via the
+/// 'h' map; transactions are stored WITH their height and 'B' block-index
+/// entries only when that lookup succeeds. Fresh sync runs this before
+/// scanning; the catch-up path historically did NOT, so every transaction in
+/// the catch-up range was stored heightless, failed height resolution, and
+/// was orphaned out of the address index. Always refresh before a catch-up
+/// blk scan.
+fn refresh_canonical_metadata(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> {
+    let config = get_global_config();
+    let pivx_blocks_dir = config
+        .get_string("paths.blk_dir")
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/liquid".to_string());
+            format!("{}/Library/Application Support/PIVX/blocks", home)
+        });
+    let block_index_copy_dir = config.get_string("paths.block_index_copy_dir").ok();
+
+    let leveldb_path = get_block_index_path(&pivx_blocks_dir, block_index_copy_dir.as_deref())?;
+    let canonical_chain = build_canonical_chain_from_leveldb(&leveldb_path)?;
+    let leveldb_height = (canonical_chain.len() - 1) as i32;
+
+    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let mut batch = rocksdb::WriteBatch::default();
+    for (height, hash, opt_file, opt_pos) in &canonical_chain {
+        let height_key = (*height as i32).to_le_bytes();
+        let mut display_hash = hash.clone();
+        display_hash.reverse();
+        batch.put_cf(&cf_metadata, height_key, &display_hash);
+
+        let mut hash_key = vec![b'h'];
+        hash_key.extend_from_slice(hash); // internal format
+        batch.put_cf(&cf_metadata, &hash_key, height_key);
+
+        if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
+            let mut off_key = vec![b'o'];
+            off_key.extend_from_slice(hash);
+            let mut buf = Vec::with_capacity(12);
+            buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
+            buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
+            batch.put_cf(&cf_metadata, &off_key, &buf);
+        }
+        if batch.len() >= 50_000 {
+            db.write(std::mem::take(&mut batch))?;
+        }
+    }
+    if !batch.is_empty() {
+        db.write(batch)?;
+    }
+    info!(tip_height = leveldb_height, "Canonical metadata refreshed from LevelDB");
+    Ok(leveldb_height)
+}
+
 /// Run initial sync from leveldb block index + blk*.dat files
 async fn run_initial_sync_leveldb(
     blk_dir: PathBuf,
@@ -757,7 +812,24 @@ async fn run_live_sync(
     if blocks_behind > 1000 {
         println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
         println!("Phase 1: Syncing from blk*.dat files...");
-        
+
+        // CRITICAL: refresh the canonical 'h' (hash → height) map from Core's
+        // LevelDB BEFORE scanning blk files, exactly like fresh sync does.
+        // Without this, blocks newer than the last refresh have no 'h' entry,
+        // their transactions are stored heightless (and without 'B' entries),
+        // and height resolution later orphans the entire catch-up range out of
+        // the address index.
+        match refresh_canonical_metadata(&db) {
+            Ok(tip) => println!("🔄 Canonical metadata refreshed from Core's index (tip {})", tip),
+            Err(e) => {
+                eprintln!("⚠️  Failed to refresh canonical metadata: {} — aborting blk catchup (falling back to RPC)", e);
+                println!("Phase 2: Monitoring for new blocks via RPC...");
+                info!("Switching to RPC monitoring (catchup fallback)");
+                run_block_monitor(db, 5, broadcaster).await?;
+                return Ok(());
+            }
+        }
+
         let config = get_global_config();
         let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
         
@@ -809,8 +881,19 @@ async fn run_live_sync(
         if !entries.is_empty() {
             println!("Processing {} blk*.dat files in parallel...", entries.len());
             process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
-            
+
             println!("✅ Finished processing blk*.dat files!");
+
+            // The blk fast-sync path stores transactions WITHOUT address data, and the
+            // RPC monitor only address-indexes blocks above enrichment_height starting
+            // from the post-catchup tip. Without re-running height resolution +
+            // enrichment here, the entire catchup range would be missing from the
+            // address index. Clear the phase markers and re-enrich before monitoring.
+            println!("🔁 Re-running height resolution + address enrichment for the catchup range...");
+            db.delete_cf(&cf_state, b"height_resolution_complete")?;
+            db.delete_cf(&cf_state, b"address_index_complete")?;
+            db.delete_cf(&cf_state, b"tx_block_index_complete")?;
+            run_post_sync_enrichment(&db).await?;
         }
     } else {
         println!("\n🚀 Only {} blocks behind - skipping blk file scan (INSTANT startup!)", blocks_behind);
