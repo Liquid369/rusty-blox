@@ -103,6 +103,24 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         .ok_or("transactions CF not found")?;
     let cf_addr_index = db.cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+
+    // Build the height -> block-time index ONCE, up front: Pass 2b buckets its
+    // prevout-join aggregates (fees, rewards, coin-days-destroyed, cold-staking
+    // flows) by the SPENDER's block date, and persist_tx_daily_series reuses
+    // the same index afterwards instead of rebuilding it.
+    let tip = db
+        .get_cf(&cf_state, b"sync_height")?
+        .filter(|b| b.len() >= 4)
+        .map(|b| i32::from_le_bytes(b[0..4].try_into().unwrap_or([0; 4])))
+        .unwrap_or(0);
+    let (block_times, block_bits) = if tip > 0 {
+        info!(tip = tip, "Building block-time index for analytics");
+        build_block_times(&db, tip)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     let mut processed = 0;
     let mut indexed_outputs = 0;
@@ -114,6 +132,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // O1 OPTIMIZATION: Build transaction cache to avoid repeated deserialization
     let mut spent_outputs: HashSet<(Vec<u8>, u64)> = HashSet::new();
     let mut tx_cache: HashMap<Vec<u8>, Arc<CTransaction>> = HashMap::new();
+    // Creation height per txid — needed by the Tier-2 prevout joins (coin age)
+    // and the HODL snapshot; tx_cache alone doesn't carry heights.
+    let mut tx_heights: HashMap<Vec<u8>, i32> = HashMap::new();
     
     // Phase 2 Instrumentation: Track deserialization metrics
     let mut pass1_tx_total = 0;
@@ -153,7 +174,8 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 // O1: Extract txid and cache the transaction
                 let txid_bytes = txid_from_key(&key);
                 if !txid_bytes.is_empty() {
-                    tx_cache.insert(txid_bytes, Arc::new(tx.clone()));
+                    tx_cache.insert(txid_bytes.clone(), Arc::new(tx.clone()));
+                    tx_heights.insert(txid_bytes, height);
                 }
                 
                 // NEW: Count Sapling transactions (version >= 3 with Sapling data)
@@ -413,6 +435,16 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut pass2b_coinstake_skipped = 0;
     let mut pass2b_inputs_processed = 0;
     
+    // Tier-2 per-day aggregates from the prevout joins below (fees, staking
+    // rewards, coin days destroyed, cold-staking flows), bucketed by the
+    // SPENDER's block date and merged into the daily series afterwards.
+    let mut day_joins: HashMap<String, DayJoinAgg> = HashMap::new();
+    // Tier-4: budget payouts minted INSIDE coinstakes (modern PIVX pays
+    // proposals in the coinstake at heights at/after each 43200-block cycle
+    // boundary). Detected here, where outputs - inputs is already joined,
+    // as the minted excess over the era's scheduled block reward.
+    let mut coinstake_treasury: Vec<TreasuryPayout> = Vec::new();
+
     let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     let mut input_processed: usize = 0;
     for item in iter3 {
@@ -461,28 +493,43 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             pass2b_coinstake_skipped += 1; // metric retained: counts coinstakes seen
         }
 
+        // Tier-2 accumulators for this spending transaction (prevout joins).
+        let mut input_sum: i64 = 0;
+        let mut inputs_with_prevout: u64 = 0;
+        let mut inputs_resolved: u64 = 0;
+        let mut tx_coin_days: f64 = 0.0;
+        let mut tx_p2cs_spent: i64 = 0;
+
         // For every input, find the prevout's addresses and attribute this tx to them
         for input in &tx.inputs {
             if input.coinbase.is_some() { continue; }
             pass2b_inputs_processed += 1;
             if let Some(prevout) = &input.prevout {
+                inputs_with_prevout += 1;
                 // prevout.hash from parser.rs is already in internal (reversed) format
                 if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
                     // O1: Try cache first - this is the CRITICAL optimization for Pass 2b!
                     let prev_tx = if let Some(cached_prev_tx) = tx_cache.get(&prev_txid_internal) {
                         pass2b_cache_hits += 1;
-                        Some(Arc::clone(cached_prev_tx))
+                        let prev_height = tx_heights.get(&prev_txid_internal).copied().unwrap_or(-1);
+                        Some((Arc::clone(cached_prev_tx), prev_height))
                     } else {
                         // Cache miss - need to read from DB
                         pass2b_db_reads += 1;
                         let prev_tx_key = tx_cf_key(&prev_txid_internal);
                         if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key).ok().flatten() {
                             if prev_tx_data.len() >= 8 {
+                                let prev_height = i32::from_le_bytes(
+                                    prev_tx_data[4..8].try_into().unwrap_or([0; 4]),
+                                );
                                 let prev_raw_tx = &prev_tx_data[8..];
                                 let mut prev_with_header = Vec::with_capacity(4 + prev_raw_tx.len());
                                 prev_with_header.extend_from_slice(&[0u8; 4]);
                                 prev_with_header.extend_from_slice(prev_raw_tx);
-                                deserialize_transaction(&prev_with_header).await.ok().map(Arc::new)
+                                deserialize_transaction(&prev_with_header)
+                                    .await
+                                    .ok()
+                                    .map(|tx| (Arc::new(tx), prev_height))
                             } else {
                                 None
                             }
@@ -490,9 +537,21 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                             None
                         }
                     };
-                    
-                    if let Some(prev_tx) = prev_tx {
+
+                    if let Some((prev_tx, prev_height)) = prev_tx {
                         if let Some(prev_out) = prev_tx.outputs.get(prevout.n as usize) {
+                            // Tier 2: spend-side joins — input value sum (fees /
+                            // rewards), coin age, and cold-staking principal spent.
+                            inputs_resolved += 1;
+                            input_sum = input_sum.saturating_add(prev_out.value);
+                            if prev_height >= 0 && height >= prev_height {
+                                let age_days = (height - prev_height) as f64 / 1440.0;
+                                tx_coin_days += (prev_out.value as f64 / 100_000_000.0) * age_days;
+                            }
+                            if crate::parser::get_script_type(&prev_out.script_pubkey.script) == "coldstake" {
+                                tx_p2cs_spent = tx_p2cs_spent.saturating_add(prev_out.value);
+                            }
+
                             // Classify the previous output
                             let prev_script_class = classify_output(prev_out);
                             
@@ -527,6 +586,75 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 }
             }
         }
+
+        // Tier 2: bucket this tx's join aggregates by the SPENDER's block date.
+        if height >= 0 && (height as usize) < block_times.len() && block_times[height as usize] != 0 {
+            let date = unix_to_date(block_times[height as usize] as u64);
+            let agg = day_joins.entry(date.clone()).or_default();
+            let out_sum: i64 = tx.outputs.iter().map(|o| o.value).sum();
+            let p2cs_created: i64 = tx
+                .outputs
+                .iter()
+                .filter(|o| crate::parser::get_script_type(&o.script_pubkey.script) == "coldstake")
+                .map(|o| o.value)
+                .sum();
+            agg.p2cs_created = agg.p2cs_created.saturating_add(p2cs_created);
+            agg.p2cs_spent = agg.p2cs_spent.saturating_add(tx_p2cs_spent);
+            agg.coin_days_destroyed += tx_coin_days;
+            match crate::tx_type::detect_transaction_type(&tx) {
+                crate::tx_type::TransactionType::Normal => {
+                    agg.normal_tx_bytes += (value.len() as u64).saturating_sub(8);
+                    // Only credit a fee when EVERY input resolved — a partial
+                    // input sum would fabricate a negative or bogus fee.
+                    if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
+                        let fee = input_sum.saturating_sub(out_sum);
+                        if fee > 0 {
+                            agg.fees_total = agg.fees_total.saturating_add(fee);
+                        }
+                    }
+                }
+                crate::tx_type::TransactionType::Coinstake => {
+                    // Minted value: outputs - staked inputs. This is the era
+                    // block reward PLUS any budget payout riding in the
+                    // coinstake (PIVX pays treasury proposals inside the
+                    // coinstake at heights at/after each budget cycle, e.g.
+                    // 12,200 PIV at h=5,400,000 and 100,800 PIV at
+                    // h=5,443,200 — node-verified, see src/emission.rs).
+                    if inputs_resolved == inputs_with_prevout {
+                        let minted = out_sum.saturating_sub(input_sum);
+                        if minted > 0 {
+                            let expected = crate::emission::era_block_reward(height);
+                            let excess = minted.saturating_sub(expected);
+                            if excess > crate::emission::COIN {
+                                // Budget payout: record it as treasury and
+                                // keep ONLY the era emission in rewards_total
+                                // so the staking APY series isn't polluted by
+                                // superblocks. (>1 PIV tolerance for fees /
+                                // rounding.)
+                                coinstake_treasury.push(TreasuryPayout {
+                                    height,
+                                    date: date.clone(),
+                                    total_paid_sats: excess,
+                                    n_outputs: tx.outputs.len() as u32,
+                                });
+                                agg.rewards_total =
+                                    agg.rewards_total.saturating_add(expected);
+                            } else {
+                                agg.rewards_total =
+                                    agg.rewards_total.saturating_add(minted);
+                            }
+                            // Staker share (excl. masternode payment) per the
+                            // v5.6.1 schedule, capped by what was minted.
+                            agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(
+                                crate::emission::era_staker_reward(height).min(minted),
+                            );
+                        }
+                    }
+                }
+                crate::tx_type::TransactionType::Coinbase => {}
+            }
+        }
+
         input_processed += 1;
     }
     
@@ -691,10 +819,25 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         warn!(error = %e, "Failed to persist wealth analytics");
     }
 
+    // HODL / dormancy snapshot: value of the final unspent UTXO set bucketed
+    // by coin age, from the in-memory tx cache + spent set (no extra DB scans).
+    if let Err(e) = persist_hodl_snapshot(&db, &tx_cache, &tx_heights, &spent_outputs, tip) {
+        warn!(error = %e, "Failed to persist HODL snapshot");
+    }
+
     // Precompute the daily transaction time-series using REAL block times, so
     // the transactions-analytics endpoint serves exact, correctly-dated data
     // instantly instead of full-scanning with a height->date estimate.
-    if let Err(e) = persist_tx_daily_series(&db).await {
+    if let Err(e) = persist_tx_daily_series(
+        &db,
+        tip,
+        &block_times,
+        &block_bits,
+        &day_joins,
+        &coinstake_treasury,
+    )
+    .await
+    {
         warn!(error = %e, "Failed to persist transaction daily series");
     }
 
@@ -727,6 +870,84 @@ pub struct TxDayAgg {
     /// Stale (non-canonical) blocks observed in blk files dated this day.
     #[serde(default)]
     pub orphan_blocks: u64,
+    /// Unique addresses appearing in any output this day.
+    #[serde(default)]
+    pub active_addresses: u64,
+    /// Addresses seen for the first time ever on this day (first-seen date).
+    #[serde(default)]
+    pub new_addresses: u64,
+    /// Transactions carrying Sapling (shield) data this day.
+    #[serde(default)]
+    pub sapling_txs: u64,
+    /// 95th-percentile block interval (seconds) across the day's blocks.
+    #[serde(default)]
+    pub interval_p95_secs: u64,
+    /// Longest block interval (seconds) across the day's blocks.
+    #[serde(default)]
+    pub interval_max_secs: u64,
+    /// Blocks won by the day's top-10 stakers (concentration metric).
+    #[serde(default)]
+    pub top10_blocks: u64,
+    /// Total fees paid by the day's Normal txs (sats; prevout-joined).
+    #[serde(default)]
+    pub fees_total: i64,
+    /// Raw byte total of the day's Normal txs (avg fee/byte basis).
+    #[serde(default)]
+    pub normal_tx_bytes: u64,
+    /// Total minted staking rewards this day (coinstake outputs - inputs,
+    /// sats), EXCLUDING budget/superblock payouts (era emission only).
+    #[serde(default)]
+    pub rewards_total: i64,
+    /// Staker-share rewards this day (era emission minus masternode payment,
+    /// per the PIVX Core v5.6.1 schedule in src/emission.rs; sats).
+    #[serde(default)]
+    pub staker_rewards_total: i64,
+    /// Coin days destroyed this day (PIV * days, per spent input).
+    #[serde(default)]
+    pub coin_days_destroyed: f64,
+    /// Value newly delegated into P2CS (cold staking) outputs this day (sats).
+    #[serde(default)]
+    pub p2cs_created: i64,
+    /// P2CS value spent (undelegated or restaked) this day (sats).
+    #[serde(default)]
+    pub p2cs_spent: i64,
+}
+
+/// Per-day aggregates that require prevout joins; accumulated during Pass 2b
+/// (which already loads the previous transaction for every input) and merged
+/// into the persisted TxDayAgg series.
+#[derive(Default, Clone)]
+pub struct DayJoinAgg {
+    pub fees_total: i64,
+    pub normal_tx_bytes: u64,
+    /// Minted coinstake value excluding budget payouts (era emission only).
+    pub rewards_total: i64,
+    /// Staker share of the day's coinstake rewards (excl. masternode share).
+    pub staker_rewards_total: i64,
+    pub coin_days_destroyed: f64,
+    pub p2cs_created: i64,
+    pub p2cs_spent: i64,
+}
+
+/// HODL / dormancy snapshot: unspent value bucketed by coin age bands.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct HodlSnapshot {
+    /// (band label, unspent value in sats) — oldest band last.
+    pub bands: Vec<(String, i64)>,
+    pub total: i64,
+}
+
+/// One budget/treasury payout: value minted in excess of the era's scheduled
+/// block reward (PIVX Core v5.6.1 GetBlockValue; see src/emission.rs).
+/// PoW era: extra coinbase outputs. PoS era: minted inside the coinstake at
+/// heights at/after each 43200-block budget cycle, one proposal per block.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct TreasuryPayout {
+    pub height: i32,
+    pub date: String,
+    /// The minted excess over era_block_reward(height), sats.
+    pub total_paid_sats: i64,
+    pub n_outputs: u32,
 }
 
 /// Convert compact nBits to difficulty (diff1 target 0x1d00ffff convention).
@@ -784,24 +1005,48 @@ fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<(Vec<u32>, Vec<u32>), Box
     Ok((times, bits))
 }
 
-async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+/// Record an address occurrence for the active/new-address daily metrics.
+/// The transaction scan is NOT chronological, so first-seen is tracked as a
+/// per-address MINIMUM date and bucketed afterwards.
+fn note_address(
+    addr: String,
+    date: &str,
+    day_active: &mut HashMap<String, HashSet<String>>,
+    first_seen: &mut HashMap<String, String>,
+) {
+    match first_seen.get_mut(&addr) {
+        Some(existing) => {
+            if date < existing.as_str() {
+                *existing = date.to_string();
+            }
+        }
+        None => {
+            first_seen.insert(addr.clone(), date.to_string());
+        }
+    }
+    day_active.entry(date.to_string()).or_default().insert(addr);
+}
+
+async fn persist_tx_daily_series(
+    db: &Arc<DB>,
+    tip: i32,
+    block_times: &[u32],
+    block_bits: &[u32],
+    day_joins: &HashMap<String, DayJoinAgg>,
+    coinstake_treasury: &[TreasuryPayout],
+) -> Result<(), Box<dyn std::error::Error>> {
     let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
     let cf_transactions = db.cf_handle("transactions").ok_or("transactions CF not found")?;
 
-    let tip = db
-        .get_cf(&cf_state, b"sync_height")?
-        .filter(|b| b.len() >= 4)
-        .map(|b| i32::from_le_bytes(b[0..4].try_into().unwrap_or([0; 4])))
-        .unwrap_or(0);
-    if tip <= 0 {
+    if tip <= 0 || block_times.len() <= tip as usize {
         return Ok(());
     }
 
-    info!("Building block-time index for transaction daily series");
-    let (block_times, block_bits) = build_block_times(db, tip)?;
-
     let mut days: HashMap<String, TxDayAgg> = HashMap::new();
-    let mut day_stakers: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut day_stakers: HashMap<String, HashMap<String, u64>> = HashMap::new();
+    let mut day_active: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut first_seen: HashMap<String, String> = HashMap::new();
+    let mut treasury: Vec<TreasuryPayout> = Vec::new();
     let iter = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
     for item in iter {
         let (key, value) = item?;
@@ -829,8 +1074,33 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
         let agg = days.entry(agg_date.clone()).or_default();
         agg.tx_count += 1;
         agg.tx_bytes += raw_tx.len() as u64;
-        match crate::tx_type::detect_transaction_type(&tx) {
-            crate::tx_type::TransactionType::Coinbase => agg.coinbase += 1,
+        if tx.sapling_data.is_some() {
+            agg.sapling_txs += 1;
+        }
+        let tx_type = crate::tx_type::detect_transaction_type(&tx);
+        match tx_type {
+            crate::tx_type::TransactionType::Coinbase => {
+                agg.coinbase += 1;
+                // Tier 4: PoW-era budget payouts ride in the coinbase as
+                // value minted in excess of the era's scheduled block reward
+                // (>1 PIV tolerance for tx fees). Node-verified: h=86,400
+                // coinbase paid 1,000,250 = 250 era + 1,000,000 budget;
+                // h=129,600 paid 325 = 225 era + 100 budget. PoS-era budget
+                // payouts ride in COINSTAKES and are detected in Pass 2b.
+                if height > 0 {
+                    let total: i64 = tx.outputs.iter().map(|o| o.value).sum();
+                    let excess =
+                        total.saturating_sub(crate::emission::era_block_reward(height));
+                    if excess > crate::emission::COIN {
+                        treasury.push(TreasuryPayout {
+                            height,
+                            date: agg_date.clone(),
+                            total_paid_sats: excess,
+                            n_outputs: tx.outputs.len() as u32,
+                        });
+                    }
+                }
+            }
             crate::tx_type::TransactionType::Coinstake => {
                 agg.coinstake += 1;
                 agg.stake_volume = agg
@@ -843,7 +1113,11 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
                     .find(|o| !o.address.is_empty())
                     .and_then(|o| o.address.first())
                 {
-                    day_stakers.entry(agg_date.clone()).or_default().insert(addr.clone());
+                    *day_stakers
+                        .entry(agg_date.clone())
+                        .or_default()
+                        .entry(addr.clone())
+                        .or_insert(0) += 1;
                 }
             }
             crate::tx_type::TransactionType::Normal => {
@@ -851,6 +1125,26 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
                 agg.volume = agg
                     .volume
                     .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+            }
+        }
+
+        // Active / first-seen address tracking from output attributions (same
+        // classification rules as the address index, incl. both P2CS sides).
+        for (vout_index, output) in tx.outputs.iter().enumerate() {
+            if tx_type == crate::tx_type::TransactionType::Coinstake && vout_index == 0 {
+                continue; // coinstake marker output
+            }
+            match classify_output(output) {
+                ScriptClassification::P2PKH(addr)
+                | ScriptClassification::P2SH(addr)
+                | ScriptClassification::P2PK(addr) => {
+                    note_address(addr, &agg_date, &mut day_active, &mut first_seen);
+                }
+                ScriptClassification::ColdStake { staker, owner } => {
+                    note_address(staker, &agg_date, &mut day_active, &mut first_seen);
+                    note_address(owner, &agg_date, &mut day_active, &mut first_seen);
+                }
+                _ => {}
             }
         }
     }
@@ -905,8 +1199,63 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
     for (date, stakers) in &day_stakers {
         if let Some(agg) = days.get_mut(date) {
             agg.unique_stakers = stakers.len() as u64;
+            // Staker concentration: blocks won by the day's top-10 stakers.
+            let mut counts: Vec<u64> = stakers.values().copied().collect();
+            counts.sort_unstable_by(|a, b| b.cmp(a));
+            agg.top10_blocks = counts.iter().take(10).sum();
         }
     }
+
+    // Per-day block interval distribution (p95 / max) from consecutive header
+    // times; an interval is attributed to the day of the LATER block.
+    let mut day_intervals: HashMap<String, Vec<u32>> = HashMap::new();
+    for h in 1..=(tip as usize) {
+        if block_times[h] == 0 || block_times[h - 1] == 0 {
+            continue;
+        }
+        let dt = block_times[h].saturating_sub(block_times[h - 1]);
+        day_intervals
+            .entry(unix_to_date(block_times[h] as u64))
+            .or_default()
+            .push(dt);
+    }
+    for (date, mut intervals) in day_intervals {
+        if let Some(agg) = days.get_mut(&date) {
+            intervals.sort_unstable();
+            let n = intervals.len();
+            agg.interval_p95_secs = intervals[(n * 95 / 100).min(n - 1)] as u64;
+            agg.interval_max_secs = intervals[n - 1] as u64;
+        }
+    }
+
+    // Active / new address counts.
+    for (date, addrs) in &day_active {
+        if let Some(agg) = days.get_mut(date) {
+            agg.active_addresses = addrs.len() as u64;
+        }
+    }
+    let mut new_per_day: HashMap<&str, u64> = HashMap::new();
+    for date in first_seen.values() {
+        *new_per_day.entry(date.as_str()).or_insert(0) += 1;
+    }
+    for (date, n) in &new_per_day {
+        if let Some(agg) = days.get_mut(*date) {
+            agg.new_addresses = *n;
+        }
+    }
+
+    // Merge the Tier-2 prevout-join aggregates accumulated during Pass 2b.
+    for (date, j) in day_joins {
+        let agg = days.entry(date.clone()).or_default();
+        agg.fees_total = j.fees_total;
+        agg.normal_tx_bytes = j.normal_tx_bytes;
+        agg.rewards_total = j.rewards_total;
+        agg.staker_rewards_total = j.staker_rewards_total;
+        agg.coin_days_destroyed = j.coin_days_destroyed;
+        agg.p2cs_created = j.p2cs_created;
+        agg.p2cs_spent = j.p2cs_spent;
+    }
+
     let mut dates: Vec<String> = days.keys().cloned().collect();
     dates.sort();
     let mut batch = rocksdb::WriteBatch::default();
@@ -916,8 +1265,18 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
         batch.put_cf(&cf_state, &k, bincode::serialize(agg)?);
     }
     batch.put_cf(&cf_state, b"analytics_tx_days", bincode::serialize(&dates)?);
+    // Tier 4: treasury payouts — PoW-era coinbase payouts (collected above)
+    // merged with PoS-era coinstake payouts (collected in Pass 2b), sorted
+    // by height.
+    treasury.extend_from_slice(coinstake_treasury);
+    treasury.sort_by_key(|t| t.height);
+    batch.put_cf(&cf_state, b"analytics_treasury", bincode::serialize(&treasury)?);
     db.write(batch)?;
-    info!(days = dates.len(), "Transaction daily series precomputed and stored");
+    info!(
+        days = dates.len(),
+        treasury_payouts = treasury.len(),
+        "Transaction daily series precomputed and stored"
+    );
     Ok(())
 }
 
@@ -941,6 +1300,12 @@ pub struct WealthSnapshot {
     pub top_1000: i64,
     /// Histogram bucket counts, same 7 ranges the API exposes.
     pub histogram: Vec<(String, u64)>,
+    /// Gini coefficient over all positive balances (0 = equal, 1 = one holder).
+    #[serde(default)]
+    pub gini: f64,
+    /// Minimum number of holders whose balances sum to >50% of the total.
+    #[serde(default)]
+    pub nakamoto_coefficient: u32,
 }
 
 /// Number of rich-list entries to retain (API serves a clamped slice of this).
@@ -1011,6 +1376,31 @@ fn persist_wealth_analytics(
         })
         .collect();
 
+    // Gini coefficient (standard formula over ascending balances):
+    //   G = 2 * Σ(i * x_i) / (n * Σx) - (n + 1) / n
+    // balances is sorted DESCENDING, so iterate in reverse for ascending order.
+    let n = balances.len();
+    let gini = if n > 0 && total_balance > 0 {
+        let mut weighted = 0.0f64;
+        for (i, (_, b)) in balances.iter().rev().enumerate() {
+            weighted += (i as f64 + 1.0) * (*b as f64);
+        }
+        (2.0 * weighted) / (n as f64 * total_balance as f64) - (n as f64 + 1.0) / n as f64
+    } else {
+        0.0
+    };
+
+    // Nakamoto coefficient: minimum holders summing to >50% of total balance.
+    let mut nakamoto_coefficient: u32 = 0;
+    let mut acc: i64 = 0;
+    for (_, b) in &balances {
+        acc = acc.saturating_add(*b);
+        nakamoto_coefficient += 1;
+        if (acc as f64) > total_balance as f64 / 2.0 {
+            break;
+        }
+    }
+
     let wealth = WealthSnapshot {
         total_balance,
         address_count: balances.len() as u64,
@@ -1019,6 +1409,8 @@ fn persist_wealth_analytics(
         top_100: sum_take(100),
         top_1000: sum_take(1000),
         histogram,
+        gini,
+        nakamoto_coefficient,
     };
 
     db.put_cf(&cf_state, b"analytics_richlist", bincode::serialize(&richlist)?)?;
@@ -1026,8 +1418,81 @@ fn persist_wealth_analytics(
     info!(
         richlist_entries = richlist.len(),
         holders = wealth.address_count,
+        gini = wealth.gini,
+        nakamoto = wealth.nakamoto_coefficient,
         "Wealth analytics precomputed and stored"
     );
+    Ok(())
+}
+
+/// HODL / dormancy snapshot: bucket the value of every UNSPENT output by the
+/// age of its creating transaction (1440 blocks ~= 1 day). Uses the in-memory
+/// transaction cache and spent set already built by Passes 1/2, so this is a
+/// pure in-memory aggregation. Iterating tx outputs (rather than address_map)
+/// avoids double-counting P2CS outputs, which are indexed under both sides.
+fn persist_hodl_snapshot(
+    db: &Arc<DB>,
+    tx_cache: &HashMap<Vec<u8>, Arc<CTransaction>>,
+    tx_heights: &HashMap<Vec<u8>, i32>,
+    spent_outputs: &HashSet<(Vec<u8>, u64)>,
+    tip: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if tip <= 0 {
+        return Ok(());
+    }
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+
+    // Age bands in days (1440 blocks/day): label, lower (incl), upper (excl).
+    const BANDS: [(&str, i64, i64); 6] = [
+        ("<1m", 0, 30),
+        ("1-3m", 30, 90),
+        ("3-6m", 90, 180),
+        ("6-12m", 180, 365),
+        ("1-2y", 365, 730),
+        (">2y", 730, i64::MAX),
+    ];
+    let mut sums = [0i64; 6];
+    let mut total: i64 = 0;
+
+    for (txid, tx) in tx_cache {
+        let create_height = match tx_heights.get(txid) {
+            Some(h) if *h >= 0 && *h <= tip => *h,
+            _ => continue,
+        };
+        let age_days = ((tip - create_height) as i64) / 1440;
+        let band_idx = BANDS
+            .iter()
+            .position(|(_, lo, hi)| age_days >= *lo && age_days < *hi)
+            .unwrap_or(BANDS.len() - 1);
+        let tx_is_coinstake = is_coinstake(tx);
+        // One probe tuple per tx: spent_outputs lookups need an owned key.
+        let mut probe = (txid.clone(), 0u64);
+        for (vout_index, output) in tx.outputs.iter().enumerate() {
+            if tx_is_coinstake && vout_index == 0 {
+                continue;
+            }
+            if output.value <= 0 {
+                continue;
+            }
+            probe.1 = output.index;
+            if spent_outputs.contains(&probe) {
+                continue;
+            }
+            sums[band_idx] = sums[band_idx].saturating_add(output.value);
+            total = total.saturating_add(output.value);
+        }
+    }
+
+    let snapshot = HodlSnapshot {
+        bands: BANDS
+            .iter()
+            .zip(sums.iter())
+            .map(|((label, _, _), v)| (label.to_string(), *v))
+            .collect(),
+        total,
+    };
+    db.put_cf(&cf_state, b"analytics_hodl", bincode::serialize(&snapshot)?)?;
+    info!(total_sats = total, "HODL age-band snapshot precomputed and stored");
     Ok(())
 }
 

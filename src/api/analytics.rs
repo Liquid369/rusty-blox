@@ -80,6 +80,16 @@ pub struct TransactionDataPoint {
     pub other_count: u64,
     pub avg_size: String,
     pub avg_fee: String,
+    /// Average fee per byte across the day's Normal txs (sats/byte).
+    pub avg_fee_per_byte: f64,
+    /// Unique addresses appearing in any output this day.
+    pub active_addresses: u64,
+    /// Addresses seen for the first time ever on this day.
+    pub new_addresses: u64,
+    /// Transactions carrying Sapling (shield) data this day.
+    pub sapling_txs: u64,
+    /// Coin days destroyed this day (PIV * days).
+    pub coin_days_destroyed: f64,
 }
 
 #[derive(Serialize, Debug)]
@@ -92,6 +102,15 @@ pub struct StakingDataPoint {
     pub avg_block_time: f64,
     /// Average size of the day's actual coinstakes (stake turnover / count), PIV.
     pub avg_stake_size: String,
+    /// Honest staker APY: staker-share rewards (era emission minus masternode
+    /// payment, per the PIVX Core v5.6.1 schedule) * 365 / network weight, %.
+    pub apy_estimate: f64,
+    /// Gross minted yield: TOTAL coinstake emission (staker + masternode
+    /// share) * 365 / network weight, %. Overstates what a staker earns
+    /// (~2.5x in the 10 PIV era where the staker keeps only 4 of 10).
+    pub gross_yield_estimate: f64,
+    /// Share of the day's blocks won by its top-10 stakers, %.
+    pub top10_dominance: f64,
 }
 
 #[derive(Serialize, Debug)]
@@ -101,6 +120,10 @@ pub struct NetworkHealthDataPoint {
     pub orphan_rate: f64,
     pub blocks_per_day: u64,
     pub avg_block_size: u64,
+    /// 95th-percentile block interval (seconds).
+    pub interval_p95_secs: u64,
+    /// Longest block interval (seconds).
+    pub interval_max_secs: u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -120,6 +143,10 @@ pub struct WealthDistribution {
     pub top_100: f64,
     pub top_1000: f64,
     pub histogram: Vec<WealthBucket>,
+    /// Gini coefficient over all positive balances (0 = equal, 1 = one holder).
+    pub gini: f64,
+    /// Minimum holders whose balances sum to >50% of the total.
+    pub nakamoto_coefficient: u32,
 }
 
 #[derive(Serialize, Debug)]
@@ -208,9 +235,17 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
             stake_count: agg.coinstake,
             other_count: agg.coinbase,
             avg_size,
-            // Fees are not tracked per day (would require prevout joins); the
-            // node-derived fee data is exposed on the per-transaction endpoint.
-            avg_fee: "0".to_string(),
+            // Real per-payment average fee from the Pass 2b prevout joins.
+            avg_fee: format_piv_amount(agg.fees_total / agg.payment.max(1) as i64),
+            avg_fee_per_byte: if agg.normal_tx_bytes > 0 {
+                agg.fees_total as f64 / agg.normal_tx_bytes as f64
+            } else {
+                0.0
+            },
+            active_addresses: agg.active_addresses,
+            new_addresses: agg.new_addresses,
+            sapling_txs: agg.sapling_txs,
+            coin_days_destroyed: agg.coin_days_destroyed,
         });
     }
     Some(out)
@@ -245,7 +280,8 @@ pub async fn staking_analytics(
 /// Read the precomputed staking daily series. participation_rate relates the
 /// day's stake turnover (coinstake output volume) to current total supply —
 /// the same approximation the legacy sampled scan used. rewards_distributed
-/// would need prevout joins per coinstake (outputs - inputs); not tracked yet.
+/// comes from the Pass 2b prevout joins (coinstake outputs - inputs, budget
+/// mints excluded).
 fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDataPoint>> {
     let cf_state = db.cf_handle("chain_state")?;
     let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
@@ -281,6 +317,11 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
         if agg.coinstake > 0 && agg.stake_volume == 0 {
             return None;
         }
+        // Same staleness rule for the staker-share split: rewards without a
+        // staker share means the blob predates staker_rewards_total.
+        if agg.rewards_total > 0 && agg.staker_rewards_total == 0 {
+            return None;
+        }
         let blocks = if agg.blocks > 0 { agg.blocks } else { agg.coinstake.max(1) };
         // PoS network weight derived from difficulty:
         //   staked_sats = difficulty * 2^43 / 60
@@ -301,9 +342,26 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
             },
             total_staked: format_piv_amount(staked.max(0)),
             active_stakers: agg.unique_stakers,
-            rewards_distributed: "0".to_string(),
+            // Real minted rewards from the Pass 2b prevout joins
+            // (coinstake outputs - staked inputs).
+            rewards_distributed: format_piv_amount(agg.rewards_total),
             avg_block_time: 86_400.0 / blocks as f64,
             avg_stake_size: format_piv_amount(agg.stake_volume / agg.coinstake.max(1) as i64),
+            // Honest staker APY: only the staker's share of the emission
+            // (excludes the masternode payment — and rewards_total already
+            // excludes budget/superblock mints).
+            apy_estimate: if staked_sats > 0.0 {
+                (agg.staker_rewards_total as f64 * 365.0 / staked_sats) * 100.0
+            } else {
+                0.0
+            },
+            // Former apy_estimate: gross minted emission incl. the MN share.
+            gross_yield_estimate: if staked_sats > 0.0 {
+                (agg.rewards_total as f64 * 365.0 / staked_sats) * 100.0
+            } else {
+                0.0
+            },
+            top10_dominance: (agg.top10_blocks as f64 / blocks as f64) * 100.0,
         });
     }
     Some(out)
@@ -352,6 +410,8 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
             orphan_rate,
             blocks_per_day: agg.blocks,
             avg_block_size,
+            interval_p95_secs: agg.interval_p95_secs,
+            interval_max_secs: agg.interval_max_secs,
         });
     }
     Some(out)
@@ -472,6 +532,8 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
         top_50: pct(w.top_50),
         top_100: pct(w.top_100),
         top_1000: pct(w.top_1000),
+        gini: w.gini,
+        nakamoto_coefficient: w.nakamoto_coefficient,
         histogram: w
             .histogram
             .into_iter()
@@ -482,6 +544,196 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
             })
             .collect(),
     })
+}
+
+// ========================================
+// New Precomputed-Blob Endpoints
+// ========================================
+
+#[derive(Deserialize, Debug)]
+pub struct SnapshotHoursQuery {
+    #[serde(default = "default_hours")]
+    pub hours: u64,
+}
+
+fn default_hours() -> u64 {
+    24
+}
+
+#[derive(Serialize, Debug)]
+pub struct HodlBand {
+    pub band: String,
+    /// Unspent value in this age band, PIV (formatted).
+    pub value: String,
+    pub percentage: f64,
+}
+
+#[derive(Serialize, Debug)]
+pub struct HodlResponse {
+    pub bands: Vec<HodlBand>,
+    pub total: String,
+}
+
+/// GET /api/v2/analytics/hodl
+/// Unspent value bucketed by coin age (HODL waves). Served from the
+/// precomputed `analytics_hodl` blob; empty until enrichment has run.
+pub async fn hodl_analytics(
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<HodlResponse>, StatusCode> {
+    let db_clone = db.clone();
+    let result = tokio::task::spawn_blocking(move || read_hodl_snapshot(&db_clone))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result.unwrap_or(HodlResponse {
+        bands: Vec::new(),
+        total: "0".to_string(),
+    })))
+}
+
+fn read_hodl_snapshot(db: &Arc<DB>) -> Option<HodlResponse> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let bytes = db.get_cf(&cf_state, b"analytics_hodl").ok()??;
+    let snap: crate::enrich_addresses::HodlSnapshot = bincode::deserialize(&bytes).ok()?;
+    let denom = if snap.total > 0 { snap.total as f64 } else { 1.0 };
+    Some(HodlResponse {
+        bands: snap
+            .bands
+            .into_iter()
+            .map(|(band, sats)| HodlBand {
+                band,
+                value: format_piv_amount(sats),
+                percentage: (sats as f64 / denom) * 100.0,
+            })
+            .collect(),
+        total: format_piv_amount(snap.total),
+    })
+}
+
+/// GET /api/v2/analytics/snapshots?hours=N
+/// Hourly forward-only network snapshots (mempool, masternodes, supply)
+/// collected by the block monitor. Empty until the first snapshot is written.
+pub async fn snapshots_analytics(
+    Query(params): Query<SnapshotHoursQuery>,
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<Vec<crate::monitor::HourlySnapshot>>, StatusCode> {
+    let db_clone = db.clone();
+    let hours = params.hours.clamp(1, 8760);
+    let result = tokio::task::spawn_blocking(move || -> Vec<crate::monitor::HourlySnapshot> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(hours.saturating_mul(3600));
+        let mut series: Vec<crate::monitor::HourlySnapshot> = db_clone
+            .cf_handle("chain_state")
+            .and_then(|cf| db_clone.get_cf(&cf, b"analytics_snapshots").ok().flatten())
+            .and_then(|b| bincode::deserialize(&b).ok())
+            .unwrap_or_default();
+        series.retain(|s| s.ts >= cutoff);
+        series
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result))
+}
+
+#[derive(Serialize, Debug)]
+pub struct TreasuryEntry {
+    pub height: i32,
+    pub date: String,
+    /// Total superblock payout, PIV (formatted).
+    pub total_paid: String,
+    pub n_outputs: u32,
+}
+
+/// GET /api/v2/analytics/treasury
+/// Historical budget/treasury payouts — value minted in excess of the era
+/// block reward (PoW era: extra coinbase outputs; PoS era: inside coinstakes
+/// at/after budget-cycle heights) — from the precomputed `analytics_treasury`
+/// blob, sorted by height.
+pub async fn treasury_analytics(
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<Vec<TreasuryEntry>>, StatusCode> {
+    let db_clone = db.clone();
+    let result = tokio::task::spawn_blocking(move || -> Vec<TreasuryEntry> {
+        let payouts: Vec<crate::enrich_addresses::TreasuryPayout> = db_clone
+            .cf_handle("chain_state")
+            .and_then(|cf| db_clone.get_cf(&cf, b"analytics_treasury").ok().flatten())
+            .and_then(|b| bincode::deserialize(&b).ok())
+            .unwrap_or_default();
+        payouts
+            .into_iter()
+            .map(|p| TreasuryEntry {
+                height: p.height,
+                date: p.date,
+                total_paid: format_piv_amount(p.total_paid_sats),
+                n_outputs: p.n_outputs,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result))
+}
+
+#[derive(Serialize, Debug)]
+pub struct ColdStakingDataPoint {
+    pub date: String,
+    /// Value newly delegated into P2CS this day, PIV (formatted).
+    pub created: String,
+    /// P2CS value spent (undelegated/restaked) this day, PIV (formatted).
+    pub spent: String,
+    /// Cumulative net delegated value since the start of the series, PIV.
+    pub net_cumulative: String,
+}
+
+/// GET /api/v2/analytics/coldstaking?range={timeRange}
+/// Cold-staking adoption curve from the daily P2CS created/spent aggregates.
+/// The cumulative sum runs over the FULL series, then only the requested
+/// range is returned.
+pub async fn coldstaking_analytics(
+    Query(params): Query<TimeRangeQuery>,
+    Extension(db): Extension<Arc<DB>>,
+) -> Result<Json<Vec<ColdStakingDataPoint>>, StatusCode> {
+    let db_clone = db.clone();
+    let range = params.range.clone();
+    let result =
+        tokio::task::spawn_blocking(move || read_coldstaking_series(&db_clone, &range))
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(result.unwrap_or_default()))
+}
+
+fn read_coldstaking_series(db: &Arc<DB>, range: &str) -> Option<Vec<ColdStakingDataPoint>> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
+    let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
+    dates.sort();
+    let days = parse_time_range(range) as usize;
+    let start = dates.len().saturating_sub(days);
+
+    let mut cumulative: i64 = 0;
+    let mut out = Vec::with_capacity(dates.len().min(days));
+    for (i, date) in dates.iter().enumerate() {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(date.as_bytes());
+        let agg: crate::enrich_addresses::TxDayAgg = match db.get_cf(&cf_state, &k).ok()? {
+            Some(b) => bincode::deserialize(&b).ok()?,
+            None => continue,
+        };
+        cumulative = cumulative
+            .saturating_add(agg.p2cs_created)
+            .saturating_sub(agg.p2cs_spent);
+        if i >= start {
+            out.push(ColdStakingDataPoint {
+                date: date.clone(),
+                created: format_piv_amount(agg.p2cs_created),
+                spent: format_piv_amount(agg.p2cs_spent),
+                net_cumulative: format_piv_amount(cumulative),
+            });
+        }
+    }
+    Some(out)
 }
 
 // ========================================
@@ -632,6 +884,12 @@ fn compute_transaction_analytics(
                 other_count: stats.other_count,
                 avg_size,
                 avg_fee,
+                // Prevout-joined metrics only exist in the precomputed series.
+                avg_fee_per_byte: 0.0,
+                active_addresses: 0,
+                new_addresses: 0,
+                sapling_txs: 0,
+                coin_days_destroyed: 0.0,
             }
         })
         .collect();
@@ -761,6 +1019,9 @@ fn compute_staking_analytics(
             rewards_distributed: format_piv_amount(rewards_distributed),
             avg_block_time,
             avg_stake_size: "0".to_string(),
+            apy_estimate: 0.0,
+            gross_yield_estimate: 0.0,
+            top10_dominance: 0.0,
         });
     }
     
@@ -851,6 +1112,8 @@ fn compute_network_health_analytics(
             orphan_rate,
             blocks_per_day: total_blocks,
             avg_block_size,
+            interval_p95_secs: 0,
+            interval_max_secs: 0,
         });
     }
     
@@ -1031,13 +1294,38 @@ fn compute_wealth_distribution(
     
     // Create histogram
     let histogram = create_balance_histogram(&balances);
-    
+
+    // Gini coefficient over ascending balances (balances is sorted descending).
+    let n = balances.len();
+    let gini = if n > 0 && total_balance > 0 {
+        let mut weighted = 0.0f64;
+        for (i, b) in balances.iter().rev().enumerate() {
+            weighted += (i as f64 + 1.0) * (*b as f64);
+        }
+        (2.0 * weighted) / (n as f64 * total_balance as f64) - (n as f64 + 1.0) / n as f64
+    } else {
+        0.0
+    };
+
+    // Nakamoto coefficient: minimum holders summing to >50% of total balance.
+    let mut nakamoto_coefficient: u32 = 0;
+    let mut acc: i64 = 0;
+    for b in &balances {
+        acc = acc.saturating_add(*b);
+        nakamoto_coefficient += 1;
+        if (acc as f64) > total_balance as f64 / 2.0 {
+            break;
+        }
+    }
+
     Ok(WealthDistribution {
         top_10,
         top_50,
         top_100,
         top_1000,
         histogram,
+        gini,
+        nakamoto_coefficient,
     })
 }
 

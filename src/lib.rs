@@ -7,6 +7,7 @@ pub mod chainwork;
 pub mod canonical_chain;
 pub mod config;
 pub mod constants;
+pub mod emission;
 pub mod db_handles;
 pub mod tx_keys;
 pub mod enrich_addresses;

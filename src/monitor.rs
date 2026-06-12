@@ -26,6 +26,70 @@ pub struct ChainTip {
     pub hash: String,
 }
 
+/// Hourly network snapshot (Tier-3 forward-only analytics series).
+/// Stored as a bincode Vec under chain_state key `analytics_snapshots`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HourlySnapshot {
+    pub ts: u64,
+    pub mempool_txs: u64,
+    pub mempool_bytes: u64,
+    pub masternode_count: u64,
+    pub shield_supply_piv: f64,
+    pub transparent_supply_piv: f64,
+}
+
+/// Retain one year of hourly snapshots.
+const SNAPSHOT_CAP: usize = 8760;
+
+/// Hour (unix ts / 3600) of the last persisted snapshot, so restarts don't
+/// double-write within the same hour. 0 when no series exists yet.
+fn read_last_snapshot_hour(db: &Arc<DB>) -> u64 {
+    db.cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"analytics_snapshots").ok().flatten())
+        .and_then(|b| bincode::deserialize::<Vec<HourlySnapshot>>(&b).ok())
+        .and_then(|v| v.last().map(|s| s.ts / 3600))
+        .unwrap_or(0)
+}
+
+/// Collect and append one hourly snapshot (mempool, masternodes, supply) to
+/// the chain_state `analytics_snapshots` series (load-append-store, capped).
+async fn write_hourly_snapshot(
+    db: &Arc<DB>,
+    ts: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::api::helpers::rpc_call_json;
+
+    let mempool = rpc_call_json("getmempoolinfo", serde_json::json!([])).await?;
+    let mn = rpc_call_json("getmasternodecount", serde_json::json!([])).await?;
+    let supply = rpc_call_json("getsupplyinfo", serde_json::json!([false])).await?;
+
+    let snapshot = HourlySnapshot {
+        ts,
+        mempool_txs: mempool.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+        mempool_bytes: mempool.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+        masternode_count: mn.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
+        shield_supply_piv: supply.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        transparent_supply_piv: supply
+            .get("transparentsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    };
+
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    // Load-append-store; an unreadable (old-schema) blob restarts the series.
+    let mut series: Vec<HourlySnapshot> = db
+        .get_cf(&cf_state, b"analytics_snapshots")?
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default();
+    series.push(snapshot);
+    if series.len() > SNAPSHOT_CAP {
+        let excess = series.len() - SNAPSHOT_CAP;
+        series.drain(0..excess);
+    }
+    db.put_cf(&cf_state, b"analytics_snapshots", bincode::serialize(&series)?)?;
+    Ok(())
+}
+
 /// Structure to hold fetched block data for two-phase processing
 #[derive(Debug, Clone)]
 struct FetchedBlock {
@@ -1299,7 +1363,34 @@ pub async fn run_block_monitor(
         }
     };
     
+    // Tier-3 hourly snapshot tracking (resumes from the persisted series).
+    let mut last_snapshot_hour: u64 = read_last_snapshot_hour(&db);
+    let mut snapshot_failure_warned = false;
+
     loop {
+        // Hourly forward-only snapshot (mempool / masternodes / supply).
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let hour = now_secs / 3600;
+        if now_secs > 0 && hour > last_snapshot_hour {
+            match write_hourly_snapshot(&db, now_secs).await {
+                Ok(()) => {
+                    last_snapshot_hour = hour;
+                    debug!(ts = now_secs, "Hourly analytics snapshot stored");
+                }
+                Err(e) => {
+                    // Skip this hour's snapshot; warn only once to avoid spam.
+                    if !snapshot_failure_warned {
+                        warn!(error = %e, "Hourly analytics snapshot failed (skipping silently from now on)");
+                        snapshot_failure_warned = true;
+                    }
+                    last_snapshot_hour = hour;
+                }
+            }
+        }
+
         // Get current tips
         let rpc_tip = match get_rpc_chain_tip(&rpc_client) {
             Ok(tip) => {
