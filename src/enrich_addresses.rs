@@ -724,6 +724,9 @@ pub struct TxDayAgg {
     /// Sum of raw transaction bytes this day (block size ~= tx_bytes + headers).
     #[serde(default)]
     pub tx_bytes: u64,
+    /// Stale (non-canonical) blocks observed in blk files dated this day.
+    #[serde(default)]
+    pub orphan_blocks: u64,
 }
 
 /// Convert compact nBits to difficulty (diff1 target 0x1d00ffff convention).
@@ -863,6 +866,35 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
         e.0 += nbits_to_difficulty(block_bits[h]);
         e.1 += 1;
     }
+    // Stale blocks: every stored header whose hash is NOT in the canonical
+    // 'h' index, bucketed by its own header time.
+    {
+        let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
+        let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+        let iter = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
+        for item in iter {
+            let (key, header) = item?;
+            let hash: &[u8] = if key.len() == 33 && key[0] == b'b' { &key[1..] } else { &key[..] };
+            if hash.len() != 32 || header.len() < 72 {
+                continue;
+            }
+            let mut h_key = vec![b'h'];
+            h_key.extend_from_slice(hash);
+            if db.get_cf(&cf_metadata, &h_key)?.is_some() {
+                continue; // canonical
+            }
+            let t = u32::from_le_bytes(header[68..72].try_into().unwrap_or([0; 4]));
+            if t == 0 { continue; }
+            // Blocks within 2h of the canonical tip may simply postdate the
+            // canonical index snapshot — not classifiable as stale yet.
+            let tip_time = block_times[tip as usize];
+            if tip_time > 0 && t + 7_200 > tip_time {
+                continue;
+            }
+            days.entry(unix_to_date(t as u64)).or_default().orphan_blocks += 1;
+        }
+    }
+
     for (date, (diff_sum, blocks)) in &day_diff {
         if let Some(agg) = days.get_mut(date) {
             agg.avg_difficulty = if *blocks > 0 { diff_sum / *blocks as f64 } else { 0.0 };

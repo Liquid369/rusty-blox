@@ -321,6 +321,14 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
     if dates.len() > days {
         dates = dates.split_off(dates.len() - days);
     }
+    // Daily network metrics are only meaningful for COMPLETE days: a partial
+    // current day under-reports blocks and over-reports orphan rate (recent
+    // stale-vs-canonical classification lags the live tip).
+    let today = crate::enrich_addresses::unix_to_date(
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    );
+    dates.retain(|d| *d != today);
+
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
         let mut k = b"analytics_tx_day:".to_vec();
@@ -336,10 +344,12 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
         // Real average block size: the day's transaction bytes plus per-block
         // header overhead (112-byte v8+ header + ~1 byte tx-count varint).
         let avg_block_size = (agg.tx_bytes + agg.blocks * 113) / agg.blocks;
+        let orphan_rate =
+            (agg.orphan_blocks as f64 / (agg.orphan_blocks + agg.blocks) as f64) * 100.0;
         out.push(NetworkHealthDataPoint {
             date,
             difficulty: format!("{:.2}", agg.avg_difficulty),
-            orphan_rate: 0.0,
+            orphan_rate,
             blocks_per_day: agg.blocks,
             avg_block_size,
         });
