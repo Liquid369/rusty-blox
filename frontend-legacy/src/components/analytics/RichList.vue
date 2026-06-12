@@ -44,6 +44,18 @@
         icon="💰"
         :loading="loading"
       />
+      <StatCard
+        label="Gini Coefficient"
+        :value="stats.gini !== null ? stats.gini.toFixed(4) : 'N/A'"
+        icon="⚖️"
+        :loading="loading"
+      />
+      <StatCard
+        label="Nakamoto Coefficient"
+        :value="stats.nakamoto !== null ? formatNumber(stats.nakamoto) : 'N/A'"
+        icon="🛡️"
+        :loading="loading"
+      />
     </div>
 
     <!-- Wealth Distribution Chart -->
@@ -195,11 +207,14 @@ const sortedRichList = computed(() => {
 
 const stats = computed(() => {
   if (!richList.value || richList.value.length === 0) {
+    const wdEmpty = wealthDistribution.value
     return {
       totalAddresses: 0,
       top100Percentage: 0,
       richestBalance: 0,
-      avgTop100: 0
+      avgTop100: 0,
+      gini: wdEmpty && typeof wdEmpty.gini === 'number' ? wdEmpty.gini : null,
+      nakamoto: wdEmpty && typeof wdEmpty.nakamoto_coefficient === 'number' ? wdEmpty.nakamoto_coefficient : null
     }
   }
 
@@ -218,7 +233,9 @@ const stats = computed(() => {
     totalAddresses,
     top100Percentage,
     richestBalance: richList.value[0]?.balance || 0,
-    avgTop100: top100Total / top100.length
+    avgTop100: top100Total / top100.length,
+    gini: wd && typeof wd.gini === 'number' ? wd.gini : null,
+    nakamoto: wd && typeof wd.nakamoto_coefficient === 'number' ? wd.nakamoto_coefficient : null
   }
 })
 
