@@ -88,6 +88,9 @@ pub struct TransactionDataPoint {
     pub new_addresses: u64,
     /// Transactions carrying Sapling (shield) data this day.
     pub sapling_txs: u64,
+    /// Coinstakes staking a P2CS (cold-staking) delegation this day —
+    /// subset of `stake_count`.
+    pub coldstake_txs: u64,
     /// Coin days destroyed this day (PIV * days).
     pub coin_days_destroyed: f64,
 }
@@ -245,6 +248,7 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
             active_addresses: agg.active_addresses,
             new_addresses: agg.new_addresses,
             sapling_txs: agg.sapling_txs,
+            coldstake_txs: agg.coldstake_txs,
             coin_days_destroyed: agg.coin_days_destroyed,
         });
     }
@@ -889,6 +893,7 @@ fn compute_transaction_analytics(
                 active_addresses: 0,
                 new_addresses: 0,
                 sapling_txs: 0,
+                coldstake_txs: 0,
                 coin_days_destroyed: 0.0,
             }
         })

@@ -702,26 +702,58 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let total_addresses = address_map.len();  // Cache length before consuming map
     let mut total_utxos_checked = 0;
     let mut total_spent_found = 0;
-    
+
+    // HODL / dormancy accumulators, fed by the SAME deduped unspent sets that
+    // back the 'a' entries (the path verified against the reference explorer).
+    // Restricting the snapshot to address-attributed UTXOs is what keeps the
+    // tracked total at the transparent supply: outputs with no address are
+    // dominated by OP_ZEROCOINMINT scripts, whose zerocoin spends consume the
+    // accumulator by serial number — never the outpoint — so they would sit in
+    // the spent-set-based walk as "unspent" forever (~744M phantom PIV).
+    // hodl_seen dedupes outpoints across addresses because P2CS UTXOs are
+    // indexed under BOTH the staker and the owner.
+    let mut hodl_sums = [0i64; HODL_BANDS.len()];
+    let mut hodl_total: i64 = 0;
+    let mut hodl_seen: HashSet<(Vec<u8>, u64)> = HashSet::new();
+
     for (address, utxos) in address_map {
         let mut key = vec![b'a'];
         key.extend_from_slice(address.as_bytes());
-        
+
         // Build canonical UTXO list (only unspent entries) to match serialize_utxos format
         let mut utxos_unspent: Vec<(Vec<u8>, u64)> = Vec::new();
 
         for (txid_bytes, vout) in utxos.iter() {
             total_utxos_checked += 1;
-            
+
             // Check spent status using natural byte order (matching Pass 1)
             let is_spent = spent_outputs.contains(&(txid_bytes.clone(), *vout));
-            
+
             if is_spent {
                 total_spent_found += 1;
             }
-            
+
             if !is_spent {
                 utxos_unspent.push((txid_bytes.clone(), *vout));
+
+                // HODL: bucket this UTXO's value by coin age, counting each
+                // outpoint exactly once (pure in-memory lookups; no DB reads).
+                if tip > 0 && hodl_seen.insert((txid_bytes.clone(), *vout)) {
+                    if let (Some(tx), Some(h)) =
+                        (tx_cache.get(txid_bytes), tx_heights.get(txid_bytes))
+                    {
+                        if *h >= 0 && *h <= tip {
+                            // Parser sets output.index == position, so direct
+                            // indexing by vout is exact.
+                            if let Some(out) = tx.outputs.get(*vout as usize) {
+                                let band_idx = hodl_band_index(tip, *h);
+                                hodl_sums[band_idx] =
+                                    hodl_sums[band_idx].saturating_add(out.value);
+                                hodl_total = hodl_total.saturating_add(out.value);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -820,8 +852,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     }
 
     // HODL / dormancy snapshot: value of the final unspent UTXO set bucketed
-    // by coin age, from the in-memory tx cache + spent set (no extra DB scans).
-    if let Err(e) = persist_hodl_snapshot(&db, &tx_cache, &tx_heights, &spent_outputs, tip) {
+    // by coin age, accumulated above from the same deduped unspent sets that
+    // back the 'a' entries (the balance path verified against the reference
+    // explorer — see the comment at the accumulators).
+    if let Err(e) = persist_hodl_snapshot(&db, &hodl_sums, hodl_total, tip) {
         warn!(error = %e, "Failed to persist HODL snapshot");
     }
 
@@ -911,6 +945,10 @@ pub struct TxDayAgg {
     /// P2CS value spent (undelegated or restaked) this day (sats).
     #[serde(default)]
     pub p2cs_spent: i64,
+    /// Coinstakes that staked a P2CS (cold-staking) delegation this day —
+    /// subset of `coinstake`, identified by P2CS re-mint outputs.
+    #[serde(default)]
+    pub coldstake_txs: u64,
 }
 
 /// Per-day aggregates that require prevout joins; accumulated during Pass 2b
@@ -1103,6 +1141,17 @@ async fn persist_tx_daily_series(
             }
             crate::tx_type::TransactionType::Coinstake => {
                 agg.coinstake += 1;
+                // Cold-staked coinstake: a delegated (P2CS) stake re-mints its
+                // principal back to the same P2CS script, so any coldstake
+                // output marks the stake as cold staking (same script test as
+                // the Pass 2b p2cs_created join).
+                if tx
+                    .outputs
+                    .iter()
+                    .any(|o| crate::parser::get_script_type(&o.script_pubkey.script) == "coldstake")
+                {
+                    agg.coldstake_txs += 1;
+                }
                 agg.stake_volume = agg
                     .stake_volume
                     .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
@@ -1425,16 +1474,39 @@ fn persist_wealth_analytics(
     Ok(())
 }
 
-/// HODL / dormancy snapshot: bucket the value of every UNSPENT output by the
-/// age of its creating transaction (1440 blocks ~= 1 day). Uses the in-memory
-/// transaction cache and spent set already built by Passes 1/2, so this is a
-/// pure in-memory aggregation. Iterating tx outputs (rather than address_map)
-/// avoids double-counting P2CS outputs, which are indexed under both sides.
+/// HODL age bands in days (1440 blocks ~= 1 day): label, lower (incl), upper (excl).
+const HODL_BANDS: [(&str, i64, i64); 6] = [
+    ("<1m", 0, 30),
+    ("1-3m", 30, 90),
+    ("3-6m", 90, 180),
+    ("6-12m", 180, 365),
+    ("1-2y", 365, 730),
+    (">2y", 730, i64::MAX),
+];
+
+/// Band index for a UTXO created at `create_height` with the chain at `tip`.
+fn hodl_band_index(tip: i32, create_height: i32) -> usize {
+    let age_days = ((tip - create_height) as i64) / 1440;
+    HODL_BANDS
+        .iter()
+        .position(|(_, lo, hi)| age_days >= *lo && age_days < *hi)
+        .unwrap_or(HODL_BANDS.len() - 1)
+}
+
+/// Persist the HODL / dormancy snapshot.
+///
+/// The band sums are accumulated in the 'a'-entry write loop from the deduped
+/// per-address unspent UTXO sets — the exact data the address API serves, and
+/// the path whose balances are verified against the reference explorer. Only
+/// address-attributed outputs are counted: outputs with no address (chiefly
+/// OP_ZEROCOINMINT) are excluded because zerocoin spends never consume the
+/// mint outpoint, which made a spent-set-based walk over the tx cache count
+/// every zPIV mint ever created as eternally unspent (~744M phantom PIV,
+/// an 8.2x overcount of the transparent supply).
 fn persist_hodl_snapshot(
     db: &Arc<DB>,
-    tx_cache: &HashMap<Vec<u8>, Arc<CTransaction>>,
-    tx_heights: &HashMap<Vec<u8>, i32>,
-    spent_outputs: &HashSet<(Vec<u8>, u64)>,
+    sums: &[i64; HODL_BANDS.len()],
+    total: i64,
     tip: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if tip <= 0 {
@@ -1442,49 +1514,8 @@ fn persist_hodl_snapshot(
     }
     let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
 
-    // Age bands in days (1440 blocks/day): label, lower (incl), upper (excl).
-    const BANDS: [(&str, i64, i64); 6] = [
-        ("<1m", 0, 30),
-        ("1-3m", 30, 90),
-        ("3-6m", 90, 180),
-        ("6-12m", 180, 365),
-        ("1-2y", 365, 730),
-        (">2y", 730, i64::MAX),
-    ];
-    let mut sums = [0i64; 6];
-    let mut total: i64 = 0;
-
-    for (txid, tx) in tx_cache {
-        let create_height = match tx_heights.get(txid) {
-            Some(h) if *h >= 0 && *h <= tip => *h,
-            _ => continue,
-        };
-        let age_days = ((tip - create_height) as i64) / 1440;
-        let band_idx = BANDS
-            .iter()
-            .position(|(_, lo, hi)| age_days >= *lo && age_days < *hi)
-            .unwrap_or(BANDS.len() - 1);
-        let tx_is_coinstake = is_coinstake(tx);
-        // One probe tuple per tx: spent_outputs lookups need an owned key.
-        let mut probe = (txid.clone(), 0u64);
-        for (vout_index, output) in tx.outputs.iter().enumerate() {
-            if tx_is_coinstake && vout_index == 0 {
-                continue;
-            }
-            if output.value <= 0 {
-                continue;
-            }
-            probe.1 = output.index;
-            if spent_outputs.contains(&probe) {
-                continue;
-            }
-            sums[band_idx] = sums[band_idx].saturating_add(output.value);
-            total = total.saturating_add(output.value);
-        }
-    }
-
     let snapshot = HodlSnapshot {
-        bands: BANDS
+        bands: HODL_BANDS
             .iter()
             .zip(sums.iter())
             .map(|((label, _, _), v)| (label.to_string(), *v))
