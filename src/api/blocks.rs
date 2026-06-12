@@ -62,7 +62,10 @@ pub async fn block_index_v2(
         
         match result {
             Ok(block_hash) => Ok(Json(block_hash)),
-            Err(e) => Err(internal_error(e.to_string())),
+            Err(e) => {
+                tracing::error!(error = %e, "block endpoint failed");
+                Err(internal_error("Internal error"))
+            }
         }
     } else if param.len() == 64 {
         // Hash validation - no cache needed (quick lookup)
@@ -88,7 +91,10 @@ pub async fn block_index_v2(
                 match db.get_cf(&cf, &reversed_hash) {
                     Ok(Some(_)) => Ok(Json(BlockHash { block_hash: param })),
                     Ok(None) => Err(not_found(format!("Block not found with hash {}", param))),
-                    Err(e) => Err(internal_error(format!("Database error: {}", e))),
+                    Err(e) => {
+                        tracing::error!(error = %e, "block index lookup failed");
+                        Err(internal_error("Internal error"))
+                    }
                 }
             },
             None => Err(internal_error("blocks column family not found")),
@@ -258,6 +264,9 @@ pub async fn block_stats_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<Vec<BlockStats>>, (StatusCode, Json<BlockbookError>)> {
+    // DoS guard: each block costs several DB reads plus a per-block tx prefix scan.
+    // Without a cap, a single request could walk the entire chain.
+    let count = count.min(1_000);
     let cache_key = format!("block_stats:{}", count);
     let db_clone = Arc::clone(&db);
     
@@ -273,7 +282,10 @@ pub async fn block_stats_v2(
     
     match result {
         Ok(stats) => Ok(Json(stats)),
-        Err(e) => Err(internal_error(e.to_string())),
+        Err(e) => {
+            tracing::error!(error = %e, "block stats failed");
+            Err(internal_error("Internal error"))
+        }
     }
 }
 

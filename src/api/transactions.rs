@@ -331,48 +331,39 @@ pub async fn send_tx_post_v2(
 async fn send_transaction_internal(
     tx_hex: String
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
-    let config = get_global_config();
-    let rpc_host = config.get::<String>("rpc.host");
-    let rpc_user = config.get::<String>("rpc.user");
-    let rpc_pass = config.get::<String>("rpc.pass");
+    // Validate input BEFORE touching the node: must be hex and within PIVX's
+    // 2 MB block size limit (4M hex chars). Previously arbitrary input was
+    // forwarded to the node on a freshly spawned OS thread per request —
+    // unbounded thread growth under load, leaked threads on timeout.
+    let tx_hex = tx_hex.trim().to_string();
+    if tx_hex.is_empty() || tx_hex.len() > 4_000_000 || tx_hex.len() % 2 != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Invalid transaction hex length")),
+        ));
+    }
+    if !tx_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Transaction must be hex-encoded")),
+        ));
+    }
 
-    // Must use separate OS thread to avoid runtime nesting
-    let (tx_channel, rx) = std::sync::mpsc::channel();
-    let tx_hex_clone = tx_hex.clone();
-    
-    std::thread::spawn(move || {
-        let client = PivxRpcClient::new(
-            rpc_host.unwrap_or_else(|_| "127.0.0.1:9998".to_string()),
-            Some(rpc_user.unwrap_or_default()),
-            Some(rpc_pass.unwrap_or_default()),
-            3,    // Max retries
-            10,   // Connection timeout
-            1000, // Read/write timeout
-        );
-        let result = client.sendrawtransaction(&tx_hex_clone, Some(false));
-        let _ = tx_channel.send(result);
-    });
-
-    let result = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(BlockbookError::new("RPC timeout"))
-        ))?;
-
-    match result {
+    // Async RPC call with the shared client (15s hard timeout, no thread spawn)
+    match super::helpers::rpc_call_json("sendrawtransaction", serde_json::json!([tx_hex, false])).await {
         Ok(txid) => {
-            let response = SendTxResponse {
-                result: Some(txid),
-                error: None, 
-            };
-            Ok(Json(response))
-        },
-        Err(e) => {
-            Err((
-                StatusCode::BAD_REQUEST,
-                Json(BlockbookError::new(format!("Failed to send transaction: {}", e)))
-            ))
-        },
+            let txid_str = txid.as_str().map(|s| s.to_string()).unwrap_or_else(|| txid.to_string());
+            Ok(Json(SendTxResponse {
+                result: Some(txid_str),
+                error: None,
+            }))
+        }
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            // Node rejection reasons (e.g. "bad-txns-inputs-spent") are part of the
+            // Blockbook contract — wallets rely on them.
+            Json(BlockbookError::new(format!("Failed to send transaction: {}", e))),
+        )),
     }
 }
 

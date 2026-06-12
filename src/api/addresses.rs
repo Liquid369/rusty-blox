@@ -111,15 +111,13 @@ async fn compute_address_info(
         .map(|chunk| chunk.to_vec())
         .collect();
     
-    let current_height = get_current_height(db).unwrap_or(0);
-    let spendable_utxos = filter_spendable_utxos(
-        unspent_utxos.clone(),
-        Arc::clone(db),
-        current_height,
-    ).await;
-    
+    // Blockbook parity: balance INCLUDES immature coinbase/coinstake outputs.
+    // (Maturity filtering here made balances diverge from the reference explorer
+    // by every coinstake output under 100 confirmations.)
+    let spendable_utxos = unspent_utxos.clone();
+
     let mut balance: i64 = 0;
-    
+
     for (txid_hash, output_index) in &spendable_utxos {
         let mut key = vec![b't'];
         key.extend(txid_hash);
@@ -246,8 +244,8 @@ async fn compute_address_info(
     };
     
     // Calculate pagination indices
-    let start_idx = ((page - 1) * page_size) as usize;
-    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
+    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
     
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
@@ -574,12 +572,8 @@ async fn aggregate_xpub_data(
         
         let utxos = deserialize_utxos(&utxo_data).await;
         
-        // Filter for spendable UTXOs (maturity rules)
-        let spendable_utxos = filter_spendable_utxos(
-            utxos.clone(),
-            db.clone(),
-            current_height,
-        ).await;
+        // Blockbook parity: include immature outputs in xpub balances
+        let spendable_utxos = utxos.clone();
         
         // Calculate balance for this address
         let mut address_balance: i64 = 0;
@@ -739,8 +733,8 @@ async fn aggregate_xpub_data(
     };
     
     // Calculate pagination indices
-    let start_idx = ((page - 1) * page_size) as usize;
-    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
+    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
     
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
@@ -845,13 +839,13 @@ async fn aggregate_xpub_data(
         
         // Apply pagination to tokens array
         let total_tokens = filtered_addresses.len() as u32;
-        let tokens_page = params.tokens_page;
-        let tokens_page_size = params.tokens_page_size;
+        let tokens_page = params.tokens_page.max(1);
+        let tokens_page_size = params.tokens_page_size.clamp(1, 1000);
         let total_tokens_pages = ((total_tokens as f64) / (tokens_page_size as f64)).ceil() as u32;
         let total_tokens_pages = if total_tokens_pages == 0 { 1 } else { total_tokens_pages };
-        
-        let start_idx = ((tokens_page - 1) * tokens_page_size) as usize;
-        let end_idx = (start_idx + tokens_page_size as usize).min(filtered_addresses.len());
+
+        let start_idx = (tokens_page as usize - 1).saturating_mul(tokens_page_size as usize);
+        let end_idx = start_idx.saturating_add(tokens_page_size as usize).min(filtered_addresses.len());
         
         let paginated_tokens: Vec<_> = if start_idx < filtered_addresses.len() {
             filtered_addresses[start_idx..end_idx].to_vec()
@@ -948,11 +942,9 @@ async fn compute_utxos(
     
     let unspent_utxos = deserialize_utxos(&result).await;
     let current_height = get_current_height(db).unwrap_or(0);
-    let spendable_utxos = filter_spendable_utxos(
-        unspent_utxos.clone(),
-        Arc::clone(db),
-        current_height,
-    ).await;
+    // Blockbook parity: the UTXO list includes immature coinbase/coinstake outputs
+    // (Blockbook flags them rather than hiding them; wallets handle maturity).
+    let spendable_utxos = unspent_utxos.clone();
     
     let mut utxo_list = Vec::new();
     

@@ -139,26 +139,22 @@ fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dy
         });
     }
     
-    // Method 2: Fallback - iterate through height -> hash mappings (for old blocks)
-    // This searches all numeric keys (heights) to find matching hash
-    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
-    
-    for item in iter {
-        if let Ok((key, value)) = item {
-            // Skip non-numeric keys (like 'h' prefix keys)
-            if key.len() == 4 && key[0] != b'h' {
-                // This is a height key (4 bytes little-endian)
-                if value.as_ref() == hash_bytes.as_slice() {
-                    let height = i32::from_le_bytes(key.as_ref().try_into()?);
-                    return Ok(SearchResult::Block {
-                        height,
-                        hash: hash.to_string(),
-                    });
-                }
-            }
-        }
+    // Method 2: some writers key 'h' entries by internal (reversed) byte order —
+    // try the reversed form before giving up. (The old fallback here iterated the
+    // ENTIRE chain_metadata CF on every miss: any unknown 64-hex query forced a
+    // full-database scan — a trivial unauthenticated DoS. Point lookups only.)
+    let hash_reversed: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+    let mut key_rev = vec![b'h'];
+    key_rev.extend_from_slice(&hash_reversed);
+
+    if let Some(height_bytes) = db.get_cf(&cf_metadata, &key_rev)? {
+        let height = i32::from_le_bytes(height_bytes.as_slice().try_into()?);
+        return Ok(SearchResult::Block {
+            height,
+            hash: hash.to_string(),
+        });
     }
-    
+
     Ok(SearchResult::NotFound {
         query: hash.to_string(),
     })

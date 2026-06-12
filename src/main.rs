@@ -36,6 +36,7 @@ use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, BlockBasedOptions};
 use axum::{Router, routing::{get, post}, response::IntoResponse};
 use tower_http::cors::{CorsLayer, Any};
+use tower_http::timeout::TimeoutLayer;
 use tokio::sync::Mutex as TokioMutex;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -130,6 +131,9 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/mempool", get(ws_mempool_handler))
         .route("/metrics", get(metrics_handler))  // Prometheus metrics endpoint
         .layer(cors)
+        // Hard ceiling on request duration: a wedged handler can no longer pin
+        // a connection forever (returns 408 on expiry)
+        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
@@ -156,9 +160,41 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
     };
     println!("Listening on {}", addr);
     
-    if let Err(e) = axum::serve(listener, app).await {
+    // Graceful shutdown on SIGTERM (Docker/systemd stop) and SIGINT (Ctrl-C):
+    // stop accepting connections, drain in-flight requests, then let main exit
+    // so RocksDB closes cleanly instead of being killed mid-write.
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         error!(error = ?e, "Web server error");
     }
+    info!("Web server shut down gracefully");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    println!("\n🛑 Shutdown signal received - draining connections...");
 }
 
 #[tokio::main]

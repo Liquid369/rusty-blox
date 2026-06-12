@@ -629,7 +629,8 @@ fn compute_rich_list(
     
     // Use a bounded min-heap to efficiently track top N addresses
     let mut top_addresses: BinaryHeap<AddressBalance> = BinaryHeap::new();
-    let max_candidates = limit * 2; // Scan 2x the limit for good results
+    let limit = limit.clamp(1, 1000); // DoS guard: bound requested result size
+    let max_candidates = limit.saturating_mul(2); // Scan 2x the limit for good results
     
     let mut scanned = 0;
     let max_scan = 10000; // Scan up to 10K addresses
