@@ -1,0 +1,57 @@
+# Build artifacts
+target/
+**/target/
+
+# Database
+data/
+*.db
+*.log
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+docs/
+
+# Frontend
+frontend-vue/node_modules/
+frontend-vue/dist/
+frontend-legacy/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+*~
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test data
+test/
+tests/
+
+# CI/CD
+.github/
+
+# Monitoring
+ops/prometheus/data/
+ops/grafana/data/
