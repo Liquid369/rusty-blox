@@ -1,5 +1,6 @@
 # Multi-stage build for rusty-blox
-FROM rust:1.83-bookworm AS builder
+# Cargo >= 1.85 required: the lockfile pins edition2024 crates (time-core 0.1.8)
+FROM rust:1.93-bookworm AS builder
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -18,7 +19,6 @@ COPY build.rs ./
 
 # Copy source code
 COPY src ./src
-COPY sleepy2 ./sleepy2
 
 # Build release binary
 RUN cargo build --release --bin rustyblox
@@ -50,12 +50,12 @@ COPY config.toml.example /app/config.toml.example
 # Switch to non-root user
 USER rustyblox
 
-# Expose API port
-EXPOSE 3001
+# Expose API port (matches config.toml.example server.port)
+EXPOSE 3005
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:3001/api/v2/health || exit 1
+    CMD curl -f http://localhost:3005/api/v2/health || exit 1
 
 # Run the application
 CMD ["rustyblox"]

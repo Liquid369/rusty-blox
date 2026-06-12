@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: rustyblox-api
     ports:
-      - "3001:3001"
+      - "3005:3005"
     volumes:
       - ./data:/data
       - ./config.toml:/app/config.toml:ro
@@ -17,7 +17,7 @@ services:
       - RUST_BACKTRACE=1
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/api/v2/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3005/api/v2/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -28,13 +28,11 @@ services:
   # Frontend (Vue.js)
   frontend:
     build:
-      context: ./frontend-vue
+      context: ./frontend-legacy
       dockerfile: Dockerfile
     container_name: rustyblox-frontend
     ports:
       - "3002:80"
-    environment:
-      - VITE_API_URL=http://localhost:3001
     depends_on:
       - rustyblox
     restart: unless-stopped
