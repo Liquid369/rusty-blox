@@ -152,7 +152,10 @@ pub async fn money_supply_v2(
 
 /// Compute money supply from PIVX RPC (async, non-blocking)
 pub async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
-    let result = super::helpers::rpc_call_json("getsupplyinfo", serde_json::json!([true])).await?;
+    // Unforced (fForceUpdate=false): the node maintains supply as it syncs, so this
+    // returns the up-to-date figures in ~20ms. Passing [true] forces a full
+    // chainstate recomputation (~17s) on every call and blew the RPC timeout.
+    let result = super::helpers::rpc_call_json("getsupplyinfo", serde_json::json!([false])).await?;
     Ok(MoneySupply {
         moneysupply: result.get("totalsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
         transparentsupply: result.get("transparentsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -181,7 +184,7 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     
-    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[true]}"#;
+    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[false]}"#;
     let auth = format!("{}:{}", rpc_user, rpc_pass);
     let auth_b64 = base64::encode(auth);
     

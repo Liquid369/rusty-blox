@@ -155,7 +155,12 @@ pub async fn transaction_analytics(
     let range = params.range.clone();
     
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<TransactionDataPoint>, Box<dyn std::error::Error + Send + Sync>> {
-        compute_transaction_analytics(&db_clone, &range)
+        // Serve the precomputed daily series (real block-time dates); fall back
+        // to the live scan only if it hasn't been built yet.
+        match read_tx_daily_series(&db_clone, &range) {
+            Some(series) => Ok(series),
+            None => compute_transaction_analytics(&db_clone, &range),
+        }
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -164,6 +169,49 @@ pub async fn transaction_analytics(
         Ok(data) => Ok(Json(data)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Read the precomputed transaction daily series from chain_state, filtered to
+/// the requested range. Returns None if the series hasn't been built.
+fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionDataPoint>> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
+    let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
+    dates.sort();
+
+    // Keep only the last `days` calendar days of the series.
+    let days = parse_time_range(range) as usize;
+    if dates.len() > days {
+        dates = dates.split_off(dates.len() - days);
+    }
+
+    let mut out = Vec::with_capacity(dates.len());
+    for date in dates {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(date.as_bytes());
+        let agg: crate::enrich_addresses::TxDayAgg = match db.get_cf(&cf_state, &k).ok()? {
+            Some(b) => bincode::deserialize(&b).ok()?,
+            None => continue,
+        };
+        let avg_size = if agg.tx_count > 0 {
+            (agg.volume / agg.tx_count as i64).to_string()
+        } else {
+            "0".to_string()
+        };
+        out.push(TransactionDataPoint {
+            date,
+            count: agg.tx_count,
+            volume: format_piv_amount(agg.volume),
+            payment_count: agg.payment,
+            stake_count: agg.coinstake,
+            other_count: agg.coinbase,
+            avg_size,
+            // Fees are not tracked per day (would require prevout joins); the
+            // node-derived fee data is exposed on the per-transaction endpoint.
+            avg_fee: "0".to_string(),
+        });
+    }
+    Some(out)
 }
 
 /// GET /api/v2/analytics/staking?range={timeRange}
@@ -176,7 +224,12 @@ pub async fn staking_analytics(
     let range = params.range.clone();
     
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<StakingDataPoint>, Box<dyn std::error::Error + Send + Sync>> {
-        compute_staking_analytics(&db_clone, &range)
+        // Serve from the precomputed daily series (real dates, O(1)); fall back
+        // to the legacy sampled scan only if the series hasn't been built.
+        match read_staking_daily_series(&db_clone, &range) {
+            Some(series) => Ok(series),
+            None => compute_staking_analytics(&db_clone, &range),
+        }
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -185,6 +238,56 @@ pub async fn staking_analytics(
         Ok(data) => Ok(Json(data)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Read the precomputed staking daily series. participation_rate relates the
+/// day's stake turnover (coinstake output volume) to current total supply —
+/// the same approximation the legacy sampled scan used. rewards_distributed
+/// would need prevout joins per coinstake (outputs - inputs); not tracked yet.
+fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDataPoint>> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
+    let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
+    dates.sort();
+    let days = parse_time_range(range) as usize;
+    if dates.len() > days {
+        dates = dates.split_off(dates.len() - days);
+    }
+
+    let total_supply = {
+        let chain_state = get_chain_state(db).ok()?;
+        calculate_total_supply_at_height(chain_state.height)
+    };
+
+    let mut out = Vec::with_capacity(dates.len());
+    for date in dates {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(date.as_bytes());
+        let agg: crate::enrich_addresses::TxDayAgg = match db.get_cf(&cf_state, &k).ok()? {
+            Some(b) => bincode::deserialize(&b).ok()?,
+            None => continue,
+        };
+        // A day's stake_volume of 0 with nonzero coinstakes means the series was
+        // built before the field existed — fall back to the legacy scan so the
+        // operator sees data until the next enrichment refresh.
+        if agg.coinstake > 0 && agg.stake_volume == 0 {
+            return None;
+        }
+        let blocks = agg.coinstake.max(1);
+        out.push(StakingDataPoint {
+            date,
+            participation_rate: if total_supply > 0 {
+                (agg.stake_volume as f64 / total_supply as f64) * 100.0
+            } else {
+                0.0
+            },
+            total_staked: format_piv_amount(agg.stake_volume),
+            active_stakers: agg.unique_stakers,
+            rewards_distributed: "0".to_string(),
+            avg_block_time: 86_400.0 / blocks as f64,
+        });
+    }
+    Some(out)
 }
 
 /// GET /api/v2/analytics/network?range={timeRange}
@@ -215,18 +318,52 @@ pub async fn rich_list(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<RichListEntry>>, StatusCode> {
     let db_clone = db.clone();
-    let limit = params.limit;
-    
+    let limit = params.limit.clamp(1, 1000);
+
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<RichListEntry>, Box<dyn std::error::Error + Send + Sync>> {
-        compute_rich_list(&db_clone, limit)
+        // Serve the precomputed snapshot (built during enrichment): O(1),
+        // correct top-N. Falls back to the live scan only if the snapshot
+        // hasn't been built yet (e.g. enrichment still running).
+        match read_richlist_snapshot(&db_clone, limit) {
+            Some(list) => Ok(list),
+            None => compute_rich_list(&db_clone, limit),
+        }
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     match result {
         Ok(data) => Ok(Json(data)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Read the precomputed rich-list snapshot from chain_state and shape it into
+/// the API response. Percentages are relative to the total tracked balance.
+fn read_richlist_snapshot(db: &Arc<DB>, limit: u32) -> Option<Vec<RichListEntry>> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let rl_bytes = db.get_cf(&cf_state, b"analytics_richlist").ok()??;
+    let wealth_bytes = db.get_cf(&cf_state, b"analytics_wealth").ok()??;
+    let entries: Vec<crate::enrich_addresses::RichListSnapshotEntry> =
+        bincode::deserialize(&rl_bytes).ok()?;
+    let wealth: crate::enrich_addresses::WealthSnapshot =
+        bincode::deserialize(&wealth_bytes).ok()?;
+    let denom = if wealth.total_balance > 0 { wealth.total_balance as f64 } else { 1.0 };
+
+    Some(
+        entries
+            .into_iter()
+            .take(limit as usize)
+            .enumerate()
+            .map(|(i, e)| RichListEntry {
+                rank: (i + 1) as u32,
+                address: e.address,
+                balance: e.balance.to_string(),
+                percentage: (e.balance as f64 / denom) * 100.0,
+                tx_count: e.tx_count,
+            })
+            .collect(),
+    )
 }
 
 /// GET /api/v2/analytics/wealth-distribution
@@ -235,17 +372,46 @@ pub async fn wealth_distribution(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<WealthDistribution>, StatusCode> {
     let db_clone = db.clone();
-    
+
     let result = tokio::task::spawn_blocking(move || -> Result<WealthDistribution, Box<dyn std::error::Error + Send + Sync>> {
-        compute_wealth_distribution(&db_clone)
+        match read_wealth_snapshot(&db_clone) {
+            Some(w) => Ok(w),
+            None => compute_wealth_distribution(&db_clone),
+        }
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     match result {
         Ok(data) => Ok(Json(data)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
     }
+}
+
+/// Read the precomputed wealth snapshot and shape it into the API response.
+fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let bytes = db.get_cf(&cf_state, b"analytics_wealth").ok()??;
+    let w: crate::enrich_addresses::WealthSnapshot = bincode::deserialize(&bytes).ok()?;
+    let denom = if w.total_balance > 0 { w.total_balance as f64 } else { 1.0 };
+    let pct = |v: i64| (v as f64 / denom) * 100.0;
+    let total_holders = if w.address_count > 0 { w.address_count as f64 } else { 1.0 };
+
+    Some(WealthDistribution {
+        top_10: pct(w.top_10),
+        top_50: pct(w.top_50),
+        top_100: pct(w.top_100),
+        top_1000: pct(w.top_1000),
+        histogram: w
+            .histogram
+            .into_iter()
+            .map(|(range, count)| WealthBucket {
+                range,
+                count,
+                percentage: (count as f64 / total_holders) * 100.0,
+            })
+            .collect(),
+    })
 }
 
 // ========================================
@@ -459,10 +625,18 @@ fn compute_staking_analytics(
         
         processed += 1;
         
-        // Deserialize transaction to check if it's a coinstake
-        let tx_data = &value[8..]; // Skip file_number(4) + height(4)
-        
-        if let Ok(tx) = deserialize_transaction_blocking(tx_data) {
+        // Deserialize transaction to check if it's a coinstake.
+        // The deserializer expects a 4-byte block_version prefix; the stored
+        // value is version(4)+height(4)+raw_tx, so strip the 8-byte header and
+        // prepend a 4-byte dummy (same convention as enrich_addresses). Passing
+        // value[8..] directly misaligned the parser and read a corrupt script
+        // length as an allocation size, aborting the process.
+        let raw_tx = &value[8..];
+        let mut tx_data = Vec::with_capacity(4 + raw_tx.len());
+        tx_data.extend_from_slice(&[0u8; 4]);
+        tx_data.extend_from_slice(raw_tx);
+
+        if let Ok(tx) = deserialize_transaction_blocking(&tx_data) {
             // Check if this is a coinstake transaction
             if detect_transaction_type(&tx) == TransactionType::Coinstake {
                 coinstake_count += 1;
@@ -523,6 +697,21 @@ fn compute_staking_analytics(
     Ok(data_points)
 }
 
+/// Read a block's header nTime via chain_metadata (height -> display hash)
+/// and the blocks CF (internal hash -> header bytes, nTime at offset 68).
+fn block_time_at_height(db: &Arc<DB>, height: i32) -> Option<u32> {
+    let cf_metadata = db.cf_handle("chain_metadata")?;
+    let cf_blocks = db.cf_handle("blocks")?;
+    let display_hash = db.get_cf(&cf_metadata, height.to_le_bytes()).ok()??;
+    let internal_hash: Vec<u8> = display_hash.iter().rev().cloned().collect();
+    let header = db.get_cf(&cf_blocks, &internal_hash).ok()??;
+    if header.len() >= 72 {
+        Some(u32::from_le_bytes(header[68..72].try_into().ok()?))
+    } else {
+        None
+    }
+}
+
 fn compute_network_health_analytics(
     db: &Arc<DB>,
     range: &str,
@@ -544,11 +733,16 @@ fn compute_network_health_analytics(
             break;
         }
         
-        let seconds_ago = day as u64 * 86400;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        let timestamp = now - seconds_ago;
-        let date = format_timestamp(timestamp);
-        
+        // Date from the REAL block header time at this height (chain_metadata
+        // height->hash, header nTime at offset 68) — the previous now-minus-
+        // estimate drifted by over a year on long ranges.
+        let date = block_time_at_height(db, height)
+            .map(|t| crate::enrich_addresses::unix_to_date(t as u64))
+            .unwrap_or_else(|| {
+                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                format_timestamp(now - day as u64 * 86400)
+            });
+
         // Count orphaned blocks in this day range
         let day_start = height;
         let day_end = std::cmp::min(height + blocks_per_day, current_height);

@@ -643,6 +643,17 @@ pub async fn read_varint(cursor: &mut Cursor<&[u8]>) -> Result<u64, std::io::Err
 
 pub async fn read_script(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, std::io::Error> {
     let script_length = read_varint(cursor).await?;
+    // Bound the allocation against the bytes actually remaining in the buffer.
+    // A corrupt or misaligned length field would otherwise request a gigantic
+    // allocation and abort the whole process (OOM) rather than failing this
+    // one parse. Scripts can never exceed the remaining transaction bytes.
+    let remaining = cursor.get_ref().len() as u64 - cursor.position();
+    if script_length > remaining {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("script length {} exceeds {} remaining bytes", script_length, remaining),
+        ));
+    }
     let mut script = vec![0u8; script_length as usize];
     cursor.read_exact(&mut script)?;
     Ok(script)

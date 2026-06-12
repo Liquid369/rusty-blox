@@ -681,7 +681,279 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     } else {
         info!("Metrics persisted to database after enrichment");
     }
-    
+
+    // Precompute the rich list and wealth distribution from the per-address
+    // totals we already have. balance == received - sent (verified to match
+    // Blockbook), so this needs no extra DB reads and produces the TRUE top
+    // holders — replacing the old O(addresses) full-scan endpoints that only
+    // sampled the first 10k addresses.
+    if let Err(e) = persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map) {
+        warn!(error = %e, "Failed to persist wealth analytics");
+    }
+
+    // Precompute the daily transaction time-series using REAL block times, so
+    // the transactions-analytics endpoint serves exact, correctly-dated data
+    // instantly instead of full-scanning with a height->date estimate.
+    if let Err(e) = persist_tx_daily_series(&db).await {
+        warn!(error = %e, "Failed to persist transaction daily series");
+    }
+
+    Ok(())
+}
+
+/// Daily transaction aggregate stored per date in chain_state.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+pub struct TxDayAgg {
+    pub tx_count: u64,
+    pub coinstake: u64,
+    pub coinbase: u64,
+    pub payment: u64,
+    pub volume: i64,
+    /// Sum of coinstake output values (stake principal re-mint + rewards).
+    #[serde(default)]
+    pub stake_volume: i64,
+    /// Unique staker addresses seen in coinstakes this day.
+    #[serde(default)]
+    pub unique_stakers: u64,
+}
+
+/// Convert a unix timestamp to a UTC YYYY-MM-DD date string (civil-from-days).
+pub fn unix_to_date(ts: u64) -> String {
+    let days = (ts / 86_400) as i64;
+    // Howard Hinnant's civil_from_days algorithm.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as i64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+/// Build a height -> block nTime index by reading every canonical block header.
+fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
+    let mut times = vec![0u32; (tip as usize) + 1];
+    for height in 0..=tip {
+        let height_key = height.to_le_bytes();
+        // chain_metadata: height -> display_hash (reversed)
+        let display_hash = match db.get_cf(&cf_metadata, height_key)? {
+            Some(h) => h,
+            None => continue,
+        };
+        let internal_hash: Vec<u8> = display_hash.iter().rev().cloned().collect();
+        // blocks: internal_hash -> header bytes; nTime is at offset 68 (4+32+32)
+        if let Some(header) = db.get_cf(&cf_blocks, &internal_hash)? {
+            if header.len() >= 72 {
+                times[height as usize] =
+                    u32::from_le_bytes(header[68..72].try_into().unwrap_or([0; 4]));
+            }
+        }
+    }
+    Ok(times)
+}
+
+async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_transactions = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+
+    let tip = db
+        .get_cf(&cf_state, b"sync_height")?
+        .filter(|b| b.len() >= 4)
+        .map(|b| i32::from_le_bytes(b[0..4].try_into().unwrap_or([0; 4])))
+        .unwrap_or(0);
+    if tip <= 0 {
+        return Ok(());
+    }
+
+    info!("Building block-time index for transaction daily series");
+    let block_times = build_block_times(db, tip)?;
+
+    let mut days: HashMap<String, TxDayAgg> = HashMap::new();
+    let mut day_stakers: HashMap<String, HashSet<String>> = HashMap::new();
+    let iter = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
+    for item in iter {
+        let (key, value) = item?;
+        if key.first() == Some(&b'B') || value.len() < 8 {
+            continue;
+        }
+        let height = i32::from_le_bytes(value[4..8].try_into().unwrap_or([0, 0, 0, 0]));
+        if !should_index_transaction(height) || height < 0 || height > tip {
+            continue;
+        }
+        let t = block_times[height as usize];
+        if t == 0 {
+            continue;
+        }
+        let raw_tx = &value[8..];
+        let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+        tx_with_header.extend_from_slice(&[0u8; 4]);
+        tx_with_header.extend_from_slice(raw_tx);
+        let tx = match deserialize_transaction(&tx_with_header).await {
+            Ok(tx) => tx,
+            Err(_) => continue,
+        };
+
+        let agg_date = unix_to_date(t as u64);
+        let agg = days.entry(agg_date.clone()).or_default();
+        agg.tx_count += 1;
+        match crate::tx_type::detect_transaction_type(&tx) {
+            crate::tx_type::TransactionType::Coinbase => agg.coinbase += 1,
+            crate::tx_type::TransactionType::Coinstake => {
+                agg.coinstake += 1;
+                agg.stake_volume = agg
+                    .stake_volume
+                    .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+                // First address of the first paying output identifies the staker
+                if let Some(addr) = tx
+                    .outputs
+                    .iter()
+                    .find(|o| !o.address.is_empty())
+                    .and_then(|o| o.address.first())
+                {
+                    day_stakers.entry(agg_date.clone()).or_default().insert(addr.clone());
+                }
+            }
+            crate::tx_type::TransactionType::Normal => {
+                agg.payment += 1;
+                agg.volume = agg
+                    .volume
+                    .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+            }
+        }
+    }
+
+    for (date, stakers) in &day_stakers {
+        if let Some(agg) = days.get_mut(date) {
+            agg.unique_stakers = stakers.len() as u64;
+        }
+    }
+    let mut dates: Vec<String> = days.keys().cloned().collect();
+    dates.sort();
+    let mut batch = rocksdb::WriteBatch::default();
+    for (date, agg) in &days {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(date.as_bytes());
+        batch.put_cf(&cf_state, &k, bincode::serialize(agg)?);
+    }
+    batch.put_cf(&cf_state, b"analytics_tx_days", bincode::serialize(&dates)?);
+    db.write(batch)?;
+    info!(days = dates.len(), "Transaction daily series precomputed and stored");
+    Ok(())
+}
+
+/// Serializable rich-list entry stored in chain_state for O(1) API reads.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct RichListSnapshotEntry {
+    pub address: String,
+    pub balance: i64,
+    pub tx_count: u64,
+}
+
+/// Snapshot of wealth distribution stored in chain_state.
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct WealthSnapshot {
+    pub total_balance: i64,
+    pub address_count: u64,
+    /// Cumulative balance of the top 10/50/100/1000 holders.
+    pub top_10: i64,
+    pub top_50: i64,
+    pub top_100: i64,
+    pub top_1000: i64,
+    /// Histogram bucket counts, same 7 ranges the API exposes.
+    pub histogram: Vec<(String, u64)>,
+}
+
+/// Number of rich-list entries to retain (API serves a clamped slice of this).
+const RICHLIST_KEEP: usize = 1000;
+
+fn persist_wealth_analytics(
+    db: &Arc<DB>,
+    totals_received: &HashMap<String, i64>,
+    totals_sent: &HashMap<String, i64>,
+    txs_map: &HashMap<String, Vec<Vec<u8>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+
+    // Compute balance per address; keep only positive balances.
+    let mut balances: Vec<(&String, i64)> = Vec::with_capacity(totals_received.len());
+    let mut total_balance: i64 = 0;
+    for (addr, recv) in totals_received {
+        let sent = *totals_sent.get(addr).unwrap_or(&0);
+        let bal = recv - sent;
+        if bal > 0 {
+            balances.push((addr, bal));
+            total_balance += bal;
+        }
+    }
+
+    // Sort descending by balance for both the rich list and the top-N sums.
+    balances.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let richlist: Vec<RichListSnapshotEntry> = balances
+        .iter()
+        .take(RICHLIST_KEEP)
+        .map(|(addr, bal)| {
+            // Unique tx count (txs_map may list a txid twice when an address is
+            // both an input and an output of the same transaction). Deduping
+            // only the kept top-N keeps this cheap.
+            let tx_count = txs_map
+                .get(*addr)
+                .map(|v| {
+                    let mut t = v.clone();
+                    t.sort();
+                    t.dedup();
+                    t.len() as u64
+                })
+                .unwrap_or(0);
+            RichListSnapshotEntry {
+                address: (*addr).clone(),
+                balance: *bal,
+                tx_count,
+            }
+        })
+        .collect();
+
+    let sum_take = |n: usize| balances.iter().take(n).map(|(_, b)| *b).sum::<i64>();
+    let histogram_ranges: [(i64, i64, &str); 7] = [
+        (0, 1_00000000, "0-1 PIV"),
+        (1_00000000, 10_00000000, "1-10 PIV"),
+        (10_00000000, 100_00000000, "10-100 PIV"),
+        (100_00000000, 1000_00000000, "100-1K PIV"),
+        (1000_00000000, 10000_00000000, "1K-10K PIV"),
+        (10000_00000000, 100000_00000000, "10K-100K PIV"),
+        (100000_00000000, i64::MAX, "100K+ PIV"),
+    ];
+    let histogram: Vec<(String, u64)> = histogram_ranges
+        .iter()
+        .map(|(min, max, label)| {
+            let count = balances.iter().filter(|(_, b)| *b >= *min && *b < *max).count() as u64;
+            (label.to_string(), count)
+        })
+        .collect();
+
+    let wealth = WealthSnapshot {
+        total_balance,
+        address_count: balances.len() as u64,
+        top_10: sum_take(10),
+        top_50: sum_take(50),
+        top_100: sum_take(100),
+        top_1000: sum_take(1000),
+        histogram,
+    };
+
+    db.put_cf(&cf_state, b"analytics_richlist", bincode::serialize(&richlist)?)?;
+    db.put_cf(&cf_state, b"analytics_wealth", bincode::serialize(&wealth)?)?;
+    info!(
+        richlist_entries = richlist.len(),
+        holders = wealth.address_count,
+        "Wealth analytics precomputed and stored"
+    );
     Ok(())
 }
 
