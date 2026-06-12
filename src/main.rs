@@ -91,7 +91,6 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
 
     // We just want to mimic blockbook API endpoints and structure for compatibility
     let app = Router::new()
-        .route("/", get(root_handler))
         .route("/api", get(api_handler))
         .route("/api/", get(status_v2))  // Same as /api/v2/status
         .route("/api/endpoint", get(api_handler))
@@ -130,6 +129,28 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
         .route("/metrics", get(metrics_handler))  // Prometheus metrics endpoint
+        ;
+
+    // Serve the built frontend (SPA) for everything that isn't an API route.
+    // ServeDir handles the hashed /assets/*.js|css files; unknown paths fall
+    // back to index.html so client-side routing works. Previously only "/"
+    // was routed (root_handler returned index.html with NO asset serving), so
+    // every built bundle 404'd its own JS/CSS when hit directly on this port.
+    let frontend_dist = config
+        .get_string("paths.frontend_dist")
+        .unwrap_or_else(|_| "frontend-legacy/dist".to_string());
+    let app = if std::path::Path::new(&frontend_dist).join("index.html").exists() {
+        println!("Serving frontend from {}", frontend_dist);
+        let index = std::path::Path::new(&frontend_dist).join("index.html");
+        let spa = tower_http::services::ServeDir::new(&frontend_dist)
+            .fallback(tower_http::services::ServeFile::new(index));
+        app.fallback_service(spa)
+    } else {
+        println!("⚠️  Frontend dist not found at {} - build it with: cd frontend-legacy && npm run build", frontend_dist);
+        app.route("/", get(root_handler))
+    };
+
+    let app = app
         .layer(cors)
         // Hard ceiling on request duration: a wedged handler can no longer pin
         // a connection forever (returns 408 on expiry)
