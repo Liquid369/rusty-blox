@@ -721,6 +721,9 @@ pub struct TxDayAgg {
     /// Canonical blocks this day.
     #[serde(default)]
     pub blocks: u64,
+    /// Sum of raw transaction bytes this day (block size ~= tx_bytes + headers).
+    #[serde(default)]
+    pub tx_bytes: u64,
 }
 
 /// Convert compact nBits to difficulty (diff1 target 0x1d00ffff convention).
@@ -822,6 +825,7 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
         let agg_date = unix_to_date(t as u64);
         let agg = days.entry(agg_date.clone()).or_default();
         agg.tx_count += 1;
+        agg.tx_bytes += raw_tx.len() as u64;
         match crate::tx_type::detect_transaction_type(&tx) {
             crate::tx_type::TransactionType::Coinbase => agg.coinbase += 1,
             crate::tx_type::TransactionType::Coinstake => {

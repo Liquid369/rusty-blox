@@ -333,12 +333,15 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
             // Series predates the difficulty fields — rebuild pending; fall back.
             return None;
         }
+        // Real average block size: the day's transaction bytes plus per-block
+        // header overhead (112-byte v8+ header + ~1 byte tx-count varint).
+        let avg_block_size = (agg.tx_bytes + agg.blocks * 113) / agg.blocks;
         out.push(NetworkHealthDataPoint {
             date,
             difficulty: format!("{:.2}", agg.avg_difficulty),
             orphan_rate: 0.0,
             blocks_per_day: agg.blocks,
-            avg_block_size: 0,
+            avg_block_size,
         });
     }
     Some(out)
