@@ -25,9 +25,14 @@
         <div class="page-header">
           <div class="header-content">
             <h1>Transaction Details</h1>
-            <Badge :variant="transactionTypeBadgeVariant">
-              {{ transactionTypeLabel }}
-            </Badge>
+            <div class="header-badges">
+              <Badge :variant="transactionTypeBadgeVariant">
+                {{ transactionTypeLabel }}
+              </Badge>
+              <Badge v-if="showColdStakeTag" variant="accent">
+                Cold-Stake
+              </Badge>
+            </div>
           </div>
         </div>
 
@@ -61,6 +66,9 @@
                 <Badge :variant="confirmationBadgeVariant">
                   {{ confirmations }} confirmation{{ confirmations !== 1 ? 's' : '' }}
                 </Badge>
+                <span v-if="transaction.blockTime" class="confirmation-age">
+                  first seen {{ formatTimeAgo(transaction.blockTime) }}
+                </span>
                 <Badge v-if="isSyncLagging" variant="warning" class="sync-warning">
                   ⚠️ Node syncing ({{ syncLag }} blocks behind)
                 </Badge>
@@ -79,21 +87,40 @@
               <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
             </InfoRow>
 
+            <InfoRow label="Total Input" icon="📥">
+              <span class="flow-value">{{ formatPIV(transaction.valueIn) }} PIV</span>
+            </InfoRow>
+
+            <InfoRow label="Total Output" icon="📤">
+              <span class="flow-value">{{ formatPIV(transaction.value) }} PIV</span>
+            </InfoRow>
+
             <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="⚙️">
               <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
             </InfoRow>
 
-            <InfoRow label="Size" icon="💾">
-              {{ formatBytes(transaction.size || 0) }}
+            <InfoRow v-if="feeRate !== null" label="Fee Rate" icon="📈">
+              <span class="fee-value">{{ feeRate }} sat/byte</span>
             </InfoRow>
+          </div>
 
-            <InfoRow label="Version" icon="🔢">
-              {{ transaction.version }}
-            </InfoRow>
-
-            <InfoRow v-if="transaction.locktime" label="Lock Time" icon="🔒">
-              {{ formatNumber(transaction.locktime) }}
-            </InfoRow>
+          <div class="structure-grid">
+            <div class="structure-cell">
+              <span class="structure-label">Size</span>
+              <span class="structure-value">{{ formatBytes(transaction.size || 0) }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Version</span>
+              <span class="structure-value">{{ transaction.version ?? '—' }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Lock Time</span>
+              <span class="structure-value">{{ formatNumber(transaction.lockTime || 0) }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Inputs / Outputs</span>
+              <span class="structure-value">{{ transaction.vin?.length || 0 }} / {{ transaction.vout?.length || 0 }}</span>
+            </div>
           </div>
         </Card>
 
@@ -234,6 +261,27 @@
             <CopyButton v-if="transaction.hex" :text="transaction.hex" />
           </div>
         </Card>
+
+        <!-- Decoded Transaction JSON (Collapsible) -->
+        <Card class="raw-tx-card">
+          <template #header>
+            <button class="raw-tx-toggle" @click="showDecodedTx = !showDecodedTx">
+              <span>Decoded (JSON)</span>
+              <span class="toggle-icon">{{ showDecodedTx ? '▼' : '▶' }}</span>
+            </button>
+          </template>
+
+          <div v-if="showDecodedTx" class="raw-tx-content">
+            <div class="decoded-toolbar">
+              <CopyButton :text="decodedJson" show-text />
+            </div>
+            <pre class="raw-tx-hex decoded-json"><span
+              v-for="(token, idx) in decodedTokens"
+              :key="idx"
+              :class="token.cls"
+            >{{ token.text }}</span></pre>
+          </div>
+        </Card>
       </div>
     </div>
   </AppLayout>
@@ -244,7 +292,13 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
 import { transactionService } from '@/services/transactionService'
-import { detectTransactionType, getTransactionTypeLabel, getTransactionTypeBadgeVariant } from '@/utils/transactionHelpers'
+import {
+  detectTransactionType,
+  getTransactionTypeLabel,
+  getTransactionTypeBadgeVariant,
+  hasColdStakeOutput,
+  getFeeRate
+} from '@/utils/transactionHelpers'
 import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatPIV } from '@/utils/formatters'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
@@ -265,9 +319,88 @@ const transaction = ref(null)
 const loading = ref(false)
 const error = ref('')
 const showRawTx = ref(false)
+const showDecodedTx = ref(false)
 
 const transactionType = computed(() => {
   return transaction.value ? detectTransactionType(transaction.value) : 'regular'
+})
+
+// Secondary tag: coinstakes/transfers that involve P2CS (cold-staking) scripts
+const showColdStakeTag = computed(() => {
+  return transactionType.value !== 'coldstake' &&
+         hasColdStakeOutput(transaction.value)
+})
+
+// Fee rate in satoshi per byte (only meaningful when fees were paid)
+const feeRate = computed(() => {
+  if (!transaction.value) return null
+  if (transactionType.value === 'coinbase' || transactionType.value === 'coinstake') return null
+  const rate = getFeeRate(transaction.value)
+  return rate === null ? null : rate.toFixed(2)
+})
+
+// Pretty-printed JSON of the full API transaction object
+const decodedJson = computed(() => {
+  return transaction.value ? JSON.stringify(transaction.value, null, 2) : ''
+})
+
+/**
+ * Tokenize a JS value into { text, cls } spans for lightweight,
+ * CSS-only JSON syntax highlighting (no v-html, no libraries).
+ */
+function tokenizeJson(value, indent, out) {
+  const pad = '  '.repeat(indent)
+  const childPad = '  '.repeat(indent + 1)
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      out.push({ text: '[]', cls: 'json-punct' })
+      return
+    }
+    out.push({ text: '[\n', cls: 'json-punct' })
+    value.forEach((item, i) => {
+      out.push({ text: childPad, cls: 'json-punct' })
+      tokenizeJson(item, indent + 1, out)
+      out.push({ text: (i < value.length - 1 ? ',' : '') + '\n', cls: 'json-punct' })
+    })
+    out.push({ text: pad + ']', cls: 'json-punct' })
+    return
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value)
+    if (keys.length === 0) {
+      out.push({ text: '{}', cls: 'json-punct' })
+      return
+    }
+    out.push({ text: '{\n', cls: 'json-punct' })
+    keys.forEach((key, i) => {
+      out.push({ text: childPad, cls: 'json-punct' })
+      out.push({ text: JSON.stringify(key), cls: 'json-key' })
+      out.push({ text: ': ', cls: 'json-punct' })
+      tokenizeJson(value[key], indent + 1, out)
+      out.push({ text: (i < keys.length - 1 ? ',' : '') + '\n', cls: 'json-punct' })
+    })
+    out.push({ text: pad + '}', cls: 'json-punct' })
+    return
+  }
+
+  if (typeof value === 'string') {
+    out.push({ text: JSON.stringify(value), cls: 'json-string' })
+  } else if (typeof value === 'number') {
+    out.push({ text: String(value), cls: 'json-number' })
+  } else if (typeof value === 'boolean') {
+    out.push({ text: String(value), cls: 'json-boolean' })
+  } else {
+    out.push({ text: 'null', cls: 'json-null' })
+  }
+}
+
+const decodedTokens = computed(() => {
+  if (!transaction.value || !showDecodedTx.value) return []
+  const tokens = []
+  tokenizeJson(transaction.value, 0, tokens)
+  return tokens
 })
 
 const transactionTypeLabel = computed(() => {
@@ -376,7 +509,6 @@ watch(() => route.params.txid, (newTxid) => {
 // Watch for reorg detection and refetch transaction
 watch(() => chainStore.reorgDetected, (detected) => {
   if (detected && route.params.txid) {
-    console.log('🔄 Reorg detected - refetching transaction data')
     fetchTransaction(route.params.txid)
   }
 })
@@ -448,7 +580,61 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .fee-value {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
+}
+
+.flow-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.confirmation-age {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+
+.structure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.structure-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.structure-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.structure-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-base);
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
 }
 
 .card-header-content {
@@ -707,6 +893,45 @@ watch(() => chainStore.reorgDetected, (detected) => {
   white-space: pre-wrap;
   max-height: 400px;
   overflow-y: auto;
+}
+
+.decoded-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-3);
+}
+
+.decoded-json {
+  max-height: 600px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* CSS-only JSON syntax highlighting */
+.decoded-json .json-key {
+  color: var(--pivx-accent);
+  font-weight: var(--weight-semibold);
+}
+
+.decoded-json .json-string {
+  color: #CD97F7;
+}
+
+.decoded-json .json-number {
+  color: var(--warning);
+}
+
+.decoded-json .json-boolean {
+  color: var(--green-accent);
+  font-weight: var(--weight-bold);
+}
+
+.decoded-json .json-null {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.decoded-json .json-punct {
+  color: var(--text-secondary);
 }
 
 .loading-container,

@@ -468,7 +468,6 @@ watch(() => route.params.address, (newAddress) => {
 // Watch for reorg detection and refetch address data
 watch(() => chainStore.reorgDetected, (detected) => {
   if (detected && address.value) {
-    console.log('🔄 Reorg detected - refetching address data')
     fetchAddressData()
   }
 })

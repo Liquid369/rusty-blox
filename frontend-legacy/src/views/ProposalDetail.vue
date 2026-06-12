@@ -78,6 +78,7 @@
 
             <InfoRow label="Remaining Payments" icon="⏳">
               {{ proposal.RemainingPaymentCount }}
+              <span class="remaining-note">({{ proposal.RemainingPaymentCount }} month{{ proposal.RemainingPaymentCount !== 1 ? 's' : '' }} left)</span>
             </InfoRow>
 
             <InfoRow label="Established" icon="✓">
@@ -102,7 +103,7 @@
               <div class="payment-item">
                 <span class="payment-label">Monthly Payment</span>
                 <div class="payment-value-container">
-                  <span class="payment-value">{{ formatPIV(proposal.MonthlyPayment) }} PIV</span>
+                  <span class="payment-value">{{ formatNumber(proposal.MonthlyPayment) }} PIV</span>
                   <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                     ≈ {{ formatAmount(proposal.MonthlyPayment, { showPIV: false }) }}
                   </span>
@@ -111,7 +112,7 @@
               <div class="payment-item">
                 <span class="payment-label">Total Payment</span>
                 <div class="payment-value-container">
-                  <span class="payment-value">{{ formatPIV(proposal.TotalPayment) }} PIV</span>
+                  <span class="payment-value">{{ formatNumber(proposal.TotalPayment) }} PIV</span>
                   <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                     ≈ {{ formatAmount(proposal.TotalPayment, { showPIV: false }) }}
                   </span>
@@ -120,15 +121,36 @@
               <div class="payment-item">
                 <span class="payment-label">Allotted</span>
                 <div class="payment-value-container">
-                  <span class="payment-value">{{ formatPIV(proposal.Allotted) }} PIV</span>
+                  <span class="payment-value">{{ formatNumber(proposal.Allotted) }} PIV</span>
                   <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                     ≈ {{ formatAmount(proposal.Allotted, { showPIV: false }) }}
                   </span>
                 </div>
               </div>
               <div class="payment-item">
+                <span class="payment-label">Remaining Payout</span>
+                <div class="payment-value-container">
+                  <span class="payment-value">{{ formatNumber(remainingPayout) }} PIV</span>
+                  <span class="payment-fiat">{{ proposal.RemainingPaymentCount }} × {{ formatNumber(proposal.MonthlyPayment) }} PIV</span>
+                </div>
+              </div>
+              <div class="payment-item">
                 <span class="payment-label">Ratio</span>
                 <span class="payment-value">{{ proposal.Ratio.toFixed(2) }}</span>
+              </div>
+
+              <!-- Funding utilization vs the monthly treasury cap -->
+              <div class="utilization-block">
+                <div class="utilization-header">
+                  <span class="payment-label">Budget Utilization</span>
+                  <span class="utilization-value">{{ budgetSharePercent }}% of {{ formatNumber(monthlyBudgetCap) }} PIV cap</span>
+                </div>
+                <div class="utilization-bar">
+                  <div
+                    class="utilization-bar-fill"
+                    :style="{ width: Math.min(100, Number(budgetSharePercent)) + '%' }"
+                  ></div>
+                </div>
               </div>
             </div>
           </Card>
@@ -188,13 +210,28 @@
               <!-- Passing Threshold Info -->
               <div v-if="mnCount" class="threshold-info">
                 <div class="threshold-item">
-                  <span class="threshold-label">Required (10%):</span>
+                  <span class="threshold-label">Required (10% of {{ formatNumber(mnCount.enabled) }} MNs):</span>
                   <span class="threshold-value">{{ formatNumber(passingThreshold) }}</span>
                 </div>
                 <div class="threshold-item">
                   <span class="threshold-label">Status:</span>
                   <Badge :variant="isProposalPassing ? 'success' : 'warning'">
                     {{ isProposalPassing ? 'Meeting Threshold' : 'Below Threshold' }}
+                  </Badge>
+                </div>
+              </div>
+
+              <!-- Margin to pass -->
+              <div v-if="mnCount" class="threshold-info">
+                <div class="threshold-item">
+                  <span class="threshold-label">Margin to Pass:</span>
+                  <span :class="['threshold-value', voteMargin >= 0 ? 'margin-positive' : 'margin-negative']">
+                    {{ voteMargin >= 0 ? '+' : '' }}{{ formatNumber(voteMargin) }} votes
+                  </span>
+                </div>
+                <div class="threshold-item">
+                  <Badge :variant="voteMargin >= 0 ? 'success' : 'danger'" size="sm">
+                    {{ voteMargin >= 0 ? `${formatNumber(voteMargin)} above threshold` : `needs ${formatNumber(-voteMargin)} more` }}
                   </Badge>
                 </div>
               </div>
@@ -236,7 +273,8 @@ import { useChainStore } from '@/stores/chainStore'
 import { useCurrency } from '@/composables/useCurrency'
 import { governanceService } from '@/services/governanceService'
 import { masternodeService } from '@/services/masternodeService'
-import { formatNumber, formatPIV } from '@/utils/formatters'
+import { formatNumber } from '@/utils/formatters'
+import { PIVX_GOVERNANCE } from '@/utils/governanceStatus'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -278,6 +316,23 @@ const passingThreshold = computed(() => {
 const isProposalPassing = computed(() => {
   if (!proposal.value || !proposal.value.IsValid || isProposalCompleted.value) return false
   return netVotes.value >= passingThreshold.value
+})
+
+// How far above (or below) the 10% passing threshold this proposal sits
+const voteMargin = computed(() => netVotes.value - passingThreshold.value)
+
+const monthlyBudgetCap = PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET
+
+// Share of the monthly treasury cap this proposal consumes
+const budgetSharePercent = computed(() => {
+  if (!proposal.value) return '0.0'
+  return (((proposal.value.MonthlyPayment || 0) / monthlyBudgetCap) * 100).toFixed(1)
+})
+
+// PIV still owed across the remaining payment months
+const remainingPayout = computed(() => {
+  if (!proposal.value) return 0
+  return (proposal.value.RemainingPaymentCount || 0) * (proposal.value.MonthlyPayment || 0)
 })
 
 const getProposalStatus = (proposal) => {
@@ -579,6 +634,60 @@ watch(() => route.params.hash, (newHash) => {
   font-weight: 700;
   color: var(--text-accent);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.margin-positive {
+  color: var(--success);
+}
+
+.margin-negative {
+  color: var(--danger);
+}
+
+.remaining-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-left: var(--space-1);
+}
+
+.utilization-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: rgba(var(--rgb-purple-dark), 0.5);
+  border-radius: var(--radius-sm);
+}
+
+.utilization-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.utilization-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  color: var(--text-accent);
+}
+
+.utilization-bar {
+  height: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-secondary);
+}
+
+.utilization-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--pivx-purple-primary) 0%, var(--pivx-accent) 100%);
+  transition: width 0.5s ease-out;
 }
 
 .votes-card {

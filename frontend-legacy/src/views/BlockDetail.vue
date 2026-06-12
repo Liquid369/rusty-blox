@@ -82,6 +82,21 @@
               {{ block.txCount }} transaction{{ block.txCount !== 1 ? 's' : '' }}
             </InfoRow>
 
+            <InfoRow v-if="blockInterval !== null" label="Block Interval" icon="⏱️">
+              <div class="interval-display">
+                <span class="interval-value">{{ formatDuration(blockInterval) }}</span>
+                <span class="interval-note">since block #{{ formatNumber(block.height - 1) }}</span>
+              </div>
+            </InfoRow>
+
+            <InfoRow v-if="blockReward !== null" label="Block Reward" icon="🏆">
+              <span class="reward-value">{{ formatPIV(blockReward) }} PIV</span>
+            </InfoRow>
+
+            <InfoRow v-if="totalTxSize > 0" label="Size (approx)" icon="💾">
+              <span class="size-value">{{ formatBytes(totalTxSize + 80) }}</span>
+            </InfoRow>
+
             <InfoRow label="Difficulty" icon="⚡">
               {{ formatDifficulty(block.difficulty) }}
             </InfoRow>
@@ -128,6 +143,26 @@
             Transactions ({{ block.txCount }})
           </h2>
 
+          <!-- Composition Summary -->
+          <Card v-if="!loadingTransactions && transactions.length > 0" class="composition-card">
+            <div class="composition-band">
+              <div class="composition-types">
+                <div
+                  v-for="entry in txComposition"
+                  :key="entry.type"
+                  class="composition-chip"
+                >
+                  <Badge :variant="entry.variant" size="sm">{{ entry.label }}</Badge>
+                  <span class="composition-count">{{ entry.count }}</span>
+                </div>
+              </div>
+              <div class="composition-total">
+                <span class="composition-total-label">Total Value Transferred</span>
+                <span class="composition-total-value">{{ formatPIV(totalValueTransferred) }} PIV</span>
+              </div>
+            </div>
+          </Card>
+
           <!-- Loading Transactions -->
           <div v-if="loadingTransactions" class="transactions-loading">
             <SkeletonLoader variant="card" v-for="i in 3" :key="i" />
@@ -162,8 +197,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
 import { blockService } from '@/services/blockService'
 import { transactionService } from '@/services/transactionService'
-import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatDifficulty } from '@/utils/formatters'
-import { LAST_POW_BLOCK } from '@/utils/constants'
+import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatDifficulty, formatDuration, formatPIV } from '@/utils/formatters'
+import {
+  detectTransactionType,
+  getTransactionTypeLabel,
+  getTransactionTypeBadgeVariant,
+  toSats
+} from '@/utils/transactionHelpers'
+import { LAST_POW_BLOCK, TX_TYPES } from '@/utils/constants'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -184,6 +225,62 @@ const transactions = ref([])
 const loading = ref(false)
 const loadingTransactions = ref(false)
 const error = ref('')
+const previousBlockTime = ref(null)
+
+// Seconds elapsed since the previous block (fetched from /api/v2/block/{h-1})
+const blockInterval = computed(() => {
+  if (!block.value?.time || !previousBlockTime.value) return null
+  const delta = block.value.time - previousBlockTime.value
+  return delta >= 0 ? delta : null
+})
+
+// Transaction type composition (n coinstake / coinbase / transparent / shield / ...)
+const txComposition = computed(() => {
+  const counts = new Map()
+  for (const tx of transactions.value) {
+    const type = tx.type || TX_TYPES.REGULAR
+    counts.set(type, (counts.get(type) || 0) + 1)
+  }
+  const order = [
+    TX_TYPES.COINBASE,
+    TX_TYPES.COINSTAKE,
+    TX_TYPES.BUDGET,
+    TX_TYPES.SAPLING,
+    TX_TYPES.COLDSTAKE,
+    TX_TYPES.REGULAR
+  ]
+  return order
+    .filter(type => counts.has(type))
+    .map(type => ({
+      type,
+      count: counts.get(type),
+      label: getTransactionTypeLabel(type),
+      variant: getTransactionTypeBadgeVariant(type)
+    }))
+})
+
+// Sum of all transaction output values in the block (satoshis)
+const totalValueTransferred = computed(() => {
+  return transactions.value
+    .reduce((sum, tx) => sum + toSats(tx.value), 0)
+    .toString()
+})
+
+// Sum of transaction sizes (block size approximation basis)
+const totalTxSize = computed(() => {
+  return transactions.value.reduce((sum, tx) => sum + (tx.size || 0), 0)
+})
+
+// Block reward, read from the coinstake (PoS) or coinbase (PoW) transaction:
+// newly created value = total outputs minus total inputs
+const blockReward = computed(() => {
+  const rewardTx = transactions.value.find(
+    tx => tx.type === TX_TYPES.COINSTAKE || tx.type === TX_TYPES.COINBASE || tx.type === TX_TYPES.BUDGET
+  )
+  if (!rewardTx) return null
+  const minted = toSats(rewardTx.value) - toSats(rewardTx.valueIn)
+  return minted > 0 ? minted.toString() : null
+})
 
 const confirmations = computed(() => {
   // Use networkHeight for actual chain depth, not syncHeight (local index)
@@ -204,6 +301,7 @@ const fetchBlock = async (identifier) => {
   error.value = ''
   block.value = null
   transactions.value = []
+  previousBlockTime.value = null
 
   try {
     const blockData = await blockService.getBlockDetail(identifier)
@@ -216,15 +314,28 @@ const fetchBlock = async (identifier) => {
     
     block.value = blockData
 
-    // Fetch transactions in parallel
+    // Fetch transactions and the previous block header (for the time delta) in parallel
+    const tasks = []
     if (blockData.tx && blockData.tx.length > 0) {
-      await fetchTransactions(blockData.tx)
+      tasks.push(fetchTransactions(blockData.tx))
     }
+    if (blockData.height > 0) {
+      tasks.push(fetchPreviousBlockTime(blockData.height - 1))
+    }
+    await Promise.all(tasks)
   } catch (err) {
-    console.error('Failed to fetch block:', err)
     error.value = err.message || 'Failed to load block'
   } finally {
     loading.value = false
+  }
+}
+
+const fetchPreviousBlockTime = async (height) => {
+  try {
+    const prevBlock = await blockService.getBlockDetail(height)
+    previousBlockTime.value = prevBlock?.time || null
+  } catch {
+    previousBlockTime.value = null
   }
 }
 
@@ -234,12 +345,13 @@ const fetchTransactions = async (txids) => {
   try {
     const txPromises = txids.map(txid => transactionService.getTransaction(txid))
     const results = await Promise.allSettled(txPromises)
-    
+
     transactions.value = results
       .filter(result => result.status === 'fulfilled')
-      .map(result => result.value)
-  } catch (err) {
-    console.error('Failed to fetch transactions:', err)
+      .map(result => ({
+        ...result.value,
+        type: detectTransactionType(result.value)
+      }))
   } finally {
     loadingTransactions.value = false
   }
@@ -262,7 +374,6 @@ watch(() => route.params.id, (newId) => {
 // Watch for reorg detection and refetch block
 watch(() => chainStore.reorgDetected, (detected) => {
   if (detected && route.params.id) {
-    console.log('🔄 Reorg detected - refetching block data')
     fetchBlock(route.params.id)
   }
 })
@@ -333,6 +444,92 @@ onMounted(() => {
 
 .transactions-section {
   margin-top: var(--space-8);
+}
+
+.composition-card {
+  margin-bottom: var(--space-4);
+}
+
+.composition-band {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.composition-types {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.composition-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+
+.composition-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.composition-total {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  text-align: right;
+}
+
+.composition-total-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.composition-total-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-lg);
+  color: var(--pivx-accent);
+}
+
+.interval-display {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
+.interval-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+}
+
+.interval-note {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.reward-value,
+.size-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  color: var(--text-accent);
 }
 
 .section-title {

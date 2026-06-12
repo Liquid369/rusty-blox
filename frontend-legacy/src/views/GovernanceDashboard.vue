@@ -68,6 +68,18 @@
               </div>
             </div>
             <div class="budget-stat">
+              <div class="stat-label">Monthly Burn (Passing)</div>
+              <div class="stat-value stat-accent" :title="monthlyBurn + ' PIV paid to passing proposals each cycle'">
+                {{ formatNumber(monthlyBurn) }} PIV
+              </div>
+            </div>
+            <div class="budget-stat">
+              <div class="stat-label">Passing Threshold</div>
+              <div class="stat-value stat-info" :title="`10% of ${formatNumber(enabledMasternodes)} enabled masternodes`">
+                {{ formatNumber(passingThreshold) }} votes
+              </div>
+            </div>
+            <div class="budget-stat">
               <div class="stat-label">Next Payout</div>
               <div class="stat-value stat-info" :title="'Block ' + nextSuperblock">
                 {{ timeUntilNextPayout }}
@@ -84,7 +96,7 @@
               ></div>
             </div>
             <div class="budget-bar-label">
-              <span>{{ budgetUtilizationPercent.toFixed(1) }}% Allocated</span>
+              <span>{{ budgetUtilizationPercent.toFixed(1) }}% of the {{ formatNumber(maxMonthlyBudget) }} PIV monthly cap allocated</span>
             </div>
           </div>
         </Card>
@@ -162,13 +174,27 @@
                     <span class="vote-value">{{ proposal.Abstains }}</span>
                   </div>
                 </div>
+
+                <!-- Net votes and margin against the 10% passing threshold -->
+                <div class="vote-margin-row">
+                  <span class="vote-label">Net votes:</span>
+                  <span class="vote-value net">{{ getNetVotes(proposal) >= 0 ? '+' : '' }}{{ formatNumber(getNetVotes(proposal)) }}</span>
+                  <Badge
+                    v-if="passingThreshold > 0"
+                    :variant="getVoteMargin(proposal) >= 0 ? 'success' : 'danger'"
+                    size="sm"
+                    :title="`Threshold: ${formatNumber(passingThreshold)} net votes (10% of enabled masternodes)`"
+                  >
+                    {{ getVoteMargin(proposal) >= 0 ? '+' : '' }}{{ formatNumber(getVoteMargin(proposal)) }} vs threshold
+                  </Badge>
+                </div>
               </div>
 
               <!-- Payment Info -->
               <div class="payment-info">
                 <InfoRow label="Monthly Payment">
                   <span class="payment-amount">
-                    {{ proposal.MonthlyPayment }} PIV
+                    {{ formatNumber(proposal.MonthlyPayment) }} PIV
                     <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                       ≈ {{ formatAmount(proposal.MonthlyPayment, { showPIV: false }) }}
                     </span>
@@ -176,14 +202,18 @@
                 </InfoRow>
                 <InfoRow label="Total Payment">
                   <span class="payment-amount">
-                    {{ proposal.TotalPayment }} PIV
+                    {{ formatNumber(proposal.TotalPayment) }} PIV
                     <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                       ≈ {{ formatAmount(proposal.TotalPayment, { showPIV: false }) }}
                     </span>
                   </span>
                 </InfoRow>
+                <InfoRow label="Budget Share">
+                  <span class="payment-amount">{{ getBudgetShare(proposal) }}% of cap</span>
+                </InfoRow>
                 <InfoRow label="Payments Remaining">
                   {{ proposal.RemainingPaymentCount }} / {{ proposal.TotalPaymentCount }}
+                  <span class="remaining-months">({{ proposal.RemainingPaymentCount }} month{{ proposal.RemainingPaymentCount !== 1 ? 's' : '' }} left)</span>
                 </InfoRow>
                 <InfoRow v-if="proposal.PaymentAddress" label="Payment Address">
                   <div class="payment-address-row" @click.stop>
@@ -237,7 +267,7 @@ import { useChainStore } from '@/stores/chainStore'
 import { useCurrency } from '@/composables/useCurrency'
 import { governanceService } from '@/services/governanceService'
 import { masternodeService } from '@/services/masternodeService'
-import { formatNumber, formatPIV } from '@/utils/formatters'
+import { formatNumber } from '@/utils/formatters'
 import {
   calculateGovernanceStats,
   getProposalStatus,
@@ -306,6 +336,29 @@ const remainingBudget = computed(() => {
 const budgetUtilizationPercent = computed(() => {
   return governanceStats.value?.budget.utilization || 0
 })
+
+// Total PIV paid out each cycle to proposals that are currently passing/funded
+const monthlyBurn = computed(() => {
+  return (governanceStats.value?.fundedProposals || [])
+    .reduce((sum, p) => sum + (p.MonthlyPayment || 0), 0)
+})
+
+const enabledMasternodes = computed(() => mnCount.value?.enabled || 0)
+
+// 10% of enabled masternodes (net yes votes) required to pass
+const passingThreshold = computed(() => {
+  return governanceStats.value?.voting.threshold || 0
+})
+
+const getNetVotes = (proposal) => proposal.Yeas - proposal.Nays
+
+const getVoteMargin = (proposal) => getNetVotes(proposal) - passingThreshold.value
+
+const getBudgetShare = (proposal) => {
+  const cap = PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET
+  if (!cap) return '0.0'
+  return (((proposal.MonthlyPayment || 0) / cap) * 100).toFixed(1)
+}
 
 // Calculate next superblock and time until payout
 const nextSuperblock = computed(() => {
@@ -743,6 +796,29 @@ onMounted(() => {
 .vote-value {
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.vote-margin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.vote-value.net {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.remaining-months {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-left: var(--space-1);
 }
 
 .payment-info {

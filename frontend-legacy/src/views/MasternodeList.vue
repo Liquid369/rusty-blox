@@ -15,20 +15,51 @@
         <Card v-if="mnCount">
           <template #header>Enabled</template>
           <div class="stat-value">{{ formatNumber(mnCount.enabled) }}</div>
+          <div class="stat-sub">{{ enabledPercent }}% of network</div>
         </Card>
-        <Card v-if="mnCount">
-          <template #header>IPv4</template>
-          <div class="stat-value">{{ formatNumber(mnCount.ipv4) }}</div>
+        <Card v-if="totalCollateral > 0">
+          <template #header>Collateral Locked</template>
+          <div class="stat-value">{{ formatNumber(totalCollateral) }} <span class="stat-unit">PIV</span></div>
+          <div class="stat-sub">{{ formatNumber(collateralBasis) }} nodes × {{ formatNumber(MASTERNODE_COLLATERAL) }} PIV</div>
         </Card>
-        <Card v-if="mnCount">
-          <template #header>IPv6</template>
-          <div class="stat-value">{{ formatNumber(mnCount.ipv6) }}</div>
-        </Card>
-        <Card v-if="mnCount">
-          <template #header>Onion</template>
-          <div class="stat-value">{{ formatNumber(mnCount.onion) }}</div>
+        <Card v-if="networkCounts">
+          <template #header>Network</template>
+          <div class="network-breakdown">
+            <div class="network-item">
+              <Badge variant="info" size="sm">IPv4</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.ipv4) }}</span>
+            </div>
+            <div class="network-item">
+              <Badge variant="accent" size="sm">IPv6</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.ipv6) }}</span>
+            </div>
+            <div class="network-item">
+              <Badge variant="warning" size="sm">Onion</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.onion) }}</span>
+            </div>
+          </div>
         </Card>
       </div>
+
+      <!-- Status Breakdown Band -->
+      <Card v-if="statusCounts.length > 0" class="status-band-card">
+        <div class="status-band">
+          <span class="status-band-label">Status Breakdown</span>
+          <div class="status-chips">
+            <button
+              v-for="entry in statusCounts"
+              :key="entry.status"
+              class="status-chip"
+              :class="{ active: statusFilter === entry.status }"
+              :title="`Filter by ${entry.status}`"
+              @click="statusFilter = statusFilter === entry.status ? 'all' : entry.status"
+            >
+              <Badge :variant="getStatusVariant(entry.status)" size="sm">{{ entry.status }}</Badge>
+              <span class="status-count">{{ formatNumber(entry.count) }}</span>
+            </button>
+          </div>
+        </div>
+      </Card>
 
       <!-- Loading State -->
       <div v-if="loading && masternodes.length === 0" class="loading-container">
@@ -166,6 +197,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { masternodeService } from '@/services/masternodeService'
 import { formatNumber, formatTimeAgo, formatDuration } from '@/utils/formatters'
+import { MASTERNODE_COLLATERAL } from '@/utils/constants'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -202,8 +234,53 @@ const getStatusVariant = (status) => {
     'EXPIRED': 'warning',
     'REMOVE': 'danger'
   }
-  return variants[status] || 'secondary'
+  return variants[status] || 'default'
 }
+
+// Counts by status, descending - drives the summary band and quick filters
+const statusCounts = computed(() => {
+  const counts = new Map()
+  for (const mn of masternodes.value) {
+    const status = mn.status || 'UNKNOWN'
+    counts.set(status, (counts.get(status) || 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => b.count - a.count)
+})
+
+// Each masternode locks exactly 10,000 PIV of collateral
+const collateralBasis = computed(() => {
+  return mnCount.value?.total || masternodes.value.length
+})
+
+const totalCollateral = computed(() => {
+  return collateralBasis.value * MASTERNODE_COLLATERAL
+})
+
+const enabledPercent = computed(() => {
+  if (!mnCount.value?.total) return '0.0'
+  return ((mnCount.value.enabled / mnCount.value.total) * 100).toFixed(1)
+})
+
+// Network breakdown: prefer /api/v2/mncount, fall back to the list's `network` field
+const networkCounts = computed(() => {
+  if (mnCount.value && (mnCount.value.ipv4 || mnCount.value.ipv6 || mnCount.value.onion)) {
+    return {
+      ipv4: mnCount.value.ipv4 || 0,
+      ipv6: mnCount.value.ipv6 || 0,
+      onion: mnCount.value.onion || 0
+    }
+  }
+  if (!masternodes.value.length) return null
+  const counts = { ipv4: 0, ipv6: 0, onion: 0 }
+  for (const mn of masternodes.value) {
+    const network = (mn.network || '').toLowerCase()
+    if (network in counts) counts[network] += 1
+    else if (String(mn.addr || '').endsWith('.onion')) counts.onion += 1
+  }
+  return counts
+})
 
 const looksLikePivxAddress = (value) => {
   if (typeof value !== 'string') return false
@@ -394,6 +471,100 @@ onMounted(() => {
   font-weight: 700;
   color: var(--text-accent);
   margin-top: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-unit {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.stat-sub {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.network-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.network-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.network-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
+}
+
+.status-band-card {
+  margin-bottom: var(--space-4);
+}
+
+.status-band {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.status-band-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  flex-shrink: 0;
+}
+
+.status-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.status-chip:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
+  background: rgba(var(--rgb-purple-mid), 0.35);
+}
+
+.status-chip.active {
+  border-color: var(--border-accent);
+}
+
+.status-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
 }
 
 .filters-card {

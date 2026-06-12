@@ -14,13 +14,27 @@
               <span class="font-mono">{{ input.coinbase }}</span>
             </div>
             <div v-else class="io-content">
-              <div v-if="input.addresses && input.addresses.length > 0" class="io-address">
-                <HashDisplay 
-                  :hash="input.addresses[0]"
-                  :link-to="`/address/${input.addresses[0]}`"
-                  :start-length="12"
-                  :end-length="12"
-                />
+              <div v-if="input.addresses && input.addresses.length > 0" class="io-address-list">
+                <div
+                  v-for="entry in getAddressRoles(input)"
+                  :key="entry.address"
+                  class="io-address"
+                >
+                  <Badge
+                    v-if="entry.role"
+                    :variant="entry.role === 'Staker' ? 'accent' : 'info'"
+                    size="sm"
+                    class="io-role-badge"
+                  >
+                    {{ entry.role }}
+                  </Badge>
+                  <HashDisplay
+                    :hash="entry.address"
+                    :link-to="`/address/${entry.address}`"
+                    :start-length="12"
+                    :end-length="12"
+                  />
+                </div>
               </div>
               <div v-if="input.txid" class="io-txid">
                 <span class="io-label">From TX:</span>
@@ -53,23 +67,40 @@
           <div class="io-index">{{ index }}</div>
           <div class="io-details">
             <div class="io-content">
-              <div v-if="output.addresses && output.addresses.length > 0" class="io-address">
-                <HashDisplay 
-                  :hash="output.addresses[0]"
-                  :link-to="`/address/${output.addresses[0]}`"
-                  :start-length="12"
-                  :end-length="12"
-                />
+              <div v-if="output.addresses && output.addresses.length > 0" class="io-address-list">
+                <div
+                  v-for="entry in getAddressRoles(output)"
+                  :key="entry.address"
+                  class="io-address"
+                >
+                  <Badge
+                    v-if="entry.role"
+                    :variant="entry.role === 'Staker' ? 'accent' : 'info'"
+                    size="sm"
+                    class="io-role-badge"
+                  >
+                    {{ entry.role }}
+                  </Badge>
+                  <HashDisplay
+                    :hash="entry.address"
+                    :link-to="`/address/${entry.address}`"
+                    :start-length="12"
+                    :end-length="12"
+                  />
+                </div>
               </div>
               <div v-else class="io-unspendable">
                 <Badge variant="default" size="sm">{{ output.type || 'Unspendable' }}</Badge>
               </div>
-              <div v-if="output.type === 'coldstake'" class="io-coldstake">
-                <Badge variant="accent" size="sm">Cold Stake</Badge>
+              <div v-if="isColdStakeOutput(output)" class="io-coldstake">
+                <Badge variant="accent" size="sm">Cold-Stake (P2CS)</Badge>
               </div>
             </div>
-            <div class="io-value">
-              {{ formatPIV(output.value) }} PIV
+            <div class="io-value-row">
+              <span class="io-value">{{ formatPIV(output.value) }} PIV</span>
+              <span v-if="outputShare(output) !== null" class="io-share">
+                {{ outputShare(output) }}% of outputs
+              </span>
             </div>
           </div>
         </div>
@@ -87,6 +118,7 @@
 <script setup>
 import { computed } from 'vue'
 import { formatPIV } from '@/utils/formatters'
+import { getAddressRoles, isColdStakeOutput, toSats } from '@/utils/transactionHelpers'
 import Badge from './Badge.vue'
 import HashDisplay from './HashDisplay.vue'
 import InfoRow from './InfoRow.vue'
@@ -119,6 +151,14 @@ const totalOutput = computed(() => {
     return sum + value
   }, 0).toString()
 })
+
+/** Per-output share of the total output value, as a percentage string. */
+const outputShare = (output) => {
+  const total = toSats(totalOutput.value)
+  const value = toSats(output.value)
+  if (!total || !value) return null
+  return ((value / total) * 100).toFixed(1)
+}
 </script>
 
 <style scoped>
@@ -203,8 +243,35 @@ const totalOutput = computed(() => {
   font-size: var(--text-sm);
 }
 
+.io-address-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
 .io-address {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
   word-break: break-all;
+}
+
+.io-role-badge {
+  flex-shrink: 0;
+}
+
+.io-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.io-share {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .io-txid {

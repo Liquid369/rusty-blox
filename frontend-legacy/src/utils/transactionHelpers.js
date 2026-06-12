@@ -1,124 +1,152 @@
 import { TX_TYPES } from './constants'
 
 /**
- * Detect the type of a PIVX transaction based on its properties
- * @param {Object} tx - Transaction object from API
- * @returns {string} Transaction type constant
+ * Transaction classification helpers.
+ *
+ * Shapes verified against the live /api/v2/tx endpoint:
+ * - Coinbase:  vin[0] has no `txid` (only the coinbase script `hex`), valueIn "0"
+ * - Coinstake: vout[0].value === "0" with no addresses AND vin[0] spends a real txid
+ * - Shield:    version >= 3 (Sapling). Transparent vin/vout may be empty; some
+ *              backends also expose sapling markers (valueBalance / vShieldedSpend)
+ * - Cold-Stake (P2CS): output addresses array = [staker (S...), owner (D...)]
+ * - Everything else is a transparent transaction
+ */
+
+const SATS_PER_PIV = 100000000
+
+/** Parse a satoshi string/number into a Number (display math only). */
+export function toSats(value) {
+  if (value === null || value === undefined) return 0
+  const n = typeof value === 'string' ? parseFloat(value.trim()) : Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
+/** True if the input is a coinbase-style input (no previous txid). */
+export function isCoinbaseInput(input) {
+  if (!input) return false
+  if (input.coinbase) return true
+  return !input.txid && !input.isAddress
+}
+
+/** True if the transaction has a coinbase input. */
+export function isCoinbaseTx(tx) {
+  return !!tx?.vin?.length && isCoinbaseInput(tx.vin[0])
+}
+
+/**
+ * True if the transaction is a coinstake (PoS block reward):
+ * first output is the empty marker output (value "0", no addresses)
+ * and the first input spends a real previous output.
+ */
+export function isCoinstakeTx(tx) {
+  const first = tx?.vout?.[0]
+  if (!first) return false
+  const zeroValue = first.value === '0' || first.value === '0.00000000'
+  const noAddresses = !first.addresses || first.addresses.length === 0
+  return zeroValue && noAddresses && !!tx.vin?.[0]?.txid
+}
+
+/** True if the transaction carries Sapling (shield) data. */
+export function isShieldTx(tx) {
+  if (!tx) return false
+  if (tx.vShieldedSpend?.length > 0 || tx.vShieldedOutput?.length > 0) return true
+  if (tx.valueBalance !== undefined && tx.valueBalance !== null && tx.valueBalance !== 0 && tx.valueBalance !== '0') return true
+  if (tx.sapling || tx.saplingData) return true
+  // Live API marker: Sapling transactions are serialized with version >= 3
+  return (tx.version || 0) >= 3
+}
+
+/**
+ * True if an output is a cold-staking (P2CS) output:
+ * addresses = [staker (S...), owner (D...)].
+ */
+export function isColdStakeOutput(output) {
+  const addrs = output?.addresses
+  if (!Array.isArray(addrs) || addrs.length < 2) return false
+  const hasStaker = addrs.some(a => typeof a === 'string' && a.startsWith('S'))
+  const hasOwner = addrs.some(a => typeof a === 'string' && a.startsWith('D'))
+  return hasStaker && hasOwner
+}
+
+/** True if any output (or input being spent) is a P2CS script. */
+export function hasColdStakeOutput(tx) {
+  return !!tx?.vout?.some(isColdStakeOutput)
+}
+
+/**
+ * Map an input/output addresses array to labeled entries.
+ * P2CS scripts carry [staker (S...), owner (D...)] - both are returned
+ * with their role so views can render and link each one.
+ * @returns {Array<{address: string, role: string|null}>}
+ */
+export function getAddressRoles(io) {
+  const addrs = io?.addresses
+  if (!Array.isArray(addrs)) return []
+  const coldStake = isColdStakeOutput(io)
+  return addrs.map(address => {
+    let role = null
+    if (coldStake) {
+      role = address.startsWith('S') ? 'Staker' : 'Owner'
+    }
+    return { address, role }
+  })
+}
+
+/** Detect a budget (superblock) payment attached to a coinbase/coinstake. */
+function isBudgetPayment(tx) {
+  if (!tx.blockHeight || !tx.vout?.length) return false
+  const superblockHeight = Math.floor(tx.blockHeight / 43200) * 43200
+  const blocksAfterSuperblock = tx.blockHeight - superblockHeight
+  if (blocksAfterSuperblock < 0 || blocksAfterSuperblock >= 100) return false
+  // Budget payments place a large payout (well above any MN reward) as the last output
+  const lastOutput = tx.vout[tx.vout.length - 1]
+  return toSats(lastOutput?.value) / SATS_PER_PIV > 50
+}
+
+/**
+ * Detect the type of a PIVX transaction based on its properties.
+ * @param {Object} tx - Transaction object from /api/v2/tx
+ * @returns {string} Transaction type constant (TX_TYPES)
  */
 export function detectTransactionType(tx) {
   if (!tx) return TX_TYPES.REGULAR
 
-  // Check for coinstake transaction FIRST (block reward from staking/PoS)
-  // Coinstake has first input spending a previous output with empty first output
-  const isCoinstake = tx.vout?.[0]?.value === '0.00000000' || 
-                      (tx.vout?.[0]?.value === '0' && tx.vin?.[0]?.txid)
-  
-  if (isCoinstake) {
-    // IMPORTANT: During superblock windows, coinstake transactions can include budget payments
-    // Check if this coinstake has a budget payment attached (large last output)
-    if (tx.blockHeight) {
-      const superblockHeight = Math.floor(tx.blockHeight / 43200) * 43200
-      const blocksAfterSuperblock = tx.blockHeight - superblockHeight
-      
-      // Within 100 blocks of superblock, check for budget payment in coinstake
-      if (blocksAfterSuperblock >= 0 && blocksAfterSuperblock < 100 && tx.vout && tx.vout.length > 2) {
-        const lastOutput = tx.vout[tx.vout.length - 1]
-        
-        // Handle both PIV (string) and satoshi (number) formats
-        let lastOutputValue = 0
-        if (lastOutput.value !== undefined) {
-          const valueStr = String(lastOutput.value)
-          lastOutputValue = parseFloat(valueStr) / (valueStr.length > 10 ? 100000000 : 1)
-        }
-        
-        // If last output > 50 PIV, this is a budget payment (not just a coinstake)
-        if (lastOutputValue > 50) {
-          return TX_TYPES.BUDGET
-        }
-      }
-    }
-    
-    // Regular coinstake without budget payment
+  // Coinstake (PoS block reward) - may carry a budget payment in superblock windows
+  if (isCoinstakeTx(tx)) {
+    if (tx.vout.length > 2 && isBudgetPayment(tx)) return TX_TYPES.BUDGET
     return TX_TYPES.COINSTAKE
   }
 
-  // Check for budget payment transaction (PIVX Core protocol rules)
-  // MUST check BEFORE coinbase because budget payments have coinbase inputs!
-  // Budget payments occur at superblocks and can span multiple blocks:
-  // 
-  // PIVX Budget Payment System:
-  // 1. Superblock at height % 43200 == 0 triggers budget cycle
-  // 2. If there are N passing proposals, budget payments occur in blocks:
-  //    superblock_height, superblock_height+1, ..., superblock_height+(N-1)
-  // 3. During budget payment blocks:
-  //    - Staker gets FULL block reward (no masternode payment)
-  //    - One proposal is paid per block
-  // 4. Budget transactions have coinbase-like structure (no inputs)
-  // 5. Number of proposals is limited by 432,000 PIV monthly budget
-  //    (could be 5 proposals or 50+ proposals depending on payment amounts)
-  //
-  // PIVX Core Detection Logic (from wallet transaction logic):
-  // - Check if transaction has coinbase input
-  // - Check if LAST output value > masternode reward (~10-15 PIV)
-  // - If credit > mn_reward, it's a budget payment, not MN reward
-  //
-  if (tx.vin?.[0]?.coinbase && tx.blockHeight) {
-    const superblockHeight = Math.floor(tx.blockHeight / 43200) * 43200
-    const blocksAfterSuperblock = tx.blockHeight - superblockHeight
-    
-    // Use generous window (100 blocks) to catch all possible budget payments
-    // Theoretical max: 432,000 PIV / ~5,000 PIV per proposal = ~86 proposals
-    if (blocksAfterSuperblock >= 0 && blocksAfterSuperblock < 100) {
-      // PIVX Core logic: Check if last output exceeds masternode reward
-      // Masternode reward is typically 10-15 PIV (varies by network version)
-      // Budget payments are always > 100 PIV, so this is a safe threshold
-      if (tx.vout && tx.vout.length > 0) {
-        const lastOutput = tx.vout[tx.vout.length - 1]
-        
-        // Handle both PIV (string like "1234.56") and satoshi (number) formats
-        let lastOutputValue = 0
-        if (lastOutput.value !== undefined) {
-          lastOutputValue = parseFloat(lastOutput.value)
-        } else if (lastOutput.valueSat !== undefined) {
-          // Convert satoshis to PIV (1 PIV = 100000000 satoshis)
-          lastOutputValue = parseFloat(lastOutput.valueSat) / 100000000
-        }
-        
-        // If last output > 50 PIV (well above any MN reward), it's a budget payment
-        // This matches PIVX Core's logic: credit > mn_reward = BudgetPayment
-        if (lastOutputValue > 50) {
-          return TX_TYPES.BUDGET
-        }
-      }
-    }
-  }
-
-  // Check for shielded (Sapling) transaction
-  // These have shielded spends or outputs
-  if (tx.vShieldedSpend?.length > 0 || tx.vShieldedOutput?.length > 0 ||
-      tx.saplingData || tx.shieldedSpends || tx.shieldedOutputs) {
-    return TX_TYPES.SAPLING
-  }
-
-  // Check for cold staking transaction
-  // Cold stake outputs have specific script type 'coldstake' or 'coldstaking'
-  const hasColdStakeOutput = tx.vout?.some(output => 
-    output.type === 'coldstake' || 
-    output.type === 'coldstaking' ||
-    output.scriptPubKey?.type === 'coldstake'
-  )
-  if (hasColdStakeOutput) {
-    return TX_TYPES.COLDSTAKE
-  }
-
-  // Check for coinbase transaction (block reward from mining/PoW)
-  // This check comes AFTER budget check because budget payments also have coinbase inputs
-  if (tx.vin?.[0]?.coinbase) {
+  // Coinbase (PoW reward / budget payout blocks)
+  if (isCoinbaseTx(tx)) {
+    if (isBudgetPayment(tx)) return TX_TYPES.BUDGET
     return TX_TYPES.COINBASE
   }
 
-  // Default to regular transaction
+  // Shield (Sapling)
+  if (isShieldTx(tx)) {
+    return TX_TYPES.SAPLING
+  }
+
+  // Cold-staking delegation (P2CS output)
+  if (hasColdStakeOutput(tx)) {
+    return TX_TYPES.COLDSTAKE
+  }
+
   return TX_TYPES.REGULAR
+}
+
+/**
+ * Fee rate in satoshi per byte, or null when not applicable
+ * (coinbase/coinstake pay no fees).
+ * @param {Object} tx - Transaction object from /api/v2/tx
+ * @returns {number|null}
+ */
+export function getFeeRate(tx) {
+  const fees = toSats(tx?.fees)
+  const size = tx?.size || tx?.vsize
+  if (!fees || !size) return null
+  return fees / size
 }
 
 /**
@@ -130,9 +158,9 @@ export function getTransactionTypeLabel(type) {
   const labels = {
     [TX_TYPES.COINBASE]: 'Coinbase',
     [TX_TYPES.COINSTAKE]: 'Coinstake',
-    [TX_TYPES.COLDSTAKE]: 'Cold Stake',
+    [TX_TYPES.COLDSTAKE]: 'Cold-Stake',
     [TX_TYPES.BUDGET]: 'Budget',
-    [TX_TYPES.SAPLING]: 'Shielded',
+    [TX_TYPES.SAPLING]: 'Shield',
     [TX_TYPES.REGULAR]: 'Transparent'
   }
   return labels[type] || 'Transaction'
@@ -149,7 +177,7 @@ export function getTransactionTypeBadgeVariant(type) {
     [TX_TYPES.COINSTAKE]: 'success',
     [TX_TYPES.COLDSTAKE]: 'accent',
     [TX_TYPES.BUDGET]: 'warning',
-    [TX_TYPES.SAPLING]: 'default',
+    [TX_TYPES.SAPLING]: 'info',
     [TX_TYPES.REGULAR]: 'default'
   }
   return variants[type] || 'default'
