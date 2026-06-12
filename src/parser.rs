@@ -180,11 +180,17 @@ pub async fn deserialize_transaction(
 
     let lock_time = cursor.read_u32::<LittleEndian>()?;
 
-    // For Sapling transactions (version >= 3), parse the Sapling-specific data
+    // For Sapling transactions (version >= 3), parse the Sapling-specific data.
+    // PIVX Core serializes sapData as Optional<SaplingTxData>: a 1-byte discriminant
+    // (0x00 = absent, 0x01 = present) followed by the payload when present.
     let sapling_data = if is_sapling {
-        // Read the value_count varint (from old transactions.rs code)
-        let _value_count = read_varint(&mut cursor).await?;
-        
+        let has_sap_data = cursor.read_u8()? != 0;
+        if !has_sap_data {
+            // Optional discriminant 0x00 — no sapling payload. extraPayload (if any)
+            // is handled below.
+            read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+            None
+        } else {
         // Read valueBalance (net value of spends - outputs)
         let value_balance = cursor.read_i64::<LittleEndian>()?;
         
@@ -276,21 +282,17 @@ pub async fn deserialize_transaction(
         // Read bindingSig (BINDINGSIG_SIZE = 64 bytes)
         let mut binding_sig = [0u8; 64];
         cursor.read_exact(&mut binding_sig)?;
-        
-        // For special transaction types (nType != 0), read extraPayload
-        if tx_type != 0 {
-            // Read extraPayload length and skip it
-            if let Ok(payload_size) = read_varint(&mut cursor).await {
-                cursor.set_position(cursor.position() + payload_size);
-            }
-        }
-        
+
+        // For special transaction types (nType != 0), consume extraPayload
+        read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+
         Some(SaplingTxData {
             value_balance,
             vshielded_spend,
             vshielded_output,
             binding_sig,
         })
+        }
     } else {
         None
     };
@@ -303,6 +305,42 @@ pub async fn deserialize_transaction(
         lock_time,
         sapling_data,
     })
+}
+
+/// Consume the extraPayload field of a special transaction (nType != 0).
+///
+/// PIVX Core serializes extraPayload as Optional<std::vector<unsigned char>>:
+/// a 1-byte discriminant (0x00 = absent, 0x01 = present), then CompactSize length
+/// + payload bytes when present. Reading the discriminant as a length (the old
+/// behavior) would leave the entire payload unconsumed and misalign every
+/// subsequent transaction in the block.
+async fn read_extra_payload(
+    cursor: &mut Cursor<&[u8]>,
+    tx_type: u16,
+    data_len: usize,
+) -> Result<(), std::io::Error> {
+    if tx_type == 0 {
+        return Ok(());
+    }
+    let has_payload = cursor.read_u8()? != 0;
+    if has_payload {
+        let payload_size = read_varint(cursor).await?;
+        let new_pos = cursor
+            .position()
+            .checked_add(payload_size)
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "extraPayload size overflow",
+            ))?;
+        if new_pos > data_len as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("extraPayload size {} exceeds transaction bounds", payload_size),
+            ));
+        }
+        cursor.set_position(new_pos);
+    }
+    Ok(())
 }
 
 /// Blocking wrapper for `deserialize_transaction` for use in synchronous contexts.
@@ -333,20 +371,25 @@ pub async fn deserialize_tx_in(
     let script_sig = read_script(cursor).await?;
     let sequence = cursor.read_u32::<LittleEndian>()?;
     
-    // Check if this is TRULY coinbase: prev_hash is all zeros AND prev_index is 0xffffffff
+    // Check if this is TRULY coinbase: prev_hash is all zeros AND prev_index is 0xffffffff,
+    // AND the scriptSig is not a zerocoin spend. PIVX Core: zerocoin spends (OP_ZEROCOINSPEND
+    // 0xc2 / OP_ZEROCOINPUBLICSPEND 0xc3) carry a null prevout but are NOT coinbase
+    // (IsCoinBase() requires !ContainsZerocoins()).
     // CRITICAL: Coinstake transactions have REAL prevouts, not null!
-    let is_coinbase = prev_hash.iter().all(|&b| b == 0) && prev_index == 0xffffffff;
-    
+    let is_null_prevout = prev_hash.iter().all(|&b| b == 0) && prev_index == 0xffffffff;
+    let is_zerocoin_script = matches!(script_sig.first(), Some(&0xc2) | Some(&0xc3));
+    let is_coinbase = is_null_prevout && !is_zerocoin_script;
+
     // Always create prevout structure - even for coinbase-like inputs
     // We'll determine later if it's truly coinbase or just coinstake
     let mut hash_display = prev_hash;
     hash_display.reverse();
-    
+
     let prevout = Some(COutPoint {
         hash: hex::encode(hash_display),
         n: prev_index,
     });
-    
+
     if is_coinbase {
         // TRUE coinbase - has null prevout (all zeros)
         Ok(CTxIn {
@@ -394,16 +437,19 @@ pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty:
 }
 
 fn extract_address_from_script(script: &[u8]) -> Vec<String> {
-    // P2CS (Cold Stake): 76a97b63d114{20 byte staker}6714{20 byte owner}6888ac (51 bytes)
-    // Format: OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY(0xd1) PUSH20 <staker> OP_ELSE PUSH20 <owner> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
-    if script.len() == 51 && 
-       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b && 
-       script[3] == 0x63 && script[4] == 0xd1 && script[5] == 0x14 &&
+    // P2CS (Cold Stake): 51 bytes, PIVX Core CScript::IsPayToColdStaking[LOF]
+    // OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY(0xd2)|OP_CHECKCOLDSTAKEVERIFY_LOF(0xd1)
+    // PUSH20 <staker> OP_ELSE PUSH20 <owner> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+    // 0xd2 is what GetScriptForStakeDelegation emits since v5.2 (mainnet ~2,927,000);
+    // 0xd1 is the original "last-output-free" variant. Both must be recognized.
+    if script.len() == 51 &&
+       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b &&
+       script[3] == 0x63 && (script[4] == 0xd1 || script[4] == 0xd2) && script[5] == 0x14 &&
        script[26] == 0x67 && script[27] == 0x14 &&
        script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
         let staker_hash = &script[6..26];
         let owner_hash = &script[28..48];
-        
+
         let mut addresses = Vec::new();
         // Staker address (version 0x3f = 63)
         if let Some(staker_addr) = encode_pivx_address(staker_hash, 63) {
@@ -417,67 +463,35 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
             return addresses;
         }
     }
-    
+
     // P2PKH: 76a914{20 byte pubkey hash}88ac
-    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14 
+    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14
         && script[23] == 0x88 && script[24] == 0xac {
         let pubkey_hash = &script[3..23];
         if let Some(address) = encode_pivx_address(pubkey_hash, 30) {
             return vec![address];
         }
     }
-    // P2PKH with a single leading prefix byte (exchange wrapper -> EXM)
-    if script.len() == 26 && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
+    // Exchange address (TX_EXCHANGEADDR): OP_EXCHANGEADDR(0xe0)-prefixed P2PKH → EXM.
+    // PIVX Core requires the 0xe0 opcode; any other leading byte is nonstandard.
+    if script.len() == 26 && script[0] == 0xe0
+        && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
         && script[24] == 0x88 && script[25] == 0xac {
         let pubkey_hash = &script[4..24];
-        // This variant is used by exchange-wrapped P2PKH outputs where a
-        // custom OP_EXCHANGEADDR (0xe0) prefix is prepended. Encode using
-        // the 3-byte EXM prefix so the explorer surfaces the EXM address.
         if let Some(address) = encode_pivx_exchange_address(pubkey_hash) {
             return vec![address];
         }
     }
-    // P2SH: a914{20 byte script hash}87
+    // P2SH: a914{20 byte script hash}87 — exactly ONE address (version 13).
+    // PIVX Core never encodes a script hash with the EXM prefix; emitting an EXM
+    // twin here previously made the enrichment classifier drop P2SH outputs entirely.
     if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
         let script_hash = &script[2..22];
-        let mut addresses = Vec::new();
-        // Standard P2SH encoding (version 13)
         if let Some(address) = encode_pivx_address(script_hash, 13) {
-            addresses.push(address);
-        }
-        // Also include Exchange (EXM) encoding when present - some services
-        // use the same script pattern but different base58 prefix.
-        if let Some(ex_addr) = encode_pivx_exchange_address(script_hash) {
-            if !addresses.contains(&ex_addr) {
-                addresses.push(ex_addr);
-            }
-        }
-        if !addresses.is_empty() {
-            return addresses;
+            return vec![address];
         }
     }
-    // P2SH with a single leading prefix byte
-    if script.len() == 24 && script[1] == 0xa9 && script[2] == 0x14 && script[23] == 0x87 {
-        let script_hash = &script[3..23];
-        let mut addresses = Vec::new();
-        if let Some(address) = encode_pivx_address(script_hash, 13) {
-            addresses.push(address);
-        }
-        if let Some(ex_addr) = encode_pivx_exchange_address(script_hash) {
-            if !addresses.contains(&ex_addr) {
-                addresses.push(ex_addr);
-            }
-        }
-        if !addresses.is_empty() {
-            return addresses;
-        }
-    }
-    
-    // P2SH Exchange Address: Same pattern as P2SH but encoded with exchange prefix
-    // Note: Exchange addresses use the same script pattern but different encoding
-    // This is detected the same way as P2SH, but we'll keep standard P2SH for now
-    // and let the wallet handle exchange address encoding when needed
-    
+
     // P2PK: {push_opcode}{pubkey} OP_CHECKSIG (0xac)
     // Compressed pubkey: 0x21 (push 33) + 33 bytes + 0xac = 35 bytes total
     // Uncompressed pubkey: 0x41 (push 65) + 65 bytes + 0xac = 67 bytes total
@@ -507,50 +521,55 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
 }
 
 pub fn get_script_type(script: &[u8]) -> &str {
-    // P2CS (Cold Stake)
-    if script.len() == 51 && 
-       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b && 
-       script[3] == 0x63 && script[4] == 0xd1 && script[5] == 0x14 &&
+    // P2CS (Cold Stake) — both OP_CHECKCOLDSTAKEVERIFY (0xd2) and the LOF variant (0xd1)
+    if script.len() == 51 &&
+       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b &&
+       script[3] == 0x63 && (script[4] == 0xd1 || script[4] == 0xd2) && script[5] == 0x14 &&
        script[26] == 0x67 && script[27] == 0x14 &&
        script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
         return "coldstake";
     }
-    
+
     // P2PKH (Pay to Public Key Hash)
-    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14 
+    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14
         && script[23] == 0x88 && script[24] == 0xac {
         return "pubkeyhash";
     }
-    
-    // Exchange-wrapped P2PKH: single leading prefix byte + standard P2PKH
-    // Example: 0xe0 76 a9 14 {20} 88 ac  (26 bytes)
-    if script.len() == 26 && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
+
+    // Exchange address (TX_EXCHANGEADDR): OP_EXCHANGEADDR(0xe0) + standard P2PKH
+    if script.len() == 26 && script[0] == 0xe0
+        && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
         && script[24] == 0x88 && script[25] == 0xac {
         return "exchangeaddress";
     }
-    
+
     // P2SH (Pay to Script Hash)
     if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
         return "scripthash";
     }
-    
-    // Exchange-wrapped P2SH: single leading prefix byte + standard P2SH
-    // Example: <prefix> a9 14 {20} 87 (24 bytes)
-    if script.len() == 24 && script[1] == 0xa9 && script[2] == 0x14 && script[23] == 0x87 {
-        return "exchangeaddress";
-    }
-    
+
     // P2PK (Pay to Public Key)
     if (script.len() == 35 && script[0] == 0x21 && script[34] == 0xac) ||
        (script.len() == 67 && script[0] == 0x41 && script[66] == 0xac) {
         return "pubkey";
     }
-    
+
+    // Zerocoin
+    if !script.is_empty() {
+        match script[0] {
+            0xc1 => return "zerocoinmint",
+            0xc2 => return "zerocoinspend",
+            0xc3 => return "zerocoinpublicspend",
+            0x6a => return "nulldata",
+            _ => {}
+        }
+    }
+
     // Empty script
     if script.is_empty() {
         return "nonstandard";
     }
-    
+
     // Unknown type
     "unknown"
 }
@@ -627,4 +646,106 @@ pub async fn read_script(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, std::io:
     let mut script = vec![0u8; script_length as usize];
     cursor.read_exact(&mut script)?;
     Ok(script)
+}
+#[cfg(test)]
+mod golden_script_tests {
+    //! Golden-vector tests: every expected value below was produced by PIVX Core
+    //! itself (mainnet RPC `getblock`/`decodescript`, height 5,452,236, 2026-06-12).
+    //! These pin the script→address layer to Core's Solver() 1:1.
+    use super::{extract_address_from_script, get_script_type};
+
+    fn hex_script(s: &str) -> Vec<u8> {
+        hex::decode(s).unwrap()
+    }
+
+    /// Real mainnet coinstake P2CS output (block 5,452,237) — OP_CHECKCOLDSTAKEVERIFY_LOF (0xd1)
+    #[test]
+    fn coldstake_d1_matches_core() {
+        let script = hex_script("76a97b63d114b3be8567d0190c67ca4675a0019089c55fe695f96714ef6bede7abacb6bea406f5c67a6b9e5e066ca85a6888ac");
+        assert_eq!(get_script_type(&script), "coldstake");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec![
+                "SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy".to_string(), // staker (Core addresses[0])
+                "DSy3LAbb93vd7xqqNcPQW2bsFwU6JsdTiF".to_string(), // owner  (Core addresses[1])
+            ]
+        );
+    }
+
+    /// Same P2CS with OP_CHECKCOLDSTAKEVERIFY (0xd2) — Core decodescript: same addresses
+    #[test]
+    fn coldstake_d2_matches_core() {
+        let script = hex_script("76a97b63d214b3be8567d0190c67ca4675a0019089c55fe695f96714ef6bede7abacb6bea406f5c67a6b9e5e066ca85a6888ac");
+        assert_eq!(get_script_type(&script), "coldstake");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec![
+                "SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy".to_string(),
+                "DSy3LAbb93vd7xqqNcPQW2bsFwU6JsdTiF".to_string(),
+            ]
+        );
+    }
+
+    /// Real mainnet P2PKH output (block 5,452,238)
+    #[test]
+    fn p2pkh_matches_core() {
+        let script = hex_script("76a914dddabf603190714c8db2e837e191b83a3a520ba588ac");
+        assert_eq!(get_script_type(&script), "pubkeyhash");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec!["DRN9vVxE9WNQM5XxS1RxdfH2NqqKG4VS1A".to_string()]
+        );
+    }
+
+    /// Real mainnet P2SH output (block 5,451,524) — exactly ONE address, version 13 ('6...')
+    #[test]
+    fn p2sh_matches_core_single_address() {
+        let script = hex_script("a91403d3f3e2a851686bbd533a497b9dab0373303b6087");
+        assert_eq!(get_script_type(&script), "scripthash");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec!["6Ek5jic51RAB9FLNQ7m91QNNYbrbPqPKiS".to_string()]
+        );
+    }
+
+    /// P2PK compressed — Core decodescript hashes the RAW 33 bytes
+    #[test]
+    fn p2pk_compressed_matches_core() {
+        let script = hex_script("2102b463185b1f1d24b25e0eff8a8e61f4f5bfcbef423e9be20393eef1ada303b6cdac");
+        assert_eq!(get_script_type(&script), "pubkey");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec!["D7H3y8PtYh25Y56uiLXYJ27wrMj1T8apSb".to_string()]
+        );
+    }
+
+    /// P2PK uncompressed — Core hashes the RAW 65 bytes (no compression first!)
+    #[test]
+    fn p2pk_uncompressed_matches_core() {
+        let script = hex_script("4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac");
+        assert_eq!(get_script_type(&script), "pubkey");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec!["DEA5vGb2NpAwCiCp5yTE16F3DueQUVivQp".to_string()]
+        );
+    }
+
+    /// Exchange address (TX_EXCHANGEADDR): OP_EXCHANGEADDR(0xe0) + P2PKH → EXM base58
+    #[test]
+    fn exchange_address_matches_core() {
+        let script = hex_script("e076a914dddabf603190714c8db2e837e191b83a3a520ba588ac");
+        assert_eq!(get_script_type(&script), "exchangeaddress");
+        assert_eq!(
+            extract_address_from_script(&script),
+            vec!["EXMXEkmvHzp7Y4fkRSmJvcDPmgivhinEziDK".to_string()]
+        );
+    }
+
+    /// A wrapped P2SH with a non-0xe0 leading byte is NONSTANDARD per Core —
+    /// it must produce no address (the old code emitted a bogus EXM address).
+    #[test]
+    fn bogus_wrapped_p2sh_is_nonstandard() {
+        let script = hex_script("c0a91403d3f3e2a851686bbd533a497b9dab0373303b6087");
+        assert_eq!(extract_address_from_script(&script), Vec::<String>::new());
+    }
 }

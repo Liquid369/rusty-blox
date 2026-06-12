@@ -84,35 +84,22 @@ pub async fn process_transaction_from_buffer(
         let tx_ver_out = async_cursor.read_u16_le().await?;
         let tx_type = async_cursor.read_u16_le().await?;
 
-        if block_version == 11 {
-            process_transaction_v1(
-                &mut async_cursor,
-                tx_ver_out.try_into().unwrap_or(1),
-                tx_type,
-                block_version,
-                block_hash,
-                block_height,
-                tx_index,
-                _db.clone(),
-                start_pos,
-                batch,
-                fast_sync,
-            ).await?;
-        } else if (tx_ver_out <= 2 && block_version < 11) || (tx_ver_out > 1 && block_version > 7) {
-            process_transaction_v1(
-                &mut async_cursor,
-                tx_ver_out.try_into().unwrap_or(1),
-                tx_type,
-                block_version,
-                block_hash,
-                block_height,
-                tx_index,
-                _db.clone(),
-                start_pos,
-                batch,
-                fast_sync,
-            ).await?;
-        }
+        // PIVX Core serializes every transaction with the same layout regardless of
+        // block version — parse uniformly. (The old version gating could fall through
+        // without consuming the tx body, misaligning every subsequent transaction.)
+        process_transaction_v1(
+            &mut async_cursor,
+            tx_ver_out.try_into().unwrap_or(1),
+            tx_type,
+            block_version,
+            block_hash,
+            block_height,
+            tx_index,
+            _db.clone(),
+            start_pos,
+            batch,
+            fast_sync,
+        ).await?;
     }
     Ok(())
 }
@@ -139,42 +126,24 @@ pub async fn process_transaction(
         let tx_ver_out = reader.read_u16_le().await?;
         let tx_type = reader.read_u16_le().await?;
 
-        if block_version == 11 {
-            // For block version 11, handle all transaction versions uniformly
-            if let Err(e) = process_transaction_v1(
-                reader,
-                tx_ver_out.try_into().unwrap_or(1),
-                tx_type,
-                block_version,
-                block_hash,
-                block_height,
-                tx_index,
-                _db.clone(),
-                start_pos,
-                batch,
-                fast_sync,
-            ).await {
-                eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
-                return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
-            }
-        } else if (tx_ver_out <= 2 && block_version < 11) || (tx_ver_out > 1 && block_version > 7) {
-            // For older blocks, process v1/v2 transactions
-            if let Err(e) = process_transaction_v1(
-                reader,
-                tx_ver_out.try_into().unwrap_or(1),
-                tx_type,
-                block_version,
-                block_hash,
-                block_height,
-                tx_index,
-                _db.clone(),
-                start_pos,
-                batch,
-                fast_sync,
-            ).await {
-                eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
-                return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
-            }
+        // PIVX Core serializes every transaction with the same layout regardless of
+        // block version — parse uniformly. (The old version gating could fall through
+        // without consuming the tx body, misaligning every subsequent transaction.)
+        if let Err(e) = process_transaction_v1(
+            reader,
+            tx_ver_out.try_into().unwrap_or(1),
+            tx_type,
+            block_version,
+            block_hash,
+            block_height,
+            tx_index,
+            _db.clone(),
+            start_pos,
+            batch,
+            fast_sync,
+        ).await {
+            eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
+            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
         }
     }
     Ok(())
@@ -214,31 +183,17 @@ async fn process_transaction_v1(
 
     let mut inputs = Vec::new();
     for i in 0..input_count {
-        let mut coinbase = None;
-        let mut prev_output = None;
-        let mut script = None;
-
-        match (block_version, tx_ver_out) {
-            (ver, 2) if ver < 3 => {
-                let mut buffer = [0; 26];
-                reader.read_exact(&mut buffer).await?;
-                coinbase = Some(buffer.to_vec());
-            }
-            _ => {
-                prev_output = Some(read_outpoint(reader).await?);
-                script = Some(read_script(reader).await?);
-            }
-        }
-
+        // PIVX Core serializes CTxIn identically for ALL tx/block versions:
+        // outpoint(36) + scriptSig(CompactSize + bytes) + sequence(4).
+        let prev_output = read_outpoint(reader).await?;
+        let script = read_script(reader).await?;
         let sequence = reader.read_u32_le().await?;
         inputs.push(CTxIn {
-            prevout: prev_output,
-            script_sig: CScript {
-                script: script.unwrap_or_default(),
-            },
+            prevout: Some(prev_output),
+            script_sig: CScript { script },
             sequence,
             index: i,
-            coinbase,
+            coinbase: None,
         });
     }
 
@@ -281,44 +236,58 @@ async fn process_transaction_v1(
         }
     }
 
-    // For Sapling transactions (version >= 3), skip the Sapling-specific data
+    // For Sapling transactions (version >= 3), skip the Sapling-specific data.
+    // PIVX Core serializes sapData as Optional<SaplingTxData>: 1-byte discriminant
+    // (0x00 absent / 0x01 present) followed by the payload. All reads MUST propagate
+    // errors — a partial skip would misalign the stream and corrupt every subsequent
+    // transaction's framing and txid.
     if tx_ver_out >= 3 {
-        // Read value_count varint
-        let _ = read_varint(reader).await;
-        
-        // Read valueBalance (i64)
-        let mut value_balance_buf = [0u8; 8];
-        let _ = reader.read_exact(&mut value_balance_buf).await;
-        
-        // Read and skip vShieldSpend
-        if let Ok(spend_count) = read_varint(reader).await {
+        let mut discriminant = [0u8; 1];
+        reader.read_exact(&mut discriminant).await?;
+
+        if discriminant[0] != 0 {
+            // Read valueBalance (i64)
+            let mut value_balance_buf = [0u8; 8];
+            reader.read_exact(&mut value_balance_buf).await?;
+
+            // Read and skip vShieldSpend (384 bytes each)
+            let spend_count = read_varint(reader).await?;
+            if spend_count > 5_000 {
+                return Err(format!("Sapling spend count {} exceeds maximum", spend_count).into());
+            }
+            let mut spend_buf = vec![0u8; 384];
             for _ in 0..spend_count {
-                // Each spend: 384 bytes
-                let mut spend_buf = vec![0u8; 384];
-                let _ = reader.read_exact(&mut spend_buf).await;
+                reader.read_exact(&mut spend_buf).await?;
             }
-        }
-        
-        // Read and skip vShieldOutput
-        if let Ok(output_count) = read_varint(reader).await {
+
+            // Read and skip vShieldOutput (948 bytes each)
+            let output_count = read_varint(reader).await?;
+            if output_count > 5_000 {
+                return Err(format!("Sapling output count {} exceeds maximum", output_count).into());
+            }
+            let mut output_buf = vec![0u8; 948];
             for _ in 0..output_count {
-                // Each output: 948 bytes
-                let mut output_buf = vec![0u8; 948];
-                let _ = reader.read_exact(&mut output_buf).await;
+                reader.read_exact(&mut output_buf).await?;
             }
+
+            // Skip bindingSig (64 bytes)
+            let mut binding_sig = [0u8; 64];
+            reader.read_exact(&mut binding_sig).await?;
         }
-        
-        // Skip bindingSig (64 bytes)
-        let mut binding_sig = vec![0u8; 64];
-        let _ = reader.read_exact(&mut binding_sig).await;
-        
-        // For special transaction types (nType != 0), skip extraPayload
+
+        // For special transaction types (nType != 0), skip extraPayload.
+        // Serialized as Optional<vector<u8>>: 1-byte discriminant, then
+        // CompactSize length + payload bytes when present.
         if tx_type != 0 {
-            if let Ok(payload_size) = read_varint(reader).await {
-                if payload_size > 0 {
-                    let mut payload = vec![0u8; payload_size as usize];
-                    let _ = reader.read_exact(&mut payload).await;
+            let mut payload_flag = [0u8; 1];
+            reader.read_exact(&mut payload_flag).await?;
+            if payload_flag[0] != 0 {
+                let payload_size = read_varint(reader).await?;
+                if payload_size > 10_000_000 {
+                    return Err(format!("extraPayload size {} exceeds maximum", payload_size).into());
                 }
+                let mut payload = vec![0u8; payload_size as usize];
+                reader.read_exact(&mut payload).await?;
             }
         }
     }

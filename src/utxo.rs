@@ -221,29 +221,27 @@ fn decompress_script(data: &[u8]) -> Result<Vec<u8>, ChainstateError> {
         
         // P2CS (cold stake): PIVX-specific
         // Format: 0x06 + 20 bytes staker + 20 bytes owner
-        // Script: OP_CHECKCOLDSTAKEVERIFY <20 staker> <20 owner> OP_DUP OP_HASH160 OP_ROT 
-        //         OP_IF OP_CHECKCOLDSTAKEVERIFY_LOF OP_ELSE OP_ROT OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+        // Canonical PIVX Core P2CS script (51 bytes):
+        // OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY 0x14 <staker20>
+        // OP_ELSE 0x14 <owner20> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
         0x06 => {
             if data.len() != 41 {
                 return Err(ChainstateError::InvalidScript(
                     format!("Invalid P2CS length: {} (expected 41)", data.len())
                 ));
             }
-            
-            // PIVX P2CS script layout (51 bytes total)
+
             let mut script = Vec::with_capacity(51);
-            script.push(0xD1); // OP_CHECKCOLDSTAKEVERIFY
-            script.push(0x14); // Push 20 bytes (staker)
-            script.extend_from_slice(&data[1..21]);
-            script.push(0x14); // Push 20 bytes (owner)
-            script.extend_from_slice(&data[21..41]);
             script.push(0x76); // OP_DUP
             script.push(0xA9); // OP_HASH160
             script.push(0x7B); // OP_ROT
             script.push(0x63); // OP_IF
-            script.push(0xD2); // OP_CHECKCOLDSTAKEVERIFY_LOF
+            script.push(0xD2); // OP_CHECKCOLDSTAKEVERIFY
+            script.push(0x14); // Push 20 bytes (staker)
+            script.extend_from_slice(&data[1..21]);
             script.push(0x67); // OP_ELSE
-            script.push(0x7B); // OP_ROT
+            script.push(0x14); // Push 20 bytes (owner)
+            script.extend_from_slice(&data[21..41]);
             script.push(0x68); // OP_ENDIF
             script.push(0x88); // OP_EQUALVERIFY
             script.push(0xAC); // OP_CHECKSIG
@@ -483,10 +481,12 @@ mod tests {
     
     #[test]
     fn test_amount_decompression_small() {
-        // Test vectors from Bitcoin Core
+        // Real Bitcoin/PIVX Core CompressAmount round-trips:
+        // compress(1)=1, compress(2)=11, compress(10)=2, compress(3)=21
         assert_eq!(decompress_amount(1), 1);
-        assert_eq!(decompress_amount(2), 2);
-        assert_eq!(decompress_amount(10), 10);
+        assert_eq!(decompress_amount(11), 2);
+        assert_eq!(decompress_amount(21), 3);
+        assert_eq!(decompress_amount(2), 10);
     }
     
     #[test]
@@ -552,8 +552,17 @@ mod tests {
         
         let script = decompress_script(&compressed).unwrap();
         assert_eq!(script.len(), 51);
-        assert_eq!(script[0], 0xD1); // OP_CHECKCOLDSTAKEVERIFY
-        assert_eq!(script[1], 0x14); // Push 20 bytes (staker)
-        assert_eq!(script[22], 0x14); // Push 20 bytes (owner)
+        // Canonical PIVX Core P2CS layout
+        assert_eq!(script[0], 0x76); // OP_DUP
+        assert_eq!(script[1], 0xA9); // OP_HASH160
+        assert_eq!(script[2], 0x7B); // OP_ROT
+        assert_eq!(script[3], 0x63); // OP_IF
+        assert_eq!(script[4], 0xD2); // OP_CHECKCOLDSTAKEVERIFY
+        assert_eq!(script[5], 0x14); // Push 20 bytes (staker)
+        assert_eq!(script[26], 0x67); // OP_ELSE
+        assert_eq!(script[27], 0x14); // Push 20 bytes (owner)
+        assert_eq!(script[48], 0x68); // OP_ENDIF
+        assert_eq!(script[49], 0x88); // OP_EQUALVERIFY
+        assert_eq!(script[50], 0xAC); // OP_CHECKSIG
     }
 }

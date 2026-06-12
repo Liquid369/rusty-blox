@@ -24,8 +24,6 @@ pub mod atomic_writer;
 pub mod transactions;
 pub mod db_sampler;
 
-#[cfg(test)]
-mod batch_writer_tests;
 pub mod leveldb_index;
 pub mod block_index;
 pub mod offset_indexer;

@@ -32,22 +32,22 @@ use crate::parser::{deserialize_transaction, serialize_utxos};
 use crate::tx_keys::{tx_cf_key, txid_from_key, txid_from_hex};
 use crate::types::{CTransaction, CTxOut, ScriptClassification};
 
-/// Detect coinstake transaction (PIVX Core parity)
-/// Coinstake has: vin[0]=stake input, vout[0]=empty OP_RETURN marker, vout[1+]=rewards
+/// Detect coinstake transaction (PIVX Core parity).
+/// Delegates to the authoritative implementation in tx_type.rs:
+/// a coinstake spends a REAL stake outpoint (null prevout disqualifies, except zPoS)
+/// and has >= 2 outputs with an EMPTY vout[0] (zero value, zero-length script).
 fn is_coinstake(tx: &CTransaction) -> bool {
-    !tx.inputs.is_empty() &&
-    tx.outputs.len() >= 2 &&
-    tx.outputs[0].value == 0 &&
-    !tx.outputs[0].script_pubkey.script.is_empty() &&
-    tx.outputs[0].script_pubkey.script[0] == 0x6a  // OP_RETURN
+    crate::tx_type::detect_transaction_type(tx) == crate::tx_type::TransactionType::Coinstake
 }
 
-/// Classify output script for correct PIVX Core attribution
+/// Classify output script for correct PIVX Core attribution.
+/// Classification is driven by the SCRIPT structure (like PIVX Core's Solver()),
+/// not by guessing from base58 prefixes of the extracted address strings.
 fn classify_output(output: &CTxOut) -> ScriptClassification {
     if output.address.is_empty() {
         return ScriptClassification::Nonstandard;
     }
-    
+
     // Check for special markers
     if output.address.iter().any(|a| a == "CoinBaseTx") {
         return ScriptClassification::Coinbase;
@@ -58,7 +58,7 @@ fn classify_output(output: &CTxOut) -> ScriptClassification {
     if output.address.iter().any(|a| a == "Nonstandard") {
         return ScriptClassification::Nonstandard;
     }
-    
+
     // OP_RETURN check (empty script or starts with 0x6a)
     if output.value == 0 && (
         output.script_pubkey.script.is_empty() ||
@@ -66,37 +66,31 @@ fn classify_output(output: &CTxOut) -> ScriptClassification {
     ) {
         return ScriptClassification::OpReturn;
     }
-    
-    // Cold staking: TWO addresses (staker + owner)
-    if output.address.len() == 2 {
-        // Check if this is from a Staking address type
-        // Pattern: first is S-address (staker), second is D-address (owner)
-        let staker = &output.address[0];
-        let owner = &output.address[1];
-        
-        // S-addresses start with 'S', D-addresses start with 'D'
-        if staker.starts_with('S') && owner.starts_with('D') {
-            return ScriptClassification::ColdStake {
-                staker: staker.clone(),
-                owner: owner.clone(),
-            };
+
+    match crate::parser::get_script_type(&output.script_pubkey.script) {
+        "coldstake" if output.address.len() == 2 => ScriptClassification::ColdStake {
+            staker: output.address[0].clone(),
+            owner: output.address[1].clone(),
+        },
+        "pubkeyhash" | "exchangeaddress" if output.address.len() == 1 => {
+            ScriptClassification::P2PKH(output.address[0].clone())
+        }
+        "scripthash" if output.address.len() == 1 => {
+            ScriptClassification::P2SH(output.address[0].clone())
+        }
+        "pubkey" if output.address.len() == 1 => {
+            ScriptClassification::P2PK(output.address[0].clone())
+        }
+        _ => {
+            // Unknown script with a single extracted address — attribute it rather
+            // than silently dropping value from the index.
+            if output.address.len() == 1 {
+                ScriptClassification::P2PKH(output.address[0].clone())
+            } else {
+                ScriptClassification::Nonstandard
+            }
         }
     }
-    
-    // Standard single-address outputs
-    if output.address.len() == 1 {
-        let addr = &output.address[0];
-        // Determine type based on prefix (P2PKH='D', P2SH='s', etc.)
-        if addr.starts_with('D') {
-            return ScriptClassification::P2PKH(addr.clone());
-        } else if addr.starts_with('s') {
-            return ScriptClassification::P2SH(addr.clone());
-        } else {
-            return ScriptClassification::P2PK(addr.clone());
-        }
-    }
-    
-    ScriptClassification::Nonstandard
 }
 
 /// Build address index from all transactions
@@ -326,18 +320,20 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 }
                 
                 ScriptClassification::ColdStake { staker, owner } => {
-                    // CRITICAL FIX: PIVX Core attribution for cold staking
-                    // - STAKER receives the value (delegation)
-                    // - OWNER receives NO value (they already own the coins)
-                    // - BOTH appear in transaction list
-                    
+                    // Cold staking (P2CS): the output is indexed under BOTH the staker
+                    // (S-address) and the owner (D-address), each credited with the full
+                    // value — the same convention Blockbook uses for multi-address
+                    // outputs, and what wallets/explorers expect when querying either
+                    // side of a delegation. The spend side (Pass 2b) debits BOTH
+                    // addresses symmetrically, so balance == received - sent holds for
+                    // each address independently.
                     *totals_received.entry(staker.clone()).or_insert(0) += output.value;
-                    // Owner gets NO value added to total_received
-                    
+                    *totals_received.entry(owner.clone()).or_insert(0) += output.value;
+
                     // Both addresses appear in transaction list
                     tx_addresses.insert(staker.clone());
                     tx_addresses.insert(owner.clone());
-                    
+
                     // Both get UTXO entry for tracking
                     if output.value > 0 {
                         address_map
@@ -458,17 +454,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         };
         
-        // PIVX Core Rule: Skip coinstake transactions in Pass 2b
-        // Stake inputs are consumed for staking, NOT counted as "sent"
-        let tx_is_coinstake = is_coinstake(&*tx);
-        if tx_is_coinstake {
-            pass2b_coinstake_skipped += 1;
-            // Coinstake transactions don't count inputs as "sent"
-            // The stake is consumed, rewards go to staker/owner
-            input_processed += 1;
-            continue;
+        // Coinstake inputs ARE counted as "sent" (UTXO accounting, Blockbook parity):
+        // the staked output is consumed and its principal re-minted in the coinstake
+        // outputs (counted as received). This keeps balance == received - sent.
+        if is_coinstake(&*tx) {
+            pass2b_coinstake_skipped += 1; // metric retained: counts coinstakes seen
         }
-        
+
         // For every input, find the prevout's addresses and attribute this tx to them
         for input in &tx.inputs {
             if input.coinbase.is_some() { continue; }
@@ -514,14 +506,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                                 }
                                 
                                 ScriptClassification::ColdStake { staker, owner } => {
-                                    // CRITICAL FIX: PIVX Core cold stake spending
-                                    // - Only OWNER can spend cold staked coins
-                                    // - STAKER cannot spend (delegation only)
-                                    // - BOTH appear in transaction list
-                                    
+                                    // Cold stake spend: debit BOTH addresses, mirroring the
+                                    // credit both received in Pass 2 (see Pass 2 comment).
+                                    // This keeps balance == received - sent for the staker
+                                    // and the owner independently.
+                                    *totals_sent.entry(staker.clone()).or_insert(0) += prev_out.value;
                                     *totals_sent.entry(owner.clone()).or_insert(0) += prev_out.value;
-                                    // Staker's total_sent is NOT increased
-                                    
+
                                     // Both appear in transaction list
                                     txs_map.entry(staker.clone()).or_default().push(current_txid_bytes.clone());
                                     txs_map.entry(owner.clone()).or_default().push(current_txid_bytes.clone());
