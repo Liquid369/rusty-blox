@@ -7,8 +7,9 @@
       </Button>
     </div>
 
-    <!-- Money Supply Over Time -->
+    <!-- Money Supply Over Time (only when the API provides historical data) -->
     <BaseChart
+      v-if="historicalData.length > 0"
       title="Money Supply Over Time"
       :option="moneySupplyOption"
       :loading="loading"
@@ -84,19 +85,13 @@ const historicalData = ref([])
 
 const shieldedPercentage = computed(() => {
   if (!supplyData.value) return 0
-  const total = supplyData.value.totalSupply
-  const shielded = supplyData.value.shielded
-  return total > 0 ? (shielded / total) * 100 : 0
+  // Provided directly by the API — do not recompute
+  return supplyData.value.shieldAdoption
 })
 
-// Money Supply Chart Option
+// Money Supply Chart Option (chart is hidden in template when no historical data)
 const moneySupplyOption = computed(() => {
   if (!historicalData.value || historicalData.value.length === 0) {
-    // Show current value as a single point if no historical data
-    if (supplyData.value) {
-      const today = new Date().toISOString().split('T')[0]
-      return getLineChartOption([today], [supplyData.value.totalSupply], 'Total Supply (PIV)')
-    }
     return getLineChartOption([], [], 'Total Supply')
   }
 
@@ -237,8 +232,7 @@ const fetchData = async () => {
 
   try {
     const data = await analyticsService.getSupplyAnalytics(timeRange.value)
-    console.log('Supply Analytics API Response:', data)
-    
+
     if (data && data.current) {
       // Parse API response (snake_case with string PIV amounts)
       supplyData.value = {
@@ -247,9 +241,7 @@ const fetchData = async () => {
         shielded: parseFloat(data.current.shielded_supply) || 0,
         shieldAdoption: data.current.shield_adoption_percentage || 0
       }
-      
-      console.log('Parsed Supply Data:', supplyData.value)
-      
+
       // Parse historical data if available
       if (data.historical && data.historical.length > 0) {
         historicalData.value = data.historical.map(point => ({
@@ -266,7 +258,6 @@ const fetchData = async () => {
       throw new Error('Invalid API response')
     }
   } catch (err) {
-    console.error('Failed to fetch supply analytics:', err)
     error.value = 'Failed to load supply data from API.'
     // Set empty data on error
     supplyData.value = null

@@ -90,6 +90,8 @@ pub struct StakingDataPoint {
     pub active_stakers: u64,
     pub rewards_distributed: String,
     pub avg_block_time: f64,
+    /// Average size of the day's actual coinstakes (stake turnover / count), PIV.
+    pub avg_stake_size: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -254,10 +256,16 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
         dates = dates.split_off(dates.len() - days);
     }
 
-    let total_supply = {
-        let chain_state = get_chain_state(db).ok()?;
-        calculate_total_supply_at_height(chain_state.height)
-    };
+    // Real circulating supply from the wealth snapshot (sum of all positive
+    // address balances, satoshis) — calculate_total_supply_at_height() is a
+    // schedule-based estimate that overshoots by an order of magnitude.
+    let total_supply = db
+        .get_cf(&cf_state, b"analytics_wealth")
+        .ok()
+        .flatten()
+        .and_then(|b| bincode::deserialize::<crate::enrich_addresses::WealthSnapshot>(&b).ok())
+        .map(|w| w.total_balance)
+        .unwrap_or(0);
 
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
@@ -273,18 +281,64 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
         if agg.coinstake > 0 && agg.stake_volume == 0 {
             return None;
         }
-        let blocks = agg.coinstake.max(1);
+        let blocks = if agg.blocks > 0 { agg.blocks } else { agg.coinstake.max(1) };
+        // PoS network weight derived from difficulty:
+        //   staked_sats = difficulty * 2^43 / 60
+        // Empirically calibrated against a measurable anchor: a staking pool
+        // with a known 3.506M PIV delegated balance staked 50/300 recent blocks
+        // (16.7%), implying ~21M PIV total network weight at difficulty ~14-17k,
+        // which matches difficulty * 2^43/60 (the naive diff1-convention
+        // estimate of difficulty * 2^32/60 is low by PIVX's kernel weight
+        // scaling). Turnover (sum of coinstake outputs) badly underestimates.
+        let staked_sats = agg.avg_difficulty * 8_796_093_022_208.0 / 60.0;
+        let staked = staked_sats as i64;
         out.push(StakingDataPoint {
             date,
-            participation_rate: if total_supply > 0 {
-                (agg.stake_volume as f64 / total_supply as f64) * 100.0
+            participation_rate: if total_supply > 0 && staked > 0 {
+                (staked as f64 / total_supply as f64) * 100.0
             } else {
                 0.0
             },
-            total_staked: format_piv_amount(agg.stake_volume),
+            total_staked: format_piv_amount(staked.max(0)),
             active_stakers: agg.unique_stakers,
             rewards_distributed: "0".to_string(),
             avg_block_time: 86_400.0 / blocks as f64,
+            avg_stake_size: format_piv_amount(agg.stake_volume / agg.coinstake.max(1) as i64),
+        });
+    }
+    Some(out)
+}
+
+/// Network health from the precomputed daily series: REAL per-day difficulty
+/// (averaged from header nBits) and real block counts. Orphan rate and block
+/// size are not tracked per day and report 0.
+fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHealthDataPoint>> {
+    let cf_state = db.cf_handle("chain_state")?;
+    let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
+    let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
+    dates.sort();
+    let days = parse_time_range(range) as usize;
+    if dates.len() > days {
+        dates = dates.split_off(dates.len() - days);
+    }
+    let mut out = Vec::with_capacity(dates.len());
+    for date in dates {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(date.as_bytes());
+        let agg: crate::enrich_addresses::TxDayAgg = match db.get_cf(&cf_state, &k).ok()? {
+            Some(b) => bincode::deserialize(&b).ok()?,
+            None => continue,
+        };
+        if agg.blocks == 0 {
+            // Series predates the difficulty fields — rebuild pending; fall back.
+            return None;
+        }
+        out.push(NetworkHealthDataPoint {
+            date,
+            difficulty: format!("{:.2}", agg.avg_difficulty),
+            orphan_rate: 0.0,
+            blocks_per_day: agg.blocks,
+            avg_block_size: 0,
         });
     }
     Some(out)
@@ -300,7 +354,10 @@ pub async fn network_health_analytics(
     let range = params.range.clone();
     
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<NetworkHealthDataPoint>, Box<dyn std::error::Error + Send + Sync>> {
-        compute_network_health_analytics(&db_clone, &range)
+        match read_network_daily_series(&db_clone, &range) {
+            Some(series) => Ok(series),
+            None => compute_network_health_analytics(&db_clone, &range),
+        }
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -690,6 +747,7 @@ fn compute_staking_analytics(
             active_stakers,
             rewards_distributed: format_piv_amount(rewards_distributed),
             avg_block_time,
+            avg_stake_size: "0".to_string(),
         });
     }
     

@@ -715,6 +715,23 @@ pub struct TxDayAgg {
     /// Unique staker addresses seen in coinstakes this day.
     #[serde(default)]
     pub unique_stakers: u64,
+    /// Average PoS difficulty across the day's blocks (from header nBits).
+    #[serde(default)]
+    pub avg_difficulty: f64,
+    /// Canonical blocks this day.
+    #[serde(default)]
+    pub blocks: u64,
+}
+
+/// Convert compact nBits to difficulty (diff1 target 0x1d00ffff convention).
+fn nbits_to_difficulty(nbits: u32) -> f64 {
+    let exp = (nbits >> 24) as i32;
+    let mant = (nbits & 0x00ff_ffff) as f64;
+    if mant == 0.0 {
+        return 0.0;
+    }
+    // difficulty = (0xffff * 256^(0x1d-3)) / (mant * 256^(exp-3))
+    (65535.0 * 256f64.powi(0x1d - 3)) / (mant * 256f64.powi(exp - 3))
 }
 
 /// Convert a unix timestamp to a UTC YYYY-MM-DD date string (civil-from-days).
@@ -735,10 +752,11 @@ pub fn unix_to_date(ts: u64) -> String {
 }
 
 /// Build a height -> block nTime index by reading every canonical block header.
-fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
+fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<(Vec<u32>, Vec<u32>), Box<dyn std::error::Error>> {
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
     let mut times = vec![0u32; (tip as usize) + 1];
+    let mut bits = vec![0u32; (tip as usize) + 1];
     for height in 0..=tip {
         let height_key = height.to_le_bytes();
         // chain_metadata: height -> display_hash (reversed)
@@ -749,13 +767,15 @@ fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<Vec<u32>, Box<dyn std::er
         let internal_hash: Vec<u8> = display_hash.iter().rev().cloned().collect();
         // blocks: internal_hash -> header bytes; nTime is at offset 68 (4+32+32)
         if let Some(header) = db.get_cf(&cf_blocks, &internal_hash)? {
-            if header.len() >= 72 {
+            if header.len() >= 76 {
                 times[height as usize] =
                     u32::from_le_bytes(header[68..72].try_into().unwrap_or([0; 4]));
+                bits[height as usize] =
+                    u32::from_le_bytes(header[72..76].try_into().unwrap_or([0; 4]));
             }
         }
     }
-    Ok(times)
+    Ok((times, bits))
 }
 
 async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
@@ -772,7 +792,7 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
     }
 
     info!("Building block-time index for transaction daily series");
-    let block_times = build_block_times(db, tip)?;
+    let (block_times, block_bits) = build_block_times(db, tip)?;
 
     let mut days: HashMap<String, TxDayAgg> = HashMap::new();
     let mut day_stakers: HashMap<String, HashSet<String>> = HashMap::new();
@@ -825,6 +845,24 @@ async fn persist_tx_daily_series(db: &Arc<DB>) -> Result<(), Box<dyn std::error:
                     .volume
                     .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
             }
+        }
+    }
+
+    // Per-day average difficulty and block count from the canonical headers.
+    let mut day_diff: HashMap<String, (f64, u64)> = HashMap::new();
+    for h in 0..=(tip as usize) {
+        if block_times[h] == 0 {
+            continue;
+        }
+        let d = unix_to_date(block_times[h] as u64);
+        let e = day_diff.entry(d).or_insert((0.0, 0));
+        e.0 += nbits_to_difficulty(block_bits[h]);
+        e.1 += 1;
+    }
+    for (date, (diff_sum, blocks)) in &day_diff {
+        if let Some(agg) = days.get_mut(date) {
+            agg.avg_difficulty = if *blocks > 0 { diff_sum / *blocks as f64 } else { 0.0 };
+            agg.blocks = *blocks;
         }
     }
 

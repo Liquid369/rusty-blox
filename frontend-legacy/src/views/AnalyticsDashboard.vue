@@ -12,27 +12,27 @@
       <!-- Navigation Tabs -->
       <Tabs v-model="activeTab" :tabs="tabs">
         <!-- Supply Analytics -->
-        <div v-show="activeTab === 'supply'" class="tab-content">
+        <div v-if="activeTab === 'supply'" class="tab-content">
           <SupplyAnalytics />
         </div>
 
         <!-- Transaction Analytics -->
-        <div v-show="activeTab === 'transactions'" class="tab-content">
+        <div v-if="activeTab === 'transactions'" class="tab-content">
           <TransactionAnalytics />
         </div>
 
         <!-- Staking Analytics -->
-        <div v-show="activeTab === 'staking'" class="tab-content">
+        <div v-if="activeTab === 'staking'" class="tab-content">
           <StakingAnalytics />
         </div>
 
         <!-- Network Health -->
-        <div v-show="activeTab === 'network'" class="tab-content">
+        <div v-if="activeTab === 'network'" class="tab-content">
           <NetworkHealth />
         </div>
 
         <!-- Rich List -->
-        <div v-show="activeTab === 'richlist'" class="tab-content">
+        <div v-if="activeTab === 'richlist'" class="tab-content">
           <RichList />
         </div>
       </Tabs>

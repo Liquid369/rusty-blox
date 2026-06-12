@@ -28,7 +28,10 @@
       
       <Card class="stats-card">
         <h3>Transaction Metrics</h3>
-        <div class="metrics">
+        <div v-if="loading" class="state-message">Loading...</div>
+        <div v-else-if="error" class="state-message">{{ error }}</div>
+        <div v-else-if="txData.length === 0" class="state-message">No data available</div>
+        <div v-else class="metrics">
           <div class="metric">
             <span class="label">Total Transactions</span>
             <span class="value">{{ formatNumber(metrics.totalTxs) }}</span>
@@ -57,15 +60,6 @@
       :error="error"
       height="350px"
     />
-
-    <!-- Fee Analysis -->
-    <BaseChart
-      title="Transaction Fee Analysis"
-      :option="feeChartOption"
-      :loading="loading"
-      :error="error"
-      height="350px"
-    />
   </div>
 </template>
 
@@ -77,7 +71,7 @@ import Button from '@/components/common/Button.vue'
 import Card from '@/components/common/Card.vue'
 import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
-import { formatNumber, formatPercentage, formatPIV } from '@/utils/formatters'
+import { formatNumber, formatPercentage } from '@/utils/formatters'
 
 const { getBarChartOption, getLineChartOption, getPieChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
@@ -105,16 +99,16 @@ const metrics = computed(() => {
   }
 })
 
-// Daily Volume Chart
+// Daily Volume Chart (volume from the API is already in PIV)
 const volumeChartOption = computed(() => {
   if (!txData.value || txData.value.length === 0) {
-    return getBarChartOption([], [], 'Transactions')
+    return getBarChartOption([], [], 'Volume (PIV)')
   }
 
   const dates = txData.value.map(d => d.date)
-  const values = txData.value.map(d => d.total)
+  const values = txData.value.map(d => d.volume)
 
-  return getBarChartOption(dates, values, 'Daily Transactions')
+  return getBarChartOption(dates, values, 'Volume (PIV)')
 })
 
 // Transaction Type Distribution
@@ -148,41 +142,32 @@ const avgSizeOption = computed(() => {
   return getLineChartOption(dates, values, 'Average Size (PIV)')
 })
 
-// Fee Chart
-const feeChartOption = computed(() => {
-  if (!txData.value || txData.value.length === 0) {
-    return getLineChartOption([], [], 'Avg Fee')
-  }
-
-  const dates = txData.value.map(d => d.date)
-  const values = txData.value.map(d => d.avgFee)
-
-  const option = getLineChartOption(dates, values, 'Average Fee (PIV)')
-  option.yAxis.axisLabel = {
-    ...option.yAxis.axisLabel,
-    formatter: (value) => value.toFixed(4)
-  }
-
-  return option
-})
-
 const fetchData = async () => {
   loading.value = true
   error.value = null
 
   try {
     const data = await analyticsService.getTransactionAnalytics(timeRange.value)
-    
+
     if (data && Array.isArray(data)) {
-      txData.value = data
+      txData.value = data.map(d => ({
+        date: d.date,
+        total: d.count || 0,
+        payment: d.payment_count || 0,
+        stake: d.stake_count || 0,
+        other: d.other_count || 0,
+        // volume is already a PIV decimal string — no satoshi conversion
+        volume: parseFloat(d.volume) || 0,
+        // avg_size is a satoshi string — convert to PIV exactly once here
+        avgSize: (parseFloat(d.avg_size) || 0) / 100000000
+      }))
     } else {
-      // Fallback to mock data
-      txData.value = generateMockTxData(timeRange.value)
+      txData.value = []
+      error.value = 'No transaction analytics data available'
     }
   } catch (err) {
-    console.error('Failed to fetch transaction analytics:', err)
-    error.value = 'Transaction analytics API not available. Using mock data.'
-    txData.value = generateMockTxData(timeRange.value)
+    error.value = 'Failed to load transaction analytics. The analytics API may not be available.'
+    txData.value = []
   } finally {
     loading.value = false
   }
@@ -192,33 +177,6 @@ const exportData = () => {
   if (txData.value && txData.value.length > 0) {
     exportToCSV(txData.value, `transaction-analytics-${timeRange.value}.csv`)
   }
-}
-
-const generateMockTxData = (range) => {
-  const days = range === '24h' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 365
-  const data = []
-  
-  for (let i = days; i >= 0; i--) {
-    const date = new Date()
-    date.setDate(date.getDate() - i)
-    
-    const total = Math.floor(Math.random() * 500) + 200
-    const payment = Math.floor(total * (0.6 + Math.random() * 0.2))
-    const stake = Math.floor(total * 0.25)
-    const other = total - payment - stake
-    
-    data.push({
-      date: date.toISOString().split('T')[0],
-      total,
-      payment,
-      stake,
-      other,
-      avgSize: Math.random() * 50 + 10,
-      avgFee: Math.random() * 0.001 + 0.0001
-    })
-  }
-
-  return data
 }
 
 watch(timeRange, () => {
@@ -257,6 +215,12 @@ onMounted(() => {
 .stats-card h3 {
   margin-bottom: var(--space-4);
   color: var(--text-primary);
+}
+
+.state-message {
+  padding: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 .metrics {

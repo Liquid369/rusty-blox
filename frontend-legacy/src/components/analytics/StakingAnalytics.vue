@@ -47,31 +47,10 @@
       height="400px"
     />
 
-    <!-- Charts Grid -->
-    <div class="chart-grid">
-      <!-- Block Time Variance -->
-      <BaseChart
-        title="Block Time Variance"
-        :option="blockTimeOption"
-        :loading="loading"
-        :error="error"
-        height="350px"
-      />
-
-      <!-- Cumulative Rewards -->
-      <BaseChart
-        title="Cumulative Staking Rewards"
-        :option="rewardsOption"
-        :loading="loading"
-        :error="error"
-        height="350px"
-      />
-    </div>
-
-    <!-- Stake Size Distribution -->
+    <!-- Block Time Variance -->
     <BaseChart
-      title="Stake Size Distribution"
-      :option="distributionOption"
+      title="Block Time Variance"
+      :option="blockTimeOption"
       :loading="loading"
       :error="error"
       height="350px"
@@ -89,7 +68,7 @@ import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
 
-const { getLineChartOption, getBarChartOption } = useChartOptions()
+const { getLineChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
 
 const timeRange = ref('30d')
@@ -110,9 +89,12 @@ const metrics = computed(() => {
   const latest = stakingData.value[stakingData.value.length - 1]
   return {
     participation: latest.participationRate,
-    totalStaked: latest.totalStaked,
+    totalStaked: Math.round(latest.totalStaked),
     activeStakers: latest.activeStakers,
-    avgStakeSize: latest.totalStaked / latest.activeStakers
+    // Average size of the day's actual coinstakes (from the API), NOT
+    // network-weight / stakers — that mixed total staked supply with only
+    // the stakers who happened to win blocks that day.
+    avgStakeSize: Math.round(latest.avgStakeSize)
   }
 })
 
@@ -126,7 +108,6 @@ const participationOption = computed(() => {
   const values = stakingData.value.map(d => d.participationRate)
 
   const option = getLineChartOption(dates, values, 'Participation Rate (%)')
-  option.yAxis.max = 100
   option.yAxis.axisLabel = {
     ...option.yAxis.axisLabel,
     formatter: '{value}%'
@@ -165,47 +146,31 @@ const blockTimeOption = computed(() => {
   return option
 })
 
-// Cumulative Rewards
-const rewardsOption = computed(() => {
-  if (!stakingData.value || stakingData.value.length === 0) {
-    return getLineChartOption([], [], 'Rewards')
-  }
-
-  const dates = stakingData.value.map(d => d.date)
-  const values = stakingData.value.map(d => d.cumulativeRewards)
-
-  return getLineChartOption(dates, values, 'Cumulative Rewards (PIV)')
-})
-
-// Stake Size Distribution (Histogram)
-const distributionOption = computed(() => {
-  if (!stakingData.value || stakingData.value.length === 0) {
-    return getBarChartOption([], [], 'Stakers')
-  }
-
-  const ranges = ['0-1K', '1K-10K', '10K-50K', '50K-100K', '100K+']
-  const values = [150, 320, 180, 95, 45]
-
-  return getBarChartOption(ranges, values, 'Number of Stakers')
-})
-
 const fetchData = async () => {
   loading.value = true
   error.value = null
 
   try {
     const data = await analyticsService.getStakingAnalytics(timeRange.value)
-    
+
     if (data && Array.isArray(data)) {
-      stakingData.value = data
+      stakingData.value = data.map(d => ({
+        date: d.date,
+        // Already a percentage value from the API
+        participationRate: d.participation_rate || 0,
+        // Already a PIV decimal string — no satoshi conversion
+        totalStaked: parseFloat(d.total_staked) || 0,
+        activeStakers: d.active_stakers || 0,
+        avgBlockTime: d.avg_block_time || 0,
+        avgStakeSize: parseFloat(d.avg_stake_size) || 0
+      }))
     } else {
-      // Fallback to mock data
-      stakingData.value = generateMockStakingData(timeRange.value)
+      stakingData.value = []
+      error.value = 'No staking analytics data available'
     }
   } catch (err) {
-    console.error('Failed to fetch staking analytics:', err)
-    error.value = 'Staking analytics API not available. Using mock data.'
-    stakingData.value = generateMockStakingData(timeRange.value)
+    error.value = 'Failed to load staking analytics. The analytics API may not be available.'
+    stakingData.value = []
   } finally {
     loading.value = false
   }
@@ -215,31 +180,6 @@ const exportData = () => {
   if (stakingData.value && stakingData.value.length > 0) {
     exportToCSV(stakingData.value, `staking-analytics-${timeRange.value}.csv`)
   }
-}
-
-const generateMockStakingData = (range) => {
-  const days = range === '24h' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 365
-  const data = []
-  let cumulativeRewards = 50000000
-  
-  for (let i = days; i >= 0; i--) {
-    const date = new Date()
-    date.setDate(date.getDate() - i)
-    
-    const dailyRewards = Math.random() * 10000 + 5000
-    cumulativeRewards += dailyRewards
-    
-    data.push({
-      date: date.toISOString().split('T')[0],
-      participationRate: 65 + Math.random() * 10,
-      totalStaked: 45000000 + Math.random() * 5000000,
-      activeStakers: 780 + Math.floor(Math.random() * 50),
-      avgBlockTime: 58 + Math.random() * 6,
-      cumulativeRewards
-    })
-  }
-
-  return data
 }
 
 watch(timeRange, () => {
@@ -269,17 +209,5 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: var(--space-4);
-}
-
-.chart-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-6);
-}
-
-@media (max-width: 768px) {
-  .chart-grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

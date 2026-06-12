@@ -222,17 +222,23 @@ const fetchData = async () => {
 
   try {
     const data = await analyticsService.getNetworkHealth(timeRange.value)
-    
+
     if (data && Array.isArray(data)) {
-      healthData.value = data
+      healthData.value = data.map(d => ({
+        date: d.date,
+        // difficulty comes back as a numeric string
+        difficulty: parseFloat(d.difficulty) || 0,
+        orphanRate: d.orphan_rate || 0,
+        avgBlockSize: d.avg_block_size || 0,
+        blocksPerDay: d.blocks_per_day || 0
+      }))
     } else {
-      // Fallback to mock data
-      healthData.value = generateMockHealthData(timeRange.value)
+      healthData.value = []
+      error.value = 'No network health data available'
     }
   } catch (err) {
-    console.error('Failed to fetch network health:', err)
-    error.value = 'Network health API not available. Using mock data.'
-    healthData.value = generateMockHealthData(timeRange.value)
+    error.value = 'Failed to load network health data. The analytics API may not be available.'
+    healthData.value = []
   } finally {
     loading.value = false
   }
@@ -242,29 +248,6 @@ const exportData = () => {
   if (healthData.value && healthData.value.length > 0) {
     exportToCSV(healthData.value, `network-health-${timeRange.value}.csv`)
   }
-}
-
-const generateMockHealthData = (range) => {
-  const days = range === '24h' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 365
-  const data = []
-  let baseDifficulty = 1250000000
-  
-  for (let i = days; i >= 0; i--) {
-    const date = new Date()
-    date.setDate(date.getDate() - i)
-    
-    baseDifficulty *= (1 + (Math.random() * 0.02 - 0.01)) // Vary by ±1%
-    
-    data.push({
-      date: date.toISOString().split('T')[0],
-      difficulty: baseDifficulty,
-      orphanRate: Math.random() * 1.5 + 0.2,
-      avgBlockSize: Math.random() * 5 + 8,
-      blocksPerDay: 1440 + Math.floor(Math.random() * 40 - 20)
-    })
-  }
-
-  return data
 }
 
 watch(timeRange, () => {
