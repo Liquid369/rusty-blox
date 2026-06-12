@@ -28,7 +28,7 @@ services:
   # Frontend (Vue.js)
   frontend:
     build:
-      context: ./frontend-legacy
+      context: ./frontend-vue
       dockerfile: Dockerfile
     container_name: rustyblox-frontend
     ports:
