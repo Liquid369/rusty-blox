@@ -21,9 +21,10 @@
             </div>
             <div class="detail-row">
               <span class="detail-label">Previous Block</span>
-              <router-link :to="`/block/${block.height - 1}`" class="detail-value">
+              <router-link v-if="block.height > 0" :to="`/block/${block.height - 1}`" class="detail-value">
                 {{ truncateHash(block.previousblockhash) }}
               </router-link>
+              <span v-else class="detail-value text-tertiary">N/A (Genesis)</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Next Block</span>

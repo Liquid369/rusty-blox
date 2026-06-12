@@ -1,7 +1,7 @@
 import api from './api'
 
 export const blockService = {
-  async getRecentBlocks(limit = 10, offset = 0) {
+  async getRecentBlocks(limit = 10) {
     // Use block-stats endpoint for recent blocks
     const response = await api.get(`/v2/block-stats/${limit}`)
     return response.data
@@ -13,7 +13,7 @@ export const blockService = {
     return response.data
   },
 
-  async getBlockTransactions(id, limit = 25, offset = 0) {
+  async getBlockTransactions(id) {
     // Block detail includes transactions
     const response = await api.get(`/v2/block-detail/${id}`)
     return response.data
@@ -26,28 +26,38 @@ export const transactionService = {
     return response.data
   },
 
-  async getRecentTransactions(limit = 10, offset = 0) {
-    // Get from mempool or recent blocks
-    const response = await api.get('/v2/mempool')
-    return response.data
+  // Fetch multiple transactions in parallel, preserving input order.
+  // Failed lookups are skipped.
+  async getTransactions(txids) {
+    const promises = txids.map((txid, index) =>
+      this.getTransaction(txid).then((data) => ({ index, data }))
+    )
+    const results = await Promise.allSettled(promises)
+    return results
+      .filter((result) => result.status === 'fulfilled')
+      .map((result) => result.value)
+      .sort((a, b) => a.index - b.index)
+      .map((item) => item.data)
   }
 }
 
 export const addressService = {
-  async getAddress(address) {
-    const response = await api.get(`/v2/address/${address}`)
-    return response.data
-  },
-
-  async getAddressTransactions(address, limit = 25, offset = 0) {
+  async getAddress(address, page = 1, pageSize = 25) {
     const response = await api.get(`/v2/address/${address}`, {
-      params: { limit, offset }
+      params: { page, pageSize }
     })
     return response.data
   },
 
   async getAddressUtxos(address) {
     const response = await api.get(`/v2/utxo/${address}`)
+    return response.data
+  }
+}
+
+export const xpubService = {
+  async getXPub(xpub, params = {}) {
+    const response = await api.get(`/v2/xpub/${xpub}`, { params })
     return response.data
   }
 }
@@ -61,13 +71,47 @@ export const chainService = {
   async getChainInfo() {
     const response = await api.get('/v2/status')
     return response.data
+  },
+
+  async getMoneySupply() {
+    const response = await api.get('/v2/moneysupply')
+    return response.data
+  }
+}
+
+export const masternodeService = {
+  async getMasternodeCount() {
+    const response = await api.get('/v2/mncount')
+    return response.data
+  }
+}
+
+export const mempoolService = {
+  async getMempool() {
+    const response = await api.get('/v2/mempool')
+    return response.data
+  },
+
+  async getMempoolTransaction(txid) {
+    const response = await api.get(`/v2/mempool/${txid}`)
+    return response.data
   }
 }
 
 export const searchService = {
   async search(query) {
-    const response = await api.get(`/v2/search/${query}`)
-    return response.data
+    const trimmed = query.trim()
+    if (!trimmed) {
+      throw new Error('Search query cannot be empty')
+    }
+    try {
+      const response = await api.get(`/v2/search/${encodeURIComponent(trimmed)}`)
+      return response.data
+    } catch (error) {
+      if (error.response && error.response.status === 404) {
+        return { type: 'NotFound', query: trimmed }
+      }
+      throw error
+    }
   }
 }
-
