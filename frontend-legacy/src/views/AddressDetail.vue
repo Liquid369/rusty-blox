@@ -562,17 +562,23 @@ onMounted(() => {
 
 .filter-select {
   padding: var(--space-2) var(--space-4);
-  background: var(--bg-tertiary);
-  border: 2px solid var(--border-secondary);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: var(--text-sm);
   cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.filter-select:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
 }
 
 .filter-select:focus {
   outline: none;
   border-color: var(--border-accent);
+  box-shadow: var(--focus-ring-glow);
 }
 
 .transactions-list {
@@ -589,35 +595,52 @@ onMounted(() => {
 .utxos-table table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--bg-secondary);
+  background: var(--glass-bg-subtle);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-md);
-}
-
-.utxos-table thead {
-  background: var(--bg-tertiary);
 }
 
 .utxos-table th {
   padding: var(--space-3) var(--space-4);
   text-align: left;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-bold);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--tracking-wide);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.utxos-table th:nth-child(3),
+.utxos-table th:nth-child(4),
+.utxos-table th:nth-child(5),
+.utxos-table td:nth-child(3),
+.utxos-table td:nth-child(4),
+.utxos-table td:nth-child(5) {
+  text-align: right;
 }
 
 .utxos-table td {
   padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border-subtle);
+  font-variant-numeric: tabular-nums;
 }
 
-.utxos-table tr:hover {
-  background: var(--bg-tertiary);
+.utxos-table tbody tr {
+  transition: background-color var(--transition-fast);
+}
+
+.utxos-table tbody tr:hover {
+  background: var(--bg-hover);
 }
 
 .amount {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-weight: var(--weight-bold);
   color: var(--text-accent);
 }

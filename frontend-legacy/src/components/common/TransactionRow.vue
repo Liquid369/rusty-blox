@@ -100,11 +100,15 @@ const getTypeLabel = (type) => {
   grid-template-columns: auto 1fr auto auto;
   gap: var(--space-4);
   padding: var(--space-4);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-subtle);
+  background: var(--glass-bg-subtle);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-md);
   align-items: center;
-  transition: all var(--transition-fast);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
 }
 
 .transaction-clickable {
@@ -112,8 +116,9 @@ const getTypeLabel = (type) => {
 }
 
 .transaction-clickable:hover {
-  background: var(--bg-tertiary);
-  border-color: var(--border-accent);
+  background: rgba(var(--rgb-purple-mid), 0.4);
+  border-color: var(--glass-border-hover);
+  box-shadow: var(--shadow-sm), var(--glow-purple);
   transform: translateX(4px);
 }
 
@@ -172,6 +177,7 @@ const getTypeLabel = (type) => {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .tx-amount {

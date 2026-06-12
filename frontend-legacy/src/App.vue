@@ -203,8 +203,13 @@ onUnmounted(() => {
 
 .ws-error-retry:hover {
   background: #E61414;
-  border: 1px solid var(--pivx-danger);
-  transform: translateY(0px);
-  box-shadow: 0 2px 8px #4B0606;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.ws-error-retry:focus-visible,
+.reorg-dismiss:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
 }
 </style>

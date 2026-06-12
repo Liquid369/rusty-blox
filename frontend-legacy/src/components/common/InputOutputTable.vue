@@ -143,7 +143,7 @@ const totalOutput = computed(() => {
   font-weight: var(--weight-bold);
   color: var(--text-primary);
   padding-bottom: var(--space-3);
-  border-bottom: 2px solid var(--border-primary);
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .io-list {
@@ -157,9 +157,15 @@ const totalOutput = computed(() => {
   grid-template-columns: auto 1fr;
   gap: var(--space-3);
   padding: var(--space-3);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
+  background: rgba(var(--rgb-purple-dark), 0.5);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.io-item:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.4);
+  background: rgba(var(--rgb-purple-mid), 0.35);
 }
 
 .io-index {
@@ -168,9 +174,11 @@ const totalOutput = computed(() => {
   justify-content: center;
   width: 32px;
   height: 32px;
-  background: var(--bg-secondary);
+  background: rgba(var(--rgb-purple-darkest), 0.6);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-sm);
   font-weight: var(--weight-bold);
   color: var(--text-secondary);
@@ -218,6 +226,7 @@ const totalOutput = computed(() => {
 
 .io-value {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
   color: var(--pivx-accent);
@@ -244,13 +253,14 @@ const totalOutput = computed(() => {
 .io-fees {
   margin-top: var(--space-6);
   padding: var(--space-4);
-  background: var(--bg-secondary);
-  border: 2px solid var(--border-secondary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-lg);
 }
 
 .fee-amount {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
   color: var(--warning);

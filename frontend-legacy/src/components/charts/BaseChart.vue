@@ -103,7 +103,7 @@ const chartOption = computed(() => ({
   ...props.option,
   backgroundColor: 'transparent',
   textStyle: {
-    color: '#E5E7EB'
+    color: '#B8B0C4'
   }
 }))
 
@@ -114,10 +114,19 @@ const handleClick = (params) => {
 
 <style scoped>
 .chart-container {
-  background: linear-gradient(180deg, #B359FC80, #B359FC10);
+  background: var(--glass-bg);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
-  border: 2px solid var(--purple-main);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-sm), var(--glass-highlight);
+  transition: border-color var(--transition-base), box-shadow var(--transition-base);
+}
+
+.chart-container:hover {
+  border-color: var(--glass-border-hover);
+  box-shadow: var(--shadow-md), var(--glass-highlight);
 }
 
 .chart-header {

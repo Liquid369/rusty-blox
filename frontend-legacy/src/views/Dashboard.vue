@@ -542,10 +542,10 @@ const navigateToTransaction = (tx) => {
 
 @keyframes glow {
   0%, 100% {
-    box-shadow: 0 0 0 rgba(89, 252, 179, 0);
+    box-shadow: 0 0 0 rgba(179, 255, 120, 0);
   }
   50% {
-    box-shadow: 0 0 20px rgba(89, 252, 179, 0.5);
+    box-shadow: 0 0 20px rgba(179, 255, 120, 0.5);
   }
 }
 

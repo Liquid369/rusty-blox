@@ -162,11 +162,11 @@ const orphanRateOption = computed(() => {
     data: dates.map(() => 2),
     lineStyle: {
       type: 'dashed',
-      color: '#F59E0B',
+      color: '#f6ff78',
       width: 2
     },
     itemStyle: {
-      color: '#F59E0B'
+      color: '#f6ff78'
     },
     symbol: 'none'
   })
@@ -192,11 +192,11 @@ const blocksPerDayOption = computed(() => {
     data: dates.map(() => 1440),
     lineStyle: {
       type: 'dashed',
-      color: '#10B981',
+      color: '#B359FC',
       width: 2
     },
     itemStyle: {
-      color: '#10B981'
+      color: '#B359FC'
     },
     symbol: 'none'
   })

@@ -72,22 +72,26 @@ const toggleCurrency = () => {
 .price-widget {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  background: #110B1B50;
-  border: 1px solid 110B1B50;
-  border-radius: 8px;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.2);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
   white-space: nowrap;
   user-select: none;
 }
 
 .price-widget:hover {
-  background: #110B1B90;
-  border: 1px solid;
+  background: rgba(var(--rgb-purple-darkest), 0.7);
   border-color: var(--purple-accent);
-  transform: translateY(0px);
+  box-shadow: var(--glow-purple);
 }
 
 .price-widget.loading {
@@ -112,13 +116,14 @@ const toggleCurrency = () => {
 
 .price-label {
   color: var(--text-primary);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .price-value {
-  color: var(--purple-accent);
-  font-weight: 700;
-  font-size: 1rem;
+  color: #CD97F7;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+  font-variant-numeric: tabular-nums;
 }
 
 .price-stale {

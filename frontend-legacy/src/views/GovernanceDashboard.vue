@@ -471,7 +471,7 @@ onMounted(() => {
 .budget-overview-card {
   margin-bottom: var(--space-6);
   background: linear-gradient(135deg, rgba(102, 45, 145, 0.1) 0%, rgba(42, 27, 66, 0.3) 100%);
-  border: 2px solid rgba(89, 252, 179, 0.2);
+  border: 1px solid rgba(179, 255, 120, 0.25);
 }
 
 .overview-header {
@@ -498,10 +498,13 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-5);
-  background: linear-gradient(135deg, rgba(59, 44, 84, 0.6) 0%, rgba(45, 34, 64, 0.8) 100%);
+  background: var(--glass-bg);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(89, 252, 179, 0.15);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid rgba(179, 255, 120, 0.15);
+  transition:
+    transform var(--transition-base),
+    border-color var(--transition-base),
+    box-shadow var(--transition-base);
   min-width: 0;
   overflow: hidden;
   align-items: flex-start;
@@ -517,16 +520,16 @@ onMounted(() => {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--pivx-accent) 0%, rgba(89, 252, 179, 0.3) 100%);
+  background: linear-gradient(90deg, var(--pivx-accent) 0%, rgba(179, 255, 120, 0.3) 100%);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
 
 .budget-stat:hover {
-  transform: translateY(-4px) scale(1.02);
-  box-shadow: 0 12px 24px rgba(89, 252, 179, 0.15), 
-              0 0 40px rgba(89, 252, 179, 0.1);
-  border-color: rgba(89, 252, 179, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(179, 255, 120, 0.15), 
+              0 0 40px rgba(179, 255, 120, 0.1);
+  border-color: rgba(179, 255, 120, 0.4);
 }
 
 .budget-stat:hover::before {
@@ -534,8 +537,8 @@ onMounted(() => {
 }
 
 .stat-label {
-  font-size: 0.65rem;
-  color: rgba(255, 255, 255, 0.6);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -562,31 +565,31 @@ onMounted(() => {
 
 .stat-accent {
   color: var(--pivx-accent);
-  text-shadow: 0 0 20px rgba(89, 252, 179, 0.5),
+  text-shadow: 0 0 20px rgba(179, 255, 120, 0.5),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-info {
-  color: #59b3fc;
-  text-shadow: 0 0 15px rgba(89, 179, 252, 0.4),
+  color: #CD97F7;
+  text-shadow: 0 0 15px rgba(179, 89, 252, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-success {
-  color: #5dfc8a;
-  text-shadow: 0 0 15px rgba(93, 252, 138, 0.4),
+  color: var(--green-accent);
+  text-shadow: 0 0 15px rgba(179, 255, 120, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-warning {
-  color: #fcb559;
-  text-shadow: 0 0 15px rgba(252, 181, 89, 0.4),
+  color: var(--warning);
+  text-shadow: 0 0 15px rgba(246, 255, 120, 0.3),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-danger {
-  color: #fc5959;
-  text-shadow: 0 0 15px rgba(252, 89, 89, 0.4),
+  color: var(--danger-text);
+  text-shadow: 0 0 15px rgba(239, 68, 68, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
@@ -608,7 +611,7 @@ onMounted(() => {
   height: 100%;
   background: linear-gradient(90deg, var(--pivx-purple-primary) 0%, var(--pivx-accent) 100%);
   transition: width 0.5s ease-out;
-  box-shadow: 0 0 10px rgba(89, 252, 179, 0.5);
+  box-shadow: 0 0 10px rgba(179, 255, 120, 0.5);
 }
 
 .budget-bar-label {
@@ -623,7 +626,7 @@ onMounted(() => {
   display: flex;
   gap: var(--space-2);
   margin-bottom: var(--space-6);
-  border-bottom: 2px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-secondary);
   overflow-x: auto;
 }
 
@@ -633,17 +636,27 @@ onMounted(() => {
   border: none;
   color: var(--text-secondary);
   font-family: var(--font-primary);
-  font-size: var(--text-base);
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
   cursor: pointer;
-  border-bottom: 3px solid transparent;
+  border-bottom: 2px solid transparent;
   margin-bottom: -2px;
-  transition: all 0.2s;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
   white-space: nowrap;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 
 .filter-tab:hover {
   color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.filter-tab:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: -2px;
 }
 
 .filter-tab.active {
@@ -737,7 +750,8 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 

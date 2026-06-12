@@ -423,7 +423,7 @@ watch(() => route.params.hash, (newHash) => {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-3);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border-radius: var(--radius-sm);
 }
 
@@ -493,7 +493,7 @@ watch(() => route.params.hash, (newHash) => {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border-radius: var(--radius-sm);
 }
 
@@ -530,9 +530,9 @@ watch(() => route.params.hash, (newHash) => {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-4);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border-radius: var(--radius-sm);
-  border: 2px solid var(--border-secondary);
+  border: 1px solid var(--border-primary);
 }
 
 .net-label {
@@ -561,7 +561,7 @@ watch(() => route.params.hash, (newHash) => {
   padding: var(--space-4);
   background: var(--bg-elevated);
   border-radius: var(--radius-sm);
-  border: 2px solid var(--border-secondary);
+  border: 1px solid var(--border-primary);
 }
 
 .threshold-item {
@@ -605,7 +605,7 @@ watch(() => route.params.hash, (newHash) => {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-3);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border-radius: var(--radius-sm);
 }
 

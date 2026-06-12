@@ -53,11 +53,17 @@ defineProps({
 
 <style scoped>
 .stat-card {
-  background: linear-gradient(180deg, #B359FC80, #B359FC10);
-  border: 2px solid var(--purple-main);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-sm), var(--glass-highlight);
   padding: var(--space-6);
-  transition: all var(--transition-base);
+  transition:
+    transform var(--transition-base),
+    border-color var(--transition-base),
+    box-shadow var(--transition-base);
   min-height: 140px;
   display: flex;
   flex-direction: column;
@@ -72,18 +78,17 @@ defineProps({
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--rgb-purple-accent), 0.6), transparent);
   opacity: 0;
   transition: opacity var(--transition-base);
+  pointer-events: none;
 }
 
 .stat-card:hover {
   transform: translateY(-2px);
-  background: linear-gradient(180deg, #B359FC95, #B359FC30);
-  box-shadow: 
-    0 12px 24px rgba(0, 0, 0, 0.5),
-    0 0 10px var(--purple-accent);
-  border-color: var(--border-accent);
+  box-shadow: var(--shadow-md), var(--glow-purple), var(--glass-highlight);
+  border-color: var(--glass-border-hover);
 }
 
 .stat-card:hover::before {
@@ -118,6 +123,7 @@ defineProps({
   color: var(--text-primary);
   line-height: 1.2;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   margin-bottom: var(--space-2);
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   word-break: break-all;
@@ -137,7 +143,7 @@ defineProps({
 
 .stat-value.text-success {
   color: var(--success);
-  text-shadow: 0 0 20px rgba(89, 252, 179, 0.3);
+  text-shadow: 0 0 20px rgba(179, 255, 120, 0.3);
 }
 
 .stat-value.text-warning {
@@ -147,7 +153,7 @@ defineProps({
 
 .stat-value.text-accent {
   color: var(--text-accent);
-  text-shadow: 0 0 20px rgba(89, 252, 179, 0.3);
+  text-shadow: 0 0 20px rgba(179, 255, 120, 0.3);
 }
 
 .stat-subtitle {

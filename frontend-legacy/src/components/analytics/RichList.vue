@@ -358,17 +358,23 @@ onMounted(() => {
 
 .limit-select {
   padding: var(--space-2) var(--space-3);
-  background: var(--card-bg);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid var(--border-secondary);
+  border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-size: var(--text-sm);
   cursor: pointer;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.limit-select:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
 }
 
 .limit-select:focus {
   outline: none;
-  border-color: var(--text-accent);
+  border-color: var(--border-accent);
+  box-shadow: var(--focus-ring-glow);
 }
 
 .stats-grid {
@@ -390,7 +396,7 @@ onMounted(() => {
 
 .table-header {
   padding: var(--space-6);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .table-header h3 {
@@ -422,18 +428,21 @@ onMounted(() => {
 }
 
 .rich-list-table thead {
-  background: rgba(255, 255, 255, 0.03);
-  border-bottom: 2px solid var(--border-color);
+  border-bottom: 1px solid var(--border-primary);
 }
 
 .rich-list-table th {
   padding: var(--space-4) var(--space-6);
   text-align: left;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-bold);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--tracking-wide);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .rich-list-table th.sortable {
@@ -454,11 +463,16 @@ onMounted(() => {
 .rich-list-table td {
   padding: var(--space-4) var(--space-6);
   font-size: var(--text-sm);
-  border-bottom: 1px solid var(--border-color);
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.table-row {
+  transition: background-color var(--transition-fast);
 }
 
 .table-row:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-hover);
 }
 
 .rank {
@@ -484,8 +498,8 @@ onMounted(() => {
 
 .table-footer {
   padding: var(--space-4) var(--space-6);
-  border-top: 1px solid var(--border-color);
-  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid var(--border-subtle);
+  background: rgba(var(--rgb-purple-darkest), 0.4);
 }
 
 .footer-text {

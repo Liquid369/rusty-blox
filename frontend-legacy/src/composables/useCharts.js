@@ -5,24 +5,24 @@ import { ref } from 'vue'
  */
 export const useChartConfig = () => {
   const colors = {
-    primary: '#59FCB3',
-    secondary: '#662D91',
-    accent: '#C084FC',
-    success: '#10B981',
-    warning: '#F59E0B',
+    primary: '#B3FF78',
+    secondary: '#642D8F',
+    accent: '#B359FC',
+    success: '#71BB3A',
+    warning: '#f6ff78',
     danger: '#EF4444',
     info: '#3B82F6',
-    gradient: ['#662D91', '#59FCB3']
+    gradient: ['#642D8F', '#B3FF78']
   }
 
   const getBaseOption = () => ({
     tooltip: {
       trigger: 'axis',
-      backgroundColor: 'rgba(17, 24, 39, 0.95)',
-      borderColor: '#374151',
+      backgroundColor: 'rgba(17, 11, 27, 0.92)',
+      borderColor: '#642D8F',
       borderWidth: 1,
       textStyle: {
-        color: '#E5E7EB'
+        color: '#FFFFFF'
       }
     },
     grid: {
@@ -37,26 +37,26 @@ export const useChartConfig = () => {
       boundaryGap: false,
       axisLine: {
         lineStyle: {
-          color: '#374151'
+          color: '#642D8F'
         }
       },
       axisLabel: {
-        color: '#9CA3AF'
+        color: '#9B93A8'
       }
     },
     yAxis: {
       type: 'value',
       axisLine: {
         lineStyle: {
-          color: '#374151'
+          color: '#642D8F'
         }
       },
       axisLabel: {
-        color: '#9CA3AF'
+        color: '#9B93A8'
       },
       splitLine: {
         lineStyle: {
-          color: '#374151',
+          color: 'rgba(100, 45, 143, 0.45)',
           type: 'dashed'
         }
       }
@@ -96,7 +96,7 @@ export const useChartExport = () => {
     const url = chartInstance.getDataURL({
       type: 'png',
       pixelRatio: 2,
-      backgroundColor: '#111827'
+      backgroundColor: '#110B1B'
     })
 
     const link = document.createElement('a')
@@ -180,8 +180,8 @@ export const useChartOptions = () => {
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(89, 252, 179, 0.3)' },
-              { offset: 1, color: 'rgba(89, 252, 179, 0)' }
+              { offset: 0, color: 'rgba(179, 255, 120, 0.25)' },
+              { offset: 1, color: 'rgba(179, 255, 120, 0)' }
             ]
           }
         }
@@ -213,17 +213,17 @@ export const useChartOptions = () => {
     tooltip: {
       trigger: 'item',
       formatter: '{b}: {c} ({d}%)',
-      backgroundColor: 'rgba(17, 24, 39, 0.95)',
-      borderColor: '#374151',
+      backgroundColor: 'rgba(17, 11, 27, 0.92)',
+      borderColor: '#642D8F',
       textStyle: {
-        color: '#E5E7EB'
+        color: '#FFFFFF'
       }
     },
     legend: {
       orient: 'vertical',
       left: 'left',
       textStyle: {
-        color: '#9CA3AF'
+        color: '#9B93A8'
       }
     },
     series: [
@@ -234,7 +234,7 @@ export const useChartOptions = () => {
         avoidLabelOverlap: false,
         itemStyle: {
           borderRadius: 8,
-          borderColor: '#111827',
+          borderColor: '#110B1B',
           borderWidth: 2
         },
         label: {
@@ -245,7 +245,7 @@ export const useChartOptions = () => {
             show: true,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#E5E7EB'
+            color: '#FFFFFF'
           }
         },
         data: data

@@ -493,7 +493,7 @@ onMounted(() => {
 }
 
 .xpub-text {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 0.9rem;
   background: var(--surface-primary);
   padding: var(--space-3);
@@ -560,33 +560,52 @@ onMounted(() => {
   border: 1px solid var(--border-primary);
 }
 
+.addresses-table {
+  overflow-x: auto;
+}
+
 .addresses-table table {
   width: 100%;
   border-collapse: collapse;
 }
 
 .addresses-table th {
-  background: var(--surface-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
   padding: var(--space-3);
   text-align: left;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
-  font-size: 0.875rem;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
   border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.addresses-table th:nth-child(n+3),
+.addresses-table td:nth-child(n+3) {
+  text-align: right;
 }
 
 .addresses-table td {
   padding: var(--space-3);
-  border-bottom: 1px solid var(--border-primary);
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .addresses-table tr:last-child td {
   border-bottom: none;
 }
 
-.addresses-table tr:hover {
-  background: var(--surface-tertiary);
+.addresses-table tbody tr {
+  transition: background-color var(--transition-fast);
+}
+
+.addresses-table tbody tr:hover {
+  background: var(--bg-hover);
 }
 
 .address-link {
@@ -599,8 +618,9 @@ onMounted(() => {
 }
 
 .amount {
-  font-family: 'Courier New', monospace;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
 }
 
 .loading-container, .error-container {
@@ -644,7 +664,7 @@ onMounted(() => {
   padding: var(--space-4);
   border-radius: var(--radius-md);
   overflow-x: auto;
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875rem;
   line-height: 1.6;
   color: var(--text-primary);
@@ -685,7 +705,7 @@ onMounted(() => {
 }
 
 .comparison-item span {
-  font-family: 'Courier New', monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
 }
 

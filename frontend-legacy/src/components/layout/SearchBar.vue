@@ -121,22 +121,29 @@ const hideSuggestions = () => {
   width: 100%;
   padding: var(--space-3) var(--space-4);
   padding-right: 48px;
-  background: linear-gradient(270deg, var(--purple-dark), var(--purple-darkest));
-  border: 0px solid var(--purple-darkest);
-  border-radius: var(--radius-lg);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.2);
+  border-radius: var(--radius-full);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
   color: var(--text-primary);
   font-size: var(--text-base);
   font-family: var(--font-mono);
-  transition: all var(--transition-fast);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.search-input:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.4);
 }
 
 .search-input:focus {
   outline: none;
-  background: var(--purple-darkest);
-  border-color: var(--purple-accent);
-  border: 1px solid var(--purple-accent);
-  color: var(--purple-accent);
-  box-shadow: 0px 0px 10px var(--purple-darkest);
+  background: rgba(var(--rgb-purple-darkest), 0.8);
+  border-color: var(--green-accent);
+  box-shadow: var(--glow-green);
 }
 
 .search-input::placeholder {
@@ -151,20 +158,25 @@ const hideSuggestions = () => {
   transform: translateY(-50%);
   width: 40px;
   height: 40px;
-  background: #110B1B00;
+  background: transparent;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   font-size: 18px;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), transform var(--transition-fast);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .search-button:hover:not(:disabled) {
-  background: var(--purple-accent);
+  background: rgba(var(--rgb-purple-accent), 0.35);
   transform: translateY(-50%) scale(1.05);
+}
+
+.search-button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .search-button:disabled {
@@ -177,10 +189,12 @@ const hideSuggestions = () => {
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  background: var(--bg-secondary);
-  border: 2px solid var(--border-primary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-lg), var(--glass-highlight);
   z-index: var(--z-dropdown);
   max-height: 300px;
   overflow-y: auto;
@@ -228,7 +242,7 @@ const hideSuggestions = () => {
 }
 
 .suggestion-item:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   color: var(--text-primary);
 }
 

@@ -422,18 +422,25 @@ onMounted(() => {
 .filter-select,
 .filter-input {
   padding: var(--space-3);
-  background: var(--bg-tertiary);
-  border: 2px solid var(--border-secondary);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-family: var(--font-primary);
   font-size: var(--text-base);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.filter-select:hover,
+.filter-input:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
 }
 
 .filter-select:focus,
 .filter-input:focus {
   outline: none;
   border-color: var(--border-accent);
+  box-shadow: var(--focus-ring-glow);
 }
 
 .table-card {
@@ -450,14 +457,18 @@ onMounted(() => {
 }
 
 .mn-table thead th {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
   color: var(--text-secondary);
   font-size: var(--text-xs);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
   padding: var(--space-3) var(--space-4);
   text-align: left;
-  border-bottom: 2px solid var(--border-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .mn-table thead th.sortable {
@@ -476,20 +487,21 @@ onMounted(() => {
 
 .mn-table tbody tr {
   border-bottom: 1px solid var(--border-subtle);
-  transition: background 0.2s;
+  transition: background-color var(--transition-fast);
 }
 
 .mn-table tbody tr:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
 }
 
 .mn-table tbody td {
   padding: var(--space-3) var(--space-4);
   font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .mn-table .rank {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text-accent);
 }
 

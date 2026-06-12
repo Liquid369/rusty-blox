@@ -59,15 +59,21 @@ defineProps({
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.5);
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-secondary);
+  transition: border-color var(--transition-fast);
+}
+
+.hash-display:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
 }
 
 .hash-text {
   color: var(--text-primary);
   font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
   user-select: all;
 }
 

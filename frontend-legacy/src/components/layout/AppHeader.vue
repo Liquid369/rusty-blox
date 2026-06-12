@@ -1,6 +1,6 @@
 <template>
   <header class="app-header">
-    <div class= "header-container">
+    <div class="header-container">
       <!-- Logo and Title -->
       <RouterLink to="/" class="logo-section">
         <img 
@@ -70,14 +70,19 @@ onMounted(() => {
 
 <style scoped>
 .app-header {
-  background: linear-gradient(180deg, var(--purple-mid), var(--purple-main));
-  border-bottom: 0px solid var(--border-primary);
+  background: linear-gradient(
+    180deg,
+    rgba(var(--rgb-purple-mid), 0.92),
+    rgba(var(--rgb-purple-main), 0.82)
+  );
+  border-bottom: 1px solid var(--glass-border);
   padding: var(--space-4) 0;
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  backdrop-filter: blur(10px);
-  box-shadow: 0 0 20px #00000050;
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-md);
 }
 
 .header-container {
@@ -177,29 +182,42 @@ onMounted(() => {
 
 .main-nav {
   display: flex;
-  gap: var(--space-2);
-  margin-center: auto;
+  gap: var(--space-1);
 }
 
 .nav-link {
-  color: var(--text-secondary);
+  color: rgba(255, 255, 255, 0.78);
   text-decoration: none;
   padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-sm);
-  font-weight: var(--weight-bold);
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  font-weight: var(--weight-semibold);
   font-size: var(--text-sm);
-  transition: all var(--transition-fast);
+  letter-spacing: var(--tracking-wide);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
   white-space: nowrap;
 }
 
 .nav-link:hover {
-  background: var(--purple-mid);
+  background: rgba(var(--rgb-purple-darkest), 0.35);
   color: var(--text-primary);
 }
 
+.nav-link:focus-visible {
+  outline: 2px solid var(--green-accent);
+  outline-offset: 2px;
+  box-shadow: var(--glow-green);
+}
+
 .nav-link.router-link-active {
-  background: var(--purple-accent);
-  color: var(--text-primary);
+  background: rgba(var(--rgb-purple-darkest), 0.5);
+  border-color: rgba(var(--rgb-green-accent), 0.45);
+  color: var(--green-accent);
+  box-shadow: var(--glow-green);
 }
 
 .sync-progress {
@@ -217,9 +235,9 @@ onMounted(() => {
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--purple-main), var(--purple-accent));
+  background: linear-gradient(90deg, var(--purple-accent), var(--green-accent));
   transition: width var(--transition-slow);
-  box-shadow: var(--shadow-glow);
+  box-shadow: var(--glow-green);
 }
 
 .progress-text {

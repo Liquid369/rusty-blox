@@ -460,7 +460,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .sapling-card {
   background: linear-gradient(135deg, rgba(102, 45, 145, 0.1) 0%, rgba(42, 27, 66, 0.3) 100%);
-  border: 2px solid rgba(89, 252, 179, 0.2);
+  border: 1px solid rgba(179, 255, 120, 0.25);
 }
 
 .shielded-count {
@@ -503,7 +503,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .balance-negative {
   color: var(--pivx-accent);
-  text-shadow: 0 0 10px rgba(89, 252, 179, 0.3);
+  text-shadow: 0 0 10px rgba(179, 255, 120, 0.3);
 }
 
 .balance-positive {
@@ -523,7 +523,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .shielded-details {
   margin-top: var(--space-6);
   padding-top: var(--space-6);
-  border-top: 2px solid var(--border-subtle);
+  border-top: 1px solid var(--border-secondary);
 }
 
 .details-title {
@@ -545,7 +545,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .spend-item,
 .output-item {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border: 1px solid var(--border-secondary);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -555,7 +555,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .spend-item:hover,
 .output-item:hover {
   border-color: var(--pivx-accent);
-  box-shadow: 0 0 12px rgba(89, 252, 179, 0.2);
+  box-shadow: 0 0 12px rgba(179, 255, 120, 0.2);
 }
 
 .spend-header,
@@ -575,7 +575,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-2);
-  background: var(--bg-quaternary);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
   border-radius: var(--radius-sm);
 }
 
@@ -596,8 +596,8 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .sapling-note {
   margin-top: var(--space-6);
   padding: var(--space-4);
-  background: rgba(89, 252, 179, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.2);
+  background: rgba(179, 255, 120, 0.05);
+  border: 1px solid rgba(179, 255, 120, 0.2);
   border-radius: var(--radius-md);
   display: flex;
   gap: var(--space-3);
@@ -695,7 +695,8 @@ watch(() => chainStore.reorgDetected, (detected) => {
 }
 
 .raw-tx-hex {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.6);
+  border: 1px solid var(--border-subtle);
   padding: var(--space-4);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);

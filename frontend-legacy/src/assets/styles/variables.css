@@ -1,14 +1,15 @@
 /* PIVX Official Design Tokens - Based on Brand Identity Guide */
+/* Design-system pass: strict spacing scale, modular type, elevation, glass + motion tokens. */
+/* Palette hues are locked to the official PIVX brand - do not change. */
 
 :root {
-  /* Primary PIVX Color Palette - Modified by YuurinBee */
+  /* ===== Primary PIVX Color Palette - Modified by YuurinBee ===== */
   --pivx-purple-primary: #642D8F;
   --pivx-purple-secondary: #452568;
   --pivx-purple-tertiary: #201634;
-  --pivx-purple-deep: #110B1B;         
+  --pivx-purple-deep: #110B1B;
 
-  /* Updated Color Palette - YuurinBee */
-  /* (Lightest to Darkest) */
+  /* Updated Color Palette - YuurinBee (Lightest to Darkest) */
   --purple-accent: #B359FC;
   --purple-main: #642D8F;
   --purple-mid: #452568;
@@ -20,64 +21,108 @@
   /* Derived Tints */
   --pivx-purple-light: #8547B3;
   --pivx-purple-lighter: #A366CC;
-  
+  --pivx-purple-dark: #452568;
+
   /* Accent - Green (Tetradic Colors from PIVX logo) */
   --pivx-accent: #B3FF78;
   --pivx-accent-dark: #71BB3A;
-  
+
+  /* ===== Brand Channels (for translucent fills/glows, hues unchanged) ===== */
+  --rgb-purple-accent: 179, 89, 252;   /* #B359FC */
+  --rgb-purple-main: 100, 45, 143;     /* #642D8F */
+  --rgb-purple-mid: 69, 37, 104;       /* #452568 */
+  --rgb-purple-dark: 32, 22, 52;       /* #201634 */
+  --rgb-purple-darkest: 17, 11, 27;    /* #110B1B */
+  --rgb-green-accent: 179, 255, 120;   /* #B3FF78 */
+
   /* ===== Semantic Mappings ===== */
   --color-primary: var(--purple-main);
   --color-secondary: var(--purple-mid);
   --color-accent: var(--purple-accent);
-  
+  --accent-primary: var(--green-accent);
+
   /* ===== Backgrounds (Dark Mode First) ===== */
   --bg-primary: #110B1B;          /* Main background */
   --bg-secondary: #200734;        /* Cards/elevated surfaces */
   --bg-tertiary: #4D3077;         /* Hover states/inputs */
   --bg-quaternary: #3A2755;       /* Between tertiary and secondary */
   --bg-elevated: #1A1229;         /* Slightly elevated from primary */
-  
+  --bg-hover: rgba(var(--rgb-purple-accent), 0.08);
+
+  /* Legacy aliases (kept so every component resolves) */
+  --card-bg: var(--bg-secondary);
+  --surface-primary: var(--bg-primary);
+  --surface-secondary: var(--bg-elevated);
+  --surface-tertiary: var(--bg-quaternary);
+
+  /* ===== Glassmorphism Surfaces ===== */
+  --glass-bg: linear-gradient(
+    180deg,
+    rgba(var(--rgb-purple-mid), 0.34) 0%,
+    rgba(var(--rgb-purple-dark), 0.55) 100%
+  );
+  --glass-bg-strong: rgba(var(--rgb-purple-darkest), 0.72);
+  --glass-bg-subtle: rgba(var(--rgb-purple-dark), 0.45);
+  --glass-border: rgba(var(--rgb-purple-accent), 0.26);
+  --glass-border-hover: rgba(var(--rgb-purple-accent), 0.55);
+  --glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --blur-sm: 8px;
+  --blur-md: 16px;
+  --blur-lg: 24px;
+
   /* ===== Borders ===== */
   --border-primary: #642D8F;
   --border-secondary: #452568;
   --border-subtle: #2A1B42;
   --border-accent: #B359FC;
-  
-  /* ===== Text Hierarchy ===== */
+  --border-color: var(--border-secondary); /* legacy alias */
+
+  /* ===== Text Hierarchy (WCAG AA on the dark purples) ===== */
   --text-primary: #FFFFFF;
-  --text-secondary: #B2B2B2;
-  --text-tertiary: #8B8B8B;
+  --text-secondary: #B8B0C4;   /* lavender-gray, >=8:1 on bg-primary/secondary */
+  --text-tertiary: #9B93A8;    /* >=5.5:1 on bg-primary/secondary */
   --text-accent: #B3FF78;
   --text-purple: #A366CC;
-  
+  --text-dark: var(--purple-darkest); /* text on green/purple accent fills */
+
   /* ===== Semantic Colors ===== */
   --success: #B3FF78;
   --warning: #f6ff78;
   --danger: #EF4444;
+  --danger-text: #FCA5A5;      /* readable danger on dark surfaces */
   --info: #8547B3;
-  
+  --text-warning: var(--warning);
+
   /* ===== Typography (Montserrat - Official PIVX Brand) ===== */
   --font-primary: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Courier New', monospace;
-  
+
   /* Font Weights */
   --weight-extralight: 200;
+  --weight-normal: 400;
   --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
   --weight-bold: 700;
   --weight-extrabold: 800;
-  
-  /* Type Scale */
-  --text-4xl: 2.5rem;      /* 40px - H1 */
+
+  /* Modular Type Scale (1.25 ratio, 16px base) */
+  --text-4xl: 2.5rem;      /* 40px - Display */
   --text-3xl: 2rem;        /* 32px - H1 */
   --text-2xl: 1.5rem;      /* 24px - H2 */
-  --text-xl: 1.25rem;      /* 20px - H2 */
-  --text-lg: 1.125rem;     /* 18px - Subheader Bold */
+  --text-xl: 1.25rem;      /* 20px - H3 */
+  --text-lg: 1.125rem;     /* 18px - Subheader */
   --text-md: 1rem;         /* 16px - Subheader Light */
   --text-base: 1rem;       /* 16px - Body */
   --text-sm: 0.875rem;     /* 14px - Small */
   --text-xs: 0.75rem;      /* 12px - Extra Small */
-  
-  /* ===== Spacing System (8px Grid) ===== */
+  --text-2xs: 0.6875rem;   /* 11px - Badges/labels only */
+
+  /* Letter Spacing */
+  --tracking-wide: 0.04em;
+  --tracking-wider: 0.08em;
+
+  /* ===== Spacing System (strict 4/8px grid) ===== */
   --space-1: 0.25rem;      /* 4px */
   --space-2: 0.5rem;       /* 8px */
   --space-3: 0.75rem;      /* 12px */
@@ -88,24 +133,51 @@
   --space-10: 2.5rem;      /* 40px */
   --space-12: 3rem;        /* 48px */
   --space-16: 4rem;        /* 64px */
-  
+
   /* ===== Border Radius ===== */
+  --radius-xs: 4px;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
-  
-  /* ===== Shadows ===== */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
-  --shadow-glow: 0 0 20px rgba(89, 252, 179, 0.3);
-  
-  /* ===== Transitions ===== */
-  --transition-fast: 150ms ease;
-  --transition-base: 200ms ease;
-  --transition-slow: 300ms ease;
-  
+  --radius-full: 999px;
+
+  /* ===== Elevation (layered shadows; pair with 1px luminous borders) ===== */
+  --shadow-xs: 0 1px 2px rgba(var(--rgb-purple-darkest), 0.5);
+  --shadow-sm:
+    0 1px 2px rgba(var(--rgb-purple-darkest), 0.55),
+    0 2px 6px rgba(var(--rgb-purple-darkest), 0.35);
+  --shadow-md:
+    0 2px 4px rgba(var(--rgb-purple-darkest), 0.5),
+    0 8px 16px rgba(var(--rgb-purple-darkest), 0.4);
+  --shadow-lg:
+    0 4px 8px rgba(var(--rgb-purple-darkest), 0.5),
+    0 16px 32px rgba(var(--rgb-purple-darkest), 0.55);
+  --shadow-xl:
+    0 8px 16px rgba(var(--rgb-purple-darkest), 0.55),
+    0 24px 48px rgba(var(--rgb-purple-darkest), 0.65);
+
+  /* Accent Glows (interactive elements only) */
+  --glow-green: 0 0 16px rgba(var(--rgb-green-accent), 0.25);
+  --glow-green-strong: 0 0 24px rgba(var(--rgb-green-accent), 0.4);
+  --glow-purple: 0 0 16px rgba(var(--rgb-purple-accent), 0.3);
+  --glow-purple-strong: 0 0 28px rgba(var(--rgb-purple-accent), 0.45);
+  --shadow-glow: var(--glow-green); /* legacy alias */
+
+  /* ===== Motion ===== */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.45, 0, 0.25, 1);
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+  --transition-fast: var(--duration-fast) var(--ease-out);
+  --transition-base: var(--duration-base) var(--ease-out);
+  --transition-slow: var(--duration-slow) var(--ease-in-out);
+
+  /* ===== Focus (visible everywhere, AA) ===== */
+  --focus-ring-color: var(--purple-accent);
+  --focus-ring-glow: 0 0 0 4px rgba(var(--rgb-purple-accent), 0.22);
+
   /* ===== Z-Index Scale ===== */
   --z-base: 0;
   --z-dropdown: 1000;

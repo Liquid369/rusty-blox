@@ -55,19 +55,28 @@ const handleCopy = async () => {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3);
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-subtle);
+  background: rgba(var(--rgb-purple-mid), 0.35);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    transform var(--transition-fast);
 }
 
 .copy-button:hover {
-  background: var(--bg-secondary);
-  border-color: var(--border-primary);
+  background: rgba(var(--rgb-purple-mid), 0.6);
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
   color: var(--text-primary);
+}
+
+.copy-button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .copy-button:active {
@@ -75,9 +84,9 @@ const handleCopy = async () => {
 }
 
 .copy-button-copied {
-  background: rgba(34, 197, 94, 0.15);
-  border-color: rgba(34, 197, 94, 0.3);
-  color: #4ade80;
+  background: rgba(var(--rgb-green-accent), 0.12);
+  border-color: rgba(var(--rgb-green-accent), 0.35);
+  color: var(--green-accent);
 }
 
 .copy-icon {

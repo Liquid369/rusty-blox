@@ -110,13 +110,13 @@ const supplyTypeOption = computed(() => {
       return {
         tooltip: {
           trigger: 'axis',
-          backgroundColor: 'rgba(17, 24, 39, 0.95)',
-          borderColor: '#374151',
-          textStyle: { color: '#E5E7EB' }
+          backgroundColor: 'rgba(17, 11, 27, 0.92)',
+          borderColor: '#642D8F',
+          textStyle: { color: '#FFFFFF' }
         },
         legend: {
           data: ['Transparent', 'Shielded'],
-          textStyle: { color: '#9CA3AF' }
+          textStyle: { color: '#9B93A8' }
         },
         grid: {
           left: '3%',
@@ -128,26 +128,26 @@ const supplyTypeOption = computed(() => {
         xAxis: {
           type: 'category',
           data: [today],
-          axisLine: { lineStyle: { color: '#374151' } },
-          axisLabel: { color: '#9CA3AF' }
+          axisLine: { lineStyle: { color: '#642D8F' } },
+          axisLabel: { color: '#9B93A8' }
         },
         yAxis: {
           type: 'value',
-          axisLine: { lineStyle: { color: '#374151' } },
-          axisLabel: { color: '#9CA3AF' },
-          splitLine: { lineStyle: { color: '#374151', type: 'dashed' } }
+          axisLine: { lineStyle: { color: '#642D8F' } },
+          axisLabel: { color: '#9B93A8' },
+          splitLine: { lineStyle: { color: 'rgba(100, 45, 143, 0.45)', type: 'dashed' } }
         },
         series: [
           {
             name: 'Transparent',
             type: 'bar',
-            itemStyle: { color: '#59FCB3' },
+            itemStyle: { color: '#B3FF78' },
             data: [supplyData.value.transparent]
           },
           {
             name: 'Shielded',
             type: 'bar',
-            itemStyle: { color: '#662D91' },
+            itemStyle: { color: '#B359FC' },
             data: [supplyData.value.shielded]
           }
         ]
@@ -164,13 +164,13 @@ const supplyTypeOption = computed(() => {
   return {
     tooltip: {
       trigger: 'axis',
-      backgroundColor: 'rgba(17, 24, 39, 0.95)',
-      borderColor: '#374151',
-      textStyle: { color: '#E5E7EB' }
+      backgroundColor: 'rgba(17, 11, 27, 0.92)',
+      borderColor: '#642D8F',
+      textStyle: { color: '#FFFFFF' }
     },
     legend: {
       data: ['Transparent', 'Shielded'],
-      textStyle: { color: '#9CA3AF' }
+      textStyle: { color: '#9B93A8' }
     },
     grid: {
       left: '3%',
@@ -182,30 +182,30 @@ const supplyTypeOption = computed(() => {
     xAxis: {
       type: 'category',
       data: dates,
-      axisLine: { lineStyle: { color: '#374151' } },
-      axisLabel: { color: '#9CA3AF' }
+      axisLine: { lineStyle: { color: '#642D8F' } },
+      axisLabel: { color: '#9B93A8' }
     },
     yAxis: {
       type: 'value',
-      axisLine: { lineStyle: { color: '#374151' } },
-      axisLabel: { color: '#9CA3AF' },
-      splitLine: { lineStyle: { color: '#374151', type: 'dashed' } }
+      axisLine: { lineStyle: { color: '#642D8F' } },
+      axisLabel: { color: '#9B93A8' },
+      splitLine: { lineStyle: { color: 'rgba(100, 45, 143, 0.45)', type: 'dashed' } }
     },
     series: [
       {
         name: 'Transparent',
         type: 'line',
         stack: 'Total',
-        areaStyle: { color: 'rgba(89, 252, 179, 0.3)' },
-        lineStyle: { color: '#59FCB3' },
+        areaStyle: { color: 'rgba(179, 255, 120, 0.25)' },
+        lineStyle: { color: '#B3FF78' },
         data: historicalData.value.map(d => d.transparent)
       },
       {
         name: 'Shielded',
         type: 'line',
         stack: 'Total',
-        areaStyle: { color: 'rgba(102, 45, 145, 0.3)' },
-        lineStyle: { color: '#662D91' },
+        areaStyle: { color: 'rgba(179, 89, 252, 0.18)' },
+        lineStyle: { color: '#B359FC' },
         data: historicalData.value.map(d => d.shielded)
       }
     ]

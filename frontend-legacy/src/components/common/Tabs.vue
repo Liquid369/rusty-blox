@@ -46,7 +46,7 @@ defineEmits(['update:modelValue'])
 .tabs-header {
   display: flex;
   gap: var(--space-2);
-  border-bottom: 2px solid var(--border-color);
+  border-bottom: 1px solid var(--border-secondary);
   overflow-x: auto;
 }
 
@@ -58,22 +58,35 @@ defineEmits(['update:modelValue'])
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
+  margin-bottom: -1px;
   color: var(--text-secondary);
   font-weight: var(--weight-medium);
+  font-size: var(--text-sm);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
   white-space: nowrap;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 
 .tab-button:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--bg-hover);
+}
+
+.tab-button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: -2px;
 }
 
 .tab-button.active {
-  color: #fff;
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
   border-bottom-color: var(--purple-accent);
+  box-shadow: inset 0 -10px 16px -14px rgba(var(--rgb-purple-accent), 0.7);
 }
 
 .tabs-content {

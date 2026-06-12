@@ -134,11 +134,11 @@ const blockTimeOption = computed(() => {
     data: dates.map(() => 60),
     lineStyle: {
       type: 'dashed',
-      color: '#F59E0B',
+      color: '#f6ff78',
       width: 2
     },
     itemStyle: {
-      color: '#F59E0B'
+      color: '#f6ff78'
     },
     symbol: 'none'
   })

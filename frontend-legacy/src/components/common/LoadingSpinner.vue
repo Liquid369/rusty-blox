@@ -39,7 +39,7 @@ defineProps({
 .spinner {
   border-radius: 50%;
   border: 3px solid var(--border-subtle);
-  border-top-color: var(--pivx-purple-primary);
+  border-top-color: var(--purple-accent);
   animation: spin 0.8s linear infinite;
 }
 
