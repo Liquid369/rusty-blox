@@ -151,7 +151,7 @@ fn cmp_u256(a: &[u64; 4], b: &[u64; 4]) -> std::cmp::Ordering {
 #[derive(Debug, Clone)]
 pub struct BlockInfo {
     pub height: i64,
-    pub hash_prev: Vec<u8>,
+    pub hash_prev: [u8; 32],
     pub n_bits: u32,
     pub chainwork: Option<[u64; 4]>,
     // File number & data position (if present in CDiskBlockIndex)
@@ -175,8 +175,10 @@ pub fn build_canonical_chain_from_leveldb(
     let mut db = DB::open(Path::new(leveldb_path), opts)?;
     
     let mut iter = db.new_iter()?;
-    let mut index: HashMap<Vec<u8>, BlockInfo> = HashMap::new();
-    let mut height_to_hashes: HashMap<i64, Vec<Vec<u8>>> = HashMap::new();
+    // Block hashes are fixed 32-byte values; key by [u8; 32] (inline, Copy) to
+    // drop a heap allocation + 24-byte header per hash across ~5.5M blocks.
+    let mut index: HashMap<[u8; 32], BlockInfo> = HashMap::new();
+    let mut height_to_hashes: HashMap<i64, Vec<[u8; 32]>> = HashMap::new();
     let mut parse_errors = 0;
     let mut leveldb_count = 0;
     
@@ -190,7 +192,7 @@ pub fn build_canonical_chain_from_leveldb(
             continue;
         }
         
-        let block_hash = key[1..].to_vec();
+        let block_hash: [u8; 32] = key[1..].try_into().unwrap(); // key is 33 bytes (checked above)
         let mut offset = 0;
         
         // Parse CDiskBlockIndex (PIVX chain.h)
@@ -284,7 +286,7 @@ pub fn build_canonical_chain_from_leveldb(
             parse_errors += 1;
             continue;
         }
-        let hash_prev = value[offset..offset + 32].to_vec();
+        let hash_prev: [u8; 32] = value[offset..offset + 32].try_into().unwrap();
         offset += 32;
         
         // hashMerkleRoot (32 bytes) - skip
@@ -348,9 +350,12 @@ pub fn build_canonical_chain_from_leveldb(
     info!("Calculating chainwork for all blocks");
     
     // PIVX genesis hash (internal/little-endian byte order)
-    let mut genesis_hash = hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")
-        .expect("Invalid genesis");
-    genesis_hash.reverse();
+    let genesis_hash: [u8; 32] = {
+        let mut g = hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")
+            .expect("Invalid genesis");
+        g.reverse();
+        g.try_into().expect("genesis hash must be 32 bytes")
+    };
     
     // Set genesis chainwork
     if let Some(genesis_info) = index.get_mut(&genesis_hash) {
@@ -389,7 +394,7 @@ pub fn build_canonical_chain_from_leveldb(
     // Step 3: Find tip with highest chainwork
     info!("Finding best chain tip (highest chainwork)");
     
-    let mut best_tip: Option<(Vec<u8>, i64, [u64; 4])> = None;
+    let mut best_tip: Option<([u8; 32], i64, [u64; 4])> = None;
     let mut blocks_without_chainwork = 0;
     
     // Check all blocks at max height and nearby (in case of orphans)
@@ -456,7 +461,7 @@ pub fn build_canonical_chain_from_leveldb(
         
         steps += 1;
         
-        chain.push((block_info.height, current_hash.clone(), block_info.file, block_info.data_pos));
+        chain.push((block_info.height, current_hash.to_vec(), block_info.file, block_info.data_pos));
         
         // Check if we reached genesis
         if block_info.height == 0 {

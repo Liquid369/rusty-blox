@@ -378,27 +378,38 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     // in blocks_map" branches did, and in both cases NO height metadata is
     // written (the function returns Err before the assignment loop), so the
     // stored output is unchanged.
-    let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
-    let mut block_meta: HashMap<Vec<u8>, (Vec<u8>, u32)> = HashMap::new();
+    // Block hashes are fixed 32-byte keys; key these maps by [u8; 32] (inline,
+    // Copy) instead of Vec<u8> to drop a separate heap allocation + 24-byte
+    // header per hash across ~5.5M blocks (large RSS + allocator-churn win).
+    let mut children_map: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
+    let mut block_meta: HashMap<[u8; 32], ([u8; 32], u32)> = HashMap::new();
     let iter = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
     let mut total_blocks = 0;
 
     for item in iter {
         if let Ok((hash, header_bytes)) = item {
+            // A header's key is always the 32-byte block hash. A stray non-32-byte
+            // key cannot be a header hash, so skipping it is output-identical (it
+            // could never be on the canonical chain). Only such keys carry >= 68
+            // byte values, so total_blocks is unaffected.
+            let hash32: [u8; 32] = match <[u8; 32]>::try_from(&hash[..]) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
             if header_bytes.len() >= 68 {
-                let prev_hash = header_bytes[4..36].to_vec();
+                let prev_hash: [u8; 32] = header_bytes[4..36].try_into().unwrap();
                 children_map.entry(prev_hash)
                     .or_default()
-                    .push(hash.to_vec());
+                    .push(hash32);
 
                 total_blocks += 1;
             }
             if header_bytes.len() >= 80 {
-                let prev_hash = header_bytes[4..36].to_vec();
+                let prev_hash: [u8; 32] = header_bytes[4..36].try_into().unwrap();
                 let n_bits = u32::from_le_bytes([
                     header_bytes[72], header_bytes[73], header_bytes[74], header_bytes[75],
                 ]);
-                block_meta.insert(hash.to_vec(), (prev_hash, n_bits));
+                block_meta.insert(hash32, (prev_hash, n_bits));
             }
         }
     }
@@ -412,8 +423,8 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     info!("Finding best chain tip");
     
     // STEP 3A: Find blocks with no children (potential tips)
-    let mut all_blocks: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-    let mut has_children: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut all_blocks: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut has_children: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     
     for (parent_hash, children) in &children_map {
         all_blocks.insert(parent_hash.clone());
@@ -423,7 +434,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         }
     }
     
-    let potential_tips: Vec<Vec<u8>> = all_blocks
+    let potential_tips: Vec<[u8; 32]> = all_blocks
         .difference(&has_children)
         .cloned()
         .collect();
@@ -437,7 +448,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     debug!("Selecting best tip by chainwork");
     
     // Find tip with highest chainwork
-    let mut best_tip: Option<(Vec<u8>, [u8; 32])> = None;
+    let mut best_tip: Option<([u8; 32], [u8; 32])> = None;
     for tip in &potential_tips {
         if let Some(work) = chainwork_map.get(tip) {
             match &best_tip {
@@ -562,9 +573,9 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         info!("Walking backwards from highest tip to genesis (height unknown)");
     }
     
-    let mut chain_path: Vec<Vec<u8>> = Vec::new();
-    let mut current_hash = highest_tip.clone();
-    let genesis_parent = vec![0u8; 32];
+    let mut chain_path: Vec<[u8; 32]> = Vec::new();
+    let mut current_hash = highest_tip;
+    let genesis_parent = [0u8; 32];
     let mut steps = 0;
     
     loop {

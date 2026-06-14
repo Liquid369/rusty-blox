@@ -81,19 +81,23 @@ fn compare_chainwork(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
 /// keep-maximum fork rule and the BFS order are all unchanged.
 pub fn calculate_all_chainwork(
     _db: &Arc<DB>,
-    blocks_map: &std::collections::HashMap<Vec<u8>, (Vec<u8>, u32)>,
-) -> Result<std::collections::HashMap<Vec<u8>, [u8; 32]>, Box<dyn std::error::Error>> {
+    blocks_map: &std::collections::HashMap<[u8; 32], ([u8; 32], u32)>,
+) -> Result<std::collections::HashMap<[u8; 32], [u8; 32]>, Box<dyn std::error::Error>> {
 
     use std::collections::{HashMap, VecDeque};
 
-    let mut chainwork_map: HashMap<Vec<u8>, [u8; 32]> = HashMap::new();
+    // Block hashes are fixed 32-byte values; keying maps by `[u8; 32]` (inline,
+    // Copy) instead of `Vec<u8>` removes a separate heap allocation + 24-byte
+    // header per hash across ~5.5M blocks, cutting RSS and allocator churn with
+    // byte-identical behavior. All `.clone()` calls below copy the array.
+    let mut chainwork_map: HashMap<[u8; 32], [u8; 32]> = HashMap::new();
 
     // `blocks_map` already holds (prev_hash, n_bits) per block, so we reference it
     // directly instead of materialising separate parent_map + bits_map copies.
     println!("📊 Calculating chainwork for {} blocks...", blocks_map.len());
 
     // Find all genesis blocks (blocks with all-zero prev_hash)
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut queue: VecDeque<[u8; 32]> = VecDeque::new();
     for (block_hash, (prev_hash, n_bits)) in blocks_map {
         if prev_hash.iter().all(|&b| b == 0) {
             // Genesis block
@@ -106,7 +110,7 @@ pub fn calculate_all_chainwork(
     println!("  Found {} genesis block(s)", queue.len());
 
     // Build children map for forward traversal
-    let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    let mut children_map: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
     for (block_hash, (prev_hash, _n_bits)) in blocks_map {
         children_map.entry(prev_hash.clone())
             .or_default()
