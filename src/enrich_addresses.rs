@@ -130,7 +130,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     
     // PASS 1: Build complete spent outputs set by scanning ALL transaction inputs
     // O1 OPTIMIZATION: Build transaction cache to avoid repeated deserialization
-    let mut spent_outputs: HashSet<(Vec<u8>, u64)> = HashSet::new();
+    // Packed spent-outpoint set: ([u8;32] txid, u32 vout) inline keys — no
+    // per-entry heap allocation, ~half the RAM and faster hashing than the old
+    // (Vec<u8>, u64). Keys stay in display byte order (matching Pass 1).
+    let mut spent_outputs: HashSet<([u8; 32], u32)> = HashSet::new();
     let mut tx_cache: HashMap<Vec<u8>, Arc<CTransaction>> = HashMap::new();
     // Creation height per txid — needed by the Tier-2 prevout joins (coin age)
     // and the HODL snapshot; tx_cache alone doesn't carry heights.
@@ -208,7 +211,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                         // prev_txid_display is in display/reversed format
                         // This NOW matches the database key format
                         
-                        spent_outputs.insert((prev_txid_display, prevout.n as u64));
+                        let t: [u8; 32] = prev_txid_display.as_slice().try_into()
+                            .expect("spent-set prevout txid must be 32 bytes");
+                        spent_outputs.insert((t, prevout.n as u32));
                     }
                 }
         }
@@ -728,7 +733,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // indexed under BOTH the staker and the owner.
     let mut hodl_sums = [0i64; HODL_BANDS.len()];
     let mut hodl_total: i64 = 0;
-    let mut hodl_seen: HashSet<(Vec<u8>, u64)> = HashSet::new();
+    let mut hodl_seen: HashSet<([u8; 32], u32)> = HashSet::new();
 
     for (address, utxos) in address_map {
         let mut key = vec![b'a'];
@@ -740,8 +745,11 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         for (txid_bytes, vout) in utxos.iter() {
             total_utxos_checked += 1;
 
-            // Check spent status using natural byte order (matching Pass 1)
-            let is_spent = spent_outputs.contains(&(txid_bytes.clone(), *vout));
+            // Check spent status using natural byte order (matching Pass 1).
+            // Packed key: [u8;32] txid + u32 vout (txid is always 32 bytes).
+            let txid32: [u8; 32] = txid_bytes.as_slice().try_into()
+                .expect("utxo txid must be 32 bytes");
+            let is_spent = spent_outputs.contains(&(txid32, *vout as u32));
 
             if is_spent {
                 total_spent_found += 1;
@@ -752,7 +760,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
 
                 // HODL: bucket this UTXO's value by coin age, counting each
                 // outpoint exactly once (pure in-memory lookups; no DB reads).
-                if tip > 0 && hodl_seen.insert((txid_bytes.clone(), *vout)) {
+                if tip > 0 && hodl_seen.insert((txid32, *vout as u32)) {
                     if let (Some(tx), Some(h)) =
                         (tx_cache.get(txid_bytes), tx_heights.get(txid_bytes))
                     {

@@ -25,6 +25,10 @@ path = "tools/diagnostics/count_orphans.rs"
 name = "inspect-leveldb"
 path = "tools/diagnostics/inspect_leveldb.rs"
 
+[[bin]]
+name = "dump-addr-snapshot"
+path = "tools/diagnostics/dump_addr_snapshot.rs"
+
 # Essential maintenance tools
 [[bin]]
 name = "rebuild-address-index"
