@@ -262,7 +262,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .get_string("paths.frontend_dist")
         .unwrap_or_else(|_| "frontend-legacy/dist".to_string());
     let app = if std::path::Path::new(&frontend_dist).join("index.html").exists() {
-        println!("Serving frontend from {}", frontend_dist);
+        info!(path = %frontend_dist, "Serving frontend");
         let index = std::path::Path::new(&frontend_dist).join("index.html");
         let assets_dir = std::path::Path::new(&frontend_dist).join("assets");
         // Hashed bundles live under /assets — serve them directly and return a
@@ -277,7 +277,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
             .nest_service("/assets", tower_http::services::ServeDir::new(assets_dir))
             .fallback_service(spa)
     } else {
-        println!("⚠️  Frontend dist not found at {} - build it with: cd frontend-legacy && npm run build", frontend_dist);
+        warn!(path = %frontend_dist, "Frontend dist not found - build with: cd frontend-legacy && npm run build");
         app.route("/", get(root_handler))
     };
 
@@ -320,7 +320,7 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
             std::process::exit(1);
         }
     };
-    println!("Listening on {}", addr);
+    info!(addr = %addr, "Listening");
     
     // Graceful shutdown on SIGTERM (Docker/systemd stop) and SIGINT (Ctrl-C):
     // stop accepting connections, drain in-flight requests, then let main exit
@@ -356,7 +356,7 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    println!("\n🛑 Shutdown signal received - draining connections...");
+    info!("Shutdown signal received - draining connections");
 }
 
 #[tokio::main]

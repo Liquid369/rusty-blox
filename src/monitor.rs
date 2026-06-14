@@ -353,9 +353,7 @@ async fn index_block_from_rpc(
             return Ok(());
         } else {
             // Different block at same height - REORG detected!
-            eprintln!("⚠️  REORG detected at height {}", height);
-            eprintln!("   Expected: {}", existing_hash_str);
-            eprintln!("   Current:  {}", block_hash);
+            warn!(height = height, expected = %existing_hash_str, current = %block_hash, "REORG detected");
             // Delete processing marker if it exists (allow reindex)
             db.delete_cf(&cf_state, &processing_key).ok();
         }
@@ -524,7 +522,7 @@ async fn index_block_from_rpc(
                 .ok_or("Missing txid in transaction object")?
                 .to_string()
         } else {
-            eprintln!("⚠️  Skipping invalid transaction at index {} in block {}", tx_index, height);
+            warn!(tx_index = tx_index, height = height, "Skipping invalid transaction");
             tx_errors += 1;
             continue;
         };
@@ -532,7 +530,7 @@ async fn index_block_from_rpc(
         let txid_bytes = match hex::decode(&txid) {
             Ok(bytes) => bytes,
             Err(_) => {
-                eprintln!("⚠️  Invalid txid hex at index {} in block {}: {}", tx_index, height, txid);
+                warn!(tx_index = tx_index, height = height, txid = %txid, "Invalid txid hex");
                 tx_errors += 1;
                 continue;
             }
@@ -545,7 +543,7 @@ async fn index_block_from_rpc(
                 match hex::decode(hex_str) {
                     Ok(bytes) => Some(bytes),
                     Err(_) => {
-                        eprintln!("⚠️  Failed to decode hex for txid {}", txid);
+                        warn!(txid = %txid, "Failed to decode hex for transaction");
                         None
                     }
                 }
@@ -580,26 +578,26 @@ async fn index_block_from_rpc(
                                 match hex::decode(raw_hex) {
                                     Ok(bytes) => bytes,
                                     Err(_) => {
-                                        eprintln!("⚠️  Failed to decode getrawtransaction result for {}", txid);
+                                        warn!(txid = %txid, "Failed to decode getrawtransaction result");
                                         tx_errors += 1;
                                         continue;
                                     }
                                 }
                             } else {
-                                eprintln!("⚠️  No result in getrawtransaction for {}", txid);
+                                warn!(txid = %txid, "No result in getrawtransaction response");
                                 tx_errors += 1;
                                 continue;
                             }
                         }
                         Err(e) => {
-                            eprintln!("⚠️  Failed to parse getrawtransaction response for {}: {}", txid, e);
+                            warn!(txid = %txid, error = %e, "Failed to parse getrawtransaction response");
                             tx_errors += 1;
                             continue;
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Failed to fetch transaction {}: {}", txid, e);
+                    warn!(txid = %txid, error = %e, "Failed to fetch transaction via RPC");
                     tx_errors += 1;
                     continue;
                 }
@@ -637,7 +635,7 @@ async fn index_block_from_rpc(
         let tx_version_bytes = if raw_tx_bytes.len() >= 4 {
             &raw_tx_bytes[0..4]
         } else {
-            eprintln!("⚠️  Transaction {} has invalid size (< 4 bytes), using default version", txid);
+            warn!(txid = %txid, "Transaction has invalid size (< 4 bytes), using default version");
             &[1u8, 0, 0, 0] // Default to version 1
         };
         
@@ -647,13 +645,13 @@ async fn index_block_from_rpc(
         
         if needs_update {
             if let Err(e) = db.put_cf(&cf_transactions, &tx_key, &full_data) {
-                eprintln!("⚠️  Failed to store transaction {}: {}", txid, e);
+                warn!(txid = %txid, error = %e, "Failed to store transaction");
                 tx_errors += 1;
                 continue;
             }
-            
+
             if existing_tx_data.is_some() {
-                eprintln!("✅ Promoted mempool tx {} to confirmed at height {}", txid, height);
+                debug!(txid = %txid, height = height, "Promoted mempool tx to confirmed");
             }
         }
         
@@ -664,7 +662,7 @@ async fn index_block_from_rpc(
         
         // Store the txid in display format
         if let Err(e) = db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes()) {
-            eprintln!("⚠️  Failed to store block TX index for {}: {}", txid, e);
+            warn!(txid = %txid, error = %e, "Failed to store block TX index");
             tx_errors += 1;
             continue;
         }
@@ -672,13 +670,13 @@ async fn index_block_from_rpc(
         // 3. Parse transaction and index addresses/UTXOs
         // Validate transaction size before allocation
         if raw_tx_bytes.len() > 10_000_000 {
-            eprintln!("⚠️  Transaction {} too large ({} bytes), skipping", txid, raw_tx_bytes.len());
+            warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction too large, skipping");
             tx_errors += 1;
             continue;
         }
-        
+
         if raw_tx_bytes.is_empty() {
-            eprintln!("⚠️  Transaction {} has empty data, skipping", txid);
+            warn!(txid = %txid, "Transaction has empty data, skipping");
             tx_errors += 1;
             continue;
         }
@@ -688,7 +686,7 @@ async fn index_block_from_rpc(
         let total_size = match 4_usize.checked_add(raw_tx_bytes.len()) {
             Some(size) if size <= 10_000_004 => size,
             _ => {
-                eprintln!("⚠️  Transaction {} size calculation overflow", txid);
+                warn!(txid = %txid, "Transaction size calculation overflow, skipping");
                 tx_errors += 1;
                 continue;
             }
@@ -703,7 +701,7 @@ async fn index_block_from_rpc(
         let parsed_tx = match deserialize_transaction(&tx_data_with_header).await {
             Ok(tx) => tx,
             Err(e) => {
-                eprintln!("⚠️  Failed to parse transaction {}: {}", txid, e);
+                warn!(txid = %txid, error = %e, "Failed to parse transaction");
                 tx_errors += 1;
                 continue;
             }
@@ -757,10 +755,10 @@ async fn index_block_from_rpc(
                             // Each UTXO is 40 bytes (32 byte txid + 8 byte vout)
                             // Limit to 100k UTXOs = 4MB
                             if data.len() > 4_000_000 {
-                                eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
                                 Vec::new()
                             } else if data.len() % 40 != 0 {
-                                eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
                                 Vec::new()
                             } else {
                                 deserialize_utxos(&data).await
@@ -777,8 +775,8 @@ async fn index_block_from_rpc(
                     if already_exists {
                         // Already indexed - skip (prevents duplicates from reorg/reindex)
                         #[cfg(feature = "debug-address-index")]
-                        eprintln!("⚠️  Duplicate UTXO detected (skipped): {}:{} for {}", 
-                                 hex::encode(&txid_bytes), output_idx, address);
+                        debug!(txid = %hex::encode(&txid_bytes), vout = output_idx, %address,
+                               "Duplicate UTXO detected (skipped)");
                         continue;
                     }
                     
@@ -788,7 +786,7 @@ async fn index_block_from_rpc(
                     // Store updated UTXO list
                     let serialized = serialize_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
-                        eprintln!("⚠️  Failed to index address {} for tx {}: {}", address, txid, e);
+                        warn!(address = %address, txid = %txid, error = %e, "Failed to index address for tx");
                     }
                 }
             }
@@ -818,7 +816,7 @@ async fn index_block_from_rpc(
             let prev_txid_bytes = match hex::decode(prev_txid_hex) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    eprintln!("⚠️  Invalid prev txid hex: {}", prev_txid_hex);
+                    warn!(prev_txid = %prev_txid_hex, "Invalid prev txid hex");
                     continue;
                 }
             };
@@ -896,7 +894,7 @@ async fn index_block_from_rpc(
                                                 full_data.extend(&raw_bytes);
                                                 
                                                 if let Err(e) = db.put_cf(&cf_transactions, &prev_tx_key, &full_data) {
-                                                    eprintln!("⚠️  Failed to cache previous tx {}: {}", prev_txid_hex, e);
+                                                    warn!(prev_txid = %prev_txid_hex, error = %e, "Failed to cache previous tx");
                                                 }
                                                 // Successfully cached - debug logging removed for performance
                                                 
@@ -909,21 +907,21 @@ async fn index_block_from_rpc(
                                                 full_data
                                             }
                                             Err(_) => {
-                                                eprintln!("⚠️  Failed to decode previous tx hex {}", prev_txid_hex);
+                                                warn!(prev_txid = %prev_txid_hex, "Failed to decode previous tx hex");
                                                 continue;
                                             }
                                         }
                                     } else {
-                                        eprintln!("⚠️  Missing hex or blockhash for previous tx {}", prev_txid_hex);
+                                        warn!(prev_txid = %prev_txid_hex, "Missing hex or blockhash for previous tx");
                                         continue;
                                     }
                                 } else {
-                                    eprintln!("⚠️  No result for previous tx {}", prev_txid_hex);
+                                    warn!(prev_txid = %prev_txid_hex, "No result for previous tx in RPC response");
                                     continue;
                                 }
                             }
                             Err(_) => {
-                                eprintln!("⚠️  Failed to parse RPC response for previous tx {}", prev_txid_hex);
+                                warn!(prev_txid = %prev_txid_hex, "Failed to parse RPC response for previous tx");
                                 continue;
                             }
                         }
@@ -931,7 +929,7 @@ async fn index_block_from_rpc(
                     Err(_) => {
                         // RPC fetch failed - can't process this input
                         // This is non-fatal, just skip removing from UTXO set
-                        eprintln!("⚠️  RPC request failed for previous tx {}", prev_txid_hex);
+                        debug!(prev_txid = %prev_txid_hex, "RPC request failed for previous tx (non-fatal)");
                         continue;
                     }
                 }
@@ -939,36 +937,36 @@ async fn index_block_from_rpc(
             
             // Now process the previous transaction data
             if prev_tx_data.len() < 8 {
-                eprintln!("⚠️  Previous transaction {} data too short", prev_txid_hex);
+                warn!(prev_txid = %prev_txid_hex, "Previous transaction data too short");
                 continue;
             }
-            
+
             if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
-                eprintln!("⚠️  Previous transaction {} too large: {} bytes", prev_txid_hex, prev_tx_data.len());
+                warn!(prev_txid = %prev_txid_hex, bytes = prev_tx_data.len(), "Previous transaction too large");
                 continue;
             }
-            
+
             // Format: version (4) + height (4) + raw_tx
             // We need to prepend 4-byte dummy header for parser, so extract raw tx part
             let raw_prev_tx = &prev_tx_data[8..];
-            
+
             if raw_prev_tx.is_empty() {
-                eprintln!("⚠️  Previous transaction {} has empty data", prev_txid_hex);
+                warn!(prev_txid = %prev_txid_hex, "Previous transaction has empty data");
                 continue;
             }
-            
+
             // Additional safety check: ensure raw_prev_tx length is reasonable
             if raw_prev_tx.len() > 10_000_000 {
-                eprintln!("⚠️  Previous transaction {} raw data too large: {} bytes", prev_txid_hex, raw_prev_tx.len());
+                warn!(prev_txid = %prev_txid_hex, bytes = raw_prev_tx.len(), "Previous transaction raw data too large");
                 continue;
             }
-            
+
             // Prepend dummy block_version for parser compatibility
             // Use safe checked addition to prevent overflow
             let total_size = match 4_usize.checked_add(raw_prev_tx.len()) {
                 Some(size) if size <= 10_000_004 => size,
                 _ => {
-                    eprintln!("⚠️  Previous transaction {} total size overflow or too large", prev_txid_hex);
+                    warn!(prev_txid = %prev_txid_hex, "Previous transaction total size overflow or too large");
                     continue;
                 }
             };
@@ -997,10 +995,10 @@ async fn index_block_from_rpc(
                             Some(data) => {
                                 // Validate data size before deserialization
                                 if data.len() > 4_000_000 {
-                                    eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                    warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
                                     Vec::new()
                                 } else if data.len() % 40 != 0 {
-                                    eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                    warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
                                     Vec::new()
                                 } else {
                                     deserialize_utxos(&data).await
@@ -1058,7 +1056,7 @@ async fn index_block_from_rpc(
                     }
                     
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
-                        eprintln!("⚠️  Failed to update tx list for {}: {}", address, e);
+                        warn!(address = %address, error = %e, "Failed to update tx list for address");
                     }
                 }
             }
@@ -1157,10 +1155,9 @@ async fn index_block_from_rpc(
     
     // Report any errors
     if tx_errors > 0 {
-        eprintln!("⚠️  Block {}: Indexed {}/{} transactions ({} errors)", 
-                  height, tx_count, tx_array.len(), tx_errors);
+        warn!(height = height, indexed = tx_count, total = tx_array.len(), errors = tx_errors, "Block indexed with errors");
     } else if height % 1000 == 0 {
-        println!("✅ Block {}: Indexed all {} transactions", height, tx_count);
+        debug!(height = height, tx_count = tx_count, "Block indexed");
     }
     // Debug logging reduced for performance - only log every 1000 blocks or on errors
     
@@ -1262,13 +1259,13 @@ fn detect_reorg(
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     // If RPC height is less than ours, definite reorg
     if rpc_tip.height < db_tip.height {
-        println!("REORG DETECTED: RPC height {} < DB height {}", rpc_tip.height, db_tip.height);
+        warn!(rpc_height = rpc_tip.height, db_height = db_tip.height, "REORG DETECTED: RPC height less than DB height");
         return Ok(Some(rpc_tip.height));
     }
-    
+
     // If heights are same, check hashes
     if rpc_tip.height == db_tip.height && rpc_tip.hash != db_tip.hash {
-        println!("REORG DETECTED: Hash mismatch at height {}", rpc_tip.height);
+        warn!(height = rpc_tip.height, "REORG DETECTED: Hash mismatch at tip");
         return Ok(Some(rpc_tip.height - 1));
     }
     
@@ -1329,10 +1326,8 @@ pub async fn run_block_monitor(
             client
         }
         Ok(Ok(Err(e))) => {
-            error!(error = %e, "RPC connection failed");
+            error!(error = %e, "RPC connection failed - ensure PIVX node is running with RPC enabled");
             metrics::set_rpc_connected(false);
-            eprintln!("RPC connection failed: {}", e);
-            eprintln!("Tip: Make sure PIVX node is running with RPC enabled");
 
             // Just poll database for changes
             loop {
@@ -1343,7 +1338,6 @@ pub async fn run_block_monitor(
             // spawn_blocking task panicked/was cancelled.
             error!(error = %e, "RPC connection task failed");
             metrics::set_rpc_connected(false);
-            eprintln!("RPC connection task failed: {}", e);
 
             // Just poll database for changes
             loop {
@@ -1353,7 +1347,6 @@ pub async fn run_block_monitor(
         Err(_) => {
             error!("RPC connection timed out");
             metrics::set_rpc_connected(false);
-            eprintln!("RPC connection timed out");
 
             // Just poll database for changes
             loop {
@@ -1418,7 +1411,7 @@ pub async fn run_block_monitor(
         let db_tip = match get_db_chain_tip(&db) {
             Ok(tip) => tip,
             Err(e) => {
-                eprintln!("Failed to get DB tip: {}", e);
+                error!(error = %e, "Failed to get DB tip");
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
@@ -1426,8 +1419,8 @@ pub async fn run_block_monitor(
         
         // Check for reorg
         if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
-            println!("\n⚠️  BLOCKCHAIN REORGANIZATION DETECTED!");
-            
+            warn!("BLOCKCHAIN REORGANIZATION DETECTED");
+
             // Handle the reorg using our reorg module
             match reorg::handle_reorg(
                 db.clone(),
@@ -1436,16 +1429,13 @@ pub async fn run_block_monitor(
                 rpc_tip.height,
             ).await {
                 Ok(reorg_info) => {
-                    println!("✅ Reorg handled successfully");
-                    println!("   Orphaned {} blocks from fork at height {}", 
-                             reorg_info.orphaned_blocks, reorg_info.fork_height);
-                    
+                    info!(orphaned = reorg_info.orphaned_blocks, fork_height = reorg_info.fork_height, "Reorg handled successfully");
+
                     // Continue to re-index from the rollback point
                     // The normal sync logic below will pick up from the new chain tip
                 }
                 Err(e) => {
-                    eprintln!("❌ Failed to handle reorg: {}", e);
-                    eprintln!("   Waiting {} seconds before retry...", poll_interval_secs);
+                    error!(error = %e, retry_secs = poll_interval_secs, "Failed to handle reorg");
                     tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                     continue;
                 }
@@ -1475,17 +1465,16 @@ pub async fn run_block_monitor(
             );
             metrics::set_blocks_behind_tip(blocks_behind as i64);
             
-            println!("\n📡 RPC CATCHUP: {} blocks behind (heights {} → {})", 
-                     blocks_behind, db_tip.height + 1, rpc_tip.height);
-            
+            info!(blocks_behind = blocks_behind, start = db_tip.height + 1, end = rpc_tip.height, "RPC catchup starting");
+
             // TWO-PHASE RPC CATCHUP (matches initial sync two-pass algorithm)
             // This ensures 100% accurate spend detection without network dependency
-            
+
             let start_height = db_tip.height + 1;
             let end_height = rpc_tip.height;
-            
+
             // === PHASE 1: Fetch blocks and build complete spent set ===
-            println!("📥 Phase 1: Fetching {} blocks and building spent set...", blocks_behind);
+            debug!(blocks = blocks_behind, "Phase 1: Fetching blocks and building spent set");
             
             let mut fetched_blocks = Vec::new();
             let mut fetch_errors = 0;
@@ -1518,7 +1507,6 @@ pub async fn run_block_monitor(
                     Err(e) => {
                         error!(height = height, error = %e, "Failed to fetch block");
                         metrics::increment_rpc_errors("getblock", "timeout");
-                        eprintln!("❌ Failed to fetch block {}: {}", height, e);
                         fetch_errors += 1;
                     }
                 }
@@ -1530,19 +1518,17 @@ pub async fn run_block_monitor(
                     retry_secs = poll_interval_secs,
                     "Fetch errors occurred, retrying"
                 );
-                eprintln!("⚠️  {} fetch errors occurred, waiting {} seconds before retry...", 
-                         fetch_errors, poll_interval_secs);
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
-            
+
             // Build complete spent set from all fetched blocks
-            println!("🔍 Building spent set from {} blocks...", fetched_blocks.len());
+            debug!(blocks = fetched_blocks.len(), "Building spent set from fetched blocks");
             let spent_set = build_spent_set_from_blocks(&fetched_blocks);
-            println!("✅ Phase 1 complete: {} outputs identified as spent", spent_set.len());
-            
+            debug!(spent_outputs = spent_set.len(), "Phase 1 complete: spent set built");
+
             // === PHASE 2: Sequential indexing with complete spent knowledge ===
-            println!("📝 Phase 2: Indexing blocks with complete spent set...");
+            debug!("Phase 2: Indexing blocks with complete spent set");
             
             let mut indexed = 0;
             let mut index_errors = 0;
@@ -1562,12 +1548,10 @@ pub async fn run_block_monitor(
                 // Check if we already have a canonical hash for this height
                 if let Some(stored_hash) = db.get_cf(&cf_metadata, &height_key)? {
                     let stored_hash_hex = hex::encode(&stored_hash);
-                    
+
                     if stored_hash_hex != block.block_hash {
-                        eprintln!("⚠️  REORG detected at height {}", block.height);
-                        eprintln!("   DB hash:  {}", stored_hash_hex);
-                        eprintln!("   RPC hash: {}", block.block_hash);
-                        eprintln!("   Aborting catchup to trigger reorg handler");
+                        warn!(height = block.height, db_hash = %stored_hash_hex, rpc_hash = %block.block_hash,
+                              "REORG detected during catchup - aborting to trigger reorg handler");
                         break;
                     }
                 }
@@ -1576,24 +1560,22 @@ pub async fn run_block_monitor(
                 match index_block_from_rpc(&rpc_client, block.height, &db, &broadcaster, Some(&spent_set)).await {
                     Ok(_) => {
                         indexed += 1;
-                        if indexed % 10 == 0 {
+                        if indexed % 100 == 0 {
                             let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
-                            println!("   📊 Progress: {}/{} ({:.1}%)", indexed, blocks_behind, progress);
+                            debug!(indexed = indexed, total = blocks_behind, progress_pct = format!("{:.1}", progress), "Catchup progress");
                         }
                     }
                     Err(e) => {
-                        eprintln!("❌ Failed to index block {}: {}", block.height, e);
+                        error!(height = block.height, error = %e, "Failed to index block");
                         index_errors += 1;
                     }
                 }
             }
             
-            println!("✅ Phase 2 complete: {}/{} blocks indexed ({} errors)", 
-                     indexed, blocks_behind, index_errors);
-            
+            info!(indexed = indexed, total = blocks_behind, errors = index_errors, "Phase 2 complete: blocks indexed");
+
             if index_errors > 0 {
-                eprintln!("⚠️  Some blocks failed to index, waiting {} seconds before retry...", 
-                         poll_interval_secs);
+                warn!(errors = index_errors, retry_secs = poll_interval_secs, "Some blocks failed to index");
             }
             
             // Check if we successfully caught up

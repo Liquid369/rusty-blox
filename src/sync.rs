@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use rocksdb::DB;
 use tokio::fs;
-use tracing::{info, info_span, warn};
+use tracing::{info, info_span, warn, debug};
 
 use crate::types::AppState;
 use crate::cache::CacheManager;
@@ -219,10 +219,7 @@ fn refresh_canonical_metadata(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::E
     let config = get_global_config();
     let pivx_blocks_dir = config
         .get_string("paths.blk_dir")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/liquid".to_string());
-            format!("{}/Library/Application Support/PIVX/blocks", home)
-        });
+        .unwrap_or_else(|_| format!("{}/blocks", crate::config::default_pivx_data_dir()));
     let block_index_copy_dir = config.get_string("paths.block_index_copy_dir").ok();
 
     let leveldb_path = get_block_index_path(&pivx_blocks_dir, block_index_copy_dir.as_deref())?;
@@ -275,11 +272,7 @@ async fn run_initial_sync_leveldb(
     let config = get_global_config();
     let pivx_blocks_dir = config
         .get_string("paths.blk_dir")
-        .unwrap_or_else(|_| {
-            // Default macOS location
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/liquid".to_string());
-            format!("{}/Library/Application Support/PIVX/blocks", home)
-        });
+        .unwrap_or_else(|_| format!("{}/blocks", crate::config::default_pivx_data_dir()));
     
     // Get copy directory from config
     let block_index_copy_dir = config
@@ -675,7 +668,17 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
             
             use crate::height_resolver::resolve_heights_from_block_index;
 
-            match resolve_heights_from_block_index(Arc::clone(db), None, bulk).await {
+            // Pass the CONFIGURED PIVX data dir so the resolver reads the block
+            // index from the deployment's real path. Passing None makes it fall
+            // back to $HOME/Library/Application Support/PIVX (a macOS default),
+            // which does not exist on a Linux/container deployment -> the copy
+            // fails, height resolution silently falls back to the repair phase,
+            // and non-canonical-block txs go un-orphaned -> inflated balances
+            // (e.g. HODL 147M instead of 103M). The initial leveldb import
+            // already reads paths.pivx_data_dir/blk_dir; this keeps the resolver
+            // consistent with it.
+            let pivx_data_dir = config.get_string("paths.pivx_data_dir").ok();
+            match resolve_heights_from_block_index(Arc::clone(db), pivx_data_dir, bulk).await {
                 Ok((fixed, orphaned)) => {
                     info!(
                         fixed_heights = fixed,
@@ -808,46 +811,45 @@ async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std
     // Map of height -> list of txids
     let mut block_txs: HashMap<i32, Vec<Vec<u8>>> = HashMap::new();
     
-    println!("   📖 Reading all transactions...");
+    debug!("Reading all transactions for block index rebuild");
     let mut tx_count = 0;
     let mut indexed_count = 0;
     let iter = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
-    
+
     for item in iter {
         match item {
             Ok((key, value)) => {
                 // Only process 't' prefix entries (transaction data)
                 if !key.is_empty() && key[0] == b't' {
                     tx_count += 1;
-                    
+
                     // Extract txid from key (skip 't' prefix)
                     let txid = &key[1..];
-                    
+
                     // Extract height from value
                     // Format: version (4 bytes) + height (4 bytes) + tx_bytes
                     if value.len() >= 8 {
                         let height = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
-                        
+
                         // Skip if height is invalid
                         if height > 0 && height < 10_000_000 {
                             block_txs.entry(height).or_default().push(txid.to_vec());
                             indexed_count += 1;
                         }
                     }
-                    
+
                     if tx_count % 100_000 == 0 {
-                        println!("      Processed {} transactions...", tx_count);
+                        debug!(tx_count = tx_count, "Block index rebuild: transactions processed");
                     }
                 }
             }
             Err(e) => {
-                eprintln!("      Error reading transaction: {}", e);
+                warn!(error = %e, "Error reading transaction during block index rebuild");
             }
         }
     }
-    
-    println!("   ✅ Read {} transactions ({} with valid heights)", tx_count, indexed_count);
-    println!("   📝 Writing block transaction index...");
+
+    debug!(tx_count = tx_count, indexed = indexed_count, "Transactions read; writing block transaction index");
     
     let mut batch = WriteBatch::default();
     let mut batch_count = 0;
@@ -872,7 +874,7 @@ async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std
                 batch = WriteBatch::default();
                 
                 if batch_count % 50000 == 0 {
-                    println!("      Written {} block-tx mappings...", batch_count);
+                    debug!(mappings = batch_count, "Block-tx index write progress");
                 }
             }
         }
@@ -883,7 +885,7 @@ async fn rebuild_transaction_block_index(db: &Arc<DB>) -> Result<(), Box<dyn std
         db.write(batch)?;
     }
     
-    println!("   ✅ Wrote {} block-tx index entries", batch_count);
+    info!(entries = batch_count, "Block-tx index rebuild complete");
     
     Ok(())
 }
@@ -902,23 +904,22 @@ async fn run_live_sync(
     ).entered();
     info!("Starting live sync mode");
     
-    println!("Starting SMART sync mode...");
-    println!("Current DB height: {}", current_height);
-    
+    info!(current_height = current_height, "Starting smart sync mode");
+
     // Check network height to determine if we need blk file catchup
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     let network_height = match db.get_cf(&cf_state, b"network_height")? {
         Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into().unwrap_or([0, 0, 0, 0])),
         None => {
-            println!("⚠️  Network height not available, will fetch from RPC");
+            warn!("Network height not available, assuming current");
             current_height // Assume we're current if unknown
         }
     };
-    
+
     let blocks_behind = network_height - current_height;
-    println!("📊 Network height: {} | Blocks behind: {}", network_height, blocks_behind);
+    info!(network_height = network_height, blocks_behind = blocks_behind, "Network status");
     
     metrics::set_chain_tip_height("rpc", network_height as i64);
     metrics::set_blocks_behind_tip(blocks_behind as i64);
@@ -931,8 +932,7 @@ async fn run_live_sync(
     // Only process blk files if we're significantly behind (>1000 blocks)
     // This makes startup instant when we're nearly synced
     if blocks_behind > 1000 {
-        println!("\n⚡ {} blocks behind - will catch up via blk files first (faster)", blocks_behind);
-        println!("Phase 1: Syncing from blk*.dat files...");
+        info!(blocks_behind = blocks_behind, "Catching up via blk files (faster than RPC for large gaps)");
 
         // CRITICAL: refresh the canonical 'h' (hash → height) map from Core's
         // LevelDB BEFORE scanning blk files, exactly like fresh sync does.
@@ -941,10 +941,9 @@ async fn run_live_sync(
         // and height resolution later orphans the entire catch-up range out of
         // the address index.
         match refresh_canonical_metadata(&db) {
-            Ok(tip) => println!("🔄 Canonical metadata refreshed from Core's index (tip {})", tip),
+            Ok(tip) => info!(tip = tip, "Canonical metadata refreshed from Core's index"),
             Err(e) => {
-                eprintln!("⚠️  Failed to refresh canonical metadata: {} — aborting blk catchup (falling back to RPC)", e);
-                println!("Phase 2: Monitoring for new blocks via RPC...");
+                warn!(error = %e, "Failed to refresh canonical metadata - falling back to RPC catchup");
                 info!("Switching to RPC monitoring (catchup fallback)");
                 run_block_monitor(db, 5, broadcaster).await?;
                 return Ok(());
@@ -979,40 +978,40 @@ async fn run_live_sync(
         
         let entries = if blocks_behind < 1000 {
             // Very close - skip blk files, use RPC only for instant startup
-            println!("🚀 Only {} blocks behind - skipping blk files (will catch up via RPC)", blocks_behind);
+            info!(blocks_behind = blocks_behind, "Very close to tip - skipping blk files, catching up via RPC");
             Vec::new()
         } else if blocks_behind < 5000 {
             // Close - process last 10 most recent files
             let files_to_check = 10;
             let recent_files: Vec<_> = all_paths.into_iter().take(files_to_check).collect();
-            println!("📁 {} blocks behind - processing {} most recent blk files", blocks_behind, recent_files.len());
+            info!(blocks_behind = blocks_behind, files = recent_files.len(), "Processing most recent blk files");
             recent_files
         } else if blocks_behind < 20000 {
             // Medium distance - process last 30 files
             let files_to_check = 30;
             let recent_files: Vec<_> = all_paths.into_iter().take(files_to_check).collect();
-            println!("📁 {} blocks behind - processing {} recent blk files", blocks_behind, recent_files.len());
+            info!(blocks_behind = blocks_behind, files = recent_files.len(), "Processing recent blk files");
             recent_files
         } else {
             // Far behind - process ALL files to ensure we catch everything
-            println!("📁 {} blocks behind - processing ALL {} blk files (faster than RPC)", blocks_behind, all_paths.len());
+            info!(blocks_behind = blocks_behind, files = all_paths.len(), "Processing ALL blk files (faster than RPC)");
             all_paths
         };
-        
+
         if !entries.is_empty() {
-            println!("Processing {} blk*.dat files in parallel...", entries.len());
+            info!(files = entries.len(), "Processing blk*.dat files in parallel");
             // bulk=false: live/RPC catch-up on an already-synced DB — a crash here
             // must be WAL-recoverable, so the WAL stays enabled for these writes.
             process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, false).await?;
 
-            println!("✅ Finished processing blk*.dat files!");
+            info!("Finished processing blk*.dat files");
 
             // The blk fast-sync path stores transactions WITHOUT address data, and the
             // RPC monitor only address-indexes blocks above enrichment_height starting
             // from the post-catchup tip. Without re-running height resolution +
             // enrichment here, the entire catchup range would be missing from the
             // address index. Clear the phase markers and re-enrich before monitoring.
-            println!("🔁 Re-running height resolution + address enrichment for the catchup range...");
+            info!("Re-running height resolution + address enrichment for the catchup range");
             db.delete_cf(&cf_state, b"height_resolution_complete")?;
             db.delete_cf(&cf_state, b"address_index_complete")?;
             db.delete_cf(&cf_state, b"tx_block_index_complete")?;
@@ -1020,12 +1019,10 @@ async fn run_live_sync(
             run_post_sync_enrichment(&db, false).await?;
         }
     } else {
-        println!("\n🚀 Only {} blocks behind - skipping blk file scan (INSTANT startup!)", blocks_behind);
-        println!("   Will catch up via RPC...");
+        info!(blocks_behind = blocks_behind, "Few blocks behind - skipping blk file scan, catching up via RPC");
     }
-    
+
     // Switch to RPC for new blocks (or catchup if we skipped blk files)
-    println!("Phase 2: Monitoring for new blocks via RPC...");
     info!("Switching to RPC monitoring");
     run_block_monitor(db, 5, broadcaster).await?;
     
@@ -1050,86 +1047,81 @@ pub async fn run_sync_service(
         cache,
     };
     
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║          PIVX BLOCKCHAIN EXPLORER SYNC             ║");
-    println!("╚════════════════════════════════════════════════════╝\n");
-    
+    info!("PIVX blockchain explorer sync pipeline starting");
+
     // Check if resync is requested
     let config = get_global_config();
     let resync = config.get_bool("sync.resync").unwrap_or(false);
-    
+
     if resync {
-        println!("\n🔄 RESYNC MODE ENABLED");
-        println!("   Clearing all databases and rebuilding from scratch...\n");
-        
+        warn!("RESYNC MODE ENABLED - clearing all databases and rebuilding from scratch");
+
         // Clear all column families
         let cf_names = vec![
-            "blocks", "transactions", "chain_metadata", 
+            "blocks", "transactions", "chain_metadata",
             "addr_index", "utxo", "pubkey", "chain_state"
         ];
-        
+
         for cf_name in cf_names {
             if let Some(cf) = db.cf_handle(cf_name) {
-                println!("   Clearing column family: {}", cf_name);
-                
+                info!(cf = cf_name, "Clearing column family");
+
                 // Get all keys in this CF
                 let iter = db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
                 let mut keys_to_delete = Vec::new();
-                
+
                 for item in iter {
                     if let Ok((key, _)) = item {
                         keys_to_delete.push(key.to_vec());
                     }
                 }
-                
+
                 // Delete all keys
-                println!("     Deleting {} entries...", keys_to_delete.len());
+                debug!(cf = cf_name, entries = keys_to_delete.len(), "Deleting entries");
                 for key in keys_to_delete {
                     db.delete_cf(&cf, &key)?;
                 }
             }
         }
-        
-        println!("✅ All databases cleared!\n");
+
+        info!("All databases cleared");
     }
-    
+
     // Fetch and store network height from RPC early
-    println!("🔍 Checking network status...");
+    info!("Checking network status");
     update_network_height(&db).await;
-    
+
     // Check sync status
-    println!("🔍 Checking database sync status...");
+    info!("Checking database sync status");
     metrics::set_pipeline_stage("current", 0); // Stage 0: Initialization
     info!("Sync stage: initialization");
-    
+
     match get_sync_status(&db).await? {
         SyncStatus::NeedInitialSync => {
-            println!("\n🆕 NO EXISTING INDEX FOUND");
-            println!("   Running initial sync from scratch...\n");
-            
+            info!("No existing index found - running initial sync from scratch");
+
             metrics::set_pipeline_stage("current", 1); // Stage 1: LevelDB import
             info!("Sync stage: leveldb_import");
-            
+
             // Try leveldb-based sync first (MUCH faster!)
             let final_height = match run_initial_sync_leveldb(blk_dir.clone(), Arc::clone(&db), state.clone()).await {
                 Ok(height) => {
-                    println!("✅ Leveldb-based sync succeeded! Final height: {}", height);
+                    info!(height = height, "LevelDB-based sync succeeded");
                     height
                 }
                 Err(e) => {
-                    println!("⚠️  Leveldb sync failed: {}", e);
-                    println!("⚠️  Falling back to traditional blk file scan...");
-                    
+                    warn!(error = %e, "LevelDB sync failed - falling back to traditional blk file scan");
+
                     metrics::set_pipeline_stage("current", 2); // Stage 2: Parallel blk file processing
                     info!("Sync stage: parallel_processing (fallback)");
-                    
+
                     // Fallback to traditional method
                     run_initial_sync(blk_dir.clone(), Arc::clone(&db), state.clone()).await?;
-                    
+
                     // Find final height
                     let cf_metadata = db.cf_handle("chain_metadata")
                         .ok_or("chain_metadata CF not found")?;
-                    
+
                     let mut height: i32 = 0;
                     loop {
                         let key = height.to_le_bytes().to_vec();
@@ -1144,11 +1136,11 @@ pub async fn run_sync_service(
                     height - 1
                 }
             };
-            
+
             metrics::set_indexed_height("block_index", final_height as i64);
             metrics::set_pipeline_stage("current", 3); // Stage 3: Post-sync enrichment
             info!(height = final_height, "Sync stage: enrichment");
-            
+
             // Run post-sync enrichment (addresses + transaction indexing)
             // bulk=true: part of the initial full reindex (reconstructible DB).
             run_post_sync_enrichment(&db, true).await?;
@@ -1157,50 +1149,40 @@ pub async fn run_sync_service(
             info!("Sync stage: rpc_monitoring");
 
             // Then switch to live mode
-            println!("\n🔄 Switching to live sync mode...");
+            info!("Switching to live sync mode");
             run_live_sync(blk_dir, db, state, final_height, broadcaster).await?;
         }
         SyncStatus::Synced { height } => {
-            println!("\n✅ EXISTING INDEX FOUND");
-            println!("   Database height: {}\n", height);
-            
+            info!(height = height, "Existing index found");
+
             metrics::set_indexed_height("block_index", height as i64);
-            
+
             // Get network height for comparison
             let cf_state = db.cf_handle("chain_state")
                 .ok_or("chain_state CF not found")?;
-            
+
             let network_height = match db.get_cf(&cf_state, b"network_height")? {
                 Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into().unwrap_or([0, 0, 0, 0])),
                 None => height, // Unknown, assume current
             };
-            
+
             let blocks_behind = network_height - height;
             metrics::set_blocks_behind_tip(blocks_behind as i64);
             metrics::set_chain_tip_height("rpc", network_height as i64);
-            
-            if blocks_behind <= 5 {
-                println!("🎉 ALREADY SYNCED! Only {} blocks behind", blocks_behind);
-                println!("   Startup will be INSTANT - going straight to RPC monitoring\n");
-            } else if blocks_behind <= 100 {
-                println!("⚡ NEARLY SYNCED! {} blocks behind", blocks_behind);
-                println!("   Startup will be FAST - skipping blk file scan\n");
-            } else {
-                println!("📥 CATCHING UP: {} blocks behind", blocks_behind);
-                println!("   Will process blk files for faster catchup\n");
-            }
-            
+
+            info!(height = height, network_height = network_height, blocks_behind = blocks_behind, "Sync position");
+
             metrics::set_pipeline_stage("current", 3); // Stage 3: Enrichment check
             info!(height = height, blocks_behind = blocks_behind, "Sync stage: enrichment_check");
-            
+
             // Only run enrichment if any phase is incomplete
             // The monitor handles incremental updates for new blocks
             // bulk=false: existing index on disk — keep these writes WAL-recoverable.
             run_post_sync_enrichment(&db, false).await?;
-            
+
             metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
             info!("Sync stage: rpc_monitoring");
-            
+
             // Go straight to live mode (it will decide whether to scan blk files)
             run_live_sync(blk_dir, db, state, height, broadcaster).await?;
         }

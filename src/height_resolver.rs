@@ -42,11 +42,7 @@ pub async fn resolve_heights_from_block_index(
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let wo = bulk_write_options();
     // 1. Determine PIVX data directory
-    let pivx_dir = pivx_data_dir.unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(|h| format!("{}/Library/Application Support/PIVX", h))
-            .unwrap_or_else(|_| "/Users/liquid/Library/Application Support/PIVX".to_string())
-    });
+    let pivx_dir = pivx_data_dir.unwrap_or_else(crate::config::default_pivx_data_dir);
     
     let block_index_src = format!("{}/blocks/index", pivx_dir);
     let block_index_copy = "/tmp/pivx_block_index_current";
@@ -322,22 +318,7 @@ pub async fn resolve_heights_from_block_index(
     
     // 6. Efficiently update ONLY the transactions that need fixing
     info!(count = fixed_count, "Updating transaction heights from block index");
-    
-    // DEBUG: Track specific problematic txid
-    const DEBUG_TXID: &str = "9e997ad2649b8ec1a73142a1c30c8d93c6688f96a5ae35dec72d8a087aa10621";
-    let debug_txid_bytes = hex::decode(DEBUG_TXID).ok();
-    let debug_txid_internal: Option<Vec<u8>> = debug_txid_bytes.as_ref().map(|b| {
-        b.iter().rev().cloned().collect()
-    });
-    
-    if let Some(ref dtx) = debug_txid_internal {
-        if txids_needing_fix.contains(dtx) {
-            info!(txid = DEBUG_TXID, "Problematic txid IS in txids_needing_fix set");
-        } else {
-            warn!(txid = DEBUG_TXID, "Problematic txid NOT in txids_needing_fix set");
-        }
-    }
-    
+
     let mut batch = WriteBatch::default();
     let _not_found_in_index = 0;
     
@@ -380,11 +361,6 @@ pub async fn resolve_heights_from_block_index(
                                 // CRITICAL FIX: Also fix HEIGHT_ORPHAN (-1) transactions
                                 // These may have been incorrectly marked as orphaned but have valid 'B' keys
                                 if current_height == 0 || current_height == HEIGHT_UNRESOLVED || current_height == HEIGHT_ORPHAN {
-                                    // DEBUG: Log if this is the problematic txid
-                                    if debug_txid_internal.as_ref() == Some(&txid_internal) {
-                                        info!(height, current_height, "Found problematic txid in 'B' key");
-                                    }
-                                    
                                     // Check if this height is in canonical chain
                                     if let Some(_block_hash) = height_to_blockhash.get(&(height as i64)) {
                                         // Block is in canonical chain - use its height
@@ -394,12 +370,7 @@ pub async fn resolve_heights_from_block_index(
                                         
                                         batch.put_cf(&cf_transactions, &tx_key, &new_value);
                                         updated += 1;
-                                        
-                                        // DEBUG: Log update
-                                        if debug_txid_internal.as_ref() == Some(&txid_internal) {
-                                            info!(from_height = current_height, to_height = height, "Updated problematic txid");
-                                        }
-                                        
+
                                         // Remove from set so we don't process it again
                                         txids_needing_fix.remove(&txid_internal);
                                         

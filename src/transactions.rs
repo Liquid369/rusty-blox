@@ -15,6 +15,7 @@ use std::task::{Context, Poll};
 use byteorder::{LittleEndian};
 use tokio::fs::File;
 use sha2::{Sha256, Digest};
+use tracing::{warn, debug};
 
 #[allow(dead_code)] // PIVX magic bytes - may be needed for raw block validation
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
@@ -142,7 +143,7 @@ pub async fn process_transaction(
             batch,
             fast_sync,
         ).await {
-            eprintln!("Error processing transaction (version {}): {}", tx_ver_out, e);
+            warn!(version = tx_ver_out, error = %e, "Error processing transaction");
             return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
         }
     }
@@ -308,9 +309,8 @@ async fn process_transaction_v1(
         Err(e) => {
             // EOF while reading transaction bytes - likely file truncation
             // Use a placeholder TXID and store what we have
-            eprintln!("Warning: EOF reading tx bytes at block height {:?}, tx index {}: {}", 
-                      block_height, tx_index, e);
-            eprintln!("         Using placeholder TXID. This transaction may need reindexing.");
+            warn!(height = ?block_height, tx_index = tx_index, error = %e,
+                  "EOF reading tx bytes (file truncation?); using placeholder TXID - may need reindexing");
             
             // Create a deterministic placeholder based on position
             let placeholder = format!("TRUNCATED_TX_{}_{}", 
@@ -330,8 +330,6 @@ async fn process_transaction_v1(
         lock_time: lock_time_buff,
         sapling_data: None,  // File-based indexing doesn't parse Sapling details (stored as raw bytes)
     };
-
-    //println!("Transaction ID: {:?}", hex::encode(&reversed_txid));
 
     // UTXO tracking and address indexing
     if !fast_sync {
@@ -537,7 +535,7 @@ async fn process_transaction_v1(
     match end_pos.try_into() {
         Ok(pos) => reader.seek(SeekFrom::Start(pos)).await?,
         Err(_) => {
-            eprintln!("Failed to convert end_pos, seeking to current position");
+            warn!("Failed to convert end_pos, seeking to current position");
             reader.seek(SeekFrom::Current(0)).await?
         }
     };
@@ -589,7 +587,7 @@ async fn parse_sapling_tx_data(
     let _outputs: Vec<CTxOut> = Vec::new();
     // Potential Vin Vector
     let input_count = read_varint(reader).await? as u64;
-    println!("Input Count: {}", input_count);
+    debug!(input_count = input_count, "Sapling tx input count");
 
     let mut inputs = Vec::new();
     if input_count > 0 {
@@ -608,7 +606,6 @@ async fn parse_sapling_tx_data(
     }
 
     let output_count = read_varint(reader).await? as u64;
-    //println!("Output Count: {}", output_count);
     let general_address_type = if input_count == 1 && output_count == 1 {
         AddressType::CoinBaseTx
     } else if output_count > 1 {
@@ -645,11 +642,9 @@ async fn parse_sapling_tx_data(
     }
 
     let _lock_time_buff = reader.read_u32_le().await?;
-    //println!("Lock Time: {}", lock_time_buff);
     // Hacky fix for getting proper values/spends/outputs for Sapling
     let _value_count = read_varint(reader).await?;
     let value_balance = reader.read_i64_le().await?;
-    //println!("Value: {}", value_balance);
     // Read the SaplingTxData
     let vshielded_spend = parse_vshield_spends(reader).await?;
     let vshielded_output = parse_vshield_outputs(reader).await?;
@@ -669,10 +664,7 @@ async fn parse_sapling_tx_data(
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     let end_pos: u64 = set_end_pos(reader, start_pos).await?;
     let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos).await?;
-    //println!("Tx Bytes: {:?}", hex::encode(&tx_bytes));
     let reversed_txid: Vec<u8> = hash_txid(&tx_bytes).await?;
-    //println!("Sapling TXID: {:?}", hex::encode(&reversed_txid));
-    //println!("{:?}", sapling_tx_data);
 
     // CRITICAL FIX: Store internal format (reversed bytes) not hex string
     let mut referenced_utxo_internal: Option<Vec<u8>> = None;
@@ -725,7 +717,7 @@ async fn parse_sapling_tx_data(
             reversed_txid.clone(),
             tx_out.index.try_into().unwrap_or(0),
         ).await {
-            eprintln!("Warning: Failed to handle address for output: {:?}", e);
+            warn!(error = ?e, "Failed to handle address for output");
         }
 
         let mut key_pubkey = vec![b'p'];
@@ -758,7 +750,6 @@ async fn parse_sapling_tx_data(
 async fn parse_vshield_spends(reader: &mut BufReader<File>) -> Result<Vec<SpendDescription>, io::Error> {
     // Read the number of vShieldSpend entries
     let count = read_varint(reader).await? as usize;
-    //println!("vShieldSpend Count: {}", count);
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -807,7 +798,6 @@ async fn parse_vshield_outputs(
 ) -> Result<Vec<OutputDescription>, io::Error> {
     // Read the number of vShieldOutput entries
     let count = read_varint(reader).await? as usize;
-    //println!("vShieldOutput Count: {}", count);
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1018,7 +1008,7 @@ async fn handle_address(
             key_address,
             serialize_utxos(&existing_utxos).await
         ).await {
-            eprintln!("Warning: Failed to add UTXO to address index: {:?}", e);
+            warn!(error = ?e, "Failed to add UTXO to address index");
         }
     }
 
@@ -1058,7 +1048,7 @@ async fn handle_address_outputs_only(
             key_address,
             serialize_utxos(&existing_utxos).await
         ).await {
-            eprintln!("Warning: Failed to add zerocoin UTXO to address index: {:?}", e);
+            warn!(error = ?e, "Failed to add zerocoin UTXO to address index");
         }
     }
 
@@ -1105,7 +1095,7 @@ async fn remove_utxo_addr(
                 key_address,
                 serialize_utxos(&existing_utxos).await
             ).await {
-                eprintln!("Warning: Failed to update address index after UTXO removal: {:?}", e);
+                warn!(error = ?e, "Failed to update address index after UTXO removal");
             }
         } else {
             perform_rocksdb_del(_db.clone(), "addr_index", key_address).await.ok();

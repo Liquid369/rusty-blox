@@ -375,11 +375,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         "Pass 1 complete: Spent outputs set built"
     );
     
-    // Store for comparison in Pass 2
-    let debug_txid_1 = spent_outputs.iter().take(1).next()
-        .map(|(txid, _)| hex::encode(txid))
-        .unwrap_or_default();
-    
     info!("Pass 2: Indexing outputs with spent flags");
     
     // Reset counter for pass 2

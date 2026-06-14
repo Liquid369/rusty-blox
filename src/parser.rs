@@ -4,6 +4,7 @@ use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript, SaplingTxDat
 use sha2::{Sha256, Digest};
 use ripemd160::{Ripemd160};
 use bs58;
+use tracing::warn;
 
 // Consensus limits to prevent DoS attacks via massive transactions
 // Bitcoin Core MAX_BLOCK_WEIGHT / MIN_TRANSACTION_WEIGHT = 400,000 theoretical max
@@ -78,7 +79,7 @@ pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, boo
     // CRITICAL: Validate count to prevent memory exhaustion
     // A reasonable maximum is 1 million UTXOs per address
     if count > 1_000_000 {
-        eprintln!("⚠️  Invalid UTXO count: {} (too large, data likely corrupted)", count);
+        warn!(count = count, "Invalid UTXO count (too large, data likely corrupted)");
         return utxos;
     }
     
@@ -92,7 +93,7 @@ pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, boo
         // CRITICAL: Validate txid_len before allocation to prevent memory exhaustion
         // TXID should always be 32 bytes for Bitcoin-derived chains
         if txid_len == 0 || txid_len > 64 {
-            eprintln!("⚠️  Invalid txid length: {} bytes (expected 32, data likely corrupted)", txid_len);
+            warn!(txid_len = txid_len, "Invalid txid length (expected 32, data likely corrupted)");
             break;
         }
         

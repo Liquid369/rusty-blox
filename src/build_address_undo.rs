@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use rocksdb::DB;
 use crate::address_rollback::{store_address_undo, build_address_undo_from_block};
+use tracing::{info, debug};
 
 /// Build address undo data for all blocks in the database
 /// 
@@ -26,11 +27,7 @@ pub async fn build_address_undo_for_range(
     start_height: i32,
     end_height: i32,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║      BUILDING ADDRESS UNDO DATA FOR REORGS        ║");
-    println!("╚════════════════════════════════════════════════════╝");
-    println!("  Building undo data for blocks {} to {}", start_height, end_height);
-    println!("  This enables address index rollback during reorganizations\n");
+    info!(start = start_height, end = end_height, "Building address undo data for reorg protection");
     
     let blocks_processed = (end_height - start_height + 1) as usize;
     let cf_transactions = db.cf_handle("transactions")
@@ -38,9 +35,7 @@ pub async fn build_address_undo_for_range(
     
     for height in start_height..=end_height {
         if height % 1000 == 0 {
-            println!("  Processing block {} ({:.1}% complete)", 
-                     height, 
-                     (height - start_height) as f64 / blocks_processed as f64 * 100.0);
+            debug!(height = height, progress_pct = format!("{:.1}", (height - start_height) as f64 / blocks_processed as f64 * 100.0), "Address undo build progress");
         }
         
         // Get all transactions in this block
@@ -78,8 +73,7 @@ pub async fn build_address_undo_for_range(
         }
     }
     
-    println!("\n  ✅ Address undo data built for {} blocks", blocks_processed);
-    println!("     Reorg protection is now enabled for address index\n");
+    info!(blocks = blocks_processed, "Address undo data built; reorg protection enabled");
     
     Ok(blocks_processed)
 }

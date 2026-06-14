@@ -34,26 +34,22 @@ use rocksdb::DB;
 use crate::chainstate_leveldb;
 use crate::chainstate::{aggregate_chainstate_with_coinbase_opts, AggregateOptions, parse_coins_value};
 use crate::parser::deserialize_transaction;
+use tracing::{info, debug};
 
 /// Enrich UTXO index from PIVX Core's chainstate
 /// This is the authoritative source for what UTXOs exist RIGHT NOW
 pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║      CHAINSTATE UTXO ENRICHMENT STARTING           ║");
-    println!("╚════════════════════════════════════════════════════╝");
-    println!();
+    info!("Chainstate UTXO enrichment starting");
     
     // 1. Copy chainstate from PIVX Core
-    let pivx_data_dir = std::env::var("HOME")
-        .map(|h| format!("{}/Library/Application Support/PIVX", h))
-        .unwrap_or_else(|_| "/Users/liquid/Library/Application Support/PIVX".to_string());
+    let pivx_data_dir = crate::config::get_global_config()
+        .get_string("paths.pivx_data_dir")
+        .unwrap_or_else(|_| crate::config::default_pivx_data_dir());
     
     let chainstate_src = format!("{}/chainstate", pivx_data_dir);
     let chainstate_copy = "/tmp/pivx_chainstate_current";
     
-    println!("📋 Copying chainstate from PIVX Core...");
-    println!("   Source: {}", chainstate_src);
-    println!("   Dest: {}", chainstate_copy);
+    info!(src = %chainstate_src, dst = %chainstate_copy, "Copying chainstate from PIVX Core");
     
     // Remove old copy if exists
     std::fs::remove_dir_all(chainstate_copy).ok();
@@ -68,10 +64,10 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
             String::from_utf8_lossy(&copy_result.stderr)).into());
     }
     
-    println!("✅ Chainstate copied!\n");
+    info!("Chainstate copied");
     
     // 2. Use the working aggregation function to get balances
-    println!("📖 Aggregating balances from chainstate...");
+    info!("Aggregating balances from chainstate");
     let opts = AggregateOptions {
         include_shielded: false,
         include_unknown: false,
@@ -82,21 +78,19 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
     
     let agg_result = aggregate_chainstate_with_coinbase_opts(chainstate_copy, opts)?;
     
-    println!("   Found {} addresses with balances", agg_result.balances.len());
-    println!("   Total coinbase amount: {} satoshis\n", agg_result.coinbase_total);
+    info!(addresses = agg_result.balances.len(), coinbase_sats = agg_result.coinbase_total, "Balance aggregation complete");
     
     // 3. Now read raw chainstate to get UTXO details for each address
-    println!("📖 Reading UTXO details from chainstate...");
+    info!("Reading UTXO details from chainstate");
     let chainstate_raw = chainstate_leveldb::read_chainstate_raw(chainstate_copy)?;
-    
-    println!("   Found {} UTXO entries in chainstate\n", chainstate_raw.len());
+    info!(entries = chainstate_raw.len(), "UTXO entries found in chainstate");
     
     let _cf_utxo = db.cf_handle("utxo")
         .ok_or("utxo CF not found")?;
     let cf_addr_index = db.cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
     
-    println!("📊 Building address index from chainstate UTXOs...");
+    info!("Building address index from chainstate UTXOs");
     
     // Map: address -> list of UTXOs
     let mut address_utxos: HashMap<String, Vec<(Vec<u8>, u64, u64)>> = HashMap::new();
@@ -152,17 +146,15 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
         
         processed += 1;
         if processed % 100000 == 0 {
-            println!("   Processed {} chainstate entries...", processed);
+            debug!(processed = processed, "Chainstate entries processed");
         }
     }
-    
-    println!("\n✅ Chainstate processing complete!");
-    println!("   {} UTXO entries processed", processed);
-    println!("   {} unique addresses found", address_utxos.len());
-    println!("   {} entries skipped (unparseable)", skipped_no_script);
-    
+
+    info!(processed = processed, addresses = address_utxos.len(), skipped = skipped_no_script,
+          "Chainstate processing complete");
+
     // 4. Write UTXO index to database
-    println!("\n📝 Writing UTXO index to database...");
+    info!("Writing UTXO index to database");
     
     let mut batch = rocksdb::WriteBatch::default();
     let mut written = 0;
@@ -197,10 +189,10 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
         db.write(batch)?;
     }
     
-    println!("✅ {} addresses indexed with current UTXOs", written);
-    
+    info!(written = written, "Addresses indexed with current UTXOs");
+
     // 5. Build transaction list ('t' prefix) - all txs involving each address
-    println!("\n📊 Building transaction lists for addresses...");
+    info!("Building transaction lists for addresses");
     
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
@@ -299,14 +291,14 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
         
         tx_count += 1;
         if tx_count % 100000 == 0 {
-            println!("   Scanned {} transactions...", tx_count);
+            debug!(tx_count = tx_count, "Transactions scanned for address lists");
         }
     }
-    
-    println!("✅ Transaction lists built for {} addresses", address_txs.len());
-    
+
+    info!(addresses = address_txs.len(), "Transaction lists built");
+
     // Write transaction lists to database
-    println!("\n📝 Writing transaction lists to database...");
+    info!("Writing transaction lists to database");
     
     let mut batch = rocksdb::WriteBatch::default();
     let mut tx_list_written = 0;
@@ -337,22 +329,15 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
         db.write(batch)?;
     }
     
-    println!("✅ {} transaction lists written", tx_list_written);
+    info!(written = tx_list_written, "Transaction lists written");
     
     // Mark enrichment as complete
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     db.put_cf(&cf_state, b"address_index_complete", b"1")?;
     
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║    🎉 CHAINSTATE ENRICHMENT COMPLETE 🎉            ║");
-    println!("╚════════════════════════════════════════════════════╝");
-    println!();
-    println!("📊 Summary:");
-    println!("   {} addresses with current UTXOs (from chainstate)", address_utxos.len());
-    println!("   {} addresses with transaction history", tx_list_written);
-    println!("   All balances now match PIVX Core exactly!");
-    println!();
+    info!(utxo_addresses = address_utxos.len(), tx_history_addresses = tx_list_written,
+          "Chainstate enrichment complete - balances match PIVX Core");
     
     Ok(())
 }

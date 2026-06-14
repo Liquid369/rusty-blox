@@ -97,7 +97,11 @@ pub fn init_tracing(config: TelemetryConfig) -> Result<(), Box<dyn std::error::E
         // Keep guard alive (otherwise logs won't flush)
         std::mem::forget(_guard);
     } else {
-        // Console-only logging
+        // Console-only logging. Wrap stdout in a non-blocking writer (same as the
+        // file branch) so a burst of log lines can never stall the hot sync path on
+        // a slow/blocking terminal — the default deployment has no log file set.
+        let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+
         if config.log_format == "json" {
             tracing_subscriber::registry()
                 .with(env_filter)
@@ -106,6 +110,7 @@ pub fn init_tracing(config: TelemetryConfig) -> Result<(), Box<dyn std::error::E
                         .json()
                         .with_current_span(true)
                         .with_span_list(true)
+                        .with_writer(non_blocking)
                 )
                 .init();
         } else {
@@ -117,9 +122,13 @@ pub fn init_tracing(config: TelemetryConfig) -> Result<(), Box<dyn std::error::E
                         .with_thread_ids(false)
                         .with_file(true)
                         .with_line_number(true)
+                        .with_writer(non_blocking)
                 )
                 .init();
         }
+
+        // Keep guard alive (otherwise logs won't flush)
+        std::mem::forget(_guard);
     }
     
     Ok(())

@@ -60,6 +60,7 @@ use rocksdb::DB;
 use crate::parser::{deserialize_transaction, serialize_utxos, deserialize_utxos};
 use crate::atomic_writer::AtomicBatchWriter;
 use serde::{Serialize, Deserialize};
+use tracing::{info, warn, debug};
 
 /// Tracks address index changes for a single block
 /// This enables efficient rollback without re-scanning the entire chain
@@ -330,14 +331,14 @@ pub async fn rollback_address_index(
     current_height: i32,
     rollback_to_height: i32,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    println!("  📍 Rolling back address index from {} to {}", current_height, rollback_to_height);
+    info!(from = current_height, to = rollback_to_height, "Rolling back address index");
     
     let blocks_to_remove = (current_height - rollback_to_height) as usize;
     
     // Process each block in reverse order
     for height in ((rollback_to_height + 1)..=current_height).rev() {
         if height % 1000 == 0 {
-            println!("    Reversing address index for block {}", height);
+            debug!(height = height, "Reversing address index");
         }
         
         // Load undo data for this block
@@ -354,13 +355,13 @@ pub async fn rollback_address_index(
         } else {
             // No undo data - this is expected for blocks indexed before undo tracking
             // In this case, we'll need to rebuild from scratch
-            println!("    ⚠️  No address undo data for block {} - full rebuild may be required", height);
+            warn!(height = height, "No address undo data for block - full rebuild may be required");
         }
     }
     
     // Note: Final flush removed - caller is responsible for flushing shared writer
     
-    println!("  ✅ Address index rollback complete");
+    info!(blocks_removed = blocks_to_remove, "Address index rollback complete");
     
     Ok(blocks_to_remove)
 }

@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use tracing::{info, warn, debug};
 
 /// Error type for chainstate parsing
 #[derive(Debug)]
@@ -413,13 +414,16 @@ pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String
                         }
                         None => {
                             no_address_count += 1;
-                            
-                            // Log non-standard scripts for investigation
+
+                            // Non-standard scripts (zerocoin mints, cold-stake/exchange
+                            // variants, OP_RETURN) are common and run once per chainstate
+                            // UTXO (~17M), so this is debug-only detail — the aggregate
+                            // `no_address` count is logged once in the summary below.
                             if output.amount > 0 {
-                                eprintln!("Warning: Could not extract address from script (amount: {} sats, txid prefix: {}...): {}",
-                                         output.amount,
-                                         &k_hex[..8],
-                                         hex::encode(&output.script_pubkey[..output.script_pubkey.len().min(20)]));
+                                debug!(amount_sats = output.amount,
+                                       txid_prefix = &k_hex[..8],
+                                       script = %hex::encode(&output.script_pubkey[..output.script_pubkey.len().min(20)]),
+                                       "Could not extract address from script");
                             }
                         }
                     }
@@ -427,23 +431,25 @@ pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String
             }
             Err(e) => {
                 parse_errors += 1;
-                
+
                 if parse_errors <= 10 {
-                    eprintln!("Failed to parse CCoins for key {}...: {}", &k_hex[..16], e);
+                    warn!(key_prefix = &k_hex[..16], error = %e, "Failed to parse CCoins entry");
                 }
             }
         }
     }
     
-    println!("\n📊 Chainstate Aggregation Results:");
-    println!("   Total entries processed:  {}", raw_map.len());
-    println!("   Total UTXOs decoded:      {}", total_utxos);
-    println!("   Addresses with balance:   {}", balances.len());
-    println!("   Parse errors:             {}", parse_errors);
-    println!("   Scripts without address:  {}", no_address_count);
-    
+    info!(
+        entries = raw_map.len(),
+        utxos = total_utxos,
+        addresses = balances.len(),
+        parse_errors = parse_errors,
+        no_address = no_address_count,
+        "Chainstate aggregation complete"
+    );
+
     if parse_errors > 0 {
-        eprintln!("\n⚠️  {} parse errors encountered (showing first 10)", parse_errors);
+        warn!(parse_errors = parse_errors, "Parse errors encountered (first 10 logged above)");
     }
     
     balances

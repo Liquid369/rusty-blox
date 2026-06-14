@@ -2,6 +2,7 @@ use std::sync::Arc;
 use rocksdb::DB;
 use num_bigint::BigUint;
 use num_traits::{One, Zero};
+use tracing::{info, debug};
 
 /// Calculate the work (difficulty) represented by a compact target (nBits)
 /// 
@@ -94,7 +95,7 @@ pub fn calculate_all_chainwork(
 
     // `blocks_map` already holds (prev_hash, n_bits) per block, so we reference it
     // directly instead of materialising separate parent_map + bits_map copies.
-    println!("📊 Calculating chainwork for {} blocks...", blocks_map.len());
+    info!(blocks = blocks_map.len(), "Calculating chainwork for all blocks");
 
     // Find all genesis blocks (blocks with all-zero prev_hash)
     let mut queue: VecDeque<[u8; 32]> = VecDeque::new();
@@ -107,7 +108,7 @@ pub fn calculate_all_chainwork(
         }
     }
 
-    println!("  Found {} genesis block(s)", queue.len());
+    debug!(count = queue.len(), "Genesis blocks found");
 
     // Build children map for forward traversal
     let mut children_map: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
@@ -144,14 +145,14 @@ pub fn calculate_all_chainwork(
                     
                     processed += 1;
                     if processed % 100000 == 0 {
-                        println!("    Calculated chainwork for {} blocks...", processed);
+                        debug!(processed = processed, "Chainwork calculation progress");
                     }
                 }
             }
         }
     }
     
-    println!("✅ Chainwork calculated for {} blocks", chainwork_map.len());
+    info!(blocks = chainwork_map.len(), "Chainwork calculation complete");
     
     Ok(chainwork_map)
 }
