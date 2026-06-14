@@ -4,7 +4,7 @@ use rocksdb::DB;
 use tokio::sync::Semaphore;
 use crate::types::AppState;
 use crate::blocks::process_blk_file;
-use crate::db_utils::save_file_as_incomplete;
+use crate::db_utils::{save_file_as_incomplete, bulk_write_options};
 use crate::chain_state::set_sync_height;
 use crate::chainwork::calculate_all_chainwork;
 use crate::sync::validate_canonical_metadata_complete;
@@ -98,11 +98,17 @@ fn find_max_descendant_chainwork(
 /// - Uses tokio tasks with semaphore to limit concurrent processing
 /// - Each file is processed on the tokio runtime
 /// - Database writes are batched within each file processor
+/// `bulk` selects the per-block write durability mode passed down to
+/// `process_blk_file`: `true` on the initial full reindex (WAL disabled — the
+/// DB is reconstructible from the `.blk` files), `false` on the live/RPC
+/// catch-up path (WAL kept so a crash stays recoverable). It changes durability
+/// only, never the bytes written.
 pub async fn process_files_parallel(
     entries: Vec<PathBuf>,
     db_arc: Arc<DB>,
     state: AppState,
     max_concurrent: usize,
+    bulk: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _span = info_span!("parallel_processing",
         file_count = %"calculating",
@@ -210,7 +216,7 @@ pub async fn process_files_parallel(
                 };
                 
                 // Process file (this is async but not Send, so we run it directly)
-                if let Err(e) = process_blk_file(st, file_path.clone(), db.clone()).await {
+                if let Err(e) = process_blk_file(st, file_path.clone(), db.clone(), bulk).await {
                     warn!(file = %file_path.display(), error = %e, "Failed to process blk file");
                     let _ = save_file_as_incomplete(&db, &file_path).await;
                 }
@@ -266,12 +272,12 @@ pub async fn process_files_parallel(
     if has_canonical_metadata {
         info!(height_mappings = height_key_count, "Canonical chain metadata exists (from leveldb) - extending with new blocks");
         // CRITICAL: Always resolve to pick up new blocks beyond the leveldb import
-        resolve_block_heights(&db_arc).await?;
+        resolve_block_heights(&db_arc, bulk).await?;
         info!("Chain resolution complete (extended with new blocks)");
     } else {
         // FALLBACK: Only resolve if no canonical metadata exists
         info!("No leveldb metadata found - building chain from blk files");
-        resolve_block_heights(&db_arc).await?;
+        resolve_block_heights(&db_arc, bulk).await?;
         info!("Chain building complete");
     }
     
@@ -287,7 +293,11 @@ pub async fn process_files_parallel(
 /// Resolve block heights by following the blockchain from genesis
 /// Optimized O(n) version using hash map for instant lookups
 /// Now with RPC validation at checkpoints to ensure we follow the canonical chain
-async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `bulk` selects the write durability for the height/hash metadata written
+/// here: `true` disables the WAL on the initial reindex path (reconstructible
+/// DB), `false` keeps it for the live/RPC catch-up path. Bytes are identical.
+async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
     
     let cf_blocks = db.cf_handle("blocks")
@@ -555,7 +565,10 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
     chain_path.reverse();
     
     let start_idx = if reached_genesis && chain_path[0] == genesis_parent { 1 } else { 0 };
-    
+
+    // On the initial reindex these per-block metadata writes are pure WAL fsync
+    // overhead; disable the WAL on the bulk path (kept on for live catch-up).
+    let wo = bulk_write_options();
     for (idx, block_hash) in chain_path[start_idx..].iter().enumerate() {
         let height = if reached_genesis {
             idx as i32
@@ -564,15 +577,23 @@ async fn resolve_block_heights(db: &Arc<DB>) -> Result<(), Box<dyn std::error::E
             // highest_height is guaranteed to be present here (check above)
             highest_height - (chain_path.len() - start_idx - 1 - idx) as i32
         };
-        
+
         // Store hash -> height mapping
         let mut h_key = vec![b'h'];
         h_key.extend_from_slice(block_hash);
-        db.put_cf(&cf_metadata, &h_key, height.to_le_bytes())?;
-        
+        if bulk {
+            db.put_cf_opt(&cf_metadata, &h_key, height.to_le_bytes(), &wo)?;
+        } else {
+            db.put_cf(&cf_metadata, &h_key, height.to_le_bytes())?;
+        }
+
         // Store height -> hash mapping (in DISPLAY format)
         let display_hash: Vec<u8> = block_hash.iter().rev().cloned().collect();
-        db.put_cf(&cf_metadata, height.to_le_bytes(), &display_hash)?;
+        if bulk {
+            db.put_cf_opt(&cf_metadata, height.to_le_bytes(), &display_hash, &wo)?;
+        } else {
+            db.put_cf(&cf_metadata, height.to_le_bytes(), &display_hash)?;
+        }
     }
     
     let chain_height = if reached_genesis {

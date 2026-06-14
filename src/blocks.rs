@@ -227,7 +227,14 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
     }
 }
 
-pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Process a single blk*.dat file.
+///
+/// `bulk` selects the write durability mode: `true` on the initial full reindex
+/// (WAL disabled — the DB is fully reconstructible from the `.blk` files, so the
+/// WAL is pure fsync overhead), `false` on the live/RPC catch-up path (WAL kept
+/// so a crash stays recoverable). It only affects durability, never the bytes
+/// written.
+pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let file_path_ref = file_path.as_ref();
     info!(file = %file_path_ref.display(), "Processing block file");
     
@@ -256,7 +263,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     let mut skipped_count = 0;
     
     // Create batch writer for transaction data
-    let mut tx_batch = BatchWriter::new(db.clone(), TX_BATCH_SIZE);
+    let mut tx_batch = BatchWriter::new_with_bulk(db.clone(), TX_BATCH_SIZE, bulk);
     
     let mut size_buffer = [0u8; 4];
     let mut magic_bytes = [0u8; 4];
@@ -614,7 +621,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         
         // Write batch when it reaches the target size
         if batch_items.len() >= BATCH_SIZE * 2 {
-            batch_put_cf(db.clone(), "blocks", batch_items.clone()).await?;
+            batch_put_cf(db.clone(), "blocks", batch_items.clone(), bulk).await?;
             batch_items.clear();
         }
         
@@ -685,7 +692,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     
     // Write any remaining items
     if !batch_items.is_empty() {
-        batch_put_cf(db.clone(), "blocks", batch_items).await?;
+        batch_put_cf(db.clone(), "blocks", batch_items, bulk).await?;
     }
     
     // Flush any remaining transaction batch writes

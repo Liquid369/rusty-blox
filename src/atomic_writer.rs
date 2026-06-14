@@ -20,12 +20,16 @@ use std::collections::HashMap;
 use rocksdb::{DB, WriteBatch};
 use tracing::{debug, warn, error, info};
 use crate::metrics;
+use crate::db_utils::bulk_write_options;
 
 /// Atomic batch writer that commits writes across multiple column families atomically
 pub struct AtomicBatchWriter {
     db: Arc<DB>,
     operations: Vec<Operation>,
     batch_size_limit: usize,
+    /// When true, flushes use disable_wal (initial bulk-reindex path only).
+    /// Default is false so the live/RPC path stays WAL-recoverable.
+    disable_wal: bool,
 }
 
 /// Represents a single database operation
@@ -53,7 +57,19 @@ impl AtomicBatchWriter {
             db,
             operations: Vec::new(),
             batch_size_limit,
+            disable_wal: false,
         }
+    }
+
+    /// Enable/disable the WAL for this writer's flushes.
+    ///
+    /// Only set `true` on the initial bulk-reindex path: a crash there is
+    /// recoverable by re-scanning the `.blk` files, so the WAL is pure fsync
+    /// overhead. The live/RPC catch-up path must leave this `false` so a crash
+    /// stays WAL-recoverable. This toggles durability only — the bytes written
+    /// are identical either way.
+    pub fn set_disable_wal(&mut self, disable_wal: bool) {
+        self.disable_wal = disable_wal;
     }
 
     /// Add a put operation to the batch
@@ -113,8 +129,9 @@ impl AtomicBatchWriter {
         // Move operations out to process
         let operations = std::mem::take(&mut self.operations);
         let db = self.db.clone();
+        let disable_wal = self.disable_wal;
 
-        // Perform atomic commit in blocking task  
+        // Perform atomic commit in blocking task
         let task_result = tokio::task::spawn_blocking(move || -> (Result<(), String>, HashMap<String, usize>) {
             // Create single WriteBatch for ALL operations across ALL CFs
             let mut batch = WriteBatch::default();
@@ -159,9 +176,15 @@ impl AtomicBatchWriter {
             }
 
             // CRITICAL: Single atomic commit for ALL column families
-            // Either everything succeeds, or nothing does
-            let write_result = db.write(batch)
-                .map_err(|e| e.to_string());
+            // Either everything succeeds, or nothing does.
+            // On the bulk-reindex path the WAL is disabled (pure fsync overhead
+            // on a fully-reconstructible DB); the live path keeps the WAL.
+            let write_result = if disable_wal {
+                db.write_opt(batch, &bulk_write_options())
+            } else {
+                db.write(batch)
+            }
+            .map_err(|e| e.to_string());
             
             // Return both the result and metadata regardless of success/failure
             (write_result, cf_batch_sizes)

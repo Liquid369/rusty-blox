@@ -6,12 +6,23 @@
 /// This eliminates the need for the "repair" phase and ensures orphaned transactions
 /// are identified using Core's canonical chain data.
 
-use rocksdb::{DB, WriteBatch, IteratorMode};
+use rocksdb::{DB, WriteBatch, WriteOptions, IteratorMode};
 use std::sync::Arc;
 use std::collections::{HashSet, HashMap};
 use tracing::{error, warn, info};
 use crate::leveldb_index::build_canonical_chain_from_leveldb;
 use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
+use crate::db_utils::bulk_write_options;
+
+/// Commit a height-resolution WriteBatch, honoring the bulk durability mode.
+/// `bulk` disables the WAL (initial reindex only); otherwise the WAL is kept.
+fn commit_batch(db: &DB, batch: WriteBatch, wo: &WriteOptions, bulk: bool) -> Result<(), rocksdb::Error> {
+    if bulk {
+        db.write_opt(batch, wo)
+    } else {
+        db.write(batch)
+    }
+}
 
 /// Resolve all transaction heights using PIVX Core's block index
 /// 
@@ -20,10 +31,16 @@ use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 /// - Transactions in non-canonical blocks get marked as orphaned (HEIGHT_ORPHAN)
 /// 
 /// Returns (fixed_count, orphaned_count)
+/// `bulk` selects the write durability for the height-fix batches below: `true`
+/// disables the WAL on the initial full-reindex path (the DB is reconstructible
+/// from Core's block index), `false` keeps the WAL on the live/catch-up path so
+/// a crash stays recoverable. The bytes written are identical either way.
 pub async fn resolve_heights_from_block_index(
     db: Arc<DB>,
     pivx_data_dir: Option<String>,
+    bulk: bool,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let wo = bulk_write_options();
     // 1. Determine PIVX data directory
     let pivx_dir = pivx_data_dir.unwrap_or_else(|| {
         std::env::var("HOME")
@@ -198,7 +215,7 @@ pub async fn resolve_heights_from_block_index(
                     orphaned_txids_from_validation.push(txid_internal.clone());
                     
                     if validated_orphaned % BATCH_SIZE == 0 {
-                        db.write(validated_batch)?;
+                        commit_batch(&db, validated_batch, &wo, bulk)?;
                         validated_batch = WriteBatch::default();
                     }
                 }
@@ -217,7 +234,7 @@ pub async fn resolve_heights_from_block_index(
         
         // Write final validation batch
         if !validated_batch.is_empty() {
-            db.write(validated_batch)?;
+            commit_batch(&db, validated_batch, &wo, bulk)?;
         }
         
         info!(orphaned = validated_orphaned, "Marked transactions with non-canonical heights as orphaned");
@@ -322,7 +339,7 @@ pub async fn resolve_heights_from_block_index(
                                         txids_needing_fix.remove(&txid_internal);
                                         
                                         if updated % BATCH_SIZE == 0 {
-                                            db.write(batch)?;
+                                            commit_batch(&db, batch, &wo, bulk)?;
                                             batch = WriteBatch::default();
 
                                         }
@@ -339,7 +356,7 @@ pub async fn resolve_heights_from_block_index(
                                         txids_needing_fix.remove(&txid_internal);
                                         
                                         if (updated + newly_orphaned) % BATCH_SIZE == 0 {
-                                            db.write(batch)?;
+                                            commit_batch(&db, batch, &wo, bulk)?;
                                             batch = WriteBatch::default();
                                         }
                                     }
@@ -358,9 +375,9 @@ pub async fn resolve_heights_from_block_index(
     
     // Write final batch
     if !batch.is_empty() {
-        db.write(batch)?;
+        commit_batch(&db, batch, &wo, bulk)?;
     }
-    
+
     // Mark any remaining transactions (not found in block index) as orphaned
     let mut all_orphaned_txids: Vec<Vec<u8>> = Vec::new();
     
@@ -394,7 +411,7 @@ pub async fn resolve_heights_from_block_index(
                         all_orphaned_txids.push(txid_internal.clone());
                         
                         if marked_orphan % BATCH_SIZE == 0 {
-                            db.write(orphan_batch)?;
+                            commit_batch(&db, orphan_batch, &wo, bulk)?;
                             orphan_batch = WriteBatch::default();
                         }
                     }
@@ -403,9 +420,9 @@ pub async fn resolve_heights_from_block_index(
         }
         
         if !orphan_batch.is_empty() {
-            db.write(orphan_batch)?;
+            commit_batch(&db, orphan_batch, &wo, bulk)?;
         }
-        
+
         newly_orphaned += marked_orphan;
         info!(marked = marked_orphan, "Marked additional transactions as HEIGHT_ORPHAN");
     }

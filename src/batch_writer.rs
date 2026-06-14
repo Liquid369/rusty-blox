@@ -18,6 +18,18 @@ impl BatchWriter {
         }
     }
 
+    /// Construct a batch writer for a given durability mode.
+    ///
+    /// Pass `bulk = true` only on the initial full-reindex path (disables the
+    /// WAL — the DB is reconstructible from the `.blk` files). Pass `false` on
+    /// the live/RPC catch-up path so writes stay WAL-recoverable. Bytes written
+    /// are identical regardless.
+    pub fn new_with_bulk(db: Arc<DB>, batch_size_limit: usize, bulk: bool) -> Self {
+        let mut atomic_writer = AtomicBatchWriter::new(db, batch_size_limit);
+        atomic_writer.set_disable_wal(bulk);
+        Self { atomic_writer }
+    }
+
     /// Add a put operation to the batch
     pub fn put(&mut self, cf_name: &str, key: Vec<u8>, value: Vec<u8>) {
         self.atomic_writer.put(cf_name, key, value);

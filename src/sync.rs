@@ -355,22 +355,29 @@ async fn run_initial_sync_leveldb(
     // This will guide the parallel block processor to know which blocks to index
     
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-    
+
     let mut offsets_stored = 0;
     let mut offsets_missing = 0;
-    
+
+    // Initial full reindex: this writeback is reconstructible from Core's LevelDB,
+    // so the WAL is pure fsync overhead. Batch the 3-puts-per-block into a single
+    // WriteBatch flushed every 50k entries (same pattern as
+    // refresh_canonical_metadata) and write with the WAL disabled. The keys and
+    // values written are byte-for-byte identical to the previous per-put loop.
+    let wo = crate::db_utils::bulk_write_options();
+    let mut batch = rocksdb::WriteBatch::default();
     for (height, hash, opt_file, opt_pos) in &canonical_chain {
         let height_key = (*height as i32).to_le_bytes();
         // Store reversed hash (display format) for consistency with existing code
         let mut display_hash = hash.clone();
         display_hash.reverse();
-        db.put_cf(&cf_metadata, height_key, &display_hash)?;
-        
+        batch.put_cf(&cf_metadata, height_key, &display_hash);
+
         // ALSO store the reverse mapping: 'h' + internal_hash → height
         // This allows blk file processing to look up heights efficiently
         let mut hash_key = vec![b'h'];
         hash_key.extend_from_slice(hash);  // Internal format (not reversed)
-        db.put_cf(&cf_metadata, &hash_key, height_key)?;
+        batch.put_cf(&cf_metadata, &hash_key, height_key);
 
         // If the leveldb index provided blk file number and data position, store it
         if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
@@ -379,13 +386,20 @@ async fn run_initial_sync_leveldb(
             let mut buf = Vec::with_capacity(12);
             buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
             buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
-            db.put_cf(&cf_metadata, &off_key, &buf)?;
+            batch.put_cf(&cf_metadata, &off_key, &buf);
             offsets_stored += 1;
         } else {
             offsets_missing += 1;
         }
+
+        if batch.len() >= 50_000 {
+            db.write_opt(std::mem::take(&mut batch), &wo)?;
+        }
     }
-    
+    if !batch.is_empty() {
+        db.write_opt(batch, &wo)?;
+    }
+
     info!(
         total_blocks = canonical_chain.len(),
         offsets_stored,
@@ -426,8 +440,9 @@ async fn run_initial_sync_leveldb(
     
     // Process files in parallel (this will index all blocks, including orphans)
     // The chainwork calculation later will determine which ones are canonical
-    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
-    
+    // bulk=true: initial full reindex, DB reconstructible from .blk → WAL disabled.
+    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true).await?;
+
     let final_height = (chain_len - 1) as i32;
     
     let elapsed_secs = std::time::SystemTime::now()
@@ -436,11 +451,39 @@ async fn run_initial_sync_leveldb(
         .as_secs();
     
     info!(
-        final_height = final_height, 
+        final_height = final_height,
         canonical_blocks = chain_len,
         "Leveldb import complete - switching to RPC mode"
     );
-    
+
+    // DURABILITY: the bulk-ingest writes above ran with the WAL disabled, so
+    // their data lives only in RocksDB memtables until a memtable flush or
+    // compaction. Force a flush of every column family the bulk path wrote to
+    // NOW, BEFORE the DB is marked synced and before we switch to live/RPC mode.
+    // (RocksDB's `flush()` only flushes the default CF, so we flush each named
+    // CF explicitly.) This makes the bulk-imported state durable on disk so a
+    // later crash in live mode (which keeps the WAL) starts from a consistent,
+    // persisted base instead of losing un-flushed memtable contents.
+    {
+        let db_flush = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            // CFs touched by the WAL-disabled bulk path: block headers, tx data,
+            // and the canonical chain metadata (height/hash/offset mappings).
+            for cf_name in ["blocks", "transactions", "chain_metadata"] {
+                if let Some(cf) = db_flush.cf_handle(cf_name) {
+                    db_flush.flush_cf(&cf).map_err(|e| format!("{}: {}", cf_name, e))?;
+                }
+            }
+            // Default CF (and any others) for completeness.
+            db_flush.flush().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    }
+    info!("Flushed all memtables to disk after bulk import (WAL-disabled writes now durable)");
+
     // Mark sync complete
     set_sync_height(&db, final_height).await?;
     
@@ -479,8 +522,9 @@ async fn run_initial_sync(
     }
     
     // Process files in parallel
-    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
-    
+    // bulk=true: this is the initial-sync fallback (from-scratch reindex).
+    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true).await?;
+
     // Find highest block height
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
@@ -500,15 +544,39 @@ async fn run_initial_sync(
     }
     
     let final_height = height - 1;
+
+    // DURABILITY: the bulk path ran WAL-disabled; flush memtables to disk before
+    // marking the DB synced so the imported state survives a later crash.
+    {
+        let db_flush = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            for cf_name in ["blocks", "transactions", "chain_metadata"] {
+                if let Some(cf) = db_flush.cf_handle(cf_name) {
+                    db_flush.flush_cf(&cf).map_err(|e| format!("{}: {}", cf_name, e))?;
+                }
+            }
+            db_flush.flush().map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
+        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+    }
+
     // Mark sync complete
     set_sync_height(&db, final_height).await?;
-    
+
     Ok(())
 }
 
 /// Run post-sync enrichment: address indexing + transaction reconciliation
 /// This runs after blockchain sync to ensure all explorer data is available
-async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `bulk` is `true` only when this runs as part of the initial full reindex
+/// (the DB is reconstructible, so the WAL-heavy height-resolution writeback can
+/// run with the WAL disabled). On the live / existing-index / catch-up paths it
+/// is `false` so those writes stay WAL-recoverable.
+async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = get_global_config();
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
@@ -561,8 +629,8 @@ async fn run_post_sync_enrichment(db: &Arc<DB>) -> Result<(), Box<dyn std::error
             info!("Resolving transaction heights from PIVX Core block index");
             
             use crate::height_resolver::resolve_heights_from_block_index;
-            
-            match resolve_heights_from_block_index(Arc::clone(db), None).await {
+
+            match resolve_heights_from_block_index(Arc::clone(db), None, bulk).await {
                 Ok((fixed, orphaned)) => {
                     info!(
                         fixed_heights = fixed,
@@ -881,7 +949,9 @@ async fn run_live_sync(
         
         if !entries.is_empty() {
             println!("Processing {} blk*.dat files in parallel...", entries.len());
-            process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent).await?;
+            // bulk=false: live/RPC catch-up on an already-synced DB — a crash here
+            // must be WAL-recoverable, so the WAL stays enabled for these writes.
+            process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, false).await?;
 
             println!("✅ Finished processing blk*.dat files!");
 
@@ -894,7 +964,8 @@ async fn run_live_sync(
             db.delete_cf(&cf_state, b"height_resolution_complete")?;
             db.delete_cf(&cf_state, b"address_index_complete")?;
             db.delete_cf(&cf_state, b"tx_block_index_complete")?;
-            run_post_sync_enrichment(&db).await?;
+            // bulk=false: live/RPC catch-up re-enrichment on an already-synced DB.
+            run_post_sync_enrichment(&db, false).await?;
         }
     } else {
         println!("\n🚀 Only {} blocks behind - skipping blk file scan (INSTANT startup!)", blocks_behind);
@@ -1027,11 +1098,12 @@ pub async fn run_sync_service(
             info!(height = final_height, "Sync stage: enrichment");
             
             // Run post-sync enrichment (addresses + transaction indexing)
-            run_post_sync_enrichment(&db).await?;
-            
+            // bulk=true: part of the initial full reindex (reconstructible DB).
+            run_post_sync_enrichment(&db, true).await?;
+
             metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
             info!("Sync stage: rpc_monitoring");
-            
+
             // Then switch to live mode
             println!("\n🔄 Switching to live sync mode...");
             run_live_sync(blk_dir, db, state, final_height, broadcaster).await?;
@@ -1071,7 +1143,8 @@ pub async fn run_sync_service(
             
             // Only run enrichment if any phase is incomplete
             // The monitor handles incremental updates for new blocks
-            run_post_sync_enrichment(&db).await?;
+            // bulk=false: existing index on disk — keep these writes WAL-recoverable.
+            run_post_sync_enrichment(&db, false).await?;
             
             metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
             info!("Sync stage: rpc_monitoring");
