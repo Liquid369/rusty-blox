@@ -576,6 +576,45 @@ async fn run_initial_sync(
 /// (the DB is reconstructible, so the WAL-heavy height-resolution writeback can
 /// run with the WAL disabled). On the live / existing-index / catch-up paths it
 /// is `false` so those writes stay WAL-recoverable.
+/// Hand freed-but-retained jemalloc pages back to the OS.
+///
+/// The block-parse and height-resolution phases allocate and free several GB of
+/// short-lived maps (the leveldb index, children/chainwork maps over ~5.5M
+/// blocks). Those are dropped by Rust before enrichment runs, but jemalloc keeps
+/// the freed pages in its arenas by default, so they stay resident and stack on
+/// top of enrichment's own ~6.8GB footprint (full-sync peak ~9.6GB). A one-shot
+/// epoch advance + arena purge at the phase boundary returns them, dropping the
+/// peak toward enrichment's standalone footprint. Purging only releases memory
+/// that is already freed — it never touches live allocations, correctness, or
+/// any persisted DB byte.
+fn purge_jemalloc() {
+    use std::ffi::CString;
+    use std::os::raw::c_void;
+    unsafe {
+        // Refresh jemalloc's epoch so the purge sees the latest deallocations.
+        let mut epoch: u64 = 1;
+        if let Ok(name) = CString::new("epoch") {
+            let _ = tikv_jemalloc_sys::mallctl(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut epoch as *mut u64 as *mut c_void,
+                std::mem::size_of::<u64>(),
+            );
+        }
+        // Force every arena (MALLCTL_ARENAS_ALL == 4096) to release unused pages.
+        if let Ok(name) = CString::new("arena.4096.purge") {
+            let _ = tikv_jemalloc_sys::mallctl(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+    }
+}
+
 async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = get_global_config();
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
@@ -585,7 +624,13 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
     let use_block_index = config.get_bool("sync.use_block_index_for_heights").unwrap_or(true);
     
     info!("Starting post-sync data enrichment");
-    
+
+    // Return the block-parse phase's freed-but-retained pages to the OS before
+    // the resolve + enrich phases allocate, so their peaks don't stack on it.
+    if bulk {
+        purge_jemalloc();
+    }
+
     // Check what enrichment steps have been completed
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
@@ -653,6 +698,13 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
         info!("Height resolution disabled - will use repair phase instead");
     }
     
+    // Purge again after height-resolution: its maps (txid sets, chainwork,
+    // height->blockhash) are now freed but still arena-retained, and would
+    // otherwise stack on enrichment's footprint — the full-sync peak.
+    if bulk {
+        purge_jemalloc();
+    }
+
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
         if use_chainstate {
