@@ -47,8 +47,11 @@
                 <span class="io-vout">[{{ input.vout }}]</span>
               </div>
             </div>
-            <div v-if="input.value" class="io-value">
-              {{ formatPIV(input.value) }} PIV
+            <div v-if="input.value" class="io-value-row">
+              <span class="io-value">{{ formatPIV(input.value) }} PIV</span>
+              <span v-if="showFiat" class="io-fiat">
+                ≈ {{ formatAmount(pivFromSats(input.value), { showPIV: false }) }}
+              </span>
             </div>
           </div>
         </div>
@@ -95,9 +98,28 @@
               <div v-if="isColdStakeOutput(output)" class="io-coldstake">
                 <Badge variant="accent" size="sm">Cold-Stake (P2CS)</Badge>
               </div>
+              <div v-if="hasSpentStatus(output)" class="io-spent">
+                <router-link
+                  v-if="output.spent && output.spentTxId"
+                  :to="`/tx/${output.spentTxId}`"
+                  class="io-spent-link"
+                >
+                  <Badge variant="danger" size="sm">Spent →</Badge>
+                </router-link>
+                <Badge
+                  v-else
+                  :variant="output.spent ? 'danger' : 'success'"
+                  size="sm"
+                >
+                  {{ output.spent ? 'Spent' : 'Unspent' }}
+                </Badge>
+              </div>
             </div>
             <div class="io-value-row">
               <span class="io-value">{{ formatPIV(output.value) }} PIV</span>
+              <span v-if="showFiat" class="io-fiat">
+                ≈ {{ formatAmount(pivFromSats(output.value), { showPIV: false }) }}
+              </span>
               <span v-if="outputShare(output) !== null" class="io-share">
                 {{ outputShare(output) }}% of outputs
               </span>
@@ -110,7 +132,12 @@
 
   <div v-if="fees" class="io-fees">
     <InfoRow label="Transaction Fee">
-      <span class="fee-amount">{{ formatPIV(fees) }} PIV</span>
+      <div class="io-fee-group">
+        <span class="fee-amount">{{ formatPIV(fees) }} PIV</span>
+        <span v-if="showFiat" class="io-fiat">
+          ≈ {{ formatAmount(pivFromSats(fees), { showPIV: false }) }}
+        </span>
+      </div>
     </InfoRow>
   </div>
 </template>
@@ -120,9 +147,22 @@ import Icon from './Icon.vue'
 import { computed } from 'vue'
 import { formatPIV } from '@/utils/formatters'
 import { getAddressRoles, isColdStakeOutput, toSats } from '@/utils/transactionHelpers'
+import { useCurrency } from '@/composables/useCurrency'
 import Badge from './Badge.vue'
 import HashDisplay from './HashDisplay.vue'
 import InfoRow from './InfoRow.vue'
+
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
+
+// Per-amount fiat annotation gate (P1-3): non-PIV preference + live prices.
+const showFiat = computed(() => preferredCurrency.value !== 'PIV' && hasValidPrices.value)
+
+// vin/vout/fee values are satoshi strings; scale to a PIV float before fiat
+// conversion so the 1e8 factor is applied exactly once.
+const pivFromSats = (sats) => {
+  const n = typeof sats === 'string' ? parseFloat(sats) : Number(sats)
+  return Number.isFinite(n) ? n / 100000000 : 0
+}
 
 const props = defineProps({
   inputs: {
@@ -152,6 +192,14 @@ const totalOutput = computed(() => {
     return sum + value
   }, 0).toString()
 })
+
+/**
+ * P2-D: whether this output carries a determinable spent/unspent status.
+ * The backend emits `spent` (boolean) only for outputs it can resolve against
+ * the live UTXO set; unspendable outputs and older cached responses omit it
+ * entirely (undefined/null), in which case no badge is shown.
+ */
+const hasSpentStatus = (output) => typeof output.spent === 'boolean'
 
 /** Per-output share of the total output value, as a percentage string. */
 const outputShare = (output) => {
@@ -275,6 +323,20 @@ const outputShare = (output) => {
   font-variant-numeric: tabular-nums;
 }
 
+.io-fiat {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.io-fee-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
 .io-txid {
   display: flex;
   align-items: center;
@@ -307,6 +369,14 @@ const outputShare = (output) => {
 
 .io-coldstake {
   margin-top: var(--space-1);
+}
+
+.io-spent {
+  margin-top: var(--space-1);
+}
+
+.io-spent-link {
+  text-decoration: none;
 }
 
 .io-arrow {

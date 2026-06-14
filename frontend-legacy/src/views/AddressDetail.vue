@@ -284,20 +284,58 @@ const loadingUtxos = ref(false)
 const error = ref(null)
 
 /**
- * Client-side PIVX base58 address sanity check. Catches obvious garbage so we
- * render an explicit "Invalid address" state instead of a fake zero account.
- * Mainnet payment addresses start with D; cold-staking staker addresses with S;
- * exchange (EXM) addresses with E; legacy/script forms can start with 6 or 7.
- * Length and base58 charset are validated; the backend remains the source of truth.
+ * Client-side PIVX address validation. Mirrors the backend's base58check guard
+ * (src/api/addresses.rs::is_valid_address): we base58-decode and require the
+ * decoded byte length to match a real PIVX address class, so a one-char typo
+ * that changes the decoded length — or any non-base58 garbage — is rejected
+ * here instead of rendering a fake zero account. The backend still verifies the
+ * full 4-byte double-SHA256 checksum (the authoritative source of truth); we do
+ * not recompute SHA256 in the browser (it would require an async crypto.subtle
+ * call inside this synchronous computed), so the backend remains the gate for
+ * checksum-only typos that preserve length.
+ *
+ * Accepted decoded lengths (these are total decoded bytes INCLUDING the 4-byte
+ * checksum, i.e. payload 21 or 23 + 4):
+ *   - 25 bytes = version(1) + hash160(20) + checksum(4). Covers D (P2PKH v30),
+ *     S (cold-staking staker v63), 6/7 (P2SH v13), and single-byte E variants.
+ *   - 27 bytes = EXM prefix(3: 0x01,0xb9,0xa2) + hash160(20) + checksum(4).
+ *     Covers EXM exchange addresses (OP_EXCHANGEADDR 0xe0, 36 chars).
  */
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/
+const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+/** Decode a base58 string to bytes, or null if it contains a non-base58 char. */
+const decodeBase58 = (str) => {
+  const bytes = [0]
+  for (const ch of str) {
+    const val = BASE58_ALPHABET.indexOf(ch)
+    if (val === -1) return null
+    let carry = val
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j] * 58
+      bytes[j] = carry & 0xff
+      carry >>= 8
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff)
+      carry >>= 8
+    }
+  }
+  // Each leading '1' in base58 is a leading 0x00 byte.
+  for (let k = 0; k < str.length && str[k] === '1'; k++) bytes.push(0)
+  return bytes.reverse()
+}
+
 const isValidAddress = computed(() => {
   const a = address.value
   if (typeof a !== 'string') return false
   const t = a.trim()
   if (t.length < 26 || t.length > 64) return false
-  if (!BASE58_RE.test(t)) return false
-  return /^[DSE67]/.test(t)
+  if (!/^[DSE67]/.test(t)) return false
+  const decoded = decodeBase58(t)
+  if (!decoded) return false
+  // 25 = standard (1-byte version + 20-byte hash + 4-byte checksum);
+  // 27 = EXM (3-byte prefix + 20-byte hash + 4-byte checksum).
+  return decoded.length === 25 || decoded.length === 27
 })
 
 // Tabs

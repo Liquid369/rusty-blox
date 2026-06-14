@@ -13,20 +13,23 @@
         label="Delegated Balance"
         :value="formatBalance(stats.delegatedBalance)"
         suffix="PIV"
+        subtitle="Net delegated pool"
         icon="snowflake"
         :loading="loading"
       />
       <StatCard
-        label="Created in Range"
+        label="P2CS Created"
         :value="formatBalance(stats.createdTotal)"
         suffix="PIV"
+        subtitle="Turnover, incl. re-stakes"
         icon="plus"
         :loading="loading"
       />
       <StatCard
-        label="Spent in Range"
+        label="P2CS Spent"
         :value="formatBalance(stats.spentTotal)"
         suffix="PIV"
+        subtitle="Turnover, incl. re-stakes"
         icon="minus"
         :loading="loading"
       />
@@ -47,6 +50,11 @@
       :error="error"
       height="450px"
     />
+    <p class="chart-caption">
+      Created / Spent are P2CS turnover and include re-stake churn (every won
+      coinstake re-mints the delegation), so they run several times larger than
+      net new delegation. The net delegated pool is the Delegated Balance line.
+    </p>
   </div>
 </template>
 
@@ -120,7 +128,7 @@ const trendOption = computed(() => {
       top: '15%'
     },
     legend: {
-      data: ['Delegated Balance', 'Created', 'Spent'],
+      data: ['Delegated Balance', 'Created (incl. re-stakes)', 'Spent (incl. re-stakes)'],
       top: 0,
       textStyle: {
         color: '#9B93A8'
@@ -139,7 +147,7 @@ const trendOption = computed(() => {
       },
       {
         ...base.yAxis,
-        name: 'Daily Flow (PIV)',
+        name: 'Daily Turnover (PIV)',
         nameTextStyle: { color: '#9B93A8' },
         splitLine: { show: false }
       }
@@ -174,7 +182,7 @@ const trendOption = computed(() => {
         }
       },
       {
-        name: 'Created',
+        name: 'Created (incl. re-stakes)',
         type: 'bar',
         yAxisIndex: 1,
         data: trendData.value.map(d => Math.round(d.created * 100) / 100),
@@ -184,7 +192,7 @@ const trendOption = computed(() => {
         }
       },
       {
-        name: 'Spent',
+        name: 'Spent (incl. re-stakes)',
         type: 'bar',
         yAxisIndex: 1,
         data: trendData.value.map(d => Math.round(d.spent * 100) / 100),
@@ -254,6 +262,13 @@ onMounted(() => {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
+}
+
+.chart-caption {
+  margin: 0;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-tertiary);
 }
 
 /* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */

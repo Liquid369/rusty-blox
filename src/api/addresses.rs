@@ -25,6 +25,83 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
     format!("{}...{}", &xpub[..8], &xpub[xpub.len()-4..])
 }
 
+/// P2-B: validate a PIVX transparent address before treating it as a real
+/// account. The prior handlers accepted any string, so a one-char typo of a
+/// real address returned HTTP 200 with balance:0 (a fake zero account) — the
+/// reference Blockbook returns 400 on a checksum mismatch, and `/search`
+/// already NotFounds the same string.
+///
+/// We validate the base58check CHECKSUM (class-agnostic) rather than enumerate
+/// version bytes: `bs58::decode(addr).with_check(None)` recomputes the 4-byte
+/// double-SHA256 checksum and fails on any typo, regardless of address class.
+/// A flipped character almost always breaks the checksum, so this catches the
+/// bug without risking rejection of a valid address.
+///
+/// Accepted decoded-payload lengths (checksum already stripped by with_check):
+///   - 21 bytes = 1-byte version + 20-byte hash160. Covers every standard
+///     class: D (P2PKH v30), S (cold-staking staker v63), 6/7 (P2SH v13),
+///     E (single-byte exchange variants).
+///   - 23 bytes = 3-byte EXM prefix [0x01,0xb9,0xa2] + 20-byte hash160. Covers
+///     EXM exchange addresses (OP_EXCHANGEADDR 0xe0), which are 36 chars and
+///     use a 3-byte prefix (see encode_pivx_exchange_address in parser.rs).
+///
+/// This deliberately does NOT hard-code a single version byte (that would
+/// exclude S/6/7/E). The checksum + sane-length test is the whole guard.
+///
+/// Implementation note: we decode raw base58 and verify the trailing 4-byte
+/// double-SHA256 checksum by hand (the same computation bs58's `with_check`
+/// performs) because the `bs58` crate is pulled in without its `check`
+/// feature. `Sha256` is already a top-level dependency (see parser.rs).
+pub(crate) fn is_valid_address(addr: &str) -> bool {
+    match decode_base58check(addr) {
+        // 21 = version(1) + hash160(20); 23 = EXM prefix(3) + hash160(20).
+        Some(payload) => payload.len() == 21 || payload.len() == 23,
+        None => false,
+    }
+}
+
+/// Decode a base58check string and verify its 4-byte double-SHA256 checksum.
+/// Returns the version+payload bytes (checksum stripped) on success, or None
+/// if the base58 is malformed, too short to hold a checksum, or the checksum
+/// does not match. Class-agnostic: works for every address class and xpubs.
+fn decode_base58check(s: &str) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+
+    let raw = bs58::decode(s).into_vec().ok()?;
+    // Need at least the 4 checksum bytes (plus some payload).
+    if raw.len() <= 4 {
+        return None;
+    }
+    let (payload, checksum) = raw.split_at(raw.len() - 4);
+    let first = Sha256::digest(payload);
+    let second = Sha256::digest(&first);
+    if second[..4] == checksum[..] {
+        Some(payload.to_vec())
+    } else {
+        None
+    }
+}
+
+/// P2-B: cheap plausibility check for a BIP32 extended public key, used to
+/// reject typo/garbage input at the top of `xpub_v2` before the derivation
+/// scan. PIVX reuses Bitcoin's xpub version bytes (0x0488B21E -> "xpub"), so a
+/// real account-level key must start with "xpub" and decode as base58check to
+/// the standard 78-byte serialization (4 version + 1 depth + 4 fingerprint +
+/// 4 child + 32 chain code + 33 pubkey). `with_check(None)` validates the same
+/// 4-byte double-SHA256 checksum used by addresses, so a one-char typo fails.
+/// `compute_xpub_info` remains the authoritative parser (depth, key validity).
+pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
+    if !xpub.starts_with("xpub") {
+        return false;
+    }
+    match decode_base58check(xpub) {
+        // 78 = 4 version + 1 depth + 4 parent fingerprint + 4 child number
+        //      + 32 chain code + 33 compressed pubkey.
+        Some(payload) => payload.len() == 78,
+        None => false,
+    }
+}
+
 /// Per-request work cap for compute_address_info's full-history loops (P1-3).
 /// Addresses with more than this many txs skip the O(history) recompute/sort and
 /// serve the persisted 'r'/'s' aggregates instead. Configurable via
@@ -66,11 +143,23 @@ async fn read_address_totals(db: &Arc<DB>, address: &str) -> (i64, i64) {
 /// **CACHED**: 30 second TTL (balances change with new blocks)
 /// Note: Complex endpoint, cache provides ~30% improvement
 pub async fn addr_v2(
-    AxumPath(address): AxumPath<String>, 
+    AxumPath(address): AxumPath<String>,
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Json<AddressInfo> {
+) -> Result<Json<AddressInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: reject invalid/mistyped addresses with 400 instead of serving a
+    // fake zero account (HTTP 200, balance:0). Matches Blockbook and the
+    // existing /search behaviour for the same string.
+    if !is_valid_address(&address) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(format!(
+                "Invalid address '{}': checksum mismatch", address
+            ))),
+        ));
+    }
+
     let cache_key = format!("addr:{}:{}:{}", address, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
@@ -87,10 +176,12 @@ pub async fn addr_v2(
         .await;
     
     match result {
-        Ok(info) => Json(info),
+        Ok(info) => Ok(Json(info)),
         Err(_) => {
-            // Fallback: return empty address info
-            Json(AddressInfo {
+            // Fallback: return empty address info. The address has already
+            // passed checksum validation above, so this is a transient DB/compute
+            // error for a real address — not the P2-B fake-zero-account case.
+            Ok(Json(AddressInfo {
                 page: Some(params.page),
                 total_pages: Some(1),
                 items_on_page: Some(params.page_size),
@@ -103,7 +194,7 @@ pub async fn addr_v2(
                 txs: 0,
                 txids: Some(vec![]),
                 transactions: None,
-            })
+            }))
         }
     }
 }
@@ -368,6 +459,23 @@ pub async fn xpub_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<XPubInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: cheaply reject obviously-not-an-xpub input up front (before the
+    // cache/derivation machinery) so a typo/garbage string gets a 400 rather
+    // than entering the scan. PIVX reuses Bitcoin's xpub version bytes
+    // (0x0488B21E -> "xpub" prefix; see compute_xpub_info note), so a real
+    // account-level xpub must start with "xpub" and be valid base58check.
+    // compute_xpub_info still does the authoritative ExtendedPubKey parse +
+    // depth check; this is just an early, class-correct guard.
+    if !is_valid_xpub(&xpub_str) {
+        warn!(xpub = %redact_xpub(&xpub_str), "rejected invalid xpub (P2-B)");
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(
+                "Invalid xpub: not a valid base58check BIP32 extended public key",
+            )),
+        ));
+    }
+
     let cache_key = format!("xpub:{}:{}:{}", xpub_str, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let xpub_clone = xpub_str.clone();
@@ -969,11 +1077,22 @@ pub async fn utxo_v2(
     Query(query): Query<UtxoQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Json<Vec<UTXO>> {
+) -> Result<Json<Vec<UTXO>>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: reject invalid/mistyped addresses with 400 instead of serving an
+    // empty UTXO list (HTTP 200, []) for a non-existent/typo'd account.
+    if !is_valid_address(&address) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(format!(
+                "Invalid address '{}': checksum mismatch", address
+            ))),
+        ));
+    }
+
     let cache_key = format!("utxo:{}:{}", address, query.confirmed);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
-    
+
     let result = cache
         .get_or_compute(
             &cache_key,
@@ -983,10 +1102,10 @@ pub async fn utxo_v2(
             }
         )
         .await;
-    
+
     match result {
-        Ok(utxos) => Json(utxos),
-        Err(_) => Json(vec![]),
+        Ok(utxos) => Ok(Json(utxos)),
+        Err(_) => Ok(Json(vec![])),
     }
 }
 
@@ -1100,4 +1219,51 @@ async fn compute_utxos(
     utxo_list.sort_by(|a, b| a.confirmations.cmp(&b.confirmations));
     
     Ok(utxo_list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_address, is_valid_xpub};
+
+    /// P2-B: every real PIVX transparent address class must pass validation.
+    /// Asymmetric risk — a validator that rejects a VALID address is worse than
+    /// the original fake-zero-account bug, so these MUST stay true.
+    #[test]
+    fn is_valid_address_accepts_all_real_classes() {
+        // D = standard P2PKH (version 30)
+        assert!(is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "D/P2PKH must be valid");
+        // S = cold-staking staker (version 63)
+        assert!(is_valid_address("SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy"), "S/cold-staking must be valid");
+        // 6 = P2SH (version 13)
+        assert!(is_valid_address("6EPs1STNZh4rxbsgP93Zu4BeHF5n9dtECo"), "6/P2SH must be valid");
+        // EXM = exchange address (3-byte prefix, OP_EXCHANGEADDR 0xe0, 36 chars)
+        assert!(is_valid_address("EXMBfGoMQMNiHTNsrs8SdrsBotUButbb1SP1"), "EXM/exchange must be valid");
+    }
+
+    /// A one-char typo of a real address must be rejected (checksum mismatch) —
+    /// this is the P2-B bug: previously returned HTTP 200 balance:0.
+    #[test]
+    fn is_valid_address_rejects_typos_and_garbage() {
+        // Flip the last char of the D address: r5 -> r6 (breaks the checksum).
+        assert!(!is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr6"), "typo'd address must be invalid");
+        // Empty / clearly-not-an-address input.
+        assert!(!is_valid_address(""), "empty must be invalid");
+        assert!(!is_valid_address("not an address"), "garbage must be invalid");
+        // Valid base58check but wrong payload length (1-byte version + 19-byte
+        // hash = 20-byte payload) must still be rejected.
+        assert!(!is_valid_address("11GsChQR2U32pvwJcDNPoYHhGcnz5Rv"), "short payload must be invalid");
+    }
+
+    /// xpub guard: accepts a real BIP32 xpub, rejects typos/non-xpub input.
+    #[test]
+    fn is_valid_xpub_basic() {
+        // A standard BIP32 mainnet xpub (Bitcoin/PIVX share 0x0488B21E).
+        let good = "xpub661MyMwAqRbcEYSGagKuFUqExQV8d2eizDP5SamP9TcLeqAk9JsrNexcG6RbwEy38PSSahG1iVxeqWMJEq3YFHbfEaayHjyFJnJ6DS2h49t";
+        assert!(is_valid_xpub(good), "real xpub must be valid");
+        // Flip the last char -> checksum mismatch (payload length still 78).
+        let bad = "xpub661MyMwAqRbcEYSGagKuFUqExQV8d2eizDP5SamP9TcLeqAk9JsrNexcG6RbwEy38PSSahG1iVxeqWMJEq3YFHbfEaayHjyFJnJ6DS2h49A";
+        assert!(!is_valid_xpub(bad), "typo'd xpub must be invalid");
+        // A transparent address is not an xpub.
+        assert!(!is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "address is not an xpub");
+    }
 }

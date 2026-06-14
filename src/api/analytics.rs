@@ -78,7 +78,11 @@ pub struct TransactionDataPoint {
     pub volume: String,
     pub payment_count: u64,
     pub stake_count: u64,
-    pub other_count: u64,
+    /// Coinbase transactions this day. On PoS this equals the block count
+    /// (one coinbase per block, paired with one coinstake). Surfaced as the
+    /// "Coinbase" slice — NOT a residual "other" bucket, which would double-
+    /// count the coinstakes already in `stake_count`.
+    pub coinbase_count: u64,
     /// Average transaction VALUE for the day, in satoshis (string).
     /// Not byte size — this is volume / tx_count.
     pub avg_value: String,
@@ -282,7 +286,7 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
             volume: format_piv_amount(agg.volume),
             payment_count: agg.payment,
             stake_count: agg.coinstake,
-            other_count: agg.coinbase,
+            coinbase_count: agg.coinbase,
             avg_value,
             // Real per-payment average fee from the Pass 2b prevout joins.
             avg_fee: format_piv_amount(agg.fees_total / agg.payment.max(1) as i64),
@@ -963,7 +967,7 @@ fn compute_transaction_analytics(
                 volume: format_piv_amount(stats.volume),
                 payment_count: stats.payment_count,
                 stake_count: stats.stake_count,
-                other_count: stats.other_count,
+                coinbase_count: stats.other_count,
                 avg_value,
                 avg_fee,
                 // Prevout-joined metrics only exist in the precomputed series.

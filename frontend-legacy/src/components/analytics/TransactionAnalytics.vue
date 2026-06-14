@@ -187,12 +187,12 @@ const typeDistributionOption = computed(() => {
 
   const totalPayment = txData.value.reduce((sum, d) => sum + d.payment, 0)
   const totalStake = txData.value.reduce((sum, d) => sum + d.stake, 0)
-  const totalOther = txData.value.reduce((sum, d) => sum + d.other, 0)
+  const totalCoinbase = txData.value.reduce((sum, d) => sum + d.coinbase, 0)
 
   const data = [
     { value: totalPayment, name: 'Payment' },
     { value: totalStake, name: 'Stake' },
-    { value: totalOther, name: 'Other' }
+    { value: totalCoinbase, name: 'Coinbase' }
   ]
 
   return getPieChartOption(data, 'Transaction Types')
@@ -223,7 +223,7 @@ const fetchData = async () => {
         total: d.count || 0,
         payment: d.payment_count || 0,
         stake: d.stake_count || 0,
-        other: d.other_count || 0,
+        coinbase: d.coinbase_count || 0,
         shield: d.sapling_txs || 0,
         coldstake: d.coldstake_txs || 0,
         // volume is already a PIV decimal string — no satoshi conversion
