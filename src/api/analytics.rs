@@ -216,6 +216,11 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
     if dates.len() > days {
         dates = dates.split_off(dates.len() - days);
     }
+    // Drop the partial current day so series/headline tiles read complete days.
+    let today = crate::enrich_addresses::unix_to_date(
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    );
+    dates.retain(|d| *d != today);
 
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
@@ -295,6 +300,13 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
     if dates.len() > days {
         dates = dates.split_off(dates.len() - days);
     }
+    // Drop the partial current day so the staking headline tiles (active
+    // stakers, APY, block time) read the last COMPLETE day, not a few hours
+    // of today that read as a cliff.
+    let today = crate::enrich_addresses::unix_to_date(
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    );
+    dates.retain(|d| *d != today);
 
     // Real circulating supply from the wealth snapshot (sum of all positive
     // address balances, satoshis) — calculate_total_supply_at_height() is a
@@ -473,6 +485,22 @@ pub async fn rich_list(
 }
 
 /// Read the precomputed rich-list snapshot from chain_state and shape it into
+/// Honest "% of supply" denominator: the HODL snapshot's deduped-outpoint
+/// circulating total. The wealth snapshot's total_balance is a SUM of
+/// per-address balances, which double-counts cold-staked coins (credited to
+/// both staker and owner for per-address parity), inflating it ~7% and biasing
+/// every share low. Falls back to total_balance if the HODL blob is absent.
+fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
+    let from_hodl = db
+        .cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"analytics_hodl").ok().flatten())
+        .and_then(|b| bincode::deserialize::<crate::enrich_addresses::HodlSnapshot>(&b).ok())
+        .map(|h| h.total)
+        .filter(|t| *t > 0);
+    let v = from_hodl.unwrap_or(fallback);
+    if v > 0 { v as f64 } else { 1.0 }
+}
+
 /// the API response. Percentages are relative to the total tracked balance.
 fn read_richlist_snapshot(db: &Arc<DB>, limit: u32) -> Option<Vec<RichListEntry>> {
     let cf_state = db.cf_handle("chain_state")?;
@@ -482,7 +510,7 @@ fn read_richlist_snapshot(db: &Arc<DB>, limit: u32) -> Option<Vec<RichListEntry>
         bincode::deserialize(&rl_bytes).ok()?;
     let wealth: crate::enrich_addresses::WealthSnapshot =
         bincode::deserialize(&wealth_bytes).ok()?;
-    let denom = if wealth.total_balance > 0 { wealth.total_balance as f64 } else { 1.0 };
+    let denom = supply_denominator(db, wealth.total_balance);
 
     Some(
         entries
@@ -527,7 +555,7 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
     let cf_state = db.cf_handle("chain_state")?;
     let bytes = db.get_cf(&cf_state, b"analytics_wealth").ok()??;
     let w: crate::enrich_addresses::WealthSnapshot = bincode::deserialize(&bytes).ok()?;
-    let denom = if w.total_balance > 0 { w.total_balance as f64 } else { 1.0 };
+    let denom = supply_denominator(db, w.total_balance);
     let pct = |v: i64| (v as f64 / denom) * 100.0;
     let total_holders = if w.address_count > 0 { w.address_count as f64 } else { 1.0 };
 
@@ -713,6 +741,12 @@ fn read_coldstaking_series(db: &Arc<DB>, range: &str) -> Option<Vec<ColdStakingD
     let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
     let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
     dates.sort();
+    // Drop the partial current day; the cumulative line should end on the last
+    // complete day rather than a partial today.
+    let today = crate::enrich_addresses::unix_to_date(
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+    );
+    dates.retain(|d| *d != today);
     let days = parse_time_range(range) as usize;
     let start = dates.len().saturating_sub(days);
 
