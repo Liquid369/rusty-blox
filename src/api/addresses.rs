@@ -251,12 +251,13 @@ async fn compute_address_info(
         (total_received, total_received - balance)
     };
     
+    // P1-1: the stored 't'-index bytes are ALREADY canonical display order
+    // (parser.rs hash_txid reverses to display, and the tx CF is keyed by
+    // 't' + display bytes). Emit them directly — the prior extra .reverse()
+    // flipped txids to a non-canonical order that the node, duddino, and every
+    // other explorer reject (broke Blockbook compat on /address.txids[]).
     let unique_txids: Vec<String> = all_txids.iter()
-        .map(|txid_internal| {
-            let mut txid_display = txid_internal.clone();
-            txid_display.reverse();
-            hex::encode(&txid_display)
-        })
+        .map(hex::encode)
         .collect();
 
     // Sort transactions by block height (descending = newest first).
@@ -269,10 +270,10 @@ async fn compute_address_info(
         let mut txid_heights: Vec<(String, i32)> = Vec::new();
         for txid in &unique_txids {
             if let Ok(txid_bytes) = hex::decode(txid) {
-                // Reverse to internal format for database lookup
-                let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+                // tx CF is keyed by 't' + canonical display-order bytes, so use
+                // the decoded txid directly (the prior reverse made the key miss).
                 let mut key = vec![b't'];
-                key.extend(&txid_internal);
+                key.extend(&txid_bytes);
                 let db_clone = db.clone();
                 let height = tokio::task::spawn_blocking(move || -> i32 {
                     if let Some(cf) = db_clone.cf_handle("transactions") {
@@ -759,10 +760,11 @@ async fn aggregate_xpub_data(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
-            // Reverse to internal format for database lookup
-            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+            // tx CF is keyed by 't' + canonical display-order bytes, so use the
+            // decoded txid directly. The prior reverse made every key miss, so
+            // xpub tx heights silently read 0 and the list was effectively unsorted.
             let mut key = vec![b't'];
-            key.extend(&txid_internal);
+            key.extend(&txid_bytes);
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
@@ -1014,12 +1016,11 @@ async fn compute_utxos(
     let mut utxo_list = Vec::new();
     
     for (txid_hash, vout) in &spendable_utxos {
-        // P2-9: emit canonical display-order txids (reversed), matching the
-        // /address tx-list and /tx endpoints. The 'a'/'t' indexes and the tx CF
-        // key store txids in internal order; the display txid is the reverse.
-        let mut txid_display_bytes = txid_hash.clone();
-        txid_display_bytes.reverse();
-        let txid_display = hex::encode(&txid_display_bytes);
+        // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
+        // (the same bytes that key the tx CF below), so emit them directly. The
+        // earlier .reverse() produced a non-canonical txid that the node,
+        // duddino, wallets, and every other explorer reject.
+        let txid_display = hex::encode(txid_hash);
 
         // Look up transaction to get value, confirmations, and other details.
         // The tx CF key uses internal (non-reversed) txid bytes, i.e. txid_hash

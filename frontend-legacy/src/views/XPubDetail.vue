@@ -162,6 +162,7 @@
               v-for="tx in paginatedTransactions"
               :key="tx.txid"
               :transaction="tx"
+              :viewed-addresses="xpubAddresses"
               @click="navigateToTransaction(tx)"
             />
           </div>
@@ -240,6 +241,15 @@ const usedAddresses = computed(() => {
   if (!xpubData.value?.tokens) return []
   return xpubData.value.tokens
 })
+
+// The set of derived address strings this xpub owns (token.name is the address,
+// as used by the Addresses tab). Passed to TransactionRow so per-tx net deltas
+// are computed across all of the xpub's addresses, not a single one.
+const xpubAddresses = computed(() =>
+  usedAddresses.value
+    .map(t => t.name)
+    .filter(name => typeof name === 'string' && name.length > 0)
+)
 
 const displayedAddresses = computed(() => {
   const addrs = usedAddresses.value

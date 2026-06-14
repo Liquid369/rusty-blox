@@ -61,7 +61,7 @@
             suffix="PIV"
             icon="coins"
             value-class="text-accent"
-            :subtitle="balanceInconsistent ? 'Adjusted — value reconciling' : ''"
+            :subtitle="balanceInconsistent ? 'Adjusted — value reconciling' : balanceFiat"
           />
           <StatCard
             label="Total Received"
@@ -69,6 +69,7 @@
             suffix="PIV"
             icon="arrow-down-left"
             value-class="text-success"
+            :subtitle="receivedFiat"
           />
           <StatCard
             label="Total Sent"
@@ -76,7 +77,7 @@
             suffix="PIV"
             icon="arrow-up-right"
             :value-class="sentInconsistent ? 'text-warning' : ''"
-            :subtitle="sentInconsistent ? 'Adjusted — value reconciling' : ''"
+            :subtitle="sentInconsistent ? 'Adjusted — value reconciling' : sentFiat"
           />
           <StatCard
             label="Transactions"
@@ -111,6 +112,7 @@
               v-for="tx in filteredTransactions"
               :key="tx.txid"
               :transaction="tx"
+              :viewed-addresses="address"
               @click="navigateToTransaction(tx)"
             />
           </div>
@@ -243,6 +245,7 @@ import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import api from '@/services/api'
 import { addressService } from '@/services/addressService'
 import { transactionService } from '@/services/transactionService'
@@ -265,6 +268,11 @@ import QRCode from 'qrcode'
 const route = useRoute()
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
+
+// Fiat annotation gate (P1-3): only when a non-PIV currency is chosen and
+// live prices are available. Falls back to '' (PIV-only) otherwise.
+const showFiat = computed(() => preferredCurrency.value !== 'PIV' && hasValidPrices.value)
 
 const address = ref(route.params.address)
 const addressData = ref(null)
@@ -339,6 +347,16 @@ const sentInconsistent = computed(() =>
 const balanceInconsistent = computed(() =>
   rawBalance.value < 0 || rawBalance.value > rawReceived.value
 )
+
+// Muted fiat annotations for the balance StatCards. Balances are satoshi floats,
+// so divide by 1e8 to the PIV value before converting — never double-scale.
+const fiatSubtitle = (satsAmount) => {
+  if (!showFiat.value) return ''
+  return `≈ ${formatAmount(satsAmount / 100000000, { showPIV: false })}`
+}
+const balanceFiat = computed(() => fiatSubtitle(displayBalance.value))
+const receivedFiat = computed(() => fiatSubtitle(displayReceived.value))
+const sentFiat = computed(() => fiatSubtitle(displaySent.value))
 
 // Filter operates over the current page's resolved transactions (server-paged).
 const filteredTransactions = computed(() => {
