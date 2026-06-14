@@ -160,20 +160,77 @@ pub async fn resolve_heights_from_block_index(
     //     several GB) purely to answer, for each positive-height tx in
     //     `txids_to_validate`, "does a 'B' key exist at this tx's stored height?".
     //
-    //     That HashSet is provably unnecessary. The blk parser writes a tx's main
-    //     't' record (which carries its height) and its 'B' block-index key in the
-    //     SAME batch, with the SAME height, whenever the block height is known
-    //     (transactions.rs: the `if let Some(height)` block writes both). The only
-    //     other 't' writers store HEIGHT_ORPHAN (reorg) or sapling side-data, never
-    //     a fresh positive height without a 'B' key. `txids_to_validate` only ever
-    //     contains txs whose stored height is > 0, so every such tx is guaranteed
-    //     to have a matching 'B' key at exactly that height. Therefore the lookup
-    //     `block_tx_index.contains(&(current_height, txid))` is invariantly TRUE.
+    //     We DROP the multi-GB HashSet but NOT the membership test itself. The
+    //     assumption that "every positive-height 't' record has a matching 'B'
+    //     key" is FALSE: the live monitor path (monitor.rs ~894-907) writes a
+    //     positive-height 't' record for an RPC-fetched prev-tx WITHOUT any 'B'
+    //     key (it doesn't know the tx_index). On a catch-up/resume (sync.rs
+    //     deletes `height_resolution_complete` and re-runs this resolver over a
+    //     monitor-populated DB) or a reorg, such a tx whose height is OUTSIDE the
+    //     canonical chain map MUST still be orphaned — hardcoding
+    //     `has_block_index = true` would keep it and inflate balances.
     //
-    //     With `has_block_index` always true, the validation loop below can never
-    //     take its orphaning branch (`!has_block_index`), so it produces zero DB
-    //     writes and zero orphans today — exactly preserved here. Dropping the
-    //     index changes no stored height and no orphan decision.
+    //     `has_block_index` is therefore computed per-tx by an ON-DEMAND, bounded
+    //     prefix scan over only the 'B' keys at this tx's stored height. The blk
+    //     parser writes 'B' as: 'B' + height.to_le_bytes() (i32, 4B) +
+    //     tx_index.to_le_bytes() (u64, 8B) -> value = hex(display/big-endian txid)
+    //     (transactions.rs ~527). A block holds only a few txs, so the scan over
+    //     the `b'B' + height` prefix touches O(few) keys per tx — not a full
+    //     re-scan, and O(1) extra memory.
+    //
+    //     This is BYTE-EQUIVALENT to the old `block_tx_index.contains(&(height,
+    //     txid_internal))` test: the old set held exactly
+    //       {(i32::from_le_bytes(key[1..5]), reverse(hex::decode(value)))
+    //          : every 'B' key}
+    //     and was queried at `(current_height, txid_internal)`. A 'B' key can only
+    //     satisfy that query if its `key[1..5]` equals `current_height` — i.e. it
+    //     falls under the `b'B' + current_height` prefix. Restricting the scan to
+    //     that prefix and decoding each value's txid to internal form
+    //     (reverse(hex::decode(value))) and comparing to `txid_internal` evaluates
+    //     the identical predicate over the identical key/value bytes, just without
+    //     pre-materialising every other height into RAM.
+
+    /// Does a 'B' (block-tx) index entry exist for `txid_internal` at `height`?
+    ///
+    /// Reproduces the old `block_tx_index.contains(&(height, txid_internal))`
+    /// membership test via a bounded prefix scan instead of a multi-GB HashSet.
+    /// `txid_internal` is the internal (Core little-endian) txid, i.e. the bytes
+    /// after the 't' prefix in a transaction key. The 'B' value stores the txid
+    /// in display (big-endian) hex, so it is hex-decoded then reversed back to
+    /// internal form before comparison — matching how the old index was built.
+    fn block_index_has_tx(
+        db: &DB,
+        cf: &impl rocksdb::AsColumnFamilyRef,
+        height: i32,
+        txid_internal: &[u8],
+    ) -> bool {
+        let mut prefix = vec![b'B'];
+        prefix.extend_from_slice(&height.to_le_bytes());
+
+        let iter = db.prefix_iterator_cf(cf, &prefix);
+        for item in iter {
+            let (key, value) = match item {
+                Ok(kv) => kv,
+                Err(_) => break,
+            };
+            // prefix_iterator can overshoot past the prefix; stop at the boundary.
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            // Value is the display (big-endian) txid as a hex string.
+            if let Ok(txid_hex) = std::str::from_utf8(&value) {
+                if let Ok(txid_display) = hex::decode(txid_hex) {
+                    // Reverse display -> internal, exactly as the old index build.
+                    if txid_display.len() == txid_internal.len()
+                        && txid_display.iter().rev().eq(txid_internal.iter())
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
 
     // Initialize counters
     let mut updated = 0;
@@ -190,46 +247,52 @@ pub async fn resolve_heights_from_block_index(
             // A transaction should ONLY be marked as orphaned if it has NO 'B' key
             // If it has a 'B' key, it's in the canonical chain regardless of height lookup
             //
-            // [C] Every entry in `txids_to_validate` has a stored height > 0, and the
-            // parser always co-writes a 'B' key at that same height alongside the
-            // 't' record. So a 'B' key provably always exists for these txs; this is
-            // invariantly true (see the note where the old `block_tx_index` build
-            // used to be). Computed inline instead of via a multi-GB HashSet.
-            let _ = &txid_internal; // (txid no longer needed for the lookup)
-            let has_block_index = true;
-            
-            // Only mark as orphaned if:
-            // 1. Height not in canonical chain AND
-            // 2. No 'B' key exists (not in any block index)
-            if !height_to_blockhash.contains_key(&(current_height as i64)) && !has_block_index {
-                // Height not in canonical chain AND no block index - mark as orphaned
-                let mut tx_key = vec![b't'];
-                tx_key.extend_from_slice(&txid_internal);
-                
-                if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
-                    // Update height to HEIGHT_ORPHAN
-                    let mut new_value = tx_data[0..4].to_vec(); // version
-                    new_value.extend(&HEIGHT_ORPHAN.to_le_bytes());
-                    new_value.extend(&tx_data[8..]); // rest of data
-                    
-                    validated_batch.put_cf(&cf_transactions, &tx_key, &new_value);
-                    validated_orphaned += 1;
-                    orphaned_txids_from_validation.push(txid_internal.clone());
-                    
-                    if validated_orphaned % BATCH_SIZE == 0 {
-                        commit_batch(&db, validated_batch, &wo, bulk)?;
-                        validated_batch = WriteBatch::default();
+            // [C] Computed on-demand via a bounded prefix scan over the 'B' keys at
+            // this tx's stored height (see `block_index_has_tx` above). This is
+            // byte-equivalent to the old `block_tx_index.contains(&(height, txid))`
+            // membership test but with O(1) extra memory. It correctly returns
+            // FALSE for monitor-written positive-height 't' records that have no
+            // 'B' key, so those are orphaned when their height is off-chain.
+            // `has_block_index` only changes the outcome when the height is OFF
+            // the canonical chain (both arms below require that). So probe the 'B'
+            // index ONLY then: on a fresh sync every height is canonical and this
+            // scan never runs; it fires solely for the rare off-chain tx (a reorg,
+            // or a monitor-written prev-tx 't' record that has no 'B' key). When
+            // the height IS canonical the tx is valid and we touch nothing — same
+            // as the old HashSet path, which also took no branch in that case.
+            if !height_to_blockhash.contains_key(&(current_height as i64)) {
+                let has_block_index =
+                    block_index_has_tx(&db, &cf_transactions, current_height, &txid_internal);
+                if !has_block_index {
+                    // Height not in canonical chain AND no block index - mark as orphaned
+                    let mut tx_key = vec![b't'];
+                    tx_key.extend_from_slice(&txid_internal);
+
+                    if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
+                        // Update height to HEIGHT_ORPHAN
+                        let mut new_value = tx_data[0..4].to_vec(); // version
+                        new_value.extend(&HEIGHT_ORPHAN.to_le_bytes());
+                        new_value.extend(&tx_data[8..]); // rest of data
+
+                        validated_batch.put_cf(&cf_transactions, &tx_key, &new_value);
+                        validated_orphaned += 1;
+                        orphaned_txids_from_validation.push(txid_internal.clone());
+
+                        if validated_orphaned % BATCH_SIZE == 0 {
+                            commit_batch(&db, validated_batch, &wo, bulk)?;
+                            validated_batch = WriteBatch::default();
+                        }
                     }
-                }
-            } else if has_block_index && !height_to_blockhash.contains_key(&(current_height as i64)) {
-                // Has 'B' key but height not in canonical lookup - this is OK, likely just incomplete chain build
-                // Log at warn level (only first occurrence to avoid spam)
-                if validated_orphaned == 0 {
-                    warn!(
-                        txid = %hex::encode(&txid_internal[..8].to_vec()),
-                        height = current_height,
-                        "Transaction has 'B' key but height not in canonical lookup - keeping as valid"
-                    );
+                } else {
+                    // Has 'B' key but height not in canonical lookup - this is OK, likely just incomplete chain build
+                    // Log at warn level (only first occurrence to avoid spam)
+                    if validated_orphaned == 0 {
+                        warn!(
+                            txid = %hex::encode(&txid_internal[..8].to_vec()),
+                            height = current_height,
+                            "Transaction has 'B' key but height not in canonical lookup - keeping as valid"
+                        );
+                    }
                 }
             }
         }
