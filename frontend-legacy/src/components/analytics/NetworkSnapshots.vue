@@ -3,14 +3,14 @@
     <div class="controls">
       <p class="controls-note">Periodic network snapshots over the last 7 days</p>
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
     <!-- Empty state: collection just started, nothing recorded yet -->
     <EmptyState
       v-if="!loading && !error && snapshots.length === 0"
-      icon="📡"
+      icon="activity"
       title="Collecting Network Snapshots"
       message="Snapshot collection has just started. Mempool, masternode and supply metrics are recorded periodically — check back soon."
     />
@@ -30,26 +30,26 @@
         <StatCard
           label="Masternodes"
           :value="formatNumber(stats.masternodeCount)"
-          icon="🖥️"
+          icon="server"
           :loading="loading"
         />
         <StatCard
           label="Mempool Transactions"
           :value="formatNumber(stats.mempoolTxs)"
-          icon="⏳"
+          icon="hourglass"
           :loading="loading"
         />
         <StatCard
           label="Mempool Size"
           :value="formatBytes(stats.mempoolBytes)"
-          icon="📦"
+          icon="box"
           :loading="loading"
         />
         <StatCard
           label="Shield Supply"
           :value="formatBalance(stats.shieldSupply)"
           suffix="PIV"
-          icon="🛡️"
+          icon="shield"
           :loading="loading"
         />
       </div>
@@ -86,6 +86,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import Button from '@/components/common/Button.vue'
@@ -272,10 +273,23 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .chart-grid {

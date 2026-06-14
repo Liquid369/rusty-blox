@@ -14,7 +14,7 @@
       @click="handleSearch"
       :disabled="!searchQuery.trim()"
     >
-      🔍
+      <Icon name="search" :size="16" />
     </button>
 
     <!-- Search Suggestions (Recent History) -->
@@ -39,6 +39,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settingsStore'

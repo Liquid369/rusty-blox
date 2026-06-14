@@ -55,7 +55,7 @@
       </div>
     </div>
 
-    <div class="io-arrow">→</div>
+    <div class="io-arrow"><Icon name="arrow-right" :size="20" /></div>
 
     <div class="io-section">
       <h3 class="io-section-title">
@@ -116,6 +116,7 @@
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
 import { computed } from 'vue'
 import { formatPIV } from '@/utils/formatters'
 import { getAddressRoles, isColdStakeOutput, toSats } from '@/utils/transactionHelpers'

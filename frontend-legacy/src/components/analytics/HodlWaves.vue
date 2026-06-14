@@ -3,7 +3,7 @@
     <div class="controls">
       <p class="controls-note">Supply grouped by time since coins last moved</p>
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -13,28 +13,28 @@
         label="Unmoved > 1 Year"
         :value="formatPercentage(stats.unmovedOverYear)"
         suffix="%"
-        icon="🧊"
+        icon="snowflake"
         :loading="loading"
       />
       <StatCard
         label="Unmoved > 2 Years"
         :value="formatPercentage(stats.unmovedOverTwoYears)"
         suffix="%"
-        icon="💎"
+        icon="gem"
         :loading="loading"
       />
       <StatCard
         label="Moved < 1 Month"
         :value="formatPercentage(stats.movedUnderMonth)"
         suffix="%"
-        icon="🔥"
+        icon="flame"
         :loading="loading"
       />
       <StatCard
         label="Tracked Supply"
         :value="formatBalance(stats.total)"
         suffix="PIV"
-        icon="📦"
+        icon="box"
         :loading="loading"
       />
     </div>
@@ -65,7 +65,7 @@
 
       <div v-else-if="bands.length === 0" class="empty-wrapper">
         <EmptyState
-          icon="🌊"
+          icon="waves"
           title="No HODL Data"
           message="Coin age data is not available yet."
         />
@@ -108,6 +108,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import Button from '@/components/common/Button.vue'
@@ -246,10 +247,23 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .table-card {

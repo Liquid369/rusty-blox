@@ -3,7 +3,7 @@
     <div class="controls">
       <TimeRangeSelector v-model="timeRange" />
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -13,27 +13,27 @@
         label="Staking Participation"
         :value="formatPercentage(metrics.participation)"
         suffix="%"
-        icon="🎯"
+        icon="target"
         :loading="loading"
       />
       <StatCard
         label="Total Staked"
         :value="formatNumber(metrics.totalStaked)"
         suffix="PIV"
-        icon="🔒"
+        icon="lock"
         :loading="loading"
       />
       <StatCard
         label="Active Stakers"
         :value="formatNumber(metrics.activeStakers)"
-        icon="👥"
+        icon="users"
         :loading="loading"
       />
       <StatCard
         label="Avg Stake Size"
         :value="formatNumber(metrics.avgStakeSize)"
         suffix="PIV"
-        icon="💰"
+        icon="coins"
         :loading="loading"
       />
     </div>
@@ -59,6 +59,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
@@ -205,9 +206,22 @@ onMounted(() => {
   gap: var(--space-3);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

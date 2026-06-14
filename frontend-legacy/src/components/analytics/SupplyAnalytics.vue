@@ -3,7 +3,7 @@
     <div class="controls">
       <TimeRangeSelector v-model="timeRange" />
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -65,6 +65,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'

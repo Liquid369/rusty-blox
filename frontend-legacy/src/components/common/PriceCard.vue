@@ -17,12 +17,13 @@
       <img src="/PIVX-Shield.svg" alt="PIVX" class="price-icon" />
       <span class="price-label">PIVX:</span>
       <span class="price-value">{{ formattedPrice }}</span>
-      <span v-if="priceStore.isStale" class="price-stale" title="Price data is stale">⚠️</span>
+      <span v-if="priceStore.isStale" class="price-stale" title="Price data is stale"><Icon name="alert-triangle" :size="14" /></span>
     </div>
   </div>
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
 import { computed } from 'vue'
 import { usePriceStore } from '@/stores/priceStore'
 import { useSettingsStore } from '@/stores/settingsStore'

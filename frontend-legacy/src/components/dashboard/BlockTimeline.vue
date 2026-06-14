@@ -9,7 +9,7 @@
 
     <!-- Error state -->
     <div v-else-if="error" class="timeline-error">
-      <p>⚠️ Failed to load recent blocks</p>
+      <p><Icon name="alert-triangle" :size="14" /> Failed to load recent blocks</p>
     </div>
 
     <!-- Block strip -->
@@ -55,7 +55,7 @@
             </div>
           </div>
           <div class="tile-staker" :title="block.staker || ''">
-            <span class="staker-icon">⛏</span>
+            <span class="staker-icon"><Icon name="zap" :size="12" /></span>
             {{ block.staker ? truncateHash(block.staker, 6, 4) : '—' }}
           </div>
         </router-link>
@@ -65,6 +65,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { formatNumber, formatTimeAgo, truncateHash } from '@/utils/formatters'
 import SkeletonLoader from '@/components/common/SkeletonLoader.vue'

@@ -1,7 +1,7 @@
 <template>
   <div class="info-row" :class="{ 'info-row-vertical': vertical }">
     <div class="info-label">
-      <span v-if="icon" class="info-icon">{{ icon }}</span>
+      <span v-if="icon" class="info-icon"><Icon :name="icon" :size="14" /></span>
       {{ label }}
     </div>
     <div class="info-value">
@@ -11,6 +11,8 @@
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
+
 defineProps({
   label: {
     type: String,
@@ -60,7 +62,9 @@ defineProps({
 }
 
 .info-icon {
-  font-size: var(--text-base);
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-accent);
 }
 
 .info-value {

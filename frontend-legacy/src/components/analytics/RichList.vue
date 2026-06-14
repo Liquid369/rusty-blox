@@ -11,7 +11,7 @@
         </select>
       </div>
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -20,40 +20,40 @@
       <StatCard
         label="Total Addresses"
         :value="formatNumber(stats.totalAddresses)"
-        icon="📬"
+        icon="inbox"
         :loading="loading"
       />
       <StatCard
         label="Top 100 Hold"
         :value="formatPercentage(stats.top100Percentage)"
         suffix="%"
-        icon="💎"
+        icon="gem"
         :loading="loading"
       />
       <StatCard
         label="Richest Address"
         :value="formatBalance(stats.richestBalance)"
         suffix="PIV"
-        icon="👑"
+        icon="crown"
         :loading="loading"
       />
       <StatCard
         label="Avg Top 100 Balance"
         :value="formatBalance(stats.avgTop100)"
         suffix="PIV"
-        icon="💰"
+        icon="coins"
         :loading="loading"
       />
       <StatCard
         label="Gini Coefficient"
         :value="stats.gini !== null ? stats.gini.toFixed(4) : 'N/A'"
-        icon="⚖️"
+        icon="scale"
         :loading="loading"
       />
       <StatCard
         label="Nakamoto Coefficient"
         :value="stats.nakamoto !== null ? formatNumber(stats.nakamoto) : 'N/A'"
-        icon="🛡️"
+        icon="shield"
         :loading="loading"
       />
     </div>
@@ -148,6 +148,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import Button from '@/components/common/Button.vue'
@@ -394,10 +395,23 @@ onMounted(() => {
   box-shadow: var(--focus-ring-glow);
 }
 
+/* 6 tiles: keep rows balanced (3x2 / 2x3 / 1) instead of wrapping 4+2 or 5+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .chart-grid {

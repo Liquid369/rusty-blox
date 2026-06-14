@@ -1,6 +1,6 @@
 <template>
   <div class="empty-state">
-    <div class="empty-icon">{{ icon }}</div>
+    <div class="empty-icon"><Icon :name="icon" :size="56" /></div>
     <h3 class="empty-title">{{ title }}</h3>
     <p class="empty-message">{{ message }}</p>
     <slot name="action" />
@@ -8,10 +8,12 @@
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
+
 defineProps({
   icon: {
     type: String,
-    default: '📭'
+    default: 'inbox'
   },
   title: {
     type: String,
@@ -39,7 +41,10 @@ defineProps({
 }
 
 .empty-icon {
-  font-size: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
   margin-bottom: var(--space-4);
   opacity: 0.5;
 }

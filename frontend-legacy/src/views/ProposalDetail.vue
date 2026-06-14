@@ -9,7 +9,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Proposal Not Found"
           :message="error"
         >
@@ -42,15 +42,15 @@
           <template #header>Proposal Information</template>
 
           <div class="info-grid">
-            <InfoRow label="Proposal Hash" icon="🔗">
+            <InfoRow label="Proposal Hash" icon="link">
               <HashDisplay :hash="proposal.Hash" :truncate="false" show-copy />
             </InfoRow>
 
-            <InfoRow label="Fee Hash" icon="💳">
+            <InfoRow label="Fee Hash" icon="credit-card">
               <HashDisplay :hash="proposal.FeeHash" :truncate="false" show-copy />
             </InfoRow>
 
-            <InfoRow label="Payment Address" icon="💰">
+            <InfoRow label="Payment Address" icon="coins">
               <HashDisplay
                 :hash="proposal.PaymentAddress"
                 show-copy
@@ -58,36 +58,36 @@
               />
             </InfoRow>
 
-            <InfoRow label="Forum URL" icon="🌐">
+            <InfoRow label="Forum URL" icon="globe">
               <a :href="proposal.URL" target="_blank" class="external-link">
                 {{ proposal.URL }} →
               </a>
             </InfoRow>
 
-            <InfoRow label="Start Block" icon="🚀">
+            <InfoRow label="Start Block" icon="play">
               {{ formatNumber(proposal.BlockStart) }}
             </InfoRow>
 
-            <InfoRow label="End Block" icon="🏁">
+            <InfoRow label="End Block" icon="flag">
               {{ formatNumber(proposal.BlockEnd) }}
             </InfoRow>
 
-            <InfoRow label="Total Payment Count" icon="📝">
+            <InfoRow label="Total Payment Count" icon="file-text">
               {{ proposal.TotalPaymentCount }}
             </InfoRow>
 
-            <InfoRow label="Remaining Payments" icon="⏳">
+            <InfoRow label="Remaining Payments" icon="hourglass">
               {{ proposal.RemainingPaymentCount }}
               <span class="remaining-note">({{ proposal.RemainingPaymentCount }} month{{ proposal.RemainingPaymentCount !== 1 ? 's' : '' }} left)</span>
             </InfoRow>
 
-            <InfoRow label="Established" icon="✓">
+            <InfoRow label="Established" icon="check">
               <Badge :variant="proposal.IsEstablished ? 'success' : 'warning'">
                 {{ proposal.IsEstablished ? 'Yes' : 'No' }}
               </Badge>
             </InfoRow>
 
-            <InfoRow label="Valid" icon="✅">
+            <InfoRow label="Valid" icon="check-circle">
               <Badge :variant="proposal.IsValid ? 'success' : 'danger'">
                 {{ proposal.IsValid ? 'Yes' : 'No' }}
               </Badge>
@@ -175,7 +175,7 @@
               <!-- Vote Numbers -->
               <div class="vote-numbers">
                 <div class="vote-item yeas">
-                  <span class="vote-icon">👍</span>
+                  <span class="vote-icon"><Icon name="thumbs-up" :size="20" /></span>
                   <div class="vote-details">
                     <span class="vote-label">Yes Votes</span>
                     <span class="vote-value">{{ formatNumber(proposal.Yeas) }}</span>
@@ -183,7 +183,7 @@
                   </div>
                 </div>
                 <div class="vote-item nays">
-                  <span class="vote-icon">👎</span>
+                  <span class="vote-icon"><Icon name="thumbs-down" :size="20" /></span>
                   <div class="vote-details">
                     <span class="vote-label">No Votes</span>
                     <span class="vote-value">{{ formatNumber(proposal.Nays) }}</span>
@@ -191,7 +191,7 @@
                   </div>
                 </div>
                 <div class="vote-item abstains">
-                  <span class="vote-icon">🤷</span>
+                  <span class="vote-icon"><Icon name="help-circle" :size="20" /></span>
                   <div class="vote-details">
                     <span class="vote-label">Abstain</span>
                     <span class="vote-value">{{ formatNumber(proposal.Abstains) }}</span>
@@ -267,6 +267,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'

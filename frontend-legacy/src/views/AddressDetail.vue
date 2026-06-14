@@ -15,7 +15,7 @@
           <div class="address-value">
             <HashDisplay :hash="address" :copyable="true" :linkable="false" />
             <Button variant="ghost" size="sm" @click="showQR = true" title="Show QR Code">
-              📱 QR
+              <Icon name="qr-code" :size="14" /> QR
             </Button>
           </div>
         </div>
@@ -31,7 +31,7 @@
       <div v-else-if="error" class="error-container">
         <Card>
           <div class="error-content">
-            <p class="error-icon">⚠️</p>
+            <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
             <h2>Address Not Found</h2>
             <p>{{ error }}</p>
             <Button @click="$router.push('/')">Back to Dashboard</Button>
@@ -47,25 +47,25 @@
             label="Balance"
             :value="formatPIV(addressData.balance, 2)"
             suffix="PIV"
-            icon="💰"
+            icon="coins"
             variant="primary"
           />
           <StatCard
             label="Total Received"
             :value="formatPIV(addressData.totalReceived, 2)"
             suffix="PIV"
-            icon="📥"
+            icon="arrow-down-left"
           />
           <StatCard
             label="Total Sent"
             :value="formatPIV(addressData.totalSent, 2)"
             suffix="PIV"
-            icon="📤"
+            icon="arrow-up-right"
           />
           <StatCard
             label="Transactions"
             :value="formatNumber(addressData.txids?.length || 0)"
-            icon="📊"
+            icon="chart-bar"
           />
         </div>
 
@@ -96,7 +96,7 @@
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="📭"
+              icon="inbox"
               title="No Transactions"
               message="This address has no transaction history."
             />
@@ -170,7 +170,7 @@
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="💸"
+              icon="send"
               title="No UTXOs"
               message="This address has no unspent outputs."
             />
@@ -197,8 +197,8 @@
               </div>
               <p class="qr-address">{{ address }}</p>
               <div class="qr-actions">
-                <Button @click="downloadQR">💾 Download PNG</Button>
-                <Button variant="secondary" @click="copyAddress">📋 Copy Address</Button>
+                <Button @click="downloadQR"><Icon name="download" :size="14" /> Download PNG</Button>
+                <Button variant="secondary" @click="copyAddress"><Icon name="clipboard" :size="14" /> Copy Address</Button>
               </div>
             </div>
           </Card>
@@ -210,7 +210,7 @@
         <div class="qr-modal-content">
           <canvas ref="qrModalCanvas" class="qr-canvas"></canvas>
           <p class="qr-address">{{ address }}</p>
-          <Button @click="downloadQR" class="download-btn">💾 Download</Button>
+          <Button @click="downloadQR" class="download-btn"><Icon name="download" :size="14" /> Download</Button>
         </div>
       </Modal>
     </div>
@@ -218,6 +218,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
@@ -523,11 +524,18 @@ onMounted(() => {
   flex-wrap: wrap;
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .address-tabs {

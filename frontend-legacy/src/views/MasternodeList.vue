@@ -17,11 +17,6 @@
           <div class="stat-value">{{ formatNumber(mnCount.enabled) }}</div>
           <div class="stat-sub">{{ enabledPercent }}% of network</div>
         </Card>
-        <Card v-if="totalCollateral > 0">
-          <template #header>Collateral Locked</template>
-          <div class="stat-value">{{ formatNumber(totalCollateral) }} <span class="stat-unit">PIV</span></div>
-          <div class="stat-sub">{{ formatNumber(collateralBasis) }} nodes × {{ formatNumber(MASTERNODE_COLLATERAL) }} PIV</div>
-        </Card>
         <Card v-if="networkCounts">
           <template #header>Network</template>
           <div class="network-breakdown">
@@ -39,7 +34,17 @@
             </div>
           </div>
         </Card>
-      </div>
+
+        <Card v-if="totalCollateral > 0">
+          <template #header>Collateral Locked</template>
+          <div class="stat-value">{{ formatNumber(totalCollateral) }} <span class="stat-unit">PIV</span></div>
+          <div class="stat-sub">{{ formatNumber(collateralBasis) }} nodes × {{ formatNumber(MASTERNODE_COLLATERAL) }} PIV</div>
+        </Card>
+        <Card v-if="supplyLockedPercent !== null">
+          <template #header>% of Supply Locked</template>
+          <div class="stat-value">{{ supplyLockedPercent }} <span class="stat-unit">%</span></div>
+          <div class="stat-sub">{{ formatNumber(enabledCollateral) }} PIV locked by enabled nodes</div>
+        </Card>      </div>
 
       <!-- Status Breakdown Band -->
       <Card v-if="statusCounts.length > 0" class="status-band-card">
@@ -69,7 +74,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Failed to Load Masternodes"
           :message="error"
         >
@@ -98,7 +103,7 @@
               <label>Protocol</label>
               <select v-model="protocolFilter" class="filter-select">
                 <option value="all">All Protocols</option>
-                <option value="70926">70926</option>
+                <option v-for="proto in availableProtocols" :key="proto" :value="proto">{{ proto }}</option>
               </select>
             </div>
             <div class="filter-group">
@@ -120,16 +125,16 @@
               <thead>
                 <tr>
                   <th @click="sortBy('rank')" class="sortable">
-                    Rank <span class="sort-icon">{{ getSortIcon('rank') }}</span>
+                    Rank <span class="sort-icon"><Icon :name="getSortIcon('rank')" :size="12" /></span>
                   </th>
                   <th>Status</th>
                   <th>Address</th>
                   <th @click="sortBy('activetime')" class="sortable">
-                    Active Since <span class="sort-icon">{{ getSortIcon('activetime') }}</span>
+                    Active Since <span class="sort-icon"><Icon :name="getSortIcon('activetime')" :size="12" /></span>
                   </th>
                   <th>Duration</th>
                   <th @click="sortBy('lastpaid')" class="sortable">
-                    Last Paid <span class="sort-icon">{{ getSortIcon('lastpaid') }}</span>
+                    Last Paid <span class="sort-icon"><Icon :name="getSortIcon('lastpaid')" :size="12" /></span>
                   </th>
                   <th>Protocol</th>
                 </tr>
@@ -172,7 +177,7 @@
           <!-- Empty State -->
           <EmptyState
             v-if="filteredMasternodes.length === 0"
-            icon="🔍"
+            icon="search"
             title="No Masternodes Found"
             message="Try adjusting your filters"
           />
@@ -193,8 +198,10 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import api from '@/services/api'
 import { masternodeService } from '@/services/masternodeService'
 import { formatNumber, formatTimeAgo, formatDuration } from '@/utils/formatters'
 import { MASTERNODE_COLLATERAL } from '@/utils/constants'
@@ -210,6 +217,7 @@ import Pagination from '@/components/common/Pagination.vue'
 const router = useRouter()
 
 const mnCount = ref(null)
+const moneySupply = ref(null) // total PIV supply from /api/v2/moneysupply
 const masternodes = ref([])
 const loading = ref(false)
 const error = ref('')
@@ -217,6 +225,13 @@ const error = ref('')
 // Filters
 const statusFilter = ref('all')
 const protocolFilter = ref('all')
+
+// Protocol versions present in the live list (was hardcoded to 70926 and
+// matched nothing once the network moved to 70927)
+const availableProtocols = computed(() => {
+  const versions = new Set(masternodes.value.map(mn => String(mn.version)).filter(Boolean))
+  return [...versions].sort((a, b) => Number(b) - Number(a))
+})
 const searchQuery = ref('')
 
 // Sorting
@@ -256,6 +271,18 @@ const collateralBasis = computed(() => {
 
 const totalCollateral = computed(() => {
   return collateralBasis.value * MASTERNODE_COLLATERAL
+})
+
+// Collateral locked by ENABLED masternodes only (10,000 PIV each)
+const enabledCollateral = computed(() => {
+  return (mnCount.value?.enabled || 0) * MASTERNODE_COLLATERAL
+})
+
+// (enabled × 10,000 PIV) / moneysupply × 100, one decimal place
+const supplyLockedPercent = computed(() => {
+  const supply = moneySupply.value
+  if (!supply || supply <= 0 || !mnCount.value?.enabled) return null
+  return ((enabledCollateral.value / supply) * 100).toFixed(1)
 })
 
 const enabledPercent = computed(() => {
@@ -412,8 +439,8 @@ const goToMasternode = (mn) => {
 }
 
 const getSortIcon = (field) => {
-  if (sortField.value !== field) return '↕'
-  return sortDirection.value === 'asc' ? '↑' : '↓'
+  if (sortField.value !== field) return 'chevrons-up-down'
+  return sortDirection.value === 'asc' ? 'chevron-up' : 'chevron-down'
 }
 
 const fetchMasternodes = async () => {
@@ -437,8 +464,21 @@ const fetchMasternodes = async () => {
   }
 }
 
+// Non-fatal: the "% of Supply Locked" tile simply hides if this fails
+const fetchMoneySupply = async () => {
+  try {
+    const response = await api.get('/api/v2/moneysupply')
+    const supply = Number(response.data?.moneysupply)
+    moneySupply.value = Number.isFinite(supply) && supply > 0 ? supply : null
+  } catch (err) {
+    console.error('Failed to fetch money supply:', err)
+    moneySupply.value = null
+  }
+}
+
 onMounted(() => {
   fetchMasternodes()
+  fetchMoneySupply()
 })
 </script>
 
@@ -459,20 +499,36 @@ onMounted(() => {
   margin-top: var(--space-2);
 }
 
+/* 5 summary tiles: keep rows balanced (5 across / 2+2+full) instead of wrapping 4+1 */
 .stats-grid {
+  align-items: stretch;
+  grid-auto-rows: 1fr;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
 }
 
-.stat-value {
-  font-size: var(--text-3xl);
-  font-weight: 700;
-  color: var(--text-accent);
-  margin-top: var(--space-2);
-  font-variant-numeric: tabular-nums;
+@media (max-width: 1280px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* When all 5 tiles render, span the 5th full-width so no row is left lopsided */
+  .stats-grid > :nth-child(5) {
+    grid-column: 1 / -1;
+  }
 }
+
+.stat-value {
+  font-size: clamp(var(--text-lg), 1.2vw + 0.55rem, var(--text-2xl));
+  font-weight: var(--weight-bold);
+  line-height: 1.2;
+  min-width: 0;
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+}
+
 
 .stat-unit {
   font-size: var(--text-base);
@@ -710,7 +766,7 @@ onMounted(() => {
   }
 
   .stats-grid {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .filters {

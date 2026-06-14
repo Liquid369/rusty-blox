@@ -17,7 +17,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Failed to Load Mempool"
           :message="error"
         >
@@ -33,23 +33,23 @@
           <StatCard
             label="Pending Transactions"
             :value="formatNumber(mempool.size)"
-            icon="⏳"
+            icon="hourglass"
           />
           <StatCard
             label="Mempool Size"
             :value="formatBytes(mempool.bytes || 0)"
-            icon="💾"
+            icon="database"
           />
           <StatCard
             label="Total Fees"
             :value="totalFees"
             suffix="PIV"
-            icon="⚙️"
+            icon="settings"
           />
           <StatCard
             label="Oldest Transaction"
             :value="oldestAge"
-            icon="🕐"
+            icon="clock"
           />
         </div>
 
@@ -64,7 +64,7 @@
 
           <EmptyState
             v-if="rows.length === 0"
-            icon="📭"
+            icon="inbox"
             title="Mempool Is Empty"
             message="All transactions have been confirmed. New transactions will appear here automatically."
           />
@@ -259,11 +259,24 @@ onUnmounted(() => {
   margin-top: var(--space-2);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .card-header-row {

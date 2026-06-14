@@ -15,7 +15,7 @@
           <div class="xpub-value">
             <code class="xpub-text">{{ xpub }}</code>
             <Button variant="ghost" size="sm" @click="copyToClipboard" title="Copy XPub">
-              📋 Copy
+              <Icon name="clipboard" :size="14" /> Copy
             </Button>
           </div>
         </div>
@@ -31,7 +31,7 @@
       <div v-else-if="error" class="error-container">
         <Card>
           <div class="error-content">
-            <p class="error-icon">⚠️</p>
+            <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
             <h2>Invalid XPub</h2>
             <p>{{ error }}</p>
             <Button @click="$router.push('/')">Back to Dashboard</Button>
@@ -47,30 +47,30 @@
             label="Balance"
             :value="formatPIV(xpubData.balance, 2)"
             suffix="PIV"
-            icon="💰"
+            icon="coins"
             variant="primary"
           />
           <StatCard
             label="Total Received"
             :value="formatPIV(xpubData.totalReceived, 2)"
             suffix="PIV"
-            icon="📥"
+            icon="arrow-down-left"
           />
           <StatCard
             label="Total Sent"
             :value="formatPIV(xpubData.totalSent, 2)"
             suffix="PIV"
-            icon="📤"
+            icon="arrow-up-right"
           />
           <StatCard
             label="Total Transfers"
             :value="formatNumber(xpubData.txs)"
-            icon="📊"
+            icon="chart-bar"
           />
           <StatCard
             label="Used Addresses"
             :value="formatNumber(xpubData.usedTokens || 0)"
-            icon="🔑"
+            icon="key"
           />
         </div>
 
@@ -129,7 +129,7 @@
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="🔑"
+              icon="key"
               title="No Addresses"
               message="No addresses match the selected filter."
             />
@@ -168,7 +168,7 @@
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="📭"
+              icon="inbox"
               title="No Transactions"
               message="This xpub has no transaction history."
             />
@@ -191,10 +191,10 @@
             <h2>API Response (Debug)</h2>
             <div class="debug-actions">
               <Button variant="ghost" size="sm" @click="refreshData">
-                🔄 Refresh
+                <Icon name="refresh-cw" :size="14" /> Refresh
               </Button>
               <Button variant="ghost" size="sm" @click="copyDebugData">
-                📋 Copy JSON
+                <Icon name="clipboard" :size="14" /> Copy JSON
               </Button>
             </div>
           </div>
@@ -208,15 +208,15 @@
             <div class="comparison-grid">
               <div class="comparison-item">
                 <label>Balance Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.balance) }} PIV</span>
+                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.balance) }} PIV</span>
               </div>
               <div class="comparison-item">
                 <label>Total Received Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.totalReceived) }} PIV</span>
+                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.totalReceived) }} PIV</span>
               </div>
               <div class="comparison-item">
                 <label>Total Sent Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.totalSent) }} PIV</span>
+                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.totalSent) }} PIV</span>
               </div>
               <div class="comparison-item">
                 <label>Transfers Count:</label>
@@ -245,6 +245,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -284,9 +285,9 @@ const loadingTransactions = ref(false)
 
 // Tabs configuration
 const tabs = [
-  { value: 'addresses', label: 'Addresses', icon: '🔑' },
-  { value: 'transactions', label: 'Transactions', icon: '📊' },
-  { value: 'debug', label: 'Debug', icon: '🔧' }
+  { value: 'addresses', label: 'Addresses', icon: 'key' },
+  { value: 'transactions', label: 'Transactions', icon: 'chart-bar' },
+  { value: 'debug', label: 'Debug', icon: 'settings' }
 ]
 
 // Computed
@@ -504,11 +505,23 @@ onMounted(() => {
   min-width: 300px;
 }
 
+/* 5 tiles: one row of 5 at desktop; below, Balance spans the row and the
+   remaining 4 form a 2x2 — no dangling 4+1 wrap */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+}
+
+@media (max-width: 1200px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stats-grid > :first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 .xpub-tabs {

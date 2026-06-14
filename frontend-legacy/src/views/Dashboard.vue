@@ -76,7 +76,7 @@
         </div>
 
         <div v-else-if="txError" class="error-state">
-          <p>⚠️ Failed to load recent transactions</p>
+          <p><Icon name="alert-triangle" :size="14" /> Failed to load recent transactions</p>
         </div>
 
         <div v-else-if="recentTransactions.length > 0" class="transactions-list">
@@ -98,13 +98,14 @@
 
       <!-- Error Display -->
       <div v-if="chainStore.error" class="error-banner">
-        ⚠️ {{ chainStore.error }}
+        <Icon name="alert-triangle" :size="14" /> {{ chainStore.error }}
       </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'

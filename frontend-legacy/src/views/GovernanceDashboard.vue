@@ -14,7 +14,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Failed to Load Proposals"
           :message="error"
         >
@@ -30,7 +30,7 @@
         <Card class="budget-overview-card">
           <template #header>
             <div class="overview-header">
-              <span class="header-icon">📊</span>
+              <span class="header-icon"><Icon name="chart-bar" :size="18" /></span>
               <span>Budget Overview</span>
             </div>
           </template>
@@ -77,6 +77,12 @@
               <div class="stat-label">Passing Threshold</div>
               <div class="stat-value stat-info" :title="`10% of ${formatNumber(enabledMasternodes)} enabled masternodes`">
                 {{ formatNumber(passingThreshold) }} votes
+              </div>
+            </div>
+            <div class="budget-stat">
+              <div class="stat-label">Enabled Masternodes</div>
+              <div class="stat-value stat-success" title="Masternodes eligible to vote">
+                {{ formatNumber(enabledMasternodes) }}
               </div>
             </div>
             <div class="budget-stat">
@@ -251,7 +257,7 @@
         <!-- Empty State -->
         <EmptyState
           v-else
-          icon="📭"
+          icon="inbox"
           title="No Proposals"
           message="No proposals match your filter"
         />
@@ -261,6 +267,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
@@ -539,11 +546,18 @@ onMounted(() => {
   font-size: var(--text-xl);
 }
 
+/* 8 tiles: keep rows balanced (4x2 / 2x4) instead of uneven auto-fit wraps */
 .budget-stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+}
+
+@media (max-width: 1024px) {
+  .budget-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .budget-stat {

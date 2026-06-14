@@ -5,8 +5,8 @@
     @click="handleCopy"
     :title="copied ? 'Copied!' : 'Click to copy'"
   >
-    <span v-if="copied" class="copy-icon">✓</span>
-    <span v-else class="copy-icon">📋</span>
+    <span v-if="copied" class="copy-icon"><Icon name="check" :size="14" /></span>
+    <span v-else class="copy-icon"><Icon name="clipboard" :size="14" /></span>
     <span v-if="showText" class="copy-text">
       {{ copied ? 'Copied!' : 'Copy' }}
     </span>
@@ -15,6 +15,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import Icon from './Icon.vue'
 
 const props = defineProps({
   text: {
@@ -90,7 +91,8 @@ const handleCopy = async () => {
 }
 
 .copy-icon {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
   line-height: 1;
 }
 

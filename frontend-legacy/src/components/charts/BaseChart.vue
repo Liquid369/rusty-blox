@@ -19,7 +19,7 @@
         <p>Loading chart data...</p>
       </div>
       <div v-else-if="error" class="chart-error">
-        <p class="error-icon">⚠️</p>
+        <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
         <p>{{ error }}</p>
       </div>
     </div>
@@ -27,6 +27,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'

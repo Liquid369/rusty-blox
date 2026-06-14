@@ -3,7 +3,7 @@
     <div class="controls">
       <p class="controls-note">Superblock treasury payouts across the full chain history</p>
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -13,36 +13,36 @@
         label="Total Paid (All Time)"
         :value="formatBalance(stats.totalAllTime)"
         suffix="PIV"
-        icon="🏛️"
+        icon="landmark"
         :loading="loading"
       />
       <StatCard
         label="Last Cycle"
         :value="formatBalance(stats.lastCycle)"
         suffix="PIV"
-        :subtitle="stats.lastCycleDate"
-        icon="🗳️"
+        :subtitle="stats.lastCycleSubtitle"
+        icon="vote"
         :loading="loading"
       />
       <StatCard
-        label="Avg Monthly (Last 12)"
-        :value="formatBalance(stats.avgMonthly12)"
+        label="Avg per Cycle (Last 12)"
+        :value="formatBalance(stats.avgCycle12)"
         suffix="PIV"
-        icon="📅"
+        icon="calendar"
         :loading="loading"
       />
       <StatCard
         label="Total Payouts"
         :value="formatNumber(stats.payoutCount)"
-        icon="🧾"
+        icon="file-text"
         :loading="loading"
       />
     </div>
 
-    <!-- Monthly Spending Chart -->
+    <!-- Per-Cycle Spending Chart -->
     <BaseChart
-      title="Monthly Treasury Spending"
-      :option="monthlyOption"
+      title="Treasury Spending per Cycle (43,200 blocks)"
+      :option="cycleOption"
       :loading="loading"
       :error="error"
       height="400px"
@@ -65,7 +65,7 @@
 
       <div v-else-if="payouts.length === 0" class="empty-wrapper">
         <EmptyState
-          icon="🏛️"
+          icon="landmark"
           title="No Treasury Payouts"
           message="No treasury payout history is available yet."
         />
@@ -114,6 +114,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import Button from '@/components/common/Button.vue'
@@ -142,43 +143,66 @@ const formatBalance = (piv) => {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-// Aggregate payouts per month (YYYY-MM) client-side, oldest first
-const monthlyTotals = computed(() => {
-  const totals = new Map()
+// PIVX budget cycle length in blocks. Each passed proposal is paid in its own
+// consecutive payout block at the superblock, so a cycle's total is the SUM of
+// all payouts whose height falls in the same 43,200-block cycle.
+const CYCLE_BLOCKS = 43200
+
+// Aggregate payouts per budget cycle (floor(height / 43200)), oldest first
+const cycleTotals = computed(() => {
+  const cycles = new Map()
   for (const payout of payouts.value) {
-    const month = (payout.date || '').slice(0, 7)
-    if (!month) continue
-    totals.set(month, (totals.get(month) || 0) + payout.totalPaid)
+    const index = Math.floor(payout.height / CYCLE_BLOCKS)
+    let entry = cycles.get(index)
+    if (!entry) {
+      entry = { cycle: index, total: 0, payouts: 0, startDate: '', endDate: '' }
+      cycles.set(index, entry)
+    }
+    entry.total += payout.totalPaid
+    entry.payouts += 1
+    if (payout.date) {
+      if (!entry.startDate || payout.date < entry.startDate) entry.startDate = payout.date
+      if (!entry.endDate || payout.date > entry.endDate) entry.endDate = payout.date
+    }
   }
-  return [...totals.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([month, total]) => ({ month, total: Math.round(total * 100) / 100 }))
+  return [...cycles.values()]
+    .sort((a, b) => a.cycle - b.cycle)
+    .map((c) => ({ ...c, total: Math.round(c.total * 100) / 100 }))
 })
+
+const cycleDateRange = (cycle) => {
+  if (!cycle || !cycle.startDate) return ''
+  return cycle.startDate === cycle.endDate
+    ? cycle.startDate
+    : `${cycle.startDate} → ${cycle.endDate}`
+}
 
 const stats = computed(() => {
   if (!payouts.value || payouts.value.length === 0) {
     return {
       totalAllTime: 0,
       lastCycle: 0,
-      lastCycleDate: '',
-      avgMonthly12: 0,
+      lastCycleSubtitle: '',
+      avgCycle12: 0,
       payoutCount: 0
     }
   }
 
   const totalAllTime = payouts.value.reduce((sum, p) => sum + p.totalPaid, 0)
-  const latest = payouts.value[payouts.value.length - 1]
+  const lastCycle = cycleTotals.value[cycleTotals.value.length - 1]
 
-  const last12 = monthlyTotals.value.slice(-12)
-  const avgMonthly12 = last12.length > 0
-    ? last12.reduce((sum, m) => sum + m.total, 0) / last12.length
+  const last12 = cycleTotals.value.slice(-12)
+  const avgCycle12 = last12.length > 0
+    ? last12.reduce((sum, c) => sum + c.total, 0) / last12.length
     : 0
 
   return {
     totalAllTime,
-    lastCycle: latest.totalPaid,
-    lastCycleDate: latest.date,
-    avgMonthly12,
+    lastCycle: lastCycle ? lastCycle.total : 0,
+    lastCycleSubtitle: lastCycle
+      ? `${cycleDateRange(lastCycle)} · ${lastCycle.payouts} payout${lastCycle.payouts === 1 ? '' : 's'}`
+      : '',
+    avgCycle12,
     payoutCount: payouts.value.length
   }
 })
@@ -188,19 +212,22 @@ const recentPayouts = computed(() =>
   [...payouts.value].slice(-RECENT_LIMIT).reverse()
 )
 
-// Monthly treasury spending bar chart over the full history
-const monthlyOption = computed(() => {
-  if (monthlyTotals.value.length === 0) {
+// Per-cycle treasury spending bar chart over the full history
+const cycleOption = computed(() => {
+  if (cycleTotals.value.length === 0) {
     return getBarChartOption([], [], 'Treasury Paid (PIV)')
   }
 
-  const months = monthlyTotals.value.map(m => m.month)
-  const totals = monthlyTotals.value.map(m => m.total)
+  const labels = cycleTotals.value.map(c => c.startDate || `Cycle ${c.cycle}`)
+  const totals = cycleTotals.value.map(c => c.total)
 
-  const option = getBarChartOption(months, totals, 'Treasury Paid (PIV)')
+  const option = getBarChartOption(labels, totals, 'Treasury Paid (PIV)')
   option.tooltip.formatter = (params) => {
     const p = Array.isArray(params) ? params[0] : params
-    return `${p.name}<br/>${p.marker}${p.seriesName}: ${formatBalance(p.value)} PIV`
+    const cycle = cycleTotals.value[p.dataIndex]
+    const range = cycleDateRange(cycle)
+    const count = cycle ? `${cycle.payouts} payout${cycle.payouts === 1 ? '' : 's'}` : ''
+    return `${range}<br/>${p.marker}${p.seriesName}: ${formatBalance(p.value)} PIV<br/>${count}`
   }
 
   return option
@@ -235,8 +262,8 @@ const fetchData = async () => {
 }
 
 const exportData = () => {
-  if (monthlyTotals.value && monthlyTotals.value.length > 0) {
-    exportToCSV(monthlyTotals.value, 'treasury-monthly.csv')
+  if (cycleTotals.value && cycleTotals.value.length > 0) {
+    exportToCSV(cycleTotals.value, 'treasury-cycles.csv')
   }
 }
 
@@ -265,10 +292,23 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .table-card {

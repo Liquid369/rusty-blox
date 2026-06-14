@@ -9,7 +9,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Block Not Found"
           :message="error"
         >
@@ -52,72 +52,72 @@
           </template>
 
           <div class="info-grid">
-            <InfoRow label="Block Hash" icon="🔗">
+            <InfoRow label="Block Hash" icon="link">
               <HashDisplay :hash="block.hash" show-copy />
             </InfoRow>
 
-            <InfoRow label="Height" icon="📊">
+            <InfoRow label="Height" icon="chart-bar">
               {{ formatNumber(block.height) }}
             </InfoRow>
 
-            <InfoRow label="Timestamp" icon="🕐">
+            <InfoRow label="Timestamp" icon="clock">
               <div class="timestamp-group">
                 <span>{{ formatDate(block.time) }}</span>
                 <span class="time-ago">{{ formatTimeAgo(block.time) }}</span>
               </div>
             </InfoRow>
 
-            <InfoRow label="Confirmations" icon="✅">
+            <InfoRow label="Confirmations" icon="check-circle">
               <div class="confirmation-display">
                 <Badge :variant="confirmations >= 6 ? 'success' : 'warning'">
                   {{ formatNumber(confirmations) }}
                 </Badge>
                 <Badge v-if="isSyncLagging" variant="warning" class="sync-warning">
-                  ⚠️ Node syncing
+                  <Icon name="alert-triangle" :size="12" /> Node syncing
                 </Badge>
               </div>
             </InfoRow>
 
-            <InfoRow label="Transactions" icon="📝">
+            <InfoRow label="Transactions" icon="file-text">
               {{ block.txCount }} transaction{{ block.txCount !== 1 ? 's' : '' }}
             </InfoRow>
 
-            <InfoRow v-if="blockInterval !== null" label="Block Interval" icon="⏱️">
+            <InfoRow v-if="blockInterval !== null" label="Block Interval" icon="clock">
               <div class="interval-display">
                 <span class="interval-value">{{ formatDuration(blockInterval) }}</span>
                 <span class="interval-note">since block #{{ formatNumber(block.height - 1) }}</span>
               </div>
             </InfoRow>
 
-            <InfoRow v-if="blockReward !== null" label="Block Reward" icon="🏆">
+            <InfoRow v-if="blockReward !== null" label="Block Reward" icon="award">
               <span class="reward-value">{{ formatPIV(blockReward) }} PIV</span>
             </InfoRow>
 
-            <InfoRow v-if="totalTxSize > 0" label="Size (approx)" icon="💾">
+            <InfoRow v-if="totalTxSize > 0" label="Size (approx)" icon="database">
               <span class="size-value">{{ formatBytes(totalTxSize + 80) }}</span>
             </InfoRow>
 
-            <InfoRow label="Difficulty" icon="⚡">
+            <InfoRow label="Difficulty" icon="zap">
               {{ formatDifficulty(block.difficulty) }}
             </InfoRow>
 
-            <InfoRow label="Version" icon="🔢">
+            <InfoRow label="Version" icon="hash">
               {{ block.version }}
             </InfoRow>
 
-            <InfoRow label="Merkle Root" icon="🌳">
+            <InfoRow label="Merkle Root" icon="network">
               <HashDisplay :hash="block.merkleroot" :truncate="true" show-copy />
             </InfoRow>
 
-            <InfoRow label="Nonce" icon="🎲">
+            <InfoRow label="Nonce" icon="hash">
               {{ formatNumber(block.nonce) }}
             </InfoRow>
 
-            <InfoRow label="Bits" icon="🔧">
+            <InfoRow label="Bits" icon="settings">
               {{ block.bits }}
             </InfoRow>
 
-            <InfoRow v-if="block.previousblockhash" label="Previous Block" icon="⬅️">
+            <InfoRow v-if="block.previousblockhash" label="Previous Block" icon="arrow-left">
               <HashDisplay
                 :hash="block.previousblockhash"
                 :truncate="true"
@@ -126,7 +126,7 @@
               />
             </InfoRow>
 
-            <InfoRow v-if="block.nextblockhash" label="Next Block" icon="➡️">
+            <InfoRow v-if="block.nextblockhash" label="Next Block" icon="arrow-right">
               <HashDisplay
                 :hash="block.nextblockhash"
                 :truncate="true"
@@ -181,7 +181,7 @@
           <!-- No Transactions -->
           <EmptyState
             v-else
-            icon="📭"
+            icon="inbox"
             title="No Transactions"
             message="This block contains no transactions."
           />
@@ -192,6 +192,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'

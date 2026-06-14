@@ -2,7 +2,7 @@
   <div class="kpi-band">
     <!-- Loading skeletons -->
     <template v-if="loading">
-      <div v-for="i in 11" :key="`kpi-sk-${i}`" class="kpi-tile kpi-skeleton">
+      <div v-for="i in 12" :key="`kpi-sk-${i}`" class="kpi-tile kpi-skeleton">
         <SkeletonLoader variant="text" width="60%" />
         <SkeletonLoader variant="title" width="80%" />
       </div>
@@ -10,7 +10,7 @@
 
     <!-- Error state (all sources failed) -->
     <div v-else-if="allFailed" class="kpi-error">
-      <p>⚠️ Failed to load network statistics</p>
+      <p><Icon name="alert-triangle" :size="14" /> Failed to load network statistics</p>
     </div>
 
     <!-- Tiles -->
@@ -34,6 +34,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import api from '@/services/api'
@@ -44,12 +45,13 @@ import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
 const loading = ref(true)
 const txDay = ref(null) // last complete day of /analytics/transactions
 const stakingDay = ref(null) // last complete day of /analytics/staking
+const networkDay = ref(null) // last complete day of /analytics/network
 const mnCount = ref(null) // /mncount
 const supply = ref(null) // /moneysupply
 const price = ref(null) // /price
 
 const allFailed = computed(() => {
-  return !txDay.value && !stakingDay.value && !mnCount.value && !supply.value && !price.value
+  return !txDay.value && !stakingDay.value && !networkDay.value && !mnCount.value && !supply.value && !price.value
 })
 
 /**
@@ -133,6 +135,18 @@ const tiles = computed(() => {
     })
   }
 
+  if (networkDay.value) {
+    // Network analytics fields: blocks_per_day, interval_p95_secs, difficulty
+    const net = networkDay.value
+    out.push({
+      key: 'blocks',
+      label: '24h Blocks',
+      value: formatNumber(net.blocks_per_day),
+      sub: net.interval_p95_secs ? `p95 interval ${net.interval_p95_secs}s` : '',
+      to: '/analytics'
+    })
+  }
+
   if (stk) {
     // total_staked is a PIV-denominated string; participation_rate / apy_estimate are %
     out.push({
@@ -185,9 +199,10 @@ const tiles = computed(() => {
 })
 
 onMounted(async () => {
-  const [txRes, stakingRes, mnRes, supplyRes, priceRes] = await Promise.allSettled([
+  const [txRes, stakingRes, networkRes, mnRes, supplyRes, priceRes] = await Promise.allSettled([
     analyticsService.getTransactionAnalytics('7d'),
     analyticsService.getStakingAnalytics('7d'),
+    analyticsService.getNetworkHealth('7d'),
     api.get('/api/v2/mncount'),
     api.get('/api/v2/moneysupply'),
     api.get('/api/v2/price')
@@ -195,6 +210,7 @@ onMounted(async () => {
 
   if (txRes.status === 'fulfilled') txDay.value = lastCompleteDay(txRes.value)
   if (stakingRes.status === 'fulfilled') stakingDay.value = lastCompleteDay(stakingRes.value)
+  if (networkRes.status === 'fulfilled') networkDay.value = lastCompleteDay(networkRes.value)
   if (mnRes.status === 'fulfilled') mnCount.value = mnRes.value.data
   if (supplyRes.status === 'fulfilled') supply.value = supplyRes.value.data
   if (priceRes.status === 'fulfilled') price.value = priceRes.value.data
@@ -204,10 +220,23 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* 12 tiles: column counts (6/4/3/2) all divide 12, so rows always balance */
 .kpi-band {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: var(--space-3);
+}
+
+@media (max-width: 1280px) {
+  .kpi-band {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .kpi-band {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .kpi-tile {
@@ -294,7 +323,7 @@ onMounted(async () => {
 
 @media (max-width: 768px) {
   .kpi-band {
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
   }
 

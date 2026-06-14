@@ -3,7 +3,7 @@
     <div v-if="isLoading" class="skeleton"></div>
     <template v-else>
       <div class="stat-label">
-        <span v-if="icon" class="stat-icon">{{ icon }}</span>
+        <span v-if="icon" class="stat-icon"><Icon :name="icon" :size="18" /></span>
         {{ label }}
       </div>
       <div class="stat-value" :class="valueClass">
@@ -17,6 +17,8 @@
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
+
 defineProps({
   label: {
     type: String,
@@ -113,7 +115,10 @@ defineProps({
 }
 
 .stat-icon {
-  font-size: var(--text-xl);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-accent);
   filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
 }
 
@@ -197,8 +202,9 @@ defineProps({
     font-size: var(--text-2xl);
   }
   
-  .stat-icon {
-    font-size: var(--text-lg);
+  .stat-icon .ui-icon {
+    width: 16px;
+    height: 16px;
   }
 }
 </style>

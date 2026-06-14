@@ -24,7 +24,7 @@
       <div v-else-if="error" class="error-container">
         <Card>
           <div class="error-content">
-            <p class="error-icon">⚠️</p>
+            <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
             <h2>Search Error</h2>
             <p>{{ error }}</p>
             <Button @click="performSearch">Try Again</Button>
@@ -37,7 +37,7 @@
         <!-- No Results -->
         <div v-if="totalResults === 0" class="no-results">
           <EmptyState
-            icon="🔍"
+            icon="search"
             title="No Results Found"
             :message="`No blocks, transactions, or addresses match '${searchQuery}'`"
           />
@@ -103,6 +103,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { searchService } from '@/services/searchService'

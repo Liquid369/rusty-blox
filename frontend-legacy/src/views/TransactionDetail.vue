@@ -9,7 +9,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Transaction Not Found"
           :message="error"
         >
@@ -45,7 +45,7 @@
               <HashDisplay :hash="transaction.txid" :truncate="false" show-copy />
             </InfoRow>
 
-            <InfoRow label="Block" icon="📦">
+            <InfoRow label="Block" icon="box">
               <div class="block-info">
                 <HashDisplay
                   v-if="transaction.blockHash"
@@ -61,7 +61,7 @@
               </div>
             </InfoRow>
 
-            <InfoRow label="Confirmations" icon="✅">
+            <InfoRow label="Confirmations" icon="check-circle">
               <div class="confirmation-display">
                 <Badge :variant="confirmationBadgeVariant">
                   {{ confirmations }} confirmation{{ confirmations !== 1 ? 's' : '' }}
@@ -70,12 +70,12 @@
                   first seen {{ formatTimeAgo(transaction.blockTime) }}
                 </span>
                 <Badge v-if="isSyncLagging" variant="warning" class="sync-warning">
-                  ⚠️ Node syncing ({{ syncLag }} blocks behind)
+                  <Icon name="alert-triangle" :size="12" /> Node syncing ({{ syncLag }} blocks behind)
                 </Badge>
               </div>
             </InfoRow>
 
-            <InfoRow label="Timestamp" icon="🕐">
+            <InfoRow label="Timestamp" icon="clock">
               <div class="timestamp-group" v-if="transaction.blockTime">
                 <span>{{ formatDate(transaction.blockTime) }}</span>
                 <span class="time-ago">{{ formatTimeAgo(transaction.blockTime) }}</span>
@@ -83,23 +83,23 @@
               <span v-else class="unconfirmed">Pending</span>
             </InfoRow>
 
-            <InfoRow label="Amount" icon="💰">
+            <InfoRow label="Amount" icon="coins">
               <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
             </InfoRow>
 
-            <InfoRow label="Total Input" icon="📥">
+            <InfoRow label="Total Input" icon="arrow-down-left">
               <span class="flow-value">{{ formatPIV(transaction.valueIn) }} PIV</span>
             </InfoRow>
 
-            <InfoRow label="Total Output" icon="📤">
+            <InfoRow label="Total Output" icon="arrow-up-right">
               <span class="flow-value">{{ formatPIV(transaction.value) }} PIV</span>
             </InfoRow>
 
-            <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="⚙️">
+            <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="settings">
               <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
             </InfoRow>
 
-            <InfoRow v-if="feeRate !== null" label="Fee Rate" icon="📈">
+            <InfoRow v-if="feeRate !== null" label="Fee Rate" icon="trending-up">
               <span class="fee-value">{{ feeRate }} sat/byte</span>
             </InfoRow>
           </div>
@@ -128,7 +128,7 @@
         <Card v-if="isShieldedTransaction" class="sapling-card">
           <template #header>
             <div class="card-header-content">
-              <span>🛡️ Sapling Shielded Transaction</span>
+              <span><Icon name="shield" :size="16" /> Sapling Shielded Transaction</span>
               <Badge variant="accent">Private</Badge>
               <Badge v-if="transaction.sapling?.transaction_type" :variant="shieldedTypeBadgeVariant">
                 {{ shieldedTypeLabel }}
@@ -137,7 +137,7 @@
           </template>
 
           <div class="info-grid">
-            <InfoRow v-if="transaction.sapling?.shielded_spend_count !== undefined" label="Shielded Spends" icon="🔒">
+            <InfoRow v-if="transaction.sapling?.shielded_spend_count !== undefined" label="Shielded Spends" icon="lock">
               <div class="shielded-count">
                 <span class="count-number">{{ transaction.sapling.shielded_spend_count }}</span>
                 <span class="count-label">input{{ transaction.sapling.shielded_spend_count !== 1 ? 's' : '' }}</span>
@@ -145,7 +145,7 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.sapling?.shielded_output_count !== undefined" label="Shielded Outputs" icon="🔐">
+            <InfoRow v-if="transaction.sapling?.shielded_output_count !== undefined" label="Shielded Outputs" icon="lock">
               <div class="shielded-count">
                 <span class="count-number">{{ transaction.sapling.shielded_output_count }}</span>
                 <span class="count-label">output{{ transaction.sapling.shielded_output_count !== 1 ? 's' : '' }}</span>
@@ -153,21 +153,21 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="formatPIV(transaction.sapling?.value_balance)" label="Value Balance" icon="⚖️">
+            <InfoRow v-if="formatPIV(transaction.sapling?.value_balance)" label="Value Balance" icon="scale">
               <div class="value-balance">
                 <span class="balance-amount" :class="valueBalanceClass">{{ formatPIV(transaction.sapling.value_balance) }} PIV</span>
                 <span class="balance-explanation">{{ valueBalanceExplanation }}</span>
               </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.sapling?.binding_sig" label="Binding Signature" icon="🔐">
+            <InfoRow v-if="transaction.sapling?.binding_sig" label="Binding Signature" icon="lock">
               <HashDisplay :hash="transaction.sapling.binding_sig" :truncate="true" show-copy />
             </InfoRow>
           </div>
 
           <!-- Shielded Spend Details -->
           <div v-if="transaction.sapling?.spends?.length > 0" class="shielded-details">
-            <h3 class="details-title">🔒 Shielded Spend Details</h3>
+            <h3 class="details-title"><Icon name="lock" :size="16" /> Shielded Spend Details</h3>
             <div class="spend-list">
               <div v-for="(spend, idx) in transaction.sapling.spends" :key="idx" class="spend-item">
                 <div class="spend-header">
@@ -193,7 +193,7 @@
 
           <!-- Shielded Output Details -->
           <div v-if="transaction.sapling?.outputs?.length > 0" class="shielded-details">
-            <h3 class="details-title">🔐 Shielded Output Details</h3>
+            <h3 class="details-title"><Icon name="lock" :size="16" /> Shielded Output Details</h3>
             <div class="output-list">
               <div v-for="(output, idx) in transaction.sapling.outputs" :key="idx" class="output-item">
                 <div class="output-header">
@@ -222,7 +222,7 @@
           </div>
 
           <div class="sapling-note">
-            <div class="note-icon">ℹ️</div>
+            <div class="note-icon"><Icon name="info" :size="18" /></div>
             <div class="note-content">
               <p class="note-title">Privacy Information</p>
               <p>This transaction contains Sapling shielded components. The amounts, addresses, and memos within shielded transfers are encrypted using zero-knowledge proofs and are not visible on the blockchain. Only the transaction participants with the correct viewing keys can decrypt this information.</p>
@@ -288,6 +288,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
@@ -455,9 +456,9 @@ const isShieldedTransaction = computed(() => {
 
 const shieldedTypeLabel = computed(() => {
   const type = transaction.value?.sapling?.transaction_type
-  if (type === 'shielding') return '🛡️ Shielding'
-  if (type === 'unshielding') return '🔓 Unshielding'
-  if (type === 'shielded_transfer') return '🔐 Shielded Transfer'
+  if (type === 'shielding') return 'Shielding'
+  if (type === 'unshielding') return 'Unshielding'
+  if (type === 'shielded_transfer') return 'Shielded Transfer'
   return 'Unknown'
 })
 

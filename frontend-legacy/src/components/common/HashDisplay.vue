@@ -17,12 +17,13 @@
       class="hash-link"
       title="View details"
     >
-      →
+      <Icon name="arrow-right" :size="14" />
     </RouterLink>
   </div>
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
 import { truncateHash } from '@/utils/formatters'
 import CopyButton from './CopyButton.vue'
 
