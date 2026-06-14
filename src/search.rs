@@ -62,11 +62,12 @@ fn detect_query_type(query: &str) -> QueryType {
     }
     
     // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
-    // 6/7 (P2SH), E (exchange/EXM). All base58, ~26-35 chars. A false positive
-    // just falls through to NotFound in search_address, so this is safe to be
-    // inclusive — and it stops S/6/E addresses being unsearchable via the API.
+    // 6/7 (P2SH), E (exchange/EXM). Most are ~26-35 chars, but EXM exchange
+    // addresses are 36 — the old <=35 cap made them unsearchable. Upper bound
+    // is generous (<=40) for headroom; a false positive just falls through to
+    // NotFound in search_address, so over-inclusion is safe.
     if matches!(q.chars().next(), Some('D') | Some('S') | Some('6') | Some('7') | Some('E'))
-        && q.len() >= 26 && q.len() <= 35 {
+        && q.len() >= 26 && q.len() <= 40 {
         return QueryType::Address;
     }
     
@@ -108,7 +109,14 @@ pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::er
 
 /// Search for block by height
 fn search_block_by_height(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    let height: i32 = query.parse()?;
+    // Parse defensively: a long numeric query (satoshi amount, large id, or a
+    // mistyped height beyond i32::MAX) overflows i32. Previously `?` bubbled the
+    // ParseIntError into a 500 + an error-level log on every such search; treat
+    // an unparseable/out-of-range height as a normal NotFound instead.
+    let height: i32 = match query.parse() {
+        Ok(h) => h,
+        Err(_) => return Ok(SearchResult::NotFound { query: query.to_string() }),
+    };
     
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;

@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::collections::{HashMap, HashSet, BinaryHeap};
 use std::cmp::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::parser::deserialize_transaction_blocking;
 use super::helpers::format_piv_amount;
@@ -48,13 +49,13 @@ fn default_limit() -> u32 {
 // Response Types
 // ========================================
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SupplyAnalytics {
     pub current: SupplySnapshot,
     pub historical: Vec<SupplyDataPoint>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SupplySnapshot {
     pub total_supply: String,
     pub transparent_supply: String,
@@ -62,7 +63,7 @@ pub struct SupplySnapshot {
     pub shield_adoption_percentage: f64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SupplyDataPoint {
     pub date: String,
     pub total: String,
@@ -78,7 +79,9 @@ pub struct TransactionDataPoint {
     pub payment_count: u64,
     pub stake_count: u64,
     pub other_count: u64,
-    pub avg_size: String,
+    /// Average transaction VALUE for the day, in satoshis (string).
+    /// Not byte size — this is volume / tx_count.
+    pub avg_value: String,
     pub avg_fee: String,
     /// Average fee per byte across the day's Normal txs (sats/byte).
     pub avg_fee_per_byte: f64,
@@ -165,15 +168,49 @@ pub struct WealthBucket {
 
 /// GET /api/v2/analytics/supply?range={timeRange}
 /// Returns money supply analytics with historical data
+///
+/// **CACHED**: 300 second TTL (supply changes slowly). On an RPC error we serve
+/// the last cached value if one exists (stale-while-revalidate) so a transient
+/// node stall doesn't surface as a user-facing 500.
 pub async fn supply_analytics(
     Query(params): Query<TimeRangeQuery>,
     Extension(db): Extension<Arc<DB>>,
+    Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<SupplyAnalytics>, StatusCode> {
-    let result = compute_supply_analytics(&db, &params.range).await;
-    
-    match result {
-        Ok(data) => Ok(Json(data)),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    // The response shape (SupplyAnalytics) differs from the moneysupply endpoint
+    // (MoneySupply) and is range-dependent, so use a dedicated key per range
+    // rather than reusing "supply:latest".
+    let cache_key = format!("analytics:supply:{}", params.range);
+    // Separate long-lived backup so a failed recompute can fall back to the last
+    // good value even after the 300s primary key has expired (get_json evicts on
+    // TTL, so the primary key alone can't back stale-while-revalidate).
+    let stale_key = format!("{}:last", cache_key);
+
+    // Fresh cache hit: serve immediately.
+    if let Some(cached) = cache.get_json::<SupplyAnalytics>(&cache_key).await {
+        return Ok(Json(cached));
+    }
+
+    match compute_supply_analytics(&db, &params.range).await {
+        Ok(data) => {
+            cache.set_json(&cache_key, &data, Duration::from_secs(300)).await;
+            // Refresh the long-lived backup used for stale-while-revalidate.
+            cache.set_json(&stale_key, &data, Duration::from_secs(86_400)).await;
+            Ok(Json(data))
+        }
+        Err(e) => {
+            // RPC stall / error: serve the last good value if we still have one.
+            match cache.get_json::<SupplyAnalytics>(&stale_key).await {
+                Some(stale) => {
+                    tracing::warn!(error = %e, "supply analytics compute failed; serving stale cache");
+                    Ok(Json(stale))
+                }
+                None => {
+                    tracing::error!(error = %e, "supply analytics endpoint failed");
+                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
     }
 }
 
@@ -230,8 +267,12 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
             Some(b) => bincode::deserialize(&b).ok()?,
             None => continue,
         };
-        let avg_size = if agg.tx_count > 0 {
-            (agg.volume / agg.tx_count as i64).to_string()
+        // avg_value = payment volume / PAYMENT count, not total tx_count: the
+        // count is dominated by coinstakes/coinbases that carry no payment
+        // value, which dragged this ~26x too low. Matches the avg_fee
+        // denominator below (agg.payment).
+        let avg_value = if agg.payment > 0 {
+            (agg.volume / agg.payment as i64).to_string()
         } else {
             "0".to_string()
         };
@@ -242,7 +283,7 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
             payment_count: agg.payment,
             stake_count: agg.coinstake,
             other_count: agg.coinbase,
-            avg_size,
+            avg_value,
             // Real per-payment average fee from the Pass 2b prevout joins.
             avg_fee: format_piv_amount(agg.fees_total / agg.payment.max(1) as i64),
             avg_fee_per_byte: if agg.normal_tx_bytes > 0 {
@@ -901,18 +942,21 @@ fn compute_transaction_analytics(
     let mut data_points: Vec<TransactionDataPoint> = daily_stats
         .into_iter()
         .map(|(_, stats)| {
-            let avg_size = if stats.count > 0 {
+            // Legacy fallback path (used only before the daily series is built).
+            // total_size is not populated here, so this averages to 0; the field
+            // is average transaction VALUE, not byte size.
+            let avg_value = if stats.count > 0 {
                 format_piv_amount((stats.total_size / stats.count) as i64)
             } else {
                 "0".to_string()
             };
-            
+
             let avg_fee = if stats.count > 0 {
                 format_piv_amount((stats.total_fee as i64) / (stats.count as i64))
             } else {
                 "0".to_string()
             };
-            
+
             TransactionDataPoint {
                 date: stats.date,
                 count: stats.count,
@@ -920,7 +964,7 @@ fn compute_transaction_analytics(
                 payment_count: stats.payment_count,
                 stake_count: stats.stake_count,
                 other_count: stats.other_count,
-                avg_size,
+                avg_value,
                 avg_fee,
                 // Prevout-joined metrics only exist in the precomputed series.
                 avg_fee_per_byte: 0.0,

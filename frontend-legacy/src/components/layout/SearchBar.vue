@@ -90,7 +90,7 @@ const classifyQuery = (q) => {
   if (/^[0-9a-fA-F]{64}$/.test(q)) {
     return { icon: 'hash', label: 'Tx / Block hash', value: q }
   }
-  if (/^[DS6E][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(q)) {
+  if (/^[DS67E][1-9A-HJ-NP-Za-km-z]{25,40}$/.test(q)) {
     return { icon: 'key', label: 'Address', value: q }
   }
   return null

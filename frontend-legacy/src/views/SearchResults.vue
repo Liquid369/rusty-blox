@@ -135,9 +135,10 @@ const totalResults = computed(() => {
 })
 
 // PIVX base58 addresses: D = P2PKH, S = cold-staking, 6 = P2SH, E = exchange (EXM).
-// 26-35 base58 chars, no 0/O/I/l. Used to resolve addresses that have no on-chain
-// history (which the search endpoint reports as NotFound) straight to /address/{q}.
-const looksLikeAddress = (q) => /^[DS6E][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(q.trim())
+// 26-41 base58 chars, no 0/O/I/l (EXM exchange addresses are 36; 7 is P2SH).
+// Used to resolve addresses that have no on-chain history (which the search
+// endpoint reports as NotFound) straight to /address/{q}.
+const looksLikeAddress = (q) => /^[DS67E][1-9A-HJ-NP-Za-km-z]{25,40}$/.test(q.trim())
 
 const performSearch = async () => {
   if (!searchQuery.value) {

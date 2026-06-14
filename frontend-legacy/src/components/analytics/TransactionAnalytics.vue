@@ -77,10 +77,10 @@
       </Card>
     </div>
 
-    <!-- Average Transaction Size Trend -->
+    <!-- Average Transaction Value Trend -->
     <BaseChart
-      title="Average Transaction Size (PIV)"
-      :option="avgSizeOption"
+      title="Average Transaction Value (PIV)"
+      :option="avgValueOption"
       :loading="loading"
       :error="error"
       height="350px"
@@ -198,16 +198,16 @@ const typeDistributionOption = computed(() => {
   return getPieChartOption(data, 'Transaction Types')
 })
 
-// Average Size Trend
-const avgSizeOption = computed(() => {
+// Average Value Trend
+const avgValueOption = computed(() => {
   if (!txData.value || txData.value.length === 0) {
-    return getLineChartOption([], [], 'Avg Size')
+    return getLineChartOption([], [], 'Avg Value')
   }
 
   const dates = txData.value.map(d => d.date)
-  const values = txData.value.map(d => d.avgSize)
+  const values = txData.value.map(d => d.avgValue)
 
-  return getLineChartOption(dates, values, 'Average Size (PIV)')
+  return getLineChartOption(dates, values, 'Average Value (PIV)')
 })
 
 const fetchData = async () => {
@@ -228,8 +228,9 @@ const fetchData = async () => {
         coldstake: d.coldstake_txs || 0,
         // volume is already a PIV decimal string — no satoshi conversion
         volume: parseFloat(d.volume) || 0,
-        // avg_size is a satoshi string — convert to PIV exactly once here
-        avgSize: (parseFloat(d.avg_size) || 0) / 100000000
+        // avg_value is the average transaction value as a satoshi string —
+        // convert to PIV exactly once here
+        avgValue: (parseFloat(d.avg_value) || 0) / 100000000
       }))
     } else {
       txData.value = []

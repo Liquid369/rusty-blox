@@ -256,9 +256,18 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
     let app = if std::path::Path::new(&frontend_dist).join("index.html").exists() {
         println!("Serving frontend from {}", frontend_dist);
         let index = std::path::Path::new(&frontend_dist).join("index.html");
+        let assets_dir = std::path::Path::new(&frontend_dist).join("assets");
+        // Hashed bundles live under /assets — serve them directly and return a
+        // real 404 on a miss (NO index.html fallback here). Falling back to
+        // index.html for a missing chunk returns 200 text/html, which browsers
+        // reject with a strict-MIME error on every redeploy (stale clients still
+        // request the previous build's chunk hashes). Non-asset paths fall
+        // through to the SPA index below for client-side routing.
         let spa = tower_http::services::ServeDir::new(&frontend_dist)
             .fallback(tower_http::services::ServeFile::new(index));
-        app.fallback_service(spa)
+        app
+            .nest_service("/assets", tower_http::services::ServeDir::new(assets_dir))
+            .fallback_service(spa)
     } else {
         println!("⚠️  Frontend dist not found at {} - build it with: cd frontend-legacy && npm run build", frontend_dist);
         app.route("/", get(root_handler))
