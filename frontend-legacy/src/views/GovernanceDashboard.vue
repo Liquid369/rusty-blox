@@ -244,9 +244,15 @@
                 </div>
               </div>
 
-              <!-- URL -->
-              <div v-if="proposal.URL" class="proposal-url">
-                <a :href="proposal.URL" target="_blank" class="external-link" @click.stop>
+              <!-- URL (only rendered when it is a safe http(s) link) -->
+              <div v-if="safeUrl(proposal.URL)" class="proposal-url">
+                <a
+                  :href="safeUrl(proposal.URL)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="external-link"
+                  @click.stop
+                >
                   View Discussion →
                 </a>
               </div>
@@ -468,6 +474,14 @@ const getProposalDisplayInfo = (proposal) => {
   }
 }
 
+// Only surface attacker-controllable proposal URLs when they are plain
+// http(s) links; anything else (javascript:, data:, etc.) is suppressed.
+const safeUrl = (url) => {
+  if (typeof url !== 'string') return ''
+  const trimmed = url.trim()
+  return /^https?:\/\//i.test(trimmed) ? trimmed : ''
+}
+
 const getYeasPercentage = (proposal) => {
   const total = proposal.Yeas + proposal.Nays
   if (total === 0) return 0
@@ -481,7 +495,7 @@ const getNaysPercentage = (proposal) => {
 }
 
 const viewProposal = (proposal) => {
-  router.push(`/governance/${encodeURIComponent(proposal.Name)}`)
+  router.push(`/proposal/${encodeURIComponent(proposal.Name)}`)
 }
 
 const fetchProposals = async () => {
@@ -771,22 +785,24 @@ onMounted(() => {
 .vote-bar {
   height: 8px;
   background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   overflow: hidden;
   display: flex;
+  border: 1px solid var(--border-secondary);
+  box-shadow: inset 0 1px 2px rgba(var(--rgb-purple-darkest), 0.5);
 }
 
 .vote-bar-fill {
   height: 100%;
-  transition: width 0.3s;
+  transition: width var(--transition-slow);
 }
 
 .vote-bar-fill.yeas {
-  background: var(--success);
+  background: linear-gradient(90deg, var(--green-accent-dark) 0%, var(--success) 100%);
 }
 
 .vote-bar-fill.nays {
-  background: var(--danger);
+  background: linear-gradient(90deg, var(--danger) 0%, #f87171 100%);
 }
 
 .vote-numbers {

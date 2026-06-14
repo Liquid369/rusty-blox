@@ -28,7 +28,39 @@
         <RouterLink to="/governance" class="nav-link">Governance</RouterLink>
         <RouterLink to="/analytics" class="nav-link">Analytics</RouterLink>
       </nav>
+
+      <!-- Mobile Menu Toggle (shown <=1024px) -->
+      <button
+        type="button"
+        class="nav-toggle"
+        aria-label="Open navigation menu"
+        :aria-expanded="mobileMenuOpen"
+        aria-controls="mobile-menu"
+        aria-haspopup="dialog"
+        @click="mobileMenuOpen = true"
+      >
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.75"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M4 6h16 M4 12h16 M4 18h16" />
+        </svg>
+      </button>
     </div>
+
+    <!-- Mobile Drawer -->
+    <MobileMenu
+      id="mobile-menu"
+      :open="mobileMenuOpen"
+      @close="mobileMenuOpen = false"
+    />
 
     <!-- Sync Progress Bar -->
     <div v-if="chainStore.isSyncing" class="sync-progress">
@@ -47,16 +79,25 @@
 </template>
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
 import { useWebSocketStore } from '@/stores/websocketStore'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
 import SearchBar from './SearchBar.vue'
-import LiveIndicator from '@/components/common/LiveIndicator.vue'
+import MobileMenu from './MobileMenu.vue'
 import PriceCard from '@/components/common/PriceCard.vue'
 
 const chainStore = useChainStore()
 const wsStore = useWebSocketStore()
+const route = useRoute()
+
+const mobileMenuOpen = ref(false)
+
+// Safety net: close the drawer on any route change.
+watch(() => route.fullPath, () => {
+  mobileMenuOpen.value = false
+})
 
 const onLogoError = (e) => {
   e.target.style.display = 'none'
@@ -91,15 +132,16 @@ onMounted(() => {
   padding: 0 var(--space-6);
   display: flex;
   align-items: center;
-  gap: var(--space-6);
+  gap: var(--space-4) var(--space-6);
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .logo-section {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-shrink: 0;
   text-decoration: none;
   transition: opacity var(--transition-fast);
 }
@@ -183,6 +225,40 @@ onMounted(() => {
 .main-nav {
   display: flex;
   gap: var(--space-1);
+  margin-left: auto;
+}
+
+/* Mobile menu toggle — hidden on desktop, revealed <=1024px */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  margin-left: auto;
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.nav-toggle:hover {
+  background: rgba(var(--rgb-purple-accent), 0.3);
+  border-color: var(--glass-border-hover);
+  color: var(--text-primary);
+}
+
+.nav-toggle:focus-visible {
+  outline: 2px solid var(--green-accent);
+  outline-offset: 2px;
+  box-shadow: var(--glow-green);
 }
 
 .nav-link {
@@ -251,6 +327,14 @@ onMounted(() => {
 @media (max-width: 1024px) {
   .main-nav {
     display: none;
+  }
+
+  .nav-toggle {
+    display: flex;
+  }
+
+  .header-container {
+    justify-content: space-between;
   }
 }
 

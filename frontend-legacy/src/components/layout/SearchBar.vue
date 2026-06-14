@@ -17,30 +17,48 @@
       <Icon name="search" :size="16" />
     </button>
 
-    <!-- Search Suggestions (Recent History) -->
-    <div 
-      v-if="showSuggestions && settingsStore.searchHistory.length > 0" 
+    <!-- Suggestions dropdown: live typeahead preview + recent history -->
+    <div
+      v-if="showSuggestions && (typeahead || settingsStore.searchHistory.length > 0)"
       class="search-suggestions"
     >
-      <div class="suggestions-header">
-        <span>Recent Searches</span>
-        <button @click="clearHistory" class="clear-button">Clear</button>
-      </div>
-      <div
-        v-for="item in settingsStore.searchHistory"
-        :key="item"
-        class="suggestion-item"
-        @mousedown.prevent="selectSuggestion(item)"
-      >
-        {{ item }}
-      </div>
+      <!-- Typeahead preview (client-side classification, no backend call) -->
+      <template v-if="typeahead">
+        <div class="suggestions-header">
+          <span>Go to</span>
+        </div>
+        <div
+          class="suggestion-item typeahead-item"
+          @mousedown.prevent="handleSearch"
+        >
+          <Icon :name="typeahead.icon" :size="14" class="typeahead-icon" />
+          <span class="typeahead-label">{{ typeahead.label }}</span>
+          <code class="typeahead-value">{{ typeahead.value }}</code>
+        </div>
+      </template>
+
+      <!-- Recent Searches -->
+      <template v-if="settingsStore.searchHistory.length > 0">
+        <div class="suggestions-header">
+          <span>Recent Searches</span>
+          <button @click="clearHistory" class="clear-button">Clear</button>
+        </div>
+        <div
+          v-for="item in settingsStore.searchHistory"
+          :key="item"
+          class="suggestion-item"
+          @mousedown.prevent="selectSuggestion(item)"
+        >
+          {{ item }}
+        </div>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup>
 import Icon from '@/components/common/Icon.vue'
-import { ref } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { searchService } from '@/services/searchService'
@@ -52,19 +70,47 @@ const searchQuery = ref('')
 const showSuggestions = ref(false)
 const isSearching = ref(false)
 
+// Debounced mirror of the input, classified client-side for a live "Go to" preview.
+// PIVX base58 addresses: D = P2PKH, S = cold-staking, 6 = P2SH, E = exchange (EXM).
+const debouncedQuery = ref('')
+let debounceTimer = null
+
+watch(searchQuery, (val) => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => {
+    debouncedQuery.value = val.trim()
+  }, 200)
+})
+
+const classifyQuery = (q) => {
+  if (!q) return null
+  if (/^\d+$/.test(q)) {
+    return { icon: 'box', label: `Block #${q}`, value: q }
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(q)) {
+    return { icon: 'hash', label: 'Tx / Block hash', value: q }
+  }
+  if (/^[DS6E][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(q)) {
+    return { icon: 'key', label: 'Address', value: q }
+  }
+  return null
+}
+
+const typeahead = computed(() => classifyQuery(debouncedQuery.value))
+
 const handleSearch = async () => {
   const query = searchQuery.value.trim()
   if (!query || isSearching.value) return
 
   isSearching.value = true
-  
+
   try {
     // Add to search history
     settingsStore.addToSearchHistory(query)
-    
+
     // Perform search
     const result = await searchService.search(query)
-    
+
     // Navigate based on result type
     if (result.type === 'Block') {
       router.push(`/block/${result.height}`)
@@ -72,22 +118,27 @@ const handleSearch = async () => {
       router.push(`/tx/${result.txid}`)
     } else if (result.type === 'Address') {
       router.push(`/address/${result.address}`)
+    } else if (result.type === 'XPub') {
+      router.push(`/xpub/${result.xpub}`)
+    } else if (result.type === 'NotFound' && classifyQuery(query)?.label === 'Address') {
+      // Address with no on-chain history (incl. cold-staking S-addresses) is
+      // reported NotFound by search but its address page still resolves.
+      router.push(`/address/${query}`)
     } else {
       // Unknown or not found - go to search results page
-      router.push({ 
-        name: 'SearchResults', 
+      router.push({
+        name: 'SearchResults',
         query: { q: query }
       })
     }
-    
+
     // Clear input
     searchQuery.value = ''
     showSuggestions.value = false
   } catch (error) {
-    console.error('Search error:', error)
     // Navigate to search results page with error
-    router.push({ 
-      name: 'SearchResults', 
+    router.push({
+      name: 'SearchResults',
       query: { q: query, error: 'true' }
     })
   } finally {
@@ -245,6 +296,34 @@ const hideSuggestions = () => {
 .suggestion-item:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.typeahead-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.typeahead-icon {
+  flex-shrink: 0;
+  color: var(--text-accent);
+}
+
+.typeahead-label {
+  flex-shrink: 0;
+  color: var(--text-primary);
+  font-family: var(--font-primary);
+  font-weight: var(--weight-bold);
+}
+
+.typeahead-value {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
 }
 
 @media (max-width: 768px) {

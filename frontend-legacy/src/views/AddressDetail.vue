@@ -21,8 +21,20 @@
         </div>
       </div>
 
+      <!-- Invalid Address State -->
+      <div v-if="!isValidAddress" class="error-container">
+        <Card>
+          <div class="error-content">
+            <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
+            <h2>Invalid Address</h2>
+            <p>This is not a valid PIVX address. Please check the value and try again.</p>
+            <Button @click="$router.push('/')">Back to Dashboard</Button>
+          </div>
+        </Card>
+      </div>
+
       <!-- Loading State -->
-      <div v-if="loading && !addressData" class="loading-container">
+      <div v-else-if="loading && !addressData" class="loading-container">
         <SkeletonLoader variant="card" height="120px" />
         <SkeletonLoader variant="card" height="400px" />
       </div>
@@ -45,26 +57,30 @@
         <div class="stats-grid">
           <StatCard
             label="Balance"
-            :value="formatPIV(addressData.balance, 2)"
+            :value="formatPIV(displayBalance, 2)"
             suffix="PIV"
             icon="coins"
-            variant="primary"
+            value-class="text-accent"
+            :subtitle="balanceInconsistent ? 'Adjusted — value reconciling' : ''"
           />
           <StatCard
             label="Total Received"
-            :value="formatPIV(addressData.totalReceived, 2)"
+            :value="formatPIV(displayReceived, 2)"
             suffix="PIV"
             icon="arrow-down-left"
+            value-class="text-success"
           />
           <StatCard
             label="Total Sent"
-            :value="formatPIV(addressData.totalSent, 2)"
+            :value="formatPIV(displaySent, 2)"
             suffix="PIV"
             icon="arrow-up-right"
+            :value-class="sentInconsistent ? 'text-warning' : ''"
+            :subtitle="sentInconsistent ? 'Adjusted — value reconciling' : ''"
           />
           <StatCard
             label="Transactions"
-            :value="formatNumber(addressData.txids?.length || 0)"
+            :value="formatNumber(totalTxCount)"
             icon="chart-bar"
           />
         </div>
@@ -77,17 +93,22 @@
           <div class="section-header">
             <h2>Transaction History</h2>
             <div class="filters">
-              <select v-model="txFilter" class="filter-select">
-                <option value="all">All Transactions</option>
+              <select v-model="txFilter" class="filter-select" aria-label="Filter transactions on this page">
+                <option value="all">All on Page</option>
                 <option value="received">Received Only</option>
                 <option value="sent">Sent Only</option>
               </select>
             </div>
           </div>
 
-          <div v-if="filteredTransactions.length > 0" class="transactions-list">
+          <!-- Per-page loading state -->
+          <div v-if="loadingTxs" class="transactions-list">
+            <SkeletonLoader variant="card" height="92px" v-for="i in 5" :key="i" />
+          </div>
+
+          <div v-else-if="filteredTransactions.length > 0" class="transactions-list">
             <TransactionRow
-              v-for="tx in paginatedTransactions"
+              v-for="tx in filteredTransactions"
               :key="tx.txid"
               :transaction="tx"
               @click="navigateToTransaction(tx)"
@@ -97,19 +118,20 @@
           <div v-else class="empty-state">
             <EmptyState
               icon="inbox"
-              title="No Transactions"
-              message="This address has no transaction history."
+              :title="txFilter === 'all' ? 'No Transactions' : 'No Matching Transactions'"
+              :message="txFilter === 'all'
+                ? 'This address has no transaction history.'
+                : 'No transactions on this page match the selected filter.'"
             />
           </div>
 
-          <!-- Pagination -->
+          <!-- Server-side Pagination -->
           <Pagination
             v-if="totalTxPages > 1"
             :current-page="txPage"
-            :total-pages="totalTxPages"
             :page-size="txPageSize"
-            :total-items="filteredTransactions.length"
-            @update:current-page="txPage = $event"
+            :total="totalTxCount"
+            @update:page="goToTxPage"
           />
         </div>
 
@@ -180,10 +202,9 @@
           <Pagination
             v-if="totalUtxoPages > 1"
             :current-page="utxoPage"
-            :total-pages="totalUtxoPages"
             :page-size="utxoPageSize"
-            :total-items="utxos.length"
-            @update:current-page="utxoPage = $event"
+            :total="utxos.length"
+            @update:page="utxoPage = $event"
           />
         </div>
 
@@ -222,6 +243,7 @@ import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import api from '@/services/api'
 import { addressService } from '@/services/addressService'
 import { transactionService } from '@/services/transactionService'
 import { formatPIV, formatNumber } from '@/utils/formatters'
@@ -249,8 +271,26 @@ const addressData = ref(null)
 const transactions = ref([])
 const utxos = ref([])
 const loading = ref(false)
+const loadingTxs = ref(false)
 const loadingUtxos = ref(false)
 const error = ref(null)
+
+/**
+ * Client-side PIVX base58 address sanity check. Catches obvious garbage so we
+ * render an explicit "Invalid address" state instead of a fake zero account.
+ * Mainnet payment addresses start with D; cold-staking staker addresses with S;
+ * exchange (EXM) addresses with E; legacy/script forms can start with 6 or 7.
+ * Length and base58 charset are validated; the backend remains the source of truth.
+ */
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/
+const isValidAddress = computed(() => {
+  const a = address.value
+  if (typeof a !== 'string') return false
+  const t = a.trim()
+  if (t.length < 26 || t.length > 64) return false
+  if (!BASE58_RE.test(t)) return false
+  return /^[DSE67]/.test(t)
+})
 
 // Tabs
 const activeTab = ref('transactions')
@@ -260,10 +300,13 @@ const tabs = [
   { value: 'qr', label: 'QR Code' }
 ]
 
-// Transaction filtering and pagination
+// Transaction filtering and server-side pagination
 const txFilter = ref('all')
 const txPage = ref(1)
 const txPageSize = ref(25)
+// Total tx count + page count come from the backend, not from txids.length
+const totalTxCount = computed(() => addressData.value?.txs ?? 0)
+const totalTxPages = computed(() => addressData.value?.totalPages ?? 1)
 
 // UTXO pagination
 const utxoPage = ref(1)
@@ -274,36 +317,50 @@ const showQR = ref(false)
 const qrCanvas = ref(null)
 const qrModalCanvas = ref(null)
 
-// Computed
+// Guarded amount display (P1-7): a transient backend inconsistency must never
+// render a negative or nonsensical figure (e.g. "-34.2M PIV"). We clamp to a
+// sane range and surface a subtle "reconciling" hint instead.
+const toAmount = (v) => {
+  const n = typeof v === 'string' ? parseFloat(v) : Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+const rawBalance = computed(() => toAmount(addressData.value?.balance))
+const rawReceived = computed(() => toAmount(addressData.value?.totalReceived))
+const rawSent = computed(() => toAmount(addressData.value?.totalSent))
+
+const displayReceived = computed(() => Math.max(0, rawReceived.value))
+const displaySent = computed(() => Math.max(0, rawSent.value))
+const displayBalance = computed(() => Math.max(0, rawBalance.value))
+
+// Inconsistency flags drive a subtle indicator without hiding the data entirely.
+const sentInconsistent = computed(() =>
+  rawSent.value < 0 || rawSent.value > rawReceived.value
+)
+const balanceInconsistent = computed(() =>
+  rawBalance.value < 0 || rawBalance.value > rawReceived.value
+)
+
+// Filter operates over the current page's resolved transactions (server-paged).
 const filteredTransactions = computed(() => {
   if (txFilter.value === 'all') return transactions.value
-  
+
   return transactions.value.filter(tx => {
     // Determine if this address received or sent based on inputs/outputs
-    const isReceived = tx.vout?.some(output => 
-      output.scriptPubKey?.addresses?.includes(address.value)
+    const isReceived = tx.vout?.some(output =>
+      output.scriptPubKey?.addresses?.includes(address.value) ||
+      output.addresses?.includes(address.value)
     )
-    const isSent = tx.vin?.some(input => 
+    const isSent = tx.vin?.some(input =>
       input.addresses?.includes(address.value)
     )
-    
+
     if (txFilter.value === 'received') return isReceived && !isSent
     if (txFilter.value === 'sent') return isSent
     return true
   })
 })
 
-const totalTxPages = computed(() => 
-  Math.ceil(filteredTransactions.value.length / txPageSize.value)
-)
-
-const paginatedTransactions = computed(() => {
-  const start = (txPage.value - 1) * txPageSize.value
-  const end = start + txPageSize.value
-  return filteredTransactions.value.slice(start, end)
-})
-
-const totalUtxoPages = computed(() => 
+const totalUtxoPages = computed(() =>
   Math.ceil(utxos.value.length / utxoPageSize.value)
 )
 
@@ -348,36 +405,84 @@ const paginatedUtxos = computed(() => {
 })
 
 // Methods
-const fetchAddressData = async () => {
-  loading.value = true
+
+// Monotonic token so a stale in-flight fetch (rapid page clicks / route change)
+// can't clobber the latest result.
+let fetchToken = 0
+
+/**
+ * Fetch a single server-side page of the address.
+ *
+ * The backend (/api/v2/address/{addr}?page=N&pageSize=M) returns this page's
+ * txids plus totalPages and txs (the real total tx count). We resolve details
+ * for only this page's ~25 txids with bounded concurrency — never the whole
+ * history at once — so there is no unbounded fan-out.
+ *
+ * @param {number} page
+ * @param {boolean} initial - true on first load / address change (full skeleton)
+ */
+const fetchAddressData = async (page = 1, initial = true) => {
+  if (!isValidAddress.value) {
+    addressData.value = null
+    transactions.value = []
+    error.value = null
+    loading.value = false
+    return
+  }
+
+  const token = ++fetchToken
   error.value = null
-  
+  if (initial) {
+    loading.value = true
+    addressData.value = null
+    transactions.value = []
+    txPage.value = 1
+    page = 1
+  }
+  loadingTxs.value = true
+
   try {
-    // Fetch address data
-    const data = await addressService.getAddress(address.value)
+    // Paged address request (page + pageSize). addressService.getAddress does
+    // not forward pageSize, so we call the shared api instance directly.
+    const { data } = await api.get(`/api/v2/address/${address.value}`, {
+      params: { page, pageSize: txPageSize.value, _cb: Date.now() }
+    })
+    if (token !== fetchToken) return // superseded
+
     addressData.value = data
-    
-    // Fetch transaction details
-    if (data.txids && data.txids.length > 0) {
-      const txDetails = await transactionService.getTransactions(data.txids)
-      // Filter out orphaned (height -1) and unresolved (height -2) transactions
+    txPage.value = data.page || page
+
+    const pageTxids = Array.isArray(data.txids) ? data.txids : []
+    if (pageTxids.length > 0) {
+      // Resolve only this page's txids, with a bounded concurrency window.
+      const txDetails = await transactionService.getTransactions(pageTxids)
+      if (token !== fetchToken) return // superseded
+
       transactions.value = txDetails
         .filter(tx => {
-          // Exclude transactions with invalid heights
-          const height = tx.blockHeight || tx.height
+          // Exclude orphaned (-1) and unresolved (-2) transactions
+          const height = tx.blockHeight ?? tx.height
           return height !== -1 && height !== -2
         })
-        .map(tx => ({
-          ...tx,
-          type: detectTransactionType(tx)
-        }))
+        .map(tx => ({ ...tx, type: detectTransactionType(tx) }))
+    } else {
+      transactions.value = []
     }
   } catch (err) {
-    console.error('Failed to fetch address data:', err)
+    if (token !== fetchToken) return
     error.value = err.message || 'Failed to load address data'
   } finally {
-    loading.value = false
+    if (token === fetchToken) {
+      loading.value = false
+      loadingTxs.value = false
+    }
   }
+}
+
+// Drive the Pagination component: fetch the requested server page.
+const goToTxPage = (page) => {
+  if (page === txPage.value) return
+  fetchAddressData(page, false)
 }
 
 const fetchUTXOs = async () => {
@@ -462,19 +567,24 @@ watch(showQR, async (show) => {
 watch(() => route.params.address, (newAddress) => {
   if (newAddress) {
     address.value = newAddress
-    fetchAddressData()
+    // Reset per-address view state so stale data never carries over
+    txFilter.value = 'all'
+    utxos.value = []
+    utxoPage.value = 1
+    activeTab.value = 'transactions'
+    fetchAddressData(1, true)
   }
 })
 
-// Watch for reorg detection and refetch address data
+// Watch for reorg detection and refetch the current page
 watch(() => chainStore.reorgDetected, (detected) => {
-  if (detected && address.value) {
-    fetchAddressData()
+  if (detected && address.value && isValidAddress.value) {
+    fetchAddressData(txPage.value, false)
   }
 })
 
 onMounted(() => {
-  fetchAddressData()
+  fetchAddressData(1, true)
 })
 </script>
 

@@ -185,60 +185,6 @@
           />
         </div>
 
-        <!-- Debug Tab -->
-        <div v-if="activeTab === 'debug'" class="tab-content">
-          <div class="section-header">
-            <h2>API Response (Debug)</h2>
-            <div class="debug-actions">
-              <Button variant="ghost" size="sm" @click="refreshData">
-                <Icon name="refresh-cw" :size="14" /> Refresh
-              </Button>
-              <Button variant="ghost" size="sm" @click="copyDebugData">
-                <Icon name="clipboard" :size="14" /> Copy JSON
-              </Button>
-            </div>
-          </div>
-
-          <Card>
-            <pre class="debug-json">{{ JSON.stringify(xpubData, null, 2) }}</pre>
-          </Card>
-
-          <div class="comparison-section">
-            <h3>Blockbook Comparison</h3>
-            <div class="comparison-grid">
-              <div class="comparison-item">
-                <label>Balance Match:</label>
-                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.balance) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Total Received Match:</label>
-                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.totalReceived) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Total Sent Match:</label>
-                <span :class="{ 'match-ok': true }"><Icon name="check-circle" :size="14" /> {{ formatPIV(xpubData.totalSent) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Transfers Count:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.txs }} transfers</span>
-              </div>
-              <div class="comparison-item">
-                <label>Used Addresses:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.usedTokens }} addresses</span>
-              </div>
-              <div class="comparison-item">
-                <label>Unique Transactions:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.txids?.length || 0 }} txids</span>
-              </div>
-            </div>
-
-            <div class="api-info">
-              <p><strong>API Endpoint:</strong> <code>/api/v2/xpub/{{ redactedXpub }}?details={{ detailsMode }}</code></p>
-              <p><strong>Cache Status:</strong> 30s TTL</p>
-              <p><strong>Note:</strong> 'txs' field = total transfers (sum of per-address tx counts), not unique transactions</p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </AppLayout>
@@ -286,17 +232,10 @@ const loadingTransactions = ref(false)
 // Tabs configuration
 const tabs = [
   { value: 'addresses', label: 'Addresses', icon: 'key' },
-  { value: 'transactions', label: 'Transactions', icon: 'chart-bar' },
-  { value: 'debug', label: 'Debug', icon: 'settings' }
+  { value: 'transactions', label: 'Transactions', icon: 'chart-bar' }
 ]
 
 // Computed
-const redactedXpub = computed(() => {
-  if (!xpub.value) return ''
-  const x = xpub.value
-  return `${x.slice(0, 8)}...${x.slice(-4)}`
-})
-
 const usedAddresses = computed(() => {
   if (!xpubData.value?.tokens) return []
   return xpubData.value.tokens
@@ -365,7 +304,6 @@ async function fetchXPubData() {
     }
   } catch (err) {
     error.value = err.message
-    console.error('Error fetching xpub:', err)
   } finally {
     loading.value = false
   }
@@ -389,7 +327,7 @@ async function fetchTransactions() {
       }
     }
   } catch (err) {
-    console.error('Error fetching transactions:', err)
+    // Non-fatal: transactions tab simply shows its empty state.
   } finally {
     loadingTransactions.value = false
   }
@@ -397,14 +335,6 @@ async function fetchTransactions() {
 
 function copyToClipboard() {
   navigator.clipboard.writeText(xpub.value)
-}
-
-function copyDebugData() {
-  navigator.clipboard.writeText(JSON.stringify(xpubData.value, null, 2))
-}
-
-function refreshData() {
-  fetchXPubData()
 }
 
 function navigateToTransaction(tx) {
@@ -451,7 +381,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-4);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -481,7 +411,8 @@ onMounted(() => {
 }
 
 .header-content h1 {
-  font-size: 1.5rem;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
   margin-bottom: var(--space-4);
   color: var(--text-primary);
 }
@@ -495,7 +426,7 @@ onMounted(() => {
 
 .xpub-text {
   font-family: var(--font-mono);
-  font-size: 0.9rem;
+  font-size: var(--text-sm);
   background: var(--surface-primary);
   padding: var(--space-3);
   border-radius: var(--radius-md);
@@ -547,11 +478,12 @@ onMounted(() => {
 }
 
 .section-header h2 {
-  font-size: 1.25rem;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
   color: var(--text-primary);
 }
 
-.filters, .debug-actions {
+.filters {
   display: flex;
   gap: var(--space-2);
   align-items: center;
@@ -563,7 +495,17 @@ onMounted(() => {
   border: 1px solid var(--border-primary);
   background: var(--surface-secondary);
   color: var(--text-primary);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
+  transition: border-color var(--transition-fast);
+}
+
+.filter-select:hover {
+  border-color: var(--accent-primary);
+}
+
+.filter-select:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .addresses-table, .transactions-list {
@@ -672,81 +614,6 @@ onMounted(() => {
   gap: var(--space-3);
 }
 
-.debug-json {
-  background: var(--surface-primary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-  font-family: var(--font-mono);
-  font-size: 0.875rem;
-  line-height: 1.6;
-  color: var(--text-primary);
-  max-height: 600px;
-  overflow-y: auto;
-}
-
-.comparison-section {
-  margin-top: var(--space-6);
-}
-
-.comparison-section h3 {
-  font-size: 1.125rem;
-  margin-bottom: var(--space-4);
-  color: var(--text-primary);
-}
-
-.comparison-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.comparison-item {
-  background: var(--surface-secondary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-primary);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.comparison-item label {
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.comparison-item span {
-  font-family: var(--font-mono);
-  font-weight: 600;
-}
-
-.match-ok {
-  color: var(--success);
-}
-
-.api-info {
-  background: var(--surface-tertiary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-primary);
-}
-
-.api-info p {
-  margin-bottom: var(--space-2);
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-}
-
-.api-info code {
-  background: var(--surface-primary);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-family: 'Courier New', monospace;
-  color: var(--accent-primary);
-}
-
 @media (max-width: 768px) {
   .xpub-detail {
     padding: var(--space-4);
@@ -763,10 +630,6 @@ onMounted(() => {
 
   .addresses-table {
     overflow-x: auto;
-  }
-
-  .comparison-grid {
-    grid-template-columns: 1fr;
   }
 }
 </style>

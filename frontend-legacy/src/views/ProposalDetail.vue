@@ -59,9 +59,16 @@
             </InfoRow>
 
             <InfoRow label="Forum URL" icon="globe">
-              <a :href="proposal.URL" target="_blank" class="external-link">
+              <a
+                v-if="safeUrl"
+                :href="safeUrl"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="external-link"
+              >
                 {{ proposal.URL }} →
               </a>
+              <span v-else class="external-link-disabled">{{ proposal.URL || '—' }}</span>
             </InfoRow>
 
             <InfoRow label="Start Block" icon="play">
@@ -135,8 +142,8 @@
                 </div>
               </div>
               <div class="payment-item">
-                <span class="payment-label">Ratio</span>
-                <span class="payment-value">{{ proposal.Ratio.toFixed(2) }}</span>
+                <span class="payment-label">Yes Ratio</span>
+                <span class="payment-value">{{ Number(proposal.Ratio || 0).toFixed(2) }}</span>
               </div>
 
               <!-- Funding utilization vs the monthly treasury cap -->
@@ -240,24 +247,24 @@
         </div>
 
         <!-- Individual Votes Section -->
-        <Card v-if="votes" class="votes-card">
+        <Card v-if="voteEntries.length > 0" class="votes-card">
           <template #header>
             <div class="votes-header">
               <span>Individual Votes</span>
-              <Badge variant="info">{{ Object.keys(votes).length }} masternodes</Badge>
+              <Badge variant="info">{{ voteEntries.length }} masternodes</Badge>
             </div>
           </template>
 
           <div class="votes-list">
-            <div v-for="(vote, address) in votes" :key="address" class="vote-entry">
+            <div v-for="entry in voteEntries" :key="entry.id" class="vote-entry">
               <HashDisplay
-                :hash="address"
+                :hash="entry.id"
                 :truncate="true"
                 :start-length="10"
                 :end-length="10"
                 show-copy
               />
-              <Badge :variant="getVoteVariant(vote)">{{ vote }}</Badge>
+              <Badge :variant="getVoteVariant(entry.vote)">{{ entry.vote }}</Badge>
             </div>
           </div>
         </Card>
@@ -368,6 +375,29 @@ const getVoteVariant = (vote) => {
   return 'secondary'
 }
 
+// The proposal URL is attacker-controllable: only expose plain http(s) links,
+// never javascript:/data: or other schemes.
+const safeUrl = computed(() => {
+  const url = proposal.value?.URL
+  if (typeof url !== 'string') return ''
+  const trimmed = url.trim()
+  return /^https?:\/\//i.test(trimmed) ? trimmed : ''
+})
+
+// Normalize the votes payload into [{ id, vote }] regardless of whether the
+// API returns an array of vote records or an { id: voteString } map.
+const voteEntries = computed(() => {
+  const raw = votes.value
+  if (!raw) return []
+  if (Array.isArray(raw)) {
+    return raw.map((v, i) => ({
+      id: v.mnId || v.nHash || String(i),
+      vote: v.Vote || ''
+    }))
+  }
+  return Object.entries(raw).map(([id, vote]) => ({ id, vote }))
+})
+
 const fetchProposal = async (proposalName) => {
   loading.value = true
   error.value = ''
@@ -410,9 +440,9 @@ const fetchProposal = async (proposalName) => {
   }
 }
 
-watch(() => route.params.hash, (newHash) => {
-  if (newHash) {
-    fetchProposal(newHash)
+watch(() => route.params.name, (newName) => {
+  if (newName) {
+    fetchProposal(newName)
   }
 }, { immediate: true })
 </script>
@@ -459,6 +489,11 @@ watch(() => route.params.hash, (newHash) => {
 
 .external-link:hover {
   opacity: 0.8;
+}
+
+.external-link-disabled {
+  color: var(--text-tertiary);
+  word-break: break-all;
 }
 
 .two-column-grid {
@@ -520,22 +555,24 @@ watch(() => route.params.hash, (newHash) => {
 .vote-bar {
   height: 12px;
   background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   overflow: hidden;
   display: flex;
+  border: 1px solid var(--border-secondary);
+  box-shadow: inset 0 1px 2px rgba(var(--rgb-purple-darkest), 0.5);
 }
 
 .vote-bar-fill {
   height: 100%;
-  transition: width 0.3s;
+  transition: width var(--transition-slow);
 }
 
 .vote-bar-fill.yeas {
-  background: var(--success);
+  background: linear-gradient(90deg, var(--green-accent-dark) 0%, var(--success) 100%);
 }
 
 .vote-bar-fill.nays {
-  background: var(--danger);
+  background: linear-gradient(90deg, var(--danger) 0%, #f87171 100%);
 }
 
 .vote-numbers {

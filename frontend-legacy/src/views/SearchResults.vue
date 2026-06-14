@@ -108,7 +108,6 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { searchService } from '@/services/searchService'
 import { formatPIV, formatNumber } from '@/utils/formatters'
-import { detectTransactionType } from '@/utils/transactionHelpers'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -135,6 +134,11 @@ const totalResults = computed(() => {
   return blocks + transactions + addresses
 })
 
+// PIVX base58 addresses: D = P2PKH, S = cold-staking, 6 = P2SH, E = exchange (EXM).
+// 26-35 base58 chars, no 0/O/I/l. Used to resolve addresses that have no on-chain
+// history (which the search endpoint reports as NotFound) straight to /address/{q}.
+const looksLikeAddress = (q) => /^[DS6E][1-9A-HJ-NP-Za-km-z]{25,34}$/.test(q.trim())
+
 const performSearch = async () => {
   if (!searchQuery.value) {
     error.value = 'Please enter a search query'
@@ -147,9 +151,7 @@ const performSearch = async () => {
 
   try {
     const data = await searchService.search(searchQuery.value)
-    
-    console.log('Search result:', data)
-    
+
     // Backend returns a single SearchResult object with a "type" field
     // Redirect to appropriate page based on result type
     if (data.type === 'Block') {
@@ -163,11 +165,16 @@ const performSearch = async () => {
       await router.push(`/address/${data.address}`)
       return
     } else if (data.type === 'XPub') {
-      console.log('Redirecting to xpub:', data.xpub)
       await router.push(`/xpub/${data.xpub}`)
       return
     } else if (data.type === 'NotFound') {
-      // Show not found message
+      // A base58 address (D/S/6/E prefix, incl. cold-staking S-addresses) with
+      // no on-chain history is reported NotFound by search, but its address page
+      // still resolves. Resolve it directly rather than showing "no results".
+      if (looksLikeAddress(searchQuery.value)) {
+        await router.push(`/address/${searchQuery.value}`)
+        return
+      }
       error.value = `No results found for "${searchQuery.value}"`
       results.value = { blocks: [], transactions: [], addresses: [] }
     } else {
@@ -175,7 +182,6 @@ const performSearch = async () => {
       results.value = data
     }
   } catch (err) {
-    console.error('Search error:', err)
     error.value = err.message || 'Failed to perform search'
   } finally {
     searching.value = false
@@ -316,6 +322,8 @@ onMounted(() => {
 
 .result-section h2 {
   margin-bottom: var(--space-4);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
   color: var(--text-primary);
 }
 
