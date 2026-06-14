@@ -29,16 +29,8 @@ use std::collections::{HashMap, HashSet};
 use rocksdb::DB;
 use tracing::{info, warn, info_span};
 use crate::parser::{deserialize_transaction, serialize_utxos};
-use crate::tx_keys::{tx_cf_key, txid_from_key, txid_from_hex};
-use crate::types::{CTransaction, CTxOut, ScriptClassification};
-
-/// Detect coinstake transaction (PIVX Core parity).
-/// Delegates to the authoritative implementation in tx_type.rs:
-/// a coinstake spends a REAL stake outpoint (null prevout disqualifies, except zPoS)
-/// and has >= 2 outputs with an EMPTY vout[0] (zero value, zero-length script).
-fn is_coinstake(tx: &CTransaction) -> bool {
-    crate::tx_type::detect_transaction_type(tx) == crate::tx_type::TransactionType::Coinstake
-}
+use crate::tx_keys::{txid_from_key, txid_from_hex};
+use crate::types::{CTxOut, ScriptClassification};
 
 /// Classify output script for correct PIVX Core attribution.
 /// Classification is driven by the SCRIPT structure (like PIVX Core's Solver()),
@@ -93,6 +85,115 @@ fn classify_output(output: &CTxOut) -> ScriptClassification {
     }
 }
 
+/// Packed, deserialization-free representation of a single transaction output.
+///
+/// Built ONCE in Pass 1 by running the SAME `classify_output` logic that Pass 2
+/// used to run, so Pass 2 / Pass 2b / the HODL snapshot can read attribution and
+/// value directly without ever re-deserializing or re-classifying. Addresses are
+/// already interned to dense u32 ids (Step 3); `value`/`vout` are copied verbatim
+/// from the source `CTxOut` so every packed value is byte-identical to the output.
+///
+/// `kind`:
+///   0 = None      — no address attribution (OP_RETURN, zerocoin mint, the empty
+///                   coinstake vout[0] marker, nonstandard). Both ids are NO_ADDR.
+///   1 = Single    — P2PKH / P2SH / P2PK / unknown-single / EXM exchangeaddress.
+///                   addr_a = the single id, addr_b = NO_ADDR.
+///   2 = ColdStake — P2CS. addr_a = staker id, addr_b = owner id.
+#[derive(Clone)]
+struct PackedOut {
+    value: i64,
+    addr_a: u32,
+    addr_b: u32,
+    vout: u32,
+    kind: u8,
+}
+
+/// Packed, deserialization-free representation of a whole indexed transaction.
+///
+/// `ty` is the `detect_transaction_type` result encoded as a u8 (see `ty_to_u8`),
+/// computed in Pass 1 while the inputs are still alive (it depends on the inputs'
+/// null/zerocoin prevout). `value_balance` is the SIGNED Sapling net value carried
+/// forward for the fee calculation. `outs` holds EVERY output of the tx (one
+/// PackedOut per `CTxOut`, including the kind=0 coinstake vout[0] marker), so
+/// `outs.len() == tx.outputs.len()` and `out_sum` is unchanged.
+#[derive(Clone)]
+struct PackedTx {
+    height: i32,
+    ty: u8,
+    value_balance: i64,
+    outs: Box<[PackedOut]>,
+}
+
+/// Sentinel "no address" interned id (PackedOut.addr_a / addr_b when absent).
+const NO_ADDR: u32 = u32::MAX;
+
+/// Encode a detected transaction type as the PackedTx.ty u8.
+/// 1 == Coinstake is load-bearing: Pass 2 / Pass 2b test `ty == 1` for coinstake.
+fn ty_to_u8(t: crate::tx_type::TransactionType) -> u8 {
+    match t {
+        crate::tx_type::TransactionType::Normal => 0,
+        crate::tx_type::TransactionType::Coinstake => 1,
+        crate::tx_type::TransactionType::Coinbase => 2,
+    }
+}
+
+/// Decode a PackedTx.ty u8 back to the transaction type (inverse of `ty_to_u8`).
+fn u8_to_ty(b: u8) -> crate::tx_type::TransactionType {
+    match b {
+        1 => crate::tx_type::TransactionType::Coinstake,
+        2 => crate::tx_type::TransactionType::Coinbase,
+        _ => crate::tx_type::TransactionType::Normal,
+    }
+}
+
+/// Pack a single output: run the SAME `classify_output` logic Pass 2 used to run,
+/// intern the resulting address string(s) to u32 ids, and copy value/vout verbatim.
+/// This is the one site that maps a classification to a (kind, addr_a, addr_b):
+///   Single  (P2PKH/P2SH/P2PK/unknown-single/EXM) => kind=1, addr_a=id, addr_b=NO_ADDR
+///   ColdStake (P2CS)                              => kind=2, addr_a=staker, addr_b=owner
+///   None (OP_RETURN/coinbase/coinstake/nonstandard/zerocoin) => kind=0, both NO_ADDR
+/// `value` and `vout` are copied EXACTLY from the source output (INVARIANT #1).
+fn pack_output(
+    output: &CTxOut,
+    addr_intern: &mut HashMap<String, u32>,
+    addr_rev: &mut Vec<String>,
+) -> PackedOut {
+    let (kind, addr_a, addr_b) = match classify_output(output) {
+        ScriptClassification::P2PKH(addr)
+        | ScriptClassification::P2SH(addr)
+        | ScriptClassification::P2PK(addr) => (1u8, intern(addr_intern, addr_rev, &addr), NO_ADDR),
+        ScriptClassification::ColdStake { staker, owner } => {
+            let staker_id = intern(addr_intern, addr_rev, &staker);
+            let owner_id = intern(addr_intern, addr_rev, &owner);
+            (2u8, staker_id, owner_id)
+        }
+        ScriptClassification::OpReturn
+        | ScriptClassification::Coinbase
+        | ScriptClassification::Coinstake
+        | ScriptClassification::Nonstandard => (0u8, NO_ADDR, NO_ADDR),
+    };
+    PackedOut {
+        value: output.value,       // INVARIANT #1: exact, verbatim i64
+        addr_a,
+        addr_b,
+        vout: output.index as u32, // parser sets index == position
+        kind,
+    }
+}
+
+/// Insert-or-get an address string in the intern table. Returns the existing dense
+/// id if present, else assigns the next id. Free fn (not a closure) so it can borrow
+/// both maps mutably at each call site. Used by `pack_output` and the enrichment pass.
+fn intern(addr_intern: &mut HashMap<String, u32>, addr_rev: &mut Vec<String>, s: &str) -> u32 {
+    if let Some(&id) = addr_intern.get(s) {
+        return id;
+    }
+    let id = addr_rev.len() as u32;
+    addr_intern.insert(s.to_string(), id);
+    addr_rev.push(s.to_string());
+    id
+}
+
 /// Build address index from all transactions
 /// This creates the addr_index CF entries for address lookups
 pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,11 +235,27 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // per-entry heap allocation, ~half the RAM and faster hashing than the old
     // (Vec<u8>, u64). Keys stay in display byte order (matching Pass 1).
     let mut spent_outputs: HashSet<([u8; 32], u32)> = HashSet::new();
-    let mut tx_cache: HashMap<Vec<u8>, Arc<CTransaction>> = HashMap::new();
-    // Creation height per txid — needed by the Tier-2 prevout joins (coin age)
-    // and the HODL snapshot; tx_cache alone doesn't carry heights.
-    let mut tx_heights: HashMap<Vec<u8>, i32> = HashMap::new();
-    
+
+    // ONE packed store replacing tx_cache / tx_heights / the per-tx deserialized
+    // objects (~13-18GB saved). Pass 2 / Pass 2b / HODL primitive directly off
+    // these and NEVER re-deserialize.
+    //   tx_index : DISPLAY-order 32-byte txid -> dense slot
+    //   packed   : slot -> PackedTx (height, ty, value_balance, packed outs)
+    //   tx_rev   : slot -> DISPLAY-order 32-byte txid (for UTXO/txs_map serialize)
+    let mut tx_index: HashMap<[u8; 32], u32> = HashMap::new();
+    let mut packed: Vec<PackedTx> = Vec::new();
+    let mut tx_rev: Vec<[u8; 32]> = Vec::new();
+
+    // Address interning (Step 3) is hoisted ABOVE Pass 1 because Pass 1 now
+    // classifies + interns every output while building the packed store. Intern
+    // each distinct base58 string ONCE to a dense u32 id; resolve id->String only
+    // when building on-disk key bytes, so the output stays byte-identical.
+    // addr_rev[id] is the exact string; addr_intern[s] is its id.
+    let mut addr_intern: HashMap<String, u32> = HashMap::new();
+    let mut addr_rev: Vec<String> = Vec::new();
+    // (intern() and pack_output() are free fns above — they borrow both maps
+    // mutably at each call site.)
+
     // Phase 2 Instrumentation: Track deserialization metrics
     let mut pass1_tx_total = 0;
     let mut pass1_tx_deserialized = 0;
@@ -174,19 +291,11 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let tx = match deserialize_transaction(&tx_with_header).await {
             Ok(tx) => {
                 pass1_tx_deserialized += 1;
-                // O1: Extract txid and cache the transaction
-                let txid_bytes = txid_from_key(&key);
-                if !txid_bytes.is_empty() {
-                    tx_cache.insert(txid_bytes.clone(), Arc::new(tx.clone()));
-                    tx_heights.insert(txid_bytes, height);
-                }
-                
                 // NEW: Count Sapling transactions (version >= 3 with Sapling data)
                 if tx.sapling_data.is_some() {
                     pass1_sapling_count += 1;
                 }
-                
-                Arc::new(tx)
+                tx
             }
             Err(e) => {
                 pass1_tx_failed += 1;
@@ -197,7 +306,40 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 continue;
             }
         };
-        
+
+        // INVARIANT #2: detect the type NOW, while the inputs are still alive —
+        // it depends on inputs[0]'s null/zerocoin prevout, which is dropped below.
+        let ty = ty_to_u8(crate::tx_type::detect_transaction_type(&tx));
+        // INVARIANT #4: carry the SIGNED Sapling net value forward for the fee calc.
+        let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+
+        // Build the packed outputs by running the SAME classify_output logic Pass 2
+        // used to run, interning the resulting address string(s) to u32 ONCE here.
+        // PUSH EVERY output (incl. kind=0 markers / zerocoin / nonstandard) so
+        // outs.len() == tx.outputs.len() and out_sum is identical (INVARIANT #1, #8).
+        let mut outs: Vec<PackedOut> = Vec::with_capacity(tx.outputs.len());
+        for output in &tx.outputs {
+            outs.push(pack_output(output, &mut addr_intern, &mut addr_rev));
+        }
+
+        // Insert the packed tx under its DISPLAY-order txid (same source the old
+        // tx_cache key used: txid_from_key on the CF key). INVARIANT #7.
+        let txid_bytes = txid_from_key(&key);
+        if !txid_bytes.is_empty() {
+            if let Ok(txid_arr) = <[u8; 32]>::try_from(txid_bytes.as_slice()) {
+                let slot = packed.len() as u32;
+                tx_index.insert(txid_arr, slot);
+                tx_rev.push(txid_arr);
+                packed.push(PackedTx {
+                    height,
+                    ty,
+                    value_balance,
+                    outs: outs.into_boxed_slice(),
+                });
+            }
+        }
+
+        // Scan inputs into the spent-outpoint set (UNCHANGED), then DROP the tx.
         for input in &tx.inputs {
                 if input.coinbase.is_some() {
                     continue;
@@ -210,7 +352,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
                         // prev_txid_display is in display/reversed format
                         // This NOW matches the database key format
-                        
+
                         let t: [u8; 32] = prev_txid_display.as_slice().try_into()
                             .expect("spent-set prevout txid must be 32 bytes");
                         spent_outputs.insert((t, prevout.n as u32));
@@ -229,8 +371,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         pass1_failed = pass1_tx_failed,
         pass1_inputs = pass1_inputs_processed,
         pass1_sapling = pass1_sapling_count,
-        cache_entries = tx_cache.len(),
-        cache_size_mb = (tx_cache.len() as f64 * 0.5) / 1000.0,
+        packed_entries = packed.len(),
         "Pass 1 complete: Spent outputs set built"
     );
     
@@ -243,133 +384,65 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     
     // Reset counter for pass 2
     processed = 0;
-    
-    // Address interning: the same ~1.7M base58 address strings would otherwise be
-    // duplicated across all four aggregation maps. Intern each distinct string to a
-    // dense u32 id ONCE, key every map by that id, and resolve id->String only when
-    // building the on-disk RocksDB key bytes (the output stays byte-identical, since
-    // interning is purely an in-memory representation change). addr_rev[id] is the
-    // exact string interned for that id; addr_intern[s] is its id.
-    let mut addr_intern: HashMap<String, u32> = HashMap::new();
-    let mut addr_rev: Vec<String> = Vec::new();
-    // Insert-or-get on the EXACT string (no normalization / case-fold). Returns the
-    // existing id if present, else assigns the next dense id. Declared as an inner
-    // fn (not a closure) so it can borrow both maps mutably at each call site.
-    fn intern(addr_intern: &mut HashMap<String, u32>, addr_rev: &mut Vec<String>, s: &str) -> u32 {
-        if let Some(&id) = addr_intern.get(s) {
-            return id;
-        }
-        let id = addr_rev.len() as u32;
-        addr_intern.insert(s.to_string(), id);
-        addr_rev.push(s.to_string());
-        id
-    }
 
-    // PASS 2: Build address map with spent flags (outputs -> address_map)
-    let mut address_map: HashMap<u32, Vec<(Vec<u8>, u64)>> = HashMap::new();
+    // (addr_intern / addr_rev / intern are declared ABOVE Pass 1 now, since Pass 1
+    // classifies + interns every output while building the packed store.)
+
+    // PASS 2: Build address map with spent flags (outputs -> address_map).
+    // Value is now (slot, vout) — purely in-memory ids resolved back to the
+    // 32-byte DISPLAY txid (tx_rev[slot]) only at on-disk serialize time, so the
+    // UTXO bytes stay byte-identical (INVARIANT #7).
+    let mut address_map: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
     // Also maintain a txs_map to collect all txids involving an address (received OR sent)
     let mut txs_map: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
     // NEW: Track total received and sent per address during Pass 2 (much faster!)
     let mut totals_received: HashMap<u32, i64> = HashMap::new();
     let mut totals_sent: HashMap<u32, i64> = HashMap::new();
     
-    // O1: Track cache hit rate
-    let mut cache_hits = 0;
-    let mut cache_misses = 0;
-    
-    // Phase 2 Instrumentation: Track Pass 2 metrics
+    // Phase 2 Instrumentation: Track Pass 2 metrics. Pass 2 now reads the packed
+    // store built in Pass 1 (no DB re-read, no re-deserialize, no re-classify):
+    // every slot is an already-indexed, already-deserialized tx, so total ==
+    // packed.len() and failures == 0 (kept for the cross-pass divergence checks).
     let mut pass2_tx_total = 0;
-    let mut pass2_tx_deserialized = 0;
-    let mut pass2_tx_failed = 0;
-    let mut pass2_outputs_processed = 0;
-    
-    let iter2 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
-    for item in iter2 {
-        let (key, value) = item?;
-        // Skip block transaction index keys (start with 'B')
-        if key.first() == Some(&b'B') {
-            continue;
-        }
-        // Transaction value format: version (i32) + height (i32) + raw_tx_bytes
-        if value.len() < 8 {
-            continue; // Invalid transaction data
-        }
-        // Check height: skip orphaned and unresolved transactions
-        let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
-        let height = i32::from_le_bytes(height_bytes);
-        if !should_index_transaction(height) {
-            continue;
-        }
-        
-        // Extract txid bytes from CF key (strip 't' prefix)
-        let txid_bytes = txid_from_key(&key);
-        if txid_bytes.is_empty() {
-            continue; // Invalid key format
-        }
-        
+    let pass2_tx_failed = 0;
+
+    for slot in 0..packed.len() {
+        let ptx = &packed[slot];
+
         pass2_tx_total += 1;
-        
-        // O1: Try to get transaction from cache first
-        let tx = if let Some(cached_tx) = tx_cache.get(&txid_bytes) {
-            cache_hits += 1;
-            pass2_tx_deserialized += 1;
-            Arc::clone(cached_tx)
-        } else {
-            cache_misses += 1;
-            let raw_tx = &value[8..]; // Skip version + height
-            let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
-            tx_with_header.extend_from_slice(&[0u8; 4]); // Dummy block version
-            tx_with_header.extend_from_slice(raw_tx);
-            match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => {
-                    pass2_tx_deserialized += 1;
-                    Arc::new(tx)
-                }
-                Err(e) => {
-                    pass2_tx_failed += 1;
-                    let txid_hex = hex::encode(&txid_bytes);
-                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2: Failed to deserialize transaction");
-                    continue;
-                }
-            }
-        };
-        
+
         // Track which addresses are involved in this transaction (for txs_map),
         // keyed by interned id.
         let mut tx_addresses: HashSet<u32> = HashSet::new();
-        
-        // Detect if this is a coinstake transaction
-        let tx_is_coinstake = is_coinstake(&*tx);
-        
-        for (vout_index, output) in tx.outputs.iter().enumerate() {
-            // PIVX Core Rule: Skip vout[0] in coinstake (OP_RETURN marker)
-            if tx_is_coinstake && vout_index == 0 {
+
+        // Detect if this is a coinstake transaction (ty was computed in Pass 1).
+        let tx_is_coinstake = ptx.ty == 1;
+
+        for out in ptx.outs.iter() {
+            // PIVX Core Rule: Skip vout[0] in coinstake (OP_RETURN marker).
+            if tx_is_coinstake && out.vout == 0 {
                 continue;
             }
-            
-            // Classify the output script
-            let script_class = classify_output(output);
-            
-            match script_class {
-                ScriptClassification::P2PKH(addr) |
-                ScriptClassification::P2SH(addr) |
-                ScriptClassification::P2PK(addr) => {
-                    // Standard single-address output
-                    let id = intern(&mut addr_intern, &mut addr_rev, &addr);
+
+            // Attribution already resolved in Pass 1 (kind + interned ids).
+            match out.kind {
+                1 => {
+                    // Standard single-address output (P2PKH / P2SH / P2PK / unknown).
+                    let id = out.addr_a;
                     tx_addresses.insert(id);
-                    *totals_received.entry(id).or_insert(0) += output.value;
+                    *totals_received.entry(id).or_insert(0) += out.value;
 
                     // Index UTXO if non-zero value
-                    if output.value > 0 {
+                    if out.value > 0 {
                         address_map
                             .entry(id)
                             .or_default()
-                            .push((txid_bytes.clone(), output.index));
+                            .push((slot as u32, out.vout));
                         indexed_outputs += 1;
                     }
                 }
 
-                ScriptClassification::ColdStake { staker, owner } => {
+                2 => {
                     // Cold staking (P2CS): the output is indexed under BOTH the staker
                     // (S-address) and the owner (D-address), each credited with the full
                     // value — the same convention Blockbook uses for multi-address
@@ -378,63 +451,52 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     // addresses symmetrically, so balance == received - sent holds for
                     // each address independently. Staker and owner are DISTINCT strings
                     // and so intern to DISTINCT ids.
-                    let staker_id = intern(&mut addr_intern, &mut addr_rev, &staker);
-                    let owner_id = intern(&mut addr_intern, &mut addr_rev, &owner);
-                    *totals_received.entry(staker_id).or_insert(0) += output.value;
-                    *totals_received.entry(owner_id).or_insert(0) += output.value;
+                    let staker_id = out.addr_a;
+                    let owner_id = out.addr_b;
+                    *totals_received.entry(staker_id).or_insert(0) += out.value;
+                    *totals_received.entry(owner_id).or_insert(0) += out.value;
 
                     // Both addresses appear in transaction list
                     tx_addresses.insert(staker_id);
                     tx_addresses.insert(owner_id);
 
                     // Both get UTXO entry for tracking
-                    if output.value > 0 {
+                    if out.value > 0 {
                         address_map
                             .entry(staker_id)
                             .or_default()
-                            .push((txid_bytes.clone(), output.index));
+                            .push((slot as u32, out.vout));
                         address_map
                             .entry(owner_id)
                             .or_default()
-                            .push((txid_bytes.clone(), output.index));
+                            .push((slot as u32, out.vout));
                         indexed_outputs += 2;  // Count both
                     }
                 }
-                
-                ScriptClassification::OpReturn |
-                ScriptClassification::Coinbase |
-                ScriptClassification::Coinstake |
-                ScriptClassification::Nonstandard => {
-                    // No address attribution for these
+
+                _ => {
+                    // kind == 0: no address attribution (OP_RETURN / coinbase /
+                    // coinstake marker / zerocoin mint / nonstandard).
                 }
             }
         }
-        
-        // Add this transaction to txs_map for ALL addresses involved (by id)
+
+        // Add this transaction to txs_map for ALL addresses involved (by id).
+        // KEEP txs_map values as the 32-byte DISPLAY txid (tx_rev[slot]) so the
+        // unique_txids.sort() in the write loop still sorts txids, not slots.
         for address_id in tx_addresses {
             txs_map
                 .entry(address_id)
                 .or_default()
-                .push(txid_bytes.clone());
+                .push(tx_rev[slot].to_vec());
         }
-        
+
         processed += 1;
     }
-    
-    // O1: Report cache performance
-    let cache_hit_rate = if cache_hits + cache_misses > 0 {
-        (cache_hits as f64 / (cache_hits + cache_misses) as f64) * 100.0
-    } else {
-        0.0
-    };
+
     info!(
-        cache_hit_rate = cache_hit_rate,
-        cache_hits = cache_hits,
-        cache_misses = cache_misses,
         pass2_total = pass2_tx_total,
-        pass2_deserialized = pass2_tx_deserialized,
         pass2_failed = pass2_tx_failed,
-        pass2_outputs = pass2_outputs_processed,
         "Pass 2 complete"
     );
     
@@ -454,18 +516,17 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
           "Writing address index to database");
     info!("Pass 2b: Scanning inputs to include sent transactions and calculate totals");
     
-    // O1: Track cache performance in Pass 2b
-    let mut pass2b_cache_hits = 0;
-    let mut _pass2b_cache_misses = 0;
-    let mut pass2b_db_reads = 0;
-    
-    // Phase 2 Instrumentation: Track Pass 2b metrics
+    // Phase 2 Instrumentation: Track Pass 2b metrics. Prevout joins now resolve
+    // through tx_index -> packed (no prevout re-deserialize, no tx_cache); the
+    // current tx is still deserialized once for its INPUTS (not packed), while
+    // its outs / ty / value_balance are read from packed[slot].
     let mut pass2b_tx_total = 0;
     let mut pass2b_tx_deserialized = 0;
     let mut pass2b_tx_failed = 0;
     let mut pass2b_coinstake_skipped = 0;
     let mut pass2b_inputs_processed = 0;
-    
+    let mut pass2b_prevout_resolved: u64 = 0;
+
     // Tier-2 per-day aggregates from the prevout joins below (fees, staking
     // rewards, coin days destroyed, cold-staking flows), bucketed by the
     // SPENDER's block date and merged into the daily series afterwards.
@@ -485,42 +546,47 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
         let height = i32::from_le_bytes(height_bytes);
         if !should_index_transaction(height) { continue; }
-        
+
         // Extract current txid from key
         let current_txid_bytes = txid_from_key(&key);
         if current_txid_bytes.is_empty() { continue; }
-        
+
+        // Resolve this tx's slot in the packed store (built in Pass 1). Outputs,
+        // ty and value_balance come from packed[slot]; the raw inputs come from
+        // the deserialize below (inputs are not packed).
+        let cur_slot = match <[u8; 32]>::try_from(current_txid_bytes.as_slice())
+            .ok()
+            .and_then(|a| tx_index.get(&a).copied())
+        {
+            Some(s) => s,
+            None => continue, // not indexed in Pass 1 (failed deserialize) — skip
+        };
+
         pass2b_tx_total += 1;
-        
-        // O1: Try cache first for current transaction
-        let tx = if let Some(cached_tx) = tx_cache.get(&current_txid_bytes) {
-            pass2b_cache_hits += 1;
-            pass2b_tx_deserialized += 1;
-            Arc::clone(cached_tx)
-        } else {
-            _pass2b_cache_misses += 1;
-            let raw_tx = &value[8..];
-            let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
-            tx_with_header.extend_from_slice(&[0u8; 4]);
-            tx_with_header.extend_from_slice(raw_tx);
-            match deserialize_transaction(&tx_with_header).await {
-                Ok(tx) => {
-                    pass2b_tx_deserialized += 1;
-                    Arc::new(tx)
-                }
-                Err(e) => {
-                    pass2b_tx_failed += 1;
-                    let txid_hex = hex::encode(&current_txid_bytes);
-                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2b: Failed to deserialize transaction");
-                    continue;
-                }
+
+        // Deserialize the current tx ONCE for its INPUTS (not held in packed).
+        let raw_tx = &value[8..];
+        let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+        tx_with_header.extend_from_slice(&[0u8; 4]);
+        tx_with_header.extend_from_slice(raw_tx);
+        let tx = match deserialize_transaction(&tx_with_header).await {
+            Ok(tx) => {
+                pass2b_tx_deserialized += 1;
+                tx
+            }
+            Err(e) => {
+                pass2b_tx_failed += 1;
+                let txid_hex = hex::encode(&current_txid_bytes);
+                warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2b: Failed to deserialize transaction");
+                continue;
             }
         };
-        
+
         // Coinstake inputs ARE counted as "sent" (UTXO accounting, Blockbook parity):
         // the staked output is consumed and its principal re-minted in the coinstake
         // outputs (counted as received). This keeps balance == received - sent.
-        if is_coinstake(&*tx) {
+        // (ty was computed in Pass 1; ty==1 => Coinstake.)
+        if packed[cur_slot as usize].ty == 1 {
             pass2b_coinstake_skipped += 1; // metric retained: counts coinstakes seen
         }
 
@@ -537,73 +603,61 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             pass2b_inputs_processed += 1;
             if let Some(prevout) = &input.prevout {
                 inputs_with_prevout += 1;
-                // prevout.hash from parser.rs is already in internal (reversed) format
-                if let Ok(prev_txid_internal) = txid_from_hex(&prevout.hash) {
-                    // O1: Try cache first - this is the CRITICAL optimization for Pass 2b!
-                    let prev_tx = if let Some(cached_prev_tx) = tx_cache.get(&prev_txid_internal) {
-                        pass2b_cache_hits += 1;
-                        let prev_height = tx_heights.get(&prev_txid_internal).copied().unwrap_or(-1);
-                        Some((Arc::clone(cached_prev_tx), prev_height))
-                    } else {
-                        // Cache miss - need to read from DB
-                        pass2b_db_reads += 1;
-                        let prev_tx_key = tx_cf_key(&prev_txid_internal);
-                        if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key).ok().flatten() {
-                            if prev_tx_data.len() >= 8 {
-                                let prev_height = i32::from_le_bytes(
-                                    prev_tx_data[4..8].try_into().unwrap_or([0; 4]),
-                                );
-                                let prev_raw_tx = &prev_tx_data[8..];
-                                let mut prev_with_header = Vec::with_capacity(4 + prev_raw_tx.len());
-                                prev_with_header.extend_from_slice(&[0u8; 4]);
-                                prev_with_header.extend_from_slice(prev_raw_tx);
-                                deserialize_transaction(&prev_with_header)
-                                    .await
-                                    .ok()
-                                    .map(|tx| (Arc::new(tx), prev_height))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
+                // prevout.hash from parser.rs is in DISPLAY (reversed) format — the
+                // same byte order as tx_index keys / tx_rev (INVARIANT #7).
+                if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
+                    // INVARIANT #3 (zPoS null-prevout): resolve ONLY through tx_index.
+                    // A zPoS coinstake's first input carries an all-zero/zerocoin
+                    // prevout txid that was never inserted into tx_index, so the
+                    // lookup MISSES, inputs_resolved is NOT incremented (while
+                    // inputs_with_prevout IS), and the clamp
+                    // `inputs_with_prevout>0 && inputs_resolved==inputs_with_prevout`
+                    // correctly FAILS -> fee/minted suppressed for zPoS. The
+                    // all-zero txid cannot map to a real slot: it is never inserted
+                    // (only real CF-key txids are), so .get() returns None.
+                    let prev = <[u8; 32]>::try_from(prev_txid_display.as_slice())
+                        .ok()
+                        .and_then(|a| tx_index.get(&a).copied())
+                        .map(|s| {
+                            let p = &packed[s as usize];
+                            (p, p.height)
+                        });
 
-                    if let Some((prev_tx, prev_height)) = prev_tx {
-                        if let Some(prev_out) = prev_tx.outputs.get(prevout.n as usize) {
+                    if let Some((prev_tx, prev_height)) = prev {
+                        if let Some(prev_out) = prev_tx.outs.get(prevout.n as usize) {
                             // Tier 2: spend-side joins — input value sum (fees /
                             // rewards), coin age, and cold-staking principal spent.
                             inputs_resolved += 1;
+                            pass2b_prevout_resolved += 1;
                             input_sum = input_sum.saturating_add(prev_out.value);
                             if prev_height >= 0 && height >= prev_height {
                                 let age_days = (height - prev_height) as f64 / 1440.0;
                                 tx_coin_days += (prev_out.value as f64 / 100_000_000.0) * age_days;
                             }
-                            if crate::parser::get_script_type(&prev_out.script_pubkey.script) == "coldstake" {
+                            // coldstake-spent test <= (prev_out.kind == 2), which
+                            // coincides exactly with the old get_script_type=="coldstake".
+                            if prev_out.kind == 2 {
                                 tx_p2cs_spent = tx_p2cs_spent.saturating_add(prev_out.value);
                             }
 
-                            // Classify the previous output
-                            let prev_script_class = classify_output(prev_out);
-                            
-                            match prev_script_class {
-                                ScriptClassification::P2PKH(addr) |
-                                ScriptClassification::P2SH(addr) |
-                                ScriptClassification::P2PK(addr) => {
+                            // Attribution from the packed kind / interned ids
+                            // (already classified + interned in Pass 1).
+                            match prev_out.kind {
+                                1 => {
                                     // Standard: address is spending
-                                    let id = intern(&mut addr_intern, &mut addr_rev, &addr);
+                                    let id = prev_out.addr_a;
                                     *totals_sent.entry(id).or_insert(0) += prev_out.value;
                                     txs_map.entry(id).or_default().push(current_txid_bytes.clone());
                                 }
 
-                                ScriptClassification::ColdStake { staker, owner } => {
+                                2 => {
                                     // Cold stake spend: debit BOTH addresses, mirroring the
                                     // credit both received in Pass 2 (see Pass 2 comment).
                                     // This keeps balance == received - sent for the staker
-                                    // and the owner independently. Staker and owner intern
-                                    // to DISTINCT ids.
-                                    let staker_id = intern(&mut addr_intern, &mut addr_rev, &staker);
-                                    let owner_id = intern(&mut addr_intern, &mut addr_rev, &owner);
+                                    // and the owner independently. Staker and owner are
+                                    // DISTINCT ids.
+                                    let staker_id = prev_out.addr_a;
+                                    let owner_id = prev_out.addr_b;
                                     *totals_sent.entry(staker_id).or_insert(0) += prev_out.value;
                                     *totals_sent.entry(owner_id).or_insert(0) += prev_out.value;
 
@@ -611,7 +665,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                                     txs_map.entry(staker_id).or_default().push(current_txid_bytes.clone());
                                     txs_map.entry(owner_id).or_default().push(current_txid_bytes.clone());
                                 }
-                                
+
                                 _ => {
                                     // No attribution for nonstandard/OP_RETURN/etc
                                 }
@@ -626,17 +680,19 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         if height >= 0 && (height as usize) < block_times.len() && block_times[height as usize] != 0 {
             let date = unix_to_date(block_times[height as usize] as u64);
             let agg = day_joins.entry(date.clone()).or_default();
-            let out_sum: i64 = tx.outputs.iter().map(|o| o.value).sum();
-            let p2cs_created: i64 = tx
-                .outputs
+            // out_sum / p2cs_created from the CURRENT tx's packed outs.
+            let cur = &packed[cur_slot as usize];
+            let out_sum: i64 = cur.outs.iter().map(|o| o.value).sum();
+            let p2cs_created: i64 = cur
+                .outs
                 .iter()
-                .filter(|o| crate::parser::get_script_type(&o.script_pubkey.script) == "coldstake")
+                .filter(|o| o.kind == 2)
                 .map(|o| o.value)
                 .sum();
             agg.p2cs_created = agg.p2cs_created.saturating_add(p2cs_created);
             agg.p2cs_spent = agg.p2cs_spent.saturating_add(tx_p2cs_spent);
             agg.coin_days_destroyed += tx_coin_days;
-            match crate::tx_type::detect_transaction_type(&tx) {
+            match u8_to_ty(cur.ty) {
                 crate::tx_type::TransactionType::Normal => {
                     agg.normal_tx_bytes += (value.len() as u64).saturating_sub(8);
                     // Fee = transparent_in + valueBalance - transparent_out.
@@ -645,10 +701,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     // ignoring it booked the entire shielded amount as "fee"
                     // (a t->z tx reported ~1998 PIV vs a real ~0.5). Credit only
                     // when every transparent input resolved, and clamp to a sane
-                    // ceiling to reject any residual mis-join.
+                    // ceiling to reject any residual mis-join. INVARIANT #4:
+                    // value_balance is SIGNED and added with its sign.
                     if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
-                        let value_balance =
-                            tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+                        let value_balance = cur.value_balance;
                         let fee = input_sum + value_balance - out_sum;
                         if fee > 0 && fee < 1_000 * crate::emission::COIN {
                             agg.fees_total = agg.fees_total.saturating_add(fee);
@@ -684,7 +740,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                                     height,
                                     date: date.clone(),
                                     total_paid_sats: excess,
-                                    n_outputs: tx.outputs.len() as u32,
+                                    n_outputs: cur.outs.len() as u32,
                                 });
                                 agg.rewards_total =
                                     agg.rewards_total.saturating_add(expected);
@@ -707,13 +763,6 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         input_processed += 1;
     }
     
-    // O1: Final Pass 2b cache statistics
-    let total_pass2b_lookups = pass2b_cache_hits + pass2b_db_reads;
-    let pass2b_cache_hit_rate = if total_pass2b_lookups > 0 {
-        (pass2b_cache_hits as f64 / total_pass2b_lookups as f64) * 100.0
-    } else {
-        0.0
-    };
     info!(
         input_processed = input_processed,
         pass2b_total = pass2b_tx_total,
@@ -721,10 +770,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         pass2b_failed = pass2b_tx_failed,
         pass2b_coinstake_skipped = pass2b_coinstake_skipped,
         pass2b_inputs = pass2b_inputs_processed,
-        cache_hit_rate = pass2b_cache_hit_rate,
-        cache_hits = pass2b_cache_hits,
-        db_reads = pass2b_db_reads,
-        db_reads_eliminated = pass2b_cache_hits,
+        pass2b_prevout_resolved = pass2b_prevout_resolved,
         "Pass 2b complete"
     );
     
@@ -782,37 +828,38 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         // Build canonical UTXO list (only unspent entries) to match serialize_utxos format
         let mut utxos_unspent: Vec<(Vec<u8>, u64)> = Vec::new();
 
-        for (txid_bytes, vout) in utxos.iter() {
+        for (slot, vout) in utxos.iter() {
             total_utxos_checked += 1;
 
-            // Check spent status using natural byte order (matching Pass 1).
-            // Packed key: [u8;32] txid + u32 vout (txid is always 32 bytes).
-            let txid32: [u8; 32] = txid_bytes.as_slice().try_into()
-                .expect("utxo txid must be 32 bytes");
-            let is_spent = spent_outputs.contains(&(txid32, *vout as u32));
+            // Resolve the in-memory (slot, vout) back to the 32-byte DISPLAY txid
+            // (tx_rev[slot]) for the spent check, the on-disk UTXO bytes, and HODL.
+            // INVARIANT #7: same byte order Pass 1 used to fill spent_outputs.
+            let txid32: [u8; 32] = tx_rev[*slot as usize];
+            let is_spent = spent_outputs.contains(&(txid32, *vout));
 
             if is_spent {
                 total_spent_found += 1;
             }
 
             if !is_spent {
-                utxos_unspent.push((txid_bytes.clone(), *vout));
+                // serialize_utxos expects (txid Vec<u8>, vout u64); resolve here so
+                // the on-disk format is byte-identical (txid(32) + vout u64 LE).
+                utxos_unspent.push((txid32.to_vec(), *vout as u64));
 
                 // HODL: bucket this UTXO's value by coin age, counting each
                 // outpoint exactly once (pure in-memory lookups; no DB reads).
-                if tip > 0 && hodl_seen.insert((txid32, *vout as u32)) {
-                    if let (Some(tx), Some(h)) =
-                        (tx_cache.get(txid_bytes), tx_heights.get(txid_bytes))
-                    {
-                        if *h >= 0 && *h <= tip {
-                            // Parser sets output.index == position, so direct
-                            // indexing by vout is exact.
-                            if let Some(out) = tx.outputs.get(*vout as usize) {
-                                let band_idx = hodl_band_index(tip, *h);
-                                hodl_sums[band_idx] =
-                                    hodl_sums[band_idx].saturating_add(out.value);
-                                hodl_total = hodl_total.saturating_add(out.value);
-                            }
+                if tip > 0 && hodl_seen.insert((txid32, *vout)) {
+                    let ptx = &packed[*slot as usize];
+                    let h = ptx.height;
+                    if h >= 0 && h <= tip {
+                        // Parser sets output.index == position, so direct indexing
+                        // by vout is exact. Value comes from packed[slot].outs[vout]
+                        // — identical to the original tx.outputs[vout].value.
+                        if let Some(out) = ptx.outs.get(*vout as usize) {
+                            let band_idx = hodl_band_index(tip, h);
+                            hodl_sums[band_idx] =
+                                hodl_sums[band_idx].saturating_add(out.value);
+                            hodl_total = hodl_total.saturating_add(out.value);
                         }
                     }
                 }
@@ -1594,5 +1641,125 @@ fn persist_hodl_snapshot(
     db.put_cf(&cf_state, b"analytics_hodl", bincode::serialize(&snapshot)?)?;
     info!(total_sats = total, "HODL age-band snapshot precomputed and stored");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CScript;
+
+    /// Build a CTxOut with the given value/index/script/addresses (the fields
+    /// classify_output() reads). script_length is informational and unused here.
+    fn mk_out(value: i64, index: u64, script: Vec<u8>, address: Vec<&str>) -> CTxOut {
+        CTxOut {
+            value,
+            script_length: script.len() as i32,
+            script_pubkey: CScript { script },
+            index,
+            address: address.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Canonical 25-byte P2PKH script (0x76a914 <20> 88ac) — get_script_type=="pubkeyhash".
+    fn p2pkh_script() -> Vec<u8> {
+        let mut s = vec![0x76, 0xa9, 0x14];
+        s.extend_from_slice(&[0xAB; 20]);
+        s.extend_from_slice(&[0x88, 0xac]);
+        s
+    }
+
+    /// Canonical 51-byte P2CS cold-stake script — get_script_type=="coldstake".
+    fn coldstake_script() -> Vec<u8> {
+        let mut s = vec![0u8; 51];
+        s[0] = 0x76;
+        s[1] = 0xa9;
+        s[2] = 0x7b;
+        s[3] = 0x63;
+        s[4] = 0xd2;
+        s[5] = 0x14;
+        s[26] = 0x67;
+        s[27] = 0x14;
+        s[48] = 0x68;
+        s[49] = 0x88;
+        s[50] = 0xac;
+        s
+    }
+
+    /// Packing a synthetic tx: out_sum is preserved across EVERY output (incl. the
+    /// kind=0 coinstake marker and an OP_RETURN), and each output maps to the
+    /// expected kind / interned ids. Mirrors the Pass 1 packing path exactly.
+    #[test]
+    fn pack_output_kind_mapping_and_out_sum() {
+        let outputs = vec![
+            // vout 0: empty coinstake marker — value 0, empty script => kind 0.
+            mk_out(0, 0, vec![], vec![]),
+            // vout 1: P2PKH single address => kind 1.
+            mk_out(5_0000_0000, 1, p2pkh_script(), vec!["DStakerOrPayee1111111111111111111"]),
+            // vout 2: P2CS cold stake (staker, owner) => kind 2, two DISTINCT ids.
+            mk_out(
+                12_0000_0000,
+                2,
+                coldstake_script(),
+                vec!["SStakerColdAddr1111111111111111111", "DOwnerColdAddr1111111111111111111"],
+            ),
+            // vout 3: OP_RETURN (value 0, script starts with 0x6a) => kind 0.
+            mk_out(0, 3, vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef], vec!["ignored"]),
+            // vout 4: another P2PKH for the SAME address as vout 1 => same interned id.
+            mk_out(3_0000_0000, 4, p2pkh_script(), vec!["DStakerOrPayee1111111111111111111"]),
+        ];
+
+        let mut addr_intern: HashMap<String, u32> = HashMap::new();
+        let mut addr_rev: Vec<String> = Vec::new();
+        let packed: Vec<PackedOut> = outputs
+            .iter()
+            .map(|o| pack_output(o, &mut addr_intern, &mut addr_rev))
+            .collect();
+
+        // INVARIANT #1 / #8: every output is packed (incl. markers) and out_sum
+        // equals the sum of the raw output values exactly.
+        assert_eq!(packed.len(), outputs.len());
+        let out_sum: i64 = packed.iter().map(|p| p.value).sum();
+        let raw_sum: i64 = outputs.iter().map(|o| o.value).sum();
+        assert_eq!(out_sum, raw_sum);
+        assert_eq!(out_sum, 5_0000_0000 + 12_0000_0000 + 3_0000_0000);
+
+        // vout positions are copied verbatim from output.index.
+        for (i, p) in packed.iter().enumerate() {
+            assert_eq!(p.vout as usize, i);
+        }
+
+        // Kind mapping.
+        assert_eq!(packed[0].kind, 0, "empty coinstake marker => kind 0");
+        assert_eq!(packed[0].addr_a, NO_ADDR);
+        assert_eq!(packed[0].addr_b, NO_ADDR);
+
+        assert_eq!(packed[1].kind, 1, "P2PKH => kind 1 (single)");
+        assert_ne!(packed[1].addr_a, NO_ADDR);
+        assert_eq!(packed[1].addr_b, NO_ADDR);
+
+        assert_eq!(packed[2].kind, 2, "P2CS => kind 2 (coldstake dual id)");
+        assert_ne!(packed[2].addr_a, NO_ADDR);
+        assert_ne!(packed[2].addr_b, NO_ADDR);
+        assert_ne!(packed[2].addr_a, packed[2].addr_b, "staker != owner id");
+
+        assert_eq!(packed[3].kind, 0, "OP_RETURN => kind 0");
+        assert_eq!(packed[3].addr_a, NO_ADDR);
+
+        assert_eq!(packed[4].kind, 1, "second P2PKH => kind 1");
+        // Interning round-trip: identical address strings share one dense id.
+        assert_eq!(packed[1].addr_a, packed[4].addr_a, "same address => same id");
+        assert_eq!(addr_rev[packed[1].addr_a as usize], "DStakerOrPayee1111111111111111111");
+    }
+
+    /// ty_to_u8 / u8_to_ty round-trip, with 1 == Coinstake load-bearing for the
+    /// Pass 2 / Pass 2b coinstake test.
+    #[test]
+    fn ty_u8_roundtrip() {
+        use crate::tx_type::TransactionType::*;
+        assert_eq!(ty_to_u8(Coinstake), 1);
+        for t in [Normal, Coinstake, Coinbase] {
+            assert_eq!(u8_to_ty(ty_to_u8(t)), t);
+        }
+    }
 }
 
