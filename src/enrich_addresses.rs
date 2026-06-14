@@ -244,13 +244,34 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Reset counter for pass 2
     processed = 0;
     
+    // Address interning: the same ~1.7M base58 address strings would otherwise be
+    // duplicated across all four aggregation maps. Intern each distinct string to a
+    // dense u32 id ONCE, key every map by that id, and resolve id->String only when
+    // building the on-disk RocksDB key bytes (the output stays byte-identical, since
+    // interning is purely an in-memory representation change). addr_rev[id] is the
+    // exact string interned for that id; addr_intern[s] is its id.
+    let mut addr_intern: HashMap<String, u32> = HashMap::new();
+    let mut addr_rev: Vec<String> = Vec::new();
+    // Insert-or-get on the EXACT string (no normalization / case-fold). Returns the
+    // existing id if present, else assigns the next dense id. Declared as an inner
+    // fn (not a closure) so it can borrow both maps mutably at each call site.
+    fn intern(addr_intern: &mut HashMap<String, u32>, addr_rev: &mut Vec<String>, s: &str) -> u32 {
+        if let Some(&id) = addr_intern.get(s) {
+            return id;
+        }
+        let id = addr_rev.len() as u32;
+        addr_intern.insert(s.to_string(), id);
+        addr_rev.push(s.to_string());
+        id
+    }
+
     // PASS 2: Build address map with spent flags (outputs -> address_map)
-    let mut address_map: HashMap<String, Vec<(Vec<u8>, u64)>> = HashMap::new();
+    let mut address_map: HashMap<u32, Vec<(Vec<u8>, u64)>> = HashMap::new();
     // Also maintain a txs_map to collect all txids involving an address (received OR sent)
-    let mut txs_map: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+    let mut txs_map: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
     // NEW: Track total received and sent per address during Pass 2 (much faster!)
-    let mut totals_received: HashMap<String, i64> = HashMap::new();
-    let mut totals_sent: HashMap<String, i64> = HashMap::new();
+    let mut totals_received: HashMap<u32, i64> = HashMap::new();
+    let mut totals_sent: HashMap<u32, i64> = HashMap::new();
     
     // O1: Track cache hit rate
     let mut cache_hits = 0;
@@ -313,8 +334,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         };
         
-        // Track which addresses are involved in this transaction (for txs_map)
-        let mut tx_addresses: HashSet<String> = HashSet::new();
+        // Track which addresses are involved in this transaction (for txs_map),
+        // keyed by interned id.
+        let mut tx_addresses: HashSet<u32> = HashSet::new();
         
         // Detect if this is a coinstake transaction
         let tx_is_coinstake = is_coinstake(&*tx);
@@ -333,19 +355,20 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 ScriptClassification::P2SH(addr) |
                 ScriptClassification::P2PK(addr) => {
                     // Standard single-address output
-                    tx_addresses.insert(addr.clone());
-                    *totals_received.entry(addr.clone()).or_insert(0) += output.value;
-                    
+                    let id = intern(&mut addr_intern, &mut addr_rev, &addr);
+                    tx_addresses.insert(id);
+                    *totals_received.entry(id).or_insert(0) += output.value;
+
                     // Index UTXO if non-zero value
                     if output.value > 0 {
                         address_map
-                            .entry(addr.clone())
+                            .entry(id)
                             .or_default()
                             .push((txid_bytes.clone(), output.index));
                         indexed_outputs += 1;
                     }
                 }
-                
+
                 ScriptClassification::ColdStake { staker, owner } => {
                     // Cold staking (P2CS): the output is indexed under BOTH the staker
                     // (S-address) and the owner (D-address), each credited with the full
@@ -353,22 +376,25 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     // outputs, and what wallets/explorers expect when querying either
                     // side of a delegation. The spend side (Pass 2b) debits BOTH
                     // addresses symmetrically, so balance == received - sent holds for
-                    // each address independently.
-                    *totals_received.entry(staker.clone()).or_insert(0) += output.value;
-                    *totals_received.entry(owner.clone()).or_insert(0) += output.value;
+                    // each address independently. Staker and owner are DISTINCT strings
+                    // and so intern to DISTINCT ids.
+                    let staker_id = intern(&mut addr_intern, &mut addr_rev, &staker);
+                    let owner_id = intern(&mut addr_intern, &mut addr_rev, &owner);
+                    *totals_received.entry(staker_id).or_insert(0) += output.value;
+                    *totals_received.entry(owner_id).or_insert(0) += output.value;
 
                     // Both addresses appear in transaction list
-                    tx_addresses.insert(staker.clone());
-                    tx_addresses.insert(owner.clone());
+                    tx_addresses.insert(staker_id);
+                    tx_addresses.insert(owner_id);
 
                     // Both get UTXO entry for tracking
                     if output.value > 0 {
                         address_map
-                            .entry(staker.clone())
+                            .entry(staker_id)
                             .or_default()
                             .push((txid_bytes.clone(), output.index));
                         address_map
-                            .entry(owner.clone())
+                            .entry(owner_id)
                             .or_default()
                             .push((txid_bytes.clone(), output.index));
                         indexed_outputs += 2;  // Count both
@@ -384,10 +410,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         }
         
-        // Add this transaction to txs_map for ALL addresses involved
-        for address_str in tx_addresses {
+        // Add this transaction to txs_map for ALL addresses involved (by id)
+        for address_id in tx_addresses {
             txs_map
-                .entry(address_str)
+                .entry(address_id)
                 .or_default()
                 .push(txid_bytes.clone());
         }
@@ -565,21 +591,25 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                                 ScriptClassification::P2SH(addr) |
                                 ScriptClassification::P2PK(addr) => {
                                     // Standard: address is spending
-                                    *totals_sent.entry(addr.clone()).or_insert(0) += prev_out.value;
-                                    txs_map.entry(addr.clone()).or_default().push(current_txid_bytes.clone());
+                                    let id = intern(&mut addr_intern, &mut addr_rev, &addr);
+                                    *totals_sent.entry(id).or_insert(0) += prev_out.value;
+                                    txs_map.entry(id).or_default().push(current_txid_bytes.clone());
                                 }
-                                
+
                                 ScriptClassification::ColdStake { staker, owner } => {
                                     // Cold stake spend: debit BOTH addresses, mirroring the
                                     // credit both received in Pass 2 (see Pass 2 comment).
                                     // This keeps balance == received - sent for the staker
-                                    // and the owner independently.
-                                    *totals_sent.entry(staker.clone()).or_insert(0) += prev_out.value;
-                                    *totals_sent.entry(owner.clone()).or_insert(0) += prev_out.value;
+                                    // and the owner independently. Staker and owner intern
+                                    // to DISTINCT ids.
+                                    let staker_id = intern(&mut addr_intern, &mut addr_rev, &staker);
+                                    let owner_id = intern(&mut addr_intern, &mut addr_rev, &owner);
+                                    *totals_sent.entry(staker_id).or_insert(0) += prev_out.value;
+                                    *totals_sent.entry(owner_id).or_insert(0) += prev_out.value;
 
                                     // Both appear in transaction list
-                                    txs_map.entry(staker.clone()).or_default().push(current_txid_bytes.clone());
-                                    txs_map.entry(owner.clone()).or_default().push(current_txid_bytes.clone());
+                                    txs_map.entry(staker_id).or_default().push(current_txid_bytes.clone());
+                                    txs_map.entry(owner_id).or_default().push(current_txid_bytes.clone());
                                 }
                                 
                                 _ => {
@@ -698,6 +728,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         "Pass 2b complete"
     );
     
+    // Interning round-trip invariant: every id resolves back to the exact string
+    // that was interned, and the forward/reverse maps stay the same size.
+    debug_assert_eq!(addr_intern.len(), addr_rev.len(), "intern/rev size mismatch");
+    if let Some((s, &id)) = addr_intern.iter().next() {
+        debug_assert_eq!(&addr_rev[id as usize], s, "intern round-trip mismatch");
+    }
+
     // CRITICAL: Final divergence check across all passes
     if pass1_tx_total != pass2_tx_total || pass2_tx_total != pass2b_tx_total {
         warn!(pass1_total = pass1_tx_total, pass2_total = pass2_tx_total, pass2b_total = pass2b_tx_total,
@@ -735,7 +772,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let mut hodl_total: i64 = 0;
     let mut hodl_seen: HashSet<([u8; 32], u32)> = HashSet::new();
 
-    for (address, utxos) in address_map {
+    for (id, utxos) in address_map {
+        // Resolve the interned id back to its exact base58 string ONLY here, where
+        // the on-disk key bytes are built — reproduces the original byte-for-byte.
+        let address = &addr_rev[id as usize];
         let mut key = vec![b'a'];
         key.extend_from_slice(address.as_bytes());
 
@@ -784,11 +824,11 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         batch.put_cf(&cf_addr_index, &key, &serialized_utxos);
 
         // Get pre-calculated totals from Pass 2 and 2b (MUCH faster than recalculating!)
-        let total_received = *totals_received.get(&address).unwrap_or(&0);
-        let total_sent = *totals_sent.get(&address).unwrap_or(&0);
-        
+        let total_received = *totals_received.get(&id).unwrap_or(&0);
+        let total_sent = *totals_sent.get(&id).unwrap_or(&0);
+
         // Write transaction list ('t' + address)
-        if let Some(txids) = txs_map.get(&address) {
+        if let Some(txids) = txs_map.get(&id) {
             let mut unique_txids = txids.clone();
             unique_txids.sort();
             unique_txids.dedup();
@@ -869,7 +909,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Blockbook), so this needs no extra DB reads and produces the TRUE top
     // holders — replacing the old O(addresses) full-scan endpoints that only
     // sampled the first 10k addresses.
-    if let Err(e) = persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map) {
+    if let Err(e) = persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map, &addr_rev) {
         warn!(error = %e, "Failed to persist wealth analytics");
     }
 
@@ -1389,20 +1429,21 @@ const RICHLIST_KEEP: usize = 1000;
 
 fn persist_wealth_analytics(
     db: &Arc<DB>,
-    totals_received: &HashMap<String, i64>,
-    totals_sent: &HashMap<String, i64>,
-    txs_map: &HashMap<String, Vec<Vec<u8>>>,
+    totals_received: &HashMap<u32, i64>,
+    totals_sent: &HashMap<u32, i64>,
+    txs_map: &HashMap<u32, Vec<Vec<u8>>>,
+    addr_rev: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
 
-    // Compute balance per address; keep only positive balances.
-    let mut balances: Vec<(&String, i64)> = Vec::with_capacity(totals_received.len());
+    // Compute balance per address (by interned id); keep only positive balances.
+    let mut balances: Vec<(u32, i64)> = Vec::with_capacity(totals_received.len());
     let mut total_balance: i64 = 0;
-    for (addr, recv) in totals_received {
-        let sent = *totals_sent.get(addr).unwrap_or(&0);
+    for (&id, recv) in totals_received {
+        let sent = *totals_sent.get(&id).unwrap_or(&0);
         let bal = recv - sent;
         if bal > 0 {
-            balances.push((addr, bal));
+            balances.push((id, bal));
             total_balance += bal;
         }
     }
@@ -1413,12 +1454,12 @@ fn persist_wealth_analytics(
     let richlist: Vec<RichListSnapshotEntry> = balances
         .iter()
         .take(RICHLIST_KEEP)
-        .map(|(addr, bal)| {
+        .map(|(id, bal)| {
             // Unique tx count (txs_map may list a txid twice when an address is
             // both an input and an output of the same transaction). Deduping
             // only the kept top-N keeps this cheap.
             let tx_count = txs_map
-                .get(*addr)
+                .get(id)
                 .map(|v| {
                     let mut t = v.clone();
                     t.sort();
@@ -1427,7 +1468,8 @@ fn persist_wealth_analytics(
                 })
                 .unwrap_or(0);
             RichListSnapshotEntry {
-                address: (*addr).clone(),
+                // Resolve the interned id back to its exact base58 string only here.
+                address: addr_rev[*id as usize].clone(),
                 balance: *bal,
                 tx_count,
             }
