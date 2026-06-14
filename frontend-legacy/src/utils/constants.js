@@ -41,7 +41,9 @@ export const TX_TYPES = {
   COINSTAKE: 'coinstake',
   COLDSTAKE: 'coldstake',
   BUDGET: 'budget',
-  SAPLING: 'sapling',
+  SAPLING: 'sapling',         // pure shielded (z->z): no transparent value moved
+  SHIELDING: 'shielding',     // transparent -> shielded (value_balance < 0)
+  DESHIELDING: 'deshielding', // shielded -> transparent (value_balance > 0)
   REGULAR: 'regular'
 }
 

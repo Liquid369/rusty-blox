@@ -136,7 +136,7 @@ import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import { formatNumber } from '@/utils/formatters'
 import { TX_TYPES } from '@/utils/constants'
-import { detectTransactionType, getAddressRoles, toSats } from '@/utils/transactionHelpers'
+import { detectTransactionType, getAddressRoles, toSats, isShieldType } from '@/utils/transactionHelpers'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import BlockRow from '@/components/blocks/BlockRow.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -210,7 +210,9 @@ const mapBlockDetail = (data) => {
       // Staker = first value-bearing output; P2CS carries [staker, owner] roles
       const stakeOut = vouts.find(v => Array.isArray(v?.addresses) && v.addresses.length > 0)
       if (stakeOut) stakers = getAddressRoles(stakeOut).slice(0, 2)
-    } else if (type === TX_TYPES.SAPLING) {
+    } else if (isShieldType(type)) {
+      // shielding / deshielding / pure-shield all aggregate into the block's
+      // shield count; the per-tx direction is shown on the block-detail rows.
       typeCounts.shield++
     } else if (type === TX_TYPES.COLDSTAKE) {
       typeCounts.coldstake++

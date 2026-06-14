@@ -57,6 +57,48 @@ export function isShieldTx(tx) {
 }
 
 /**
+ * Signed net Sapling value the transaction moves. Sourced from either the
+ * block-detail shape (`tx.sapling.value_balance`, PIV float) or the live tx
+ * endpoint (`tx.valueBalance`). Only the SIGN is used for direction, so the
+ * unit/scale is irrelevant.
+ *
+ * Sign convention (matches the backend — block_detail.rs / sapling_validation.rs):
+ *   < 0  value entered the shielded pool  (transparent -> shielded) = shielding
+ *   > 0  value left the shielded pool      (shielded -> transparent) = deshielding
+ *   = 0  value stayed inside the pool       (shielded -> shielded)    = pure shield
+ */
+export function getShieldValueBalance(tx) {
+  const sap = tx?.sapling
+  if (sap && sap.value_balance !== undefined && sap.value_balance !== null) {
+    return toSats(sap.value_balance)
+  }
+  if (tx?.valueBalance !== undefined && tx.valueBalance !== null) {
+    return toSats(tx.valueBalance)
+  }
+  return 0
+}
+
+/**
+ * Direction of a shielded (Sapling) transaction, by the value-balance sign:
+ *   'shielding'   transparent -> shielded (value_balance < 0)
+ *   'deshielding' shielded -> transparent (value_balance > 0)
+ *   'shield'      fully shielded z->z      (value_balance == 0, or unknown)
+ */
+export function getShieldDirection(tx) {
+  const vb = getShieldValueBalance(tx)
+  if (vb < 0) return 'shielding'
+  if (vb > 0) return 'deshielding'
+  return 'shield'
+}
+
+/** True if a detected TX_TYPES value is any shielded variant. */
+export function isShieldType(type) {
+  return type === TX_TYPES.SAPLING ||
+         type === TX_TYPES.SHIELDING ||
+         type === TX_TYPES.DESHIELDING
+}
+
+/**
  * True if an output is a cold-staking (P2CS) output:
  * addresses = [staker (S...), owner (D...)].
  */
@@ -123,9 +165,13 @@ export function detectTransactionType(tx) {
     return TX_TYPES.COINBASE
   }
 
-  // Shield (Sapling)
+  // Shield (Sapling) — classify direction by the signed value balance
   if (isShieldTx(tx)) {
-    return TX_TYPES.SAPLING
+    switch (getShieldDirection(tx)) {
+      case 'shielding': return TX_TYPES.SHIELDING
+      case 'deshielding': return TX_TYPES.DESHIELDING
+      default: return TX_TYPES.SAPLING
+    }
   }
 
   // Cold-staking delegation (P2CS output)
@@ -161,6 +207,8 @@ export function getTransactionTypeLabel(type) {
     [TX_TYPES.COLDSTAKE]: 'Cold-Stake',
     [TX_TYPES.BUDGET]: 'Budget',
     [TX_TYPES.SAPLING]: 'Shield',
+    [TX_TYPES.SHIELDING]: 'Shielding',
+    [TX_TYPES.DESHIELDING]: 'Deshielding',
     [TX_TYPES.REGULAR]: 'Transparent'
   }
   return labels[type] || 'Transaction'
@@ -178,6 +226,8 @@ export function getTransactionTypeBadgeVariant(type) {
     [TX_TYPES.COLDSTAKE]: 'accent',
     [TX_TYPES.BUDGET]: 'warning',
     [TX_TYPES.SAPLING]: 'info',
+    [TX_TYPES.SHIELDING]: 'accent',
+    [TX_TYPES.DESHIELDING]: 'warning',
     [TX_TYPES.REGULAR]: 'default'
   }
   return variants[type] || 'default'
