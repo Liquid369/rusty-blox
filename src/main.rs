@@ -1,3 +1,11 @@
+// jemalloc: returns freed memory to the OS far more aggressively than the system
+// allocator (the macOS default retained the per-tx deserialization churn, inflating
+// enrichment RSS ~6GB-raw -> ~24GB-resident). The #[global_allocator] must live in
+// each binary root, not lib.rs (it would conflict across the 14 bins).
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use rustyblox::config::{get_global_config, init_global_config};
 use rustyblox::sync::run_sync_service;
 use rustyblox::mempool::{MempoolState, run_mempool_monitor};

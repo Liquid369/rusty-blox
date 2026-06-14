@@ -5,9 +5,19 @@
 use std::sync::Arc;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor};
 use rustyblox::enrich_addresses::enrich_all_addresses;
+use rustyblox::telemetry::{TelemetryConfig, init_tracing};
+
+// jemalloc (see src/main.rs) — the #[global_allocator] must be set in each binary
+// root. This is the binary that runs enrichment in isolation for measurement.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The harness has no tracing subscriber otherwise, so enrich_all_addresses'
+    // info! lines (ENRICH_TIMING + cache/db metrics) are dropped. Honors RUST_LOG.
+    let _ = init_tracing(TelemetryConfig::default());
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║      REBUILD ADDRESS INDEX WITH UTXO TRACKING      ║");
     println!("╚════════════════════════════════════════════════════╝\n");
