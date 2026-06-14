@@ -90,7 +90,12 @@
             </InfoRow>
 
             <InfoRow v-if="blockReward !== null" label="Block Reward" icon="award">
-              <span class="reward-value">{{ formatPIV(blockReward) }} PIV</span>
+              <div class="amount-group">
+                <span class="reward-value">{{ formatPIV(blockReward) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(blockReward), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
             <InfoRow v-if="totalTxSize > 0" label="Size (approx)" icon="database">
@@ -159,6 +164,9 @@
               <div class="composition-total">
                 <span class="composition-total-label">Total Value Transferred</span>
                 <span class="composition-total-value">{{ formatPIV(totalValueTransferred) }} PIV</span>
+                <span v-if="showFiat" class="composition-total-fiat">
+                  ≈ {{ formatAmount(pivFromSats(totalValueTransferred), { showPIV: false }) }}
+                </span>
               </div>
             </div>
           </Card>
@@ -196,6 +204,7 @@ import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import { blockService } from '@/services/blockService'
 import { transactionService } from '@/services/transactionService'
 import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatDifficulty, formatDuration, formatPIV } from '@/utils/formatters'
@@ -220,6 +229,17 @@ import TransactionRow from '@/components/common/TransactionRow.vue'
 const route = useRoute()
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
+
+// Fiat-annotation gate (P1-3): non-PIV preference + live prices.
+const showFiat = computed(() => preferredCurrency.value !== 'PIV' && hasValidPrices.value)
+
+// blockReward / totalValueTransferred are satoshi strings; scale to a PIV float
+// before fiat conversion so the 1e8 factor is applied exactly once.
+const pivFromSats = (sats) => {
+  const n = typeof sats === 'string' ? parseFloat(sats) : Number(sats)
+  return Number.isFinite(n) ? n / 100000000 : 0
+}
 
 const block = ref(null)
 const transactions = ref([])
@@ -505,6 +525,27 @@ onMounted(() => {
   font-weight: var(--weight-bold);
   font-size: var(--text-lg);
   color: var(--pivx-accent);
+}
+
+.composition-total-fiat {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.amount-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
+.amount-fiat {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 
 .interval-display {

@@ -84,7 +84,12 @@
             </InfoRow>
 
             <InfoRow label="Amount" icon="coins">
-              <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
+              <div class="amount-group">
+                <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.value), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
             <InfoRow label="Total Input" icon="arrow-down-left">
@@ -92,11 +97,21 @@
             </InfoRow>
 
             <InfoRow label="Total Output" icon="arrow-up-right">
-              <span class="flow-value">{{ formatPIV(transaction.value) }} PIV</span>
+              <div class="amount-group">
+                <span class="flow-value">{{ formatPIV(transaction.value) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.value), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
             <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="settings">
-              <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
+              <div class="amount-group">
+                <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.fees), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
             <InfoRow v-if="feeRate !== null" label="Fee Rate" icon="trending-up">
@@ -292,6 +307,7 @@ import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import { transactionService } from '@/services/transactionService'
 import {
   detectTransactionType,
@@ -315,6 +331,17 @@ import CopyButton from '@/components/common/CopyButton.vue'
 const route = useRoute()
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
+
+// Gate fiat annotations on a non-PIV preference with live prices (P1-3).
+const showFiat = computed(() => preferredCurrency.value !== 'PIV' && hasValidPrices.value)
+
+// API amounts are satoshi strings; convert to a PIV float before fiat conversion
+// so we never double-apply the 1e8 scale.
+const pivFromSats = (sats) => {
+  const n = typeof sats === 'string' ? parseFloat(sats) : Number(sats)
+  return Number.isFinite(n) ? n / 100000000 : 0
+}
 
 const transaction = ref(null)
 const loading = ref(false)
@@ -577,6 +604,20 @@ watch(() => chainStore.reorgDetected, (detected) => {
   font-weight: 700;
   color: var(--text-accent);
   font-family: var(--font-mono);
+}
+
+.amount-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
+.amount-fiat {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-weight: var(--weight-normal);
+  font-variant-numeric: tabular-nums;
 }
 
 .fee-value {

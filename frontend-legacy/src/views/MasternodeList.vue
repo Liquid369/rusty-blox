@@ -41,7 +41,7 @@
           <div class="stat-sub">{{ formatNumber(collateralBasis) }} nodes × {{ formatNumber(MASTERNODE_COLLATERAL) }} PIV</div>
         </Card>
         <Card v-if="supplyLockedPercent !== null">
-          <template #header>% of Supply Locked</template>
+          <template #header>Supply Locked</template>
           <div class="stat-value">{{ supplyLockedPercent }} <span class="stat-unit">%</span></div>
           <div class="stat-sub">{{ formatNumber(enabledCollateral) }} PIV locked by enabled nodes</div>
         </Card>      </div>
