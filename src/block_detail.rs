@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use tracing::warn;
+use crate::emission::era_block_reward;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockDetail {
@@ -24,6 +25,9 @@ pub struct BlockDetail {
     pub difficulty: f64,
     pub previousblockhash: Option<String>,
     pub nextblockhash: Option<String>,
+    /// Block subsidy minted at this height (PIV), from the deterministic
+    /// emission schedule — always correct regardless of input resolution.
+    pub reward: f64,
     pub tx: Vec<TransactionSummary>,
 }
 
@@ -236,9 +240,10 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
         difficulty: header.difficulty,
         previousblockhash,
         nextblockhash,
+        reward: era_block_reward(height) as f64 / 100_000_000.0,
         tx: transactions,
     };
-    
+
     Ok(Json(block_detail))
 }
 
@@ -302,14 +307,14 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
 }
 
 fn bits_to_difficulty(bits: u32) -> f64 {
+    // difficulty = difficulty-1 target / current target, NOT the raw target.
+    // The old version returned the raw target (~1e63) instead of difficulty.
     let exponent = (bits >> 24) as i32;
     let mantissa = (bits & 0x00ffffff) as f64;
-    
-    if exponent <= 3 {
-        mantissa / 256_f64.powi(3 - exponent)
-    } else {
-        mantissa * 256_f64.powi(exponent - 3)
+    if mantissa == 0.0 {
+        return 0.0;
     }
+    (65535.0 * 256_f64.powi(0x1d - 3)) / (mantissa * 256_f64.powi(exponent - 3))
 }
 
 fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSummary>, StatusCode> {
@@ -355,7 +360,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
-                                enrich_transaction_inputs(db, cf_transactions, &mut tx);
+                                enrich_transaction_inputs(db, cf_transactions, &mut tx, height);
                                 transactions.push(tx);
                             } else {
                                 warn!(txid = %txid_str, "Failed to parse transaction");
@@ -375,7 +380,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
     Ok(transactions)
 }
 
-fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary) {
+fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary, height: i32) {
     
     
     for input in &mut tx.vin {
@@ -444,8 +449,20 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
     // Calculate fees and rewards based on transaction type
     if let Some(ref tx_type) = tx.tx_type {
         if tx_type == "coinstake" {
-            // Coinstake: reward is output - input (stake reward)
-            tx.reward = Some(tx.value_out - tx.value_in);
+            // Coinstake reward = newly minted = outputs - inputs. That formula
+            // is only valid when EVERY input value resolved: a zerocoin-stake
+            // (zPoS) input is a serial number with no UTXO prevout, so its value
+            // is unresolvable and out-in would report principal+reward (e.g.
+            // 5005 instead of 5). When any input is unresolved, fall back to the
+            // deterministic emission subsidy. (zPoS predates budget payouts, so
+            // the subsidy is the exact minted amount there.)
+            let any_input_unresolved = tx.vin.iter().any(|i| i.value.is_none());
+            let reward = if !tx.vin.is_empty() && !any_input_unresolved {
+                tx.value_out - tx.value_in
+            } else {
+                era_block_reward(height) as f64 / 100_000_000.0
+            };
+            tx.reward = Some(reward);
             tx.fees = 0.0;
         } else if tx_type == "coinbase" {
             // Coinbase: reward already set to value_out in parse_transaction_binary
