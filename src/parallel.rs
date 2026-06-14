@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 use rocksdb::DB;
 use tokio::sync::Semaphore;
 use crate::types::AppState;
 use crate::blocks::process_blk_file;
 use crate::db_utils::{save_file_as_incomplete, bulk_write_options};
-use crate::chain_state::set_sync_height;
+use crate::chain_state::{set_sync_height, get_sync_height};
 use crate::chainwork::calculate_all_chainwork;
 use crate::sync::validate_canonical_metadata_complete;
 use hex;
@@ -13,7 +14,7 @@ use std::collections::HashMap;
 use crate::config::get_global_config;
 use reqwest::Client;
 use serde_json::Value;
-use tracing::{info, warn, debug, info_span};
+use tracing::{info, warn, debug, info_span, Instrument};
 use crate::metrics;
 use crate::telemetry::ProgressCounter;
 
@@ -185,6 +186,14 @@ pub async fn process_files_parallel(
     
     // Progress tracking
     let completed = Arc::new(tokio::sync::Mutex::new(0_usize));
+
+    // Running max canonical block height seen across files, flushed to
+    // sync_height on a throttle below — replaces the per-file full-CF scan of
+    // chain_metadata (~O(files x blocks)). `last_written` is seeded from the
+    // stored sync_height so the throttled writes stay monotonic (on the leveldb
+    // path sync_height is set before parse and must not move backwards).
+    let running_max = Arc::new(AtomicI32::new(-1));
+    let last_written = Arc::new(AtomicI32::new(get_sync_height(&db_arc).unwrap_or(0)));
     
     // Process files with controlled concurrency
     let tasks: Vec<_> = blk_files
@@ -194,17 +203,23 @@ pub async fn process_files_parallel(
             let db = db_arc.clone();
             let st = state.clone();
             let completed_clone = completed.clone();
-            
+            let running_max = running_max.clone();
+            let last_written = last_written.clone();
+
+            let file_name = file_path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            // Attach the per-file span with `.instrument()` (below) instead of
+            // `span.entered()`: an entered guard held across the .await points in
+            // this task stays on the thread-local span stack while the task is
+            // parked, so a sibling file task resumed on the same worker nests
+            // UNDER it (observed blk4:blk3:blk2:blk1:blk0), inflating every log
+            // line. `.instrument` enters the span only around each poll.
+            let file_span = info_span!("process_blk_file", file_name = %file_name);
+
             async move {
-                let file_name = file_path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown");
-                
-                let _file_span = info_span!("process_blk_file",
-                    file_name = file_name
-                ).entered();
-                
-                debug!(file_name = file_name, "Processing blk file");
+                debug!("Processing blk file");
                 
                 // Acquire permit - if this fails, semaphore is closed (shutdown).
                 // The permit is held for the entire duration of the blocking task
@@ -252,7 +267,11 @@ pub async fn process_files_parallel(
                 .await;
 
                 match join {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(height_opt)) => {
+                        if let Some(h) = height_opt {
+                            running_max.fetch_max(h, Ordering::Relaxed);
+                        }
+                    }
                     Ok(Err(e)) => {
                         warn!(file = %file_path.display(), error = %e, "Failed to process blk file");
                         let _ = save_file_as_incomplete(&db, &file_path).await;
@@ -272,11 +291,24 @@ pub async fn process_files_parallel(
                 let progress = (current as f64 / total_files as f64) * 100.0;
                 info!(current = current, total = total_files, progress_pct = format!("{:.1}", progress), "File progress");
                 
-                // Update sync_height incrementally to show progress
-                if let Err(e) = update_sync_height_from_metadata(&db).await {
-                    warn!(error = %e, "Failed to update sync_height");
+                // Throttled progress refresh from the in-memory running max,
+                // replacing the old per-file full-CF scan of chain_metadata
+                // (~O(files x blocks)). `cur > last_written` keeps it monotonic;
+                // the authoritative refresh after the loop writes the final
+                // value. Fire every 16 files and on the last file so chains with
+                // fewer than 16 files still surface progress.
+                let cur = running_max.load(Ordering::Relaxed);
+                if (current % 16 == 0 || current == total_files)
+                    && cur > last_written.load(Ordering::Relaxed)
+                {
+                    if set_sync_height(&db, cur).is_ok() {
+                        last_written.store(cur, Ordering::Relaxed);
+                    } else {
+                        warn!("Failed to update sync_height");
+                    }
                 }
             }
+            .instrument(file_span)
         })
         .collect();
     

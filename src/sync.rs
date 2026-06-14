@@ -18,6 +18,23 @@ use crate::parallel::process_files_parallel;
 use crate::metrics;
 use crate::telemetry::truncate_hex;
 
+/// Effective parallel-file concurrency for blk parsing.
+///
+/// Takes the configured `sync.parallel_files` (default 8) and caps it to the
+/// number of CPUs actually available to this process. `available_parallelism`
+/// honors cgroup CPU quotas / affinity on Linux, so a 2-4 vCPU VPS won't run 8
+/// CPU-bound parses at once (each blk file saturates a core hashing
+/// Quark/SHA256d), which only thrashes caches and starves pivxd alongside it.
+/// Floored at 1 so a single-core host never builds a `Semaphore(0)` — that would
+/// deadlock the file pipeline on the first `acquire().await`.
+fn effective_parallel_files(config: &crate::config::Config) -> usize {
+    let configured = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    configured.min(cores).max(1)
+}
+
 /// Validate that canonical chain metadata is complete before parallel processing
 /// 
 /// Fix for Phase 2, Issue #1: Transaction Height Assignment Race
@@ -417,7 +434,7 @@ async fn run_initial_sync_leveldb(
     // The parallel processor will index all blocks it finds
     // Because we stored the canonical chain metadata above, we know exactly which blocks to index
     
-    let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
+    let max_concurrent = effective_parallel_files(config);
     
     let mut dir_entries = fs::read_dir(&blk_dir).await?;
     let mut entries = Vec::new();
@@ -504,7 +521,7 @@ async fn run_initial_sync(
     state: AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = get_global_config();
-    let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
+    let max_concurrent = effective_parallel_files(config);
     
     // Read all .dat files
     let mut dir_entries = fs::read_dir(&blk_dir).await?;
@@ -951,7 +968,7 @@ async fn run_live_sync(
         }
 
         let config = get_global_config();
-        let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
+        let max_concurrent = effective_parallel_files(config);
         
         // Read all .dat files and determine which ones to process
         let mut dir_entries = fs::read_dir(&blk_dir).await?;

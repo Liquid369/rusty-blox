@@ -87,6 +87,17 @@ pub fn set_sync_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// Read the current stored sync height (0 if unset). Cheap point lookup,
+/// used to seed the throttled progress writer so it stays monotonic.
+pub fn get_sync_height(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    match db.get_cf(&cf_state, b"sync_height")? {
+        Some(bytes) => Ok(i32::from_le_bytes(bytes.as_slice().try_into()?)),
+        None => Ok(0),
+    }
+}
+
 /// Mark reorg point
 pub fn mark_reorg(db: &Arc<DB>, height: i32, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
     let cf_state = db.cf_handle("chain_state")

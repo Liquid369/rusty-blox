@@ -9,7 +9,7 @@ use crate::db_utils::batch_put_cf;
 use crate::transactions::process_transaction_from_buffer;
 use crate::batch_writer::BatchWriter;
 use crate::config::get_global_config;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error};
 use crate::metrics;
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
@@ -285,7 +285,7 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 /// WAL is pure fsync overhead), `false` on the live/RPC catch-up path (WAL kept
 /// so a crash stays recoverable). It only affects durability, never the bytes
 /// written.
-pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>, bulk: bool) -> Result<Option<i32>, Box<dyn std::error::Error + Send + Sync>> {
     let file_path_ref = file_path.as_ref();
     info!(file = %file_path_ref.display(), "Processing block file");
     
@@ -297,7 +297,10 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     }
 
     let file = tokio::fs::File::open(&file_path_ref).await?;
-    let mut reader = BufReader::new(file);
+    // 1 MiB read buffer (vs the 8 KiB default): the full-file blk parse is a
+    // sequential scan, so larger reads cut syscall count on high-latency VPS
+    // disks. Allocated once per file (bounded by the parallel-files semaphore).
+    let mut reader = BufReader::with_capacity(1 << 20, file);
     
     // Priority 1.1: Get file size for bounds validation
     let file_size = reader.seek(std::io::SeekFrom::End(0)).await?;
@@ -312,6 +315,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     let mut header_buffer = Vec::with_capacity(112);
     let mut block_count = 0;
     let mut skipped_count = 0;
+    // Highest canonical block height written in this file (i32::MIN = none seen).
+    // Returned so the caller advances sync_height without a full-CF scan.
+    let mut max_height: i32 = i32::MIN;
     
     // Create batch writer for transaction data
     let mut tx_batch = BatchWriter::new_with_bulk(db.clone(), TX_BATCH_SIZE, bulk);
@@ -609,6 +615,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // If we have a height (genesis or previously resolved), store mappings
         // CRITICAL FIX: Now uses tx_batch for atomic writes with transactions
         if let Some(height) = block_height {
+            if height > max_height {
+                max_height = height;
+            }
             // Store: 'h' + block_hash -> height (for parent lookup, uses internal byte order)
             let mut height_key = vec![b'h'];
             height_key.extend_from_slice(&block_hash_vec);
@@ -764,7 +773,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         "File processing complete"
     );
     
-    Ok(())
+    Ok(if max_height == i32::MIN { None } else { Some(max_height) })
 }
 
 /// Read and process a single block by file number and offset (Pattern A helper)
