@@ -35,10 +35,11 @@ use rustyblox::types::MyError;
 
 use std::sync::Arc;
 use rocksdb::{DB, ColumnFamilyDescriptor, Options, Cache, BlockBasedOptions};
-use axum::{Router, routing::{get, post}, response::IntoResponse};
+use axum::{Router, routing::{get, post}, response::{IntoResponse, Response}, middleware::{self, Next}, extract::Request, http::StatusCode};
+use axum::http::header::{HeaderName, HeaderValue};
 use tower_http::cors::{CorsLayer, Any};
 use tower_http::timeout::TimeoutLayer;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::path::PathBuf;
@@ -58,6 +59,81 @@ const COLUMN_FAMILIES: [&str; 8] = [
 
 lazy_static! {
     static ref DB_MUTEX: TokioMutex<()> = TokioMutex::new(());
+}
+
+// ============================================================================
+// Request admission control (P1-2)
+// ----------------------------------------------------------------------------
+// The backend listens on 0.0.0.0:3005 and previously had only a 30s timeout.
+// There was no ceiling on the number of in-flight requests, so a burst of
+// traffic (or an abusive client hammering the unauthenticated node-broadcast
+// proxies /sendtx and /relaymnb) could exhaust the tokio runtime and the
+// upstream PIVX node. We add two semaphore-backed concurrency caps applied as
+// axum middleware:
+//   * a GLOBAL cap across every route (defence-in-depth alongside the
+//     reverse-proxy per-IP rate limiting in frontend-legacy/nginx.conf), and
+//   * a tighter cap scoped to the broadcast routes so transaction/MN-broadcast
+//     floods can't monopolise the node even within the global budget.
+// (tower's GlobalConcurrencyLimitLayer would require enabling tower's `limit`
+// feature as a new direct dependency; using axum middleware + a tokio
+// Semaphore — both already direct deps — achieves the same back-pressure with
+// no Cargo manifest change. Over-limit requests get 503 + Retry-After.)
+const GLOBAL_MAX_INFLIGHT: usize = 256;
+const BROADCAST_MAX_INFLIGHT: usize = 8;
+
+/// Concurrency-limit middleware: refuses (503) once `permits` in-flight
+/// requests are already being served by the guarded scope. The permit is held
+/// for the lifetime of the request (including the downstream handler) and
+/// released on drop when the response is produced.
+async fn concurrency_limit(
+    permits: Arc<Semaphore>,
+    request: Request,
+    next: Next,
+) -> Response {
+    match permits.try_acquire() {
+        Ok(_permit) => next.run(request).await,
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("Retry-After", "1")],
+            "server busy: concurrency limit reached",
+        )
+            .into_response(),
+    }
+}
+
+/// Security-header middleware (P2-1): stamps conservative hardening headers on
+/// every response. This is a read-only public block explorer so we keep CORS
+/// origins permissive (see CorsLayer below) but lock down framing, MIME
+/// sniffing, referrer leakage, and script/source origins via CSP.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    // Block MIME-type sniffing.
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    // Disallow embedding in frames (clickjacking).
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    // Never leak URLs/paths in the Referer header to third parties.
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    // Conservative CSP for the SPA: same-origin scripts/styles/connect, no
+    // plugins/framing, inline styles allowed (Vue scoped styles), data: images.
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
+             script-src 'self'; connect-src 'self'; font-src 'self' data:; \
+             object-src 'none'; frame-ancestors 'none'; base-uri 'self'",
+        ),
+    );
+    response
 }
 
 /// Prometheus metrics endpoint handler
@@ -84,11 +160,35 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .get_int("server.port")
         .unwrap_or(3005) as u16;
     
-    // Configure CORS to allow requests from the frontend
+    // Configure CORS (P2-1). This is a read-only PUBLIC block explorer, so we
+    // intentionally keep `allow_origin(Any)` — anyone may read the chain data
+    // from any site and there are no cookies/credentials to protect (CORS is
+    // not a server-side authorization boundary here). We DO narrow methods to
+    // the two we actually serve — GET for reads and POST for the
+    // Blockbook-compatible /sendtx broadcast — instead of the previous `Any`,
+    // and likewise scope allowed request headers to Content-Type.
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([axum::http::header::CONTENT_TYPE]);
+
+    // Per-IP rate limiting lives at the reverse proxy (frontend-legacy/nginx.conf).
+    // In-process we add semaphore-backed concurrency caps (see consts above): a
+    // global ceiling and a tighter one around the node-broadcast routes.
+    let global_limit = Arc::new(Semaphore::new(GLOBAL_MAX_INFLIGHT));
+    let broadcast_limit = Arc::new(Semaphore::new(BROADCAST_MAX_INFLIGHT));
+
+    // Node-broadcast proxies are unauthenticated and forward straight to the
+    // upstream PIVX node, so they get their own tighter concurrency bound on
+    // top of the global cap (P1-2). Split into a sub-router so the broadcast
+    // limit layers ONLY these routes; merged into the main app below.
+    let broadcast_routes = Router::new()
+        .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
+        .route("/api/v2/sendtx", post(send_tx_post_v2))  // Blockbook-compatible POST endpoint
+        .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
+        .layer(middleware::from_fn(move |req, next| {
+            concurrency_limit(broadcast_limit.clone(), req, next)
+        }));
 
     // We just want to mimic blockbook API endpoints and structure for compatibility
     let app = Router::new()
@@ -97,6 +197,15 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/endpoint", get(api_handler))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/health", get(health_check_v2))
+        // NOTE (P3-3): /api/v2/cache/stats and /metrics (below) are operational
+        // endpoints exposed on the same PUBLIC listener as the explorer API.
+        // They leak no secrets but do expose internal cache/runtime detail. The
+        // reverse proxy (frontend-legacy/nginx.conf) only forwards /api/ and
+        // /ws/, so /metrics is NOT reachable through the public vhost; restrict
+        // /api/v2/cache/stats at the proxy too if it must stay private. A future
+        // hardening step is to bind these behind a separate admin listener /
+        // config flag — left as a deliberate TODO to avoid breaking Prometheus
+        // scraping which targets this port directly.
         .route("/api/v2/cache/stats", get(cache_stats_v2))  // Cache statistics endpoint
         .route("/api/v2/search/{query}", get(search_v2))
         .route("/api/v2/mempool", get(mempool_v2))
@@ -109,13 +218,10 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/api/v2/xpub/{xpub}", get(xpub_v2))
         .route("/api/v2/utxo/{address}", get(utxo_v2))
         .route("/api/v2/block/{block_height}", get(block_v2))
-        .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
-        .route("/api/v2/sendtx", post(send_tx_post_v2))  // Blockbook-compatible POST endpoint
         .route("/api/v2/mncount", get(mn_count_v2))
         .route("/api/v2/mnlist", get(mn_list_v2))
         .route("/api/v2/moneysupply", get(money_supply_v2))
         .route("/api/v2/budgetinfo", get(budget_info_v2))
-        .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/mnrawbudgetvote/{raw_vote_params}", get(api_handler))
@@ -134,6 +240,9 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
         .route("/metrics", get(metrics_handler))  // Prometheus metrics endpoint
+        // Merge the rate-bounded broadcast proxies (their tighter concurrency
+        // cap is already layered onto this sub-router above).
+        .merge(broadcast_routes)
         ;
 
     // Serve the built frontend (SPA) for everything that isn't an API route.
@@ -156,10 +265,20 @@ async fn start_web_server(db_arc: Arc<DB>, mempool_state: Arc<MempoolState>, bro
     };
 
     let app = app
+        // Stamp hardening headers on every response (P2-1).
+        .layer(middleware::from_fn(security_headers))
         .layer(cors)
         // Hard ceiling on request duration: a wedged handler can no longer pin
         // a connection forever (returns 408 on expiry)
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        // GLOBAL in-flight cap (P1-2). Outermost limiter so we shed load before
+        // doing any per-request work; the broadcast routes carry an additional
+        // tighter cap layered on their sub-router above. 503 + Retry-After once
+        // saturated. Layers are applied outermost-last, so this is the first
+        // thing every request hits.
+        .layer(middleware::from_fn(move |req, next| {
+            concurrency_limit(global_limit.clone(), req, next)
+        }))
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))

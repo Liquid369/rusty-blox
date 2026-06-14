@@ -25,9 +25,44 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
     format!("{}...{}", &xpub[..8], &xpub[xpub.len()-4..])
 }
 
+/// Per-request work cap for compute_address_info's full-history loops (P1-3).
+/// Addresses with more than this many txs skip the O(history) recompute/sort and
+/// serve the persisted 'r'/'s' aggregates instead. Configurable via
+/// RUSTYBLOX_ADDR_MAX_TX_SCAN; defaults to 50_000 (well above any normal address).
+fn address_recompute_cap() -> usize {
+    std::env::var("RUSTYBLOX_ADDR_MAX_TX_SCAN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50_000)
+}
+
+/// Read the exact persisted per-address totals written by the enrichment phase:
+/// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
+/// Returns (total_received, total_sent); missing keys read as 0.
+async fn read_address_totals(db: &Arc<DB>, address: &str) -> (i64, i64) {
+    let r_key = format!("r{}", address).into_bytes();
+    let s_key = format!("s{}", address).into_bytes();
+    let db_clone = Arc::clone(db);
+
+    tokio::task::spawn_blocking(move || -> (i64, i64) {
+        let read_i64 = |key: &[u8]| -> i64 {
+            db_clone
+                .cf_handle("addr_index")
+                .and_then(|cf| db_clone.get_cf(&cf, key).ok().flatten())
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                .map(i64::from_le_bytes)
+                .unwrap_or(0)
+        };
+        (read_i64(&r_key), read_i64(&s_key))
+    })
+    .await
+    .unwrap_or((0, 0))
+}
+
 /// GET /api/v2/address/{address}
 /// Returns address balance, transactions, and history.
-/// 
+///
 /// **CACHED**: 30 second TTL (balances change with new blocks)
 /// Note: Complex endpoint, cache provides ~30% improvement
 pub async fn addr_v2(
@@ -150,48 +185,71 @@ async fn compute_address_info(
         }
     }
     
-    let mut total_received: i64 = 0;
-    for txid_internal in &all_txids {
-        let mut key = vec![b't'];
-        key.extend(txid_internal);
-        let key_clone = key.clone();
-        let db_clone = Arc::clone(db);
-        let address_clone = address.to_string();
-        
-        let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-            let cf_transactions = db_clone.cf_handle("transactions")?;
-            db_clone.get_cf(&cf_transactions, &key_clone).ok()?
-        })
-        .await
-        .ok()
-        .flatten();
-        
-        if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
-                // Skip orphaned and unresolved transactions
-                let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
-                    continue;
-                }
-                let tx_data_len = tx_data.len() - 8;
-                if tx_data_len > 0 {
-                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                
-                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                        for output in &tx.outputs {
-                            if output.address.contains(&address_clone) {
-                                total_received += output.value;
+    // P1-3 interim DoS cap: compute_address_info does full-history loops (the
+    // total_received recompute below and the per-txid height-sort further down).
+    // On a huge address (e.g. 325k txs) those scans cost ~11-21s each and a
+    // handful of concurrent requests saturate the blocking pool to HTTP 408.
+    // The full fix is persisted per-address aggregates (fast-follow); for now we
+    // bound worst-case work per request: above address_recompute_cap() we DO NOT
+    // do the unbounded recompute/sort. The balance loop above is already bounded by the
+    // unspent UTXO count and matches the reference explorer, so it always runs.
+    //
+    // The enrichment phase already persists exact per-address totals under
+    // 'r'+address (totalReceived) and 's'+address (totalSent) as i64 LE, so the
+    // capped path stays EXACT rather than approximate — it just trades the
+    // O(history) scan for two point lookups.
+    let recompute_cap = address_recompute_cap();
+    let over_cap = all_txids.len() > recompute_cap;
+
+    let (total_received, total_sent) = if over_cap {
+        read_address_totals(db, address).await
+    } else {
+        let mut total_received: i64 = 0;
+        for txid_internal in &all_txids {
+            let mut key = vec![b't'];
+            key.extend(txid_internal);
+            let key_clone = key.clone();
+            let db_clone = Arc::clone(db);
+            let address_clone = address.to_string();
+
+            let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+                let cf_transactions = db_clone.cf_handle("transactions")?;
+                db_clone.get_cf(&cf_transactions, &key_clone).ok()?
+            })
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(tx_data) = tx_data {
+                if tx_data.len() >= 8 {
+                    // Filter hardening: only skip genuinely orphaned (-1) txs. A
+                    // transient HEIGHT_UNRESOLVED read must not drop a tx that the
+                    // 't' index attributes to this address — that would diverge
+                    // total_received from the (no-filter) balance loop. On the clean
+                    // DB nothing reads orphan/unresolved, so this is unchanged.
+                    let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                    if block_height == HEIGHT_ORPHAN {
+                        continue;
+                    }
+                    let tx_data_len = tx_data.len() - 8;
+                    if tx_data_len > 0 {
+                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
+
+                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                            for output in &tx.outputs {
+                                if output.address.contains(&address_clone) {
+                                    total_received += output.value;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
-    
-    let total_sent = total_received - balance;
+        (total_received, total_received - balance)
+    };
     
     let unique_txids: Vec<String> = all_txids.iter()
         .map(|txid_internal| {
@@ -200,35 +258,42 @@ async fn compute_address_info(
             hex::encode(&txid_display)
         })
         .collect();
-    
-    // Sort transactions by block height (descending = newest first)
-    let mut txid_heights: Vec<(String, i32)> = Vec::new();
-    for txid in &unique_txids {
-        if let Ok(txid_bytes) = hex::decode(txid) {
-            // Reverse to internal format for database lookup
-            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-            let mut key = vec![b't'];
-            key.extend(&txid_internal);
-            let db_clone = db.clone();
-            let height = tokio::task::spawn_blocking(move || -> i32 {
-                if let Some(cf) = db_clone.cf_handle("transactions") {
-                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
-                        if tx_data.len() >= 8 {
-                            return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+
+    // Sort transactions by block height (descending = newest first).
+    // P1-3 cap: the per-txid height fetch is the second full-history scan, so for
+    // over-cap addresses we skip it and serve the stored 't'-index order (txid
+    // sorted, from enrichment) — bounded work instead of O(history) DB reads.
+    let all_txids: Vec<String> = if over_cap {
+        unique_txids
+    } else {
+        let mut txid_heights: Vec<(String, i32)> = Vec::new();
+        for txid in &unique_txids {
+            if let Ok(txid_bytes) = hex::decode(txid) {
+                // Reverse to internal format for database lookup
+                let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+                let mut key = vec![b't'];
+                key.extend(&txid_internal);
+                let db_clone = db.clone();
+                let height = tokio::task::spawn_blocking(move || -> i32 {
+                    if let Some(cf) = db_clone.cf_handle("transactions") {
+                        if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
+                            if tx_data.len() >= 8 {
+                                return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                            }
                         }
                     }
-                }
-                0
-            })
-            .await
-            .unwrap_or(0);
-            txid_heights.push((txid.clone(), height));
+                    0
+                })
+                .await
+                .unwrap_or(0);
+                txid_heights.push((txid.clone(), height));
+            }
         }
-    }
-    
-    // Sort by height descending (newest first = highest block)
-    txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
-    let all_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
+
+        // Sort by height descending (newest first = highest block)
+        txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+        txid_heights.into_iter().map(|(txid, _)| txid).collect()
+    };
     
     // === PAGINATION LOGIC ===
     // Validate and clamp parameters
@@ -949,13 +1014,19 @@ async fn compute_utxos(
     let mut utxo_list = Vec::new();
     
     for (txid_hash, vout) in &spendable_utxos {
-        // txid_hash is already in display order (per tx_keys.rs format), no reversal needed
-        let txid_display = hex::encode(txid_hash);
-        
-        // Look up transaction to get value, confirmations, and other details
+        // P2-9: emit canonical display-order txids (reversed), matching the
+        // /address tx-list and /tx endpoints. The 'a'/'t' indexes and the tx CF
+        // key store txids in internal order; the display txid is the reverse.
+        let mut txid_display_bytes = txid_hash.clone();
+        txid_display_bytes.reverse();
+        let txid_display = hex::encode(&txid_display_bytes);
+
+        // Look up transaction to get value, confirmations, and other details.
+        // The tx CF key uses internal (non-reversed) txid bytes, i.e. txid_hash
+        // as stored in the 'a' unspent set.
         let mut tx_key = vec![b't'];
         tx_key.extend_from_slice(txid_hash);
-        
+
         let db_clone = Arc::clone(db);
         let tx_key_clone = tx_key.clone();
         let tx_data_opt = tokio::task::spawn_blocking(move || {
@@ -965,13 +1036,19 @@ async fn compute_utxos(
                 None
             }
         }).await.ok().flatten();
-        
+
         if let Some(tx_data) = tx_data_opt {
             if tx_data.len() >= 8 {
                 let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                
-                // Skip orphaned and unresolved transactions
-                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
+
+                // Filter hardening: a UTXO present in the 'a' unspent set is
+                // canonical by construction (the balance loop trusts it with no
+                // height filter). Only drop entries with a definitive orphan
+                // determination (-1); a transient HEIGHT_UNRESOLVED read must NOT
+                // silently drop a canonical UTXO (that under-reported /utxo 98%
+                // on a degraded DB). On the clean DB nothing is orphan/unresolved,
+                // so the set is unchanged.
+                if block_height == HEIGHT_ORPHAN {
                     continue;
                 }
                 

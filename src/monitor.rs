@@ -98,42 +98,36 @@ struct FetchedBlock {
     json_result: Value,
 }
 
-/// Get current chain tip from RPC node
-fn get_rpc_chain_tip(
-    rpc_client: &Arc<PivxRpcClient>,
-) -> Result<ChainTip, Box<dyn std::error::Error>> {
+/// Get current chain tip from RPC node.
+///
+/// Fully async via the shared `rpc_call_json` helper — no more detached
+/// `std::thread::spawn` + `recv_timeout` (which leaked an OS thread on every
+/// node timeout). The helper carries its own hard HTTP timeout.
+async fn get_rpc_chain_tip() -> Result<ChainTip, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::api::helpers::rpc_call_json;
+
     let timer = metrics::Timer::new();
-    
-    // Get block count (height) - must use separate thread
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockcount();
-        let _ = tx.send(result);
-    });
-    let height_i64 = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
+    let height_i64 = rpc_call_json("getblockcount", serde_json::json!([]))
+        .await?
+        .as_i64()
+        .ok_or("getblockcount returned non-integer")?;
     let height = height_i64 as i32;
-    
+
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockcount"])
         .observe(timer.elapsed_secs());
-    
-    // Get block hash at this height - must use separate thread
+
     let timer2 = metrics::Timer::new();
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockhash(height as i64);
-        let _ = tx.send(result);
-    });
-    let hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
-    
+    let hash = rpc_call_json("getblockhash", serde_json::json!([height as i64]))
+        .await?
+        .as_str()
+        .ok_or("getblockhash returned non-string")?
+        .to_string();
+
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockhash"])
         .observe(timer2.elapsed_secs());
-    
+
     Ok(ChainTip {
         height,
         hash,
@@ -189,40 +183,29 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
 async fn fetch_block_data(
     height: i32,
 ) -> Result<FetchedBlock, Box<dyn std::error::Error>> {
+    use crate::api::helpers::rpc_call_json;
+
     let config = get_global_config();
     let url = config.get_string("rpc.host")?;
     let user = config.get_string("rpc.user")?;
     let pass = config.get_string("rpc.pass")?;
-    
+
     let client = reqwest::Client::new();
-    
-    // Get block hash at this height - must use separate thread
-    let (tx, rx) = std::sync::mpsc::channel();
-    let rpc_host = url.clone();
-    let rpc_user = user.clone();
-    let rpc_pass = pass.clone();
-    let height_i64 = height as i64;
-    
-    std::thread::spawn(move || {
-        let timer = metrics::Timer::new();
-        let client = PivxRpcClient::new(
-            rpc_host,
-            Some(rpc_user),
-            Some(rpc_pass),
-            3,
-            10,
-            30000,
-        );
-        let result = client.getblockhash(height_i64);
-        metrics::RPC_CALL_DURATION
-            .with_label_values(&["getblockhash"])
-            .observe(timer.elapsed_secs());
-        let _ = tx.send(result);
-    });
-    
-    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout getting block hash")??;
-    
+
+    // Get block hash at this height. Async helper (carries its own timeout)
+    // instead of a detached thread::spawn + recv_timeout that leaked a thread
+    // on every node timeout.
+    let timer = metrics::Timer::new();
+    let block_hash = rpc_call_json("getblockhash", serde_json::json!([height as i64]))
+        .await
+        .map_err(|e| format!("RPC error getting block hash: {}", e))?
+        .as_str()
+        .ok_or("getblockhash returned non-string")?
+        .to_string();
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblockhash"])
+        .observe(timer.elapsed_secs());
+
     // Fetch block with full transaction data (verbosity=2)
     let timer = metrics::Timer::new();
     let response = client
@@ -310,7 +293,9 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
 ///   is done via HashSet lookup instead of on-demand RPC fetching. This ensures
 ///   100% accurate spend detection matching the initial sync two-pass algorithm.
 async fn index_block_from_rpc(
-    rpc_client: &Arc<PivxRpcClient>,
+    // Block hashes now come from the async `rpc_call_json` helper (no thread
+    // leak); the blocking client is no longer needed here.
+    _rpc_client: &Arc<PivxRpcClient>,
     height: i32,
     db: &Arc<DB>,
     broadcaster: &Option<Arc<EventBroadcaster>>,
@@ -339,16 +324,19 @@ async fn index_block_from_rpc(
         Some(enrich_height) => height > enrich_height,  // Only for NEW blocks
     };
     
-    // Get block hash at this height - must use separate thread
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockhash(height as i64);
-        let _ = tx.send(result);
-    });
-    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
-    
+    // Get block hash at this height. Async helper (carries its own timeout)
+    // instead of a detached thread::spawn + recv_timeout that leaked a thread
+    // on every node timeout.
+    let block_hash = crate::api::helpers::rpc_call_json(
+        "getblockhash",
+        serde_json::json!([height as i64]),
+    )
+    .await
+    .map_err(|e| format!("RPC error getting block hash: {}", e))?
+    .as_str()
+    .ok_or("getblockhash returned non-string")?
+    .to_string();
+
     // CRITICAL FIX: Atomic check-and-reserve to prevent race conditions
     // Step 1: Check if already indexed OR being processed
     let mut height_hash_key = vec![b'H'];
@@ -1306,46 +1294,57 @@ pub async fn run_block_monitor(
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
     
-    // Create RPC client in completely separate OS thread
-    // PivxRpcClient uses reqwest::blocking which creates its own runtime
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Construct the blocking RPC client + test connection on tokio's managed
+    // blocking pool. PivxRpcClient uses reqwest::blocking (own runtime), so it
+    // must not run on a tokio worker thread. spawn_blocking is bounded and
+    // awaited (joined) — unlike the previous detached std::thread::spawn +
+    // recv_timeout, which leaked the OS thread whenever the node was slow.
     let rpc_host_clone = rpc_host.clone();
-    
-    std::thread::spawn(move || {
+    let connect = tokio::task::spawn_blocking(move || {
         let client = PivxRpcClient::new(
-            rpc_host_clone.clone(),
+            rpc_host_clone,
             Some(rpc_user),
             Some(rpc_pass),
             3,
             10,
             30000,
         );
-        
+
         // Test connection
-        let result = match client.getblockcount() {
+        match client.getblockcount() {
             Ok(height) => Ok((Arc::new(client), height)),
             Err(e) => Err(e),
-        };
-        let _ = tx.send(result);
+        }
     });
-    
-    let rpc_client = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(Ok((client, height))) => {
+
+    let rpc_client = match tokio::time::timeout(std::time::Duration::from_secs(10), connect).await {
+        Ok(Ok(Ok((client, height)))) => {
             info!(rpc_height = height, "RPC connection established");
             metrics::set_rpc_connected(true);
-            
+
             // Connected successfully - store initial network height
             if let Err(e) = set_network_height(&db, height as i32) {
                 error!(error = %e, "Failed to set initial network height");
             }
             client
         }
-        Ok(Err(e)) => {
+        Ok(Ok(Err(e))) => {
             error!(error = %e, "RPC connection failed");
             metrics::set_rpc_connected(false);
             eprintln!("RPC connection failed: {}", e);
             eprintln!("Tip: Make sure PIVX node is running with RPC enabled");
-            
+
+            // Just poll database for changes
+            loop {
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+            }
+        }
+        Ok(Err(e)) => {
+            // spawn_blocking task panicked/was cancelled.
+            error!(error = %e, "RPC connection task failed");
+            metrics::set_rpc_connected(false);
+            eprintln!("RPC connection task failed: {}", e);
+
             // Just poll database for changes
             loop {
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
@@ -1355,7 +1354,7 @@ pub async fn run_block_monitor(
             error!("RPC connection timed out");
             metrics::set_rpc_connected(false);
             eprintln!("RPC connection timed out");
-            
+
             // Just poll database for changes
             loop {
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
@@ -1392,7 +1391,7 @@ pub async fn run_block_monitor(
         }
 
         // Get current tips
-        let rpc_tip = match get_rpc_chain_tip(&rpc_client) {
+        let rpc_tip = match get_rpc_chain_tip().await {
             Ok(tip) => {
                 info!(
                     rpc_height = tip.height,

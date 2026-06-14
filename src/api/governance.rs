@@ -67,7 +67,20 @@ pub async fn budget_votes_v2(
 
 async fn compute_budget_votes(proposal_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     // params serialized via serde_json — no string interpolation (JSON-injection safe)
-    rpc_call_json("getbudgetvotes", serde_json::json!([proposal_name])).await
+    match rpc_call_json("getbudgetvotes", serde_json::json!([proposal_name])).await {
+        Ok(votes) => Ok(votes),
+        Err(e) => {
+            // P2-8: an unknown/empty proposal makes the node return an RPC error
+            // ("Unknown proposal name"). That is a 200-with-empty-array case, not a
+            // 500. Genuine RPC/transport failures still propagate as errors.
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("unknown proposal") || msg.contains("invalid proposal") {
+                Ok(serde_json::json!([]))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// GET /api/v2/budgetprojection

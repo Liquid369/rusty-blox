@@ -12,8 +12,73 @@ use std::time::Duration;
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::blocks::parse_block_header_sync;
-use super::types::{BlockHash, BlockParams, BlockbookError};
+use super::types::{BlockHash, BlockbookError};
 use super::helpers::{not_found, internal_error};
+
+/// nBits (compact target) -> difficulty.
+///
+/// difficulty = difficulty-1 target / current target. Reproduced locally to
+/// avoid cross-module coupling; mirrors `block_detail::bits_to_difficulty`.
+/// The old `256^26 / target` form omitted the 0xffff mantissa of the
+/// difficulty-1 target, leaving results 65535x too small.
+fn bits_to_difficulty(bits: u32) -> f64 {
+    let exponent = (bits >> 24) as i32;
+    let mantissa = (bits & 0x00ffffff) as f64;
+    if mantissa == 0.0 {
+        return 0.0;
+    }
+    (65535.0 * 256_f64.powi(0x1d - 3)) / (mantissa * 256_f64.powi(exponent - 3))
+}
+
+/// Resolve a block height from either a decimal height or a 64-char hex block
+/// hash (display byte order). Hash lookup uses the chain_metadata 'h' + hash
+/// (internal byte order) -> height mapping. Returns None if unresolvable.
+fn resolve_block_height(db: &Arc<DB>, param: &str) -> Option<i32> {
+    // All-digit param: parse as height directly.
+    if let Ok(height) = param.parse::<i32>() {
+        return Some(height);
+    }
+
+    // 64-char hex: treat as a display-order block hash and resolve to height.
+    if param.len() == 64 {
+        let hash_bytes = hex::decode(param).ok()?;
+        if hash_bytes.len() != 32 {
+            return None;
+        }
+        let cf_metadata = db.cf_handle("chain_metadata")?;
+
+        // 'h' entries are keyed by internal (reversed) byte order.
+        let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+        let mut key = vec![b'h'];
+        key.extend_from_slice(&internal_hash);
+        if let Ok(Some(height_bytes)) = db.get_cf(&cf_metadata, &key) {
+            if height_bytes.len() == 4 {
+                return Some(i32::from_le_bytes([
+                    height_bytes[0],
+                    height_bytes[1],
+                    height_bytes[2],
+                    height_bytes[3],
+                ]));
+            }
+        }
+
+        // Some writers key 'h' entries by display byte order — try that too.
+        let mut key_display = vec![b'h'];
+        key_display.extend_from_slice(&hash_bytes);
+        if let Ok(Some(height_bytes)) = db.get_cf(&cf_metadata, &key_display) {
+            if height_bytes.len() == 4 {
+                return Some(i32::from_le_bytes([
+                    height_bytes[0],
+                    height_bytes[1],
+                    height_bytes[2],
+                    height_bytes[3],
+                ]));
+            }
+        }
+    }
+
+    None
+}
 
 /// GET /api/v2/block-index/{hashOrHeight}
 /// Returns block hash for a given height, or validates a block hash exists.
@@ -107,18 +172,24 @@ pub async fn block_index_v2(
     }
 }
 
-/// GET /api/v2/block/{height}
+/// GET /api/v2/block/{heightOrHash}
 /// Returns full block details with all transactions.
-/// 
+///
+/// Accepts EITHER a decimal block height OR a 64-char hex block hash
+/// (display byte order); the hash is resolved to a height via chain_metadata.
+///
 /// **CACHED**: 60-300s TTL (recent blocks 60s, older blocks 300s)
 pub async fn block_v2(
-    Path(params): Path<BlockParams>,
+    Path(param): Path<String>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<crate::types::Block>, StatusCode> {
-    let cache_key = format!("block:height:{}", params.block_height);
+    let height = match resolve_block_height(&db, &param) {
+        Some(h) => h,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let cache_key = format!("block:height:{}", height);
     let db_clone = Arc::clone(&db);
-    let height = params.block_height;
     
     // Determine TTL based on block age
     let chain_state = get_chain_state(&db).ok();
@@ -188,34 +259,25 @@ async fn compute_block_details(
             if let Ok((key, value)) = item {
                 if key.len() >= 5 && &key[0..5] == block_tx_prefix.as_slice() {
                     if let Ok(txid_str) = String::from_utf8(value.to_vec()) {
-                        tx_ids.push(txid_str);
+                        // Stored txids are in internal (little-endian) byte order;
+                        // emit canonical display-order txids (reversed) so API
+                        // consumers match the node and /block-detail.
+                        let display_txid = match hex::decode(&txid_str) {
+                            Ok(bytes) => {
+                                hex::encode(bytes.iter().rev().cloned().collect::<Vec<u8>>())
+                            }
+                            Err(_) => txid_str,
+                        };
+                        tx_ids.push(display_txid);
                     }
                 } else {
                     break;
                 }
             }
         }
-        
-        // Calculate difficulty from nBits
-        let difficulty = if header.n_bits != 0 {
-            let compact = header.n_bits;
-            let size = (compact >> 24) as u32;
-            let word = compact & 0x00ffffff;
-            
-            let target = if size <= 3 {
-                (word >> (8 * (3 - size))) as f64
-            } else {
-                (word as f64) * (256.0_f64).powi((size - 3) as i32)
-            };
-            
-            if target > 0.0 {
-                (256.0_f64).powi(26) / target
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
+
+        // Calculate difficulty from nBits (difficulty-1 target / current target).
+        let difficulty = bits_to_difficulty(header.n_bits);
         
         // Get previous block hash (if not genesis)
         let previousblockhash = if header.hash_prev_block != [0u8; 32] {

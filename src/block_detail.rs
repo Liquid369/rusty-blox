@@ -469,10 +469,14 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
             tx.fees = 0.0;
         }
     } else {
-        // Normal transaction: calculate fees
+        // Normal transaction fee = transparent_in + valueBalance - transparent_out.
+        // Sapling value moves via valueBalance (PIV; 0 for transparent txs);
+        // ignoring it booked the entire shielded amount as fee. Clamp to a sane
+        // range to reject any residual mis-join.
         if tx.value_in > 0.0 {
-            let calculated_fee = tx.value_in - tx.value_out;
-            tx.fees = if calculated_fee < 0.0 { 0.0 } else { calculated_fee };
+            let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
+            let calculated_fee = tx.value_in + value_balance - tx.value_out;
+            tx.fees = if calculated_fee < 0.0 || calculated_fee > 1000.0 { 0.0 } else { calculated_fee };
         } else {
             tx.fees = 0.0;
         }

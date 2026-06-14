@@ -604,11 +604,18 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             match crate::tx_type::detect_transaction_type(&tx) {
                 crate::tx_type::TransactionType::Normal => {
                     agg.normal_tx_bytes += (value.len() as u64).saturating_sub(8);
-                    // Only credit a fee when EVERY input resolved — a partial
-                    // input sum would fabricate a negative or bogus fee.
+                    // Fee = transparent_in + valueBalance - transparent_out.
+                    // Sapling txs move value via valueBalance (negative =
+                    // transparent->shield, positive = shield->transparent);
+                    // ignoring it booked the entire shielded amount as "fee"
+                    // (a t->z tx reported ~1998 PIV vs a real ~0.5). Credit only
+                    // when every transparent input resolved, and clamp to a sane
+                    // ceiling to reject any residual mis-join.
                     if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
-                        let fee = input_sum.saturating_sub(out_sum);
-                        if fee > 0 {
+                        let value_balance =
+                            tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+                        let fee = input_sum + value_balance - out_sum;
+                        if fee > 0 && fee < 1_000 * crate::emission::COIN {
                             agg.fees_total = agg.fees_total.saturating_add(fee);
                         }
                     }
@@ -625,7 +632,14 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                         if minted > 0 {
                             let expected = crate::emission::era_block_reward(height);
                             let excess = minted.saturating_sub(expected);
-                            if excess > crate::emission::COIN {
+                            // Budget payouts are large (hundreds–thousands of
+                            // PIV). A coinstake whose excess is only a few PIV is
+                            // collecting transaction fees, not paying a proposal —
+                            // the old >1 PIV threshold swept ~19 fee-bearing
+                            // coinstakes into the treasury history. Require
+                            // >=100 PIV; fee excess then correctly flows into the
+                            // staker's rewards (the else branch).
+                            if excess > 100 * crate::emission::COIN {
                                 // Budget payout: record it as treasury and
                                 // keep ONLY the era emission in rewards_total
                                 // so the staking APY series isn't polluted by
@@ -1129,7 +1143,12 @@ async fn persist_tx_daily_series(
                     let total: i64 = tx.outputs.iter().map(|o| o.value).sum();
                     let excess =
                         total.saturating_sub(crate::emission::era_block_reward(height));
-                    if excess > crate::emission::COIN {
+                    // Require >=10 PIV: excludes sub-PIV tx-fee noise (which the
+                    // old >1 PIV bar let through) while keeping every legit
+                    // PoW-era coinbase budget (smallest node-verified is 100 PIV
+                    // at h=129,600). Budgets here are 100 PIV..1M PIV; fees are
+                    // well under 10 PIV.
+                    if excess > 10 * crate::emission::COIN {
                         treasury.push(TreasuryPayout {
                             height,
                             date: agg_date.clone(),

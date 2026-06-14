@@ -37,7 +37,15 @@ pub enum SearchResult {
 fn detect_query_type(query: &str) -> QueryType {
     // Remove whitespace
     let q = query.trim();
-    
+
+    // Empty/whitespace-only query is not a valid search of any kind.
+    // (Guards against `"".chars().all(..)` classifying the empty string as a
+    // BlockHeight via vacuous truth, which then fails `"".parse::<i32>()` and
+    // surfaced as an HTTP 500 — P3-4.)
+    if q.is_empty() {
+        return QueryType::Unknown;
+    }
+
     // Numeric = block height
     if q.chars().all(|c| c.is_numeric()) {
         return QueryType::BlockHeight;
@@ -53,8 +61,12 @@ fn detect_query_type(query: &str) -> QueryType {
         return QueryType::XPub;
     }
     
-    // Starts with D = PIVX address
-    if q.starts_with('D') && q.len() >= 26 && q.len() <= 35 {
+    // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
+    // 6/7 (P2SH), E (exchange/EXM). All base58, ~26-35 chars. A false positive
+    // just falls through to NotFound in search_address, so this is safe to be
+    // inclusive — and it stops S/6/E addresses being unsearchable via the API.
+    if matches!(q.chars().next(), Some('D') | Some('S') | Some('6') | Some('7') | Some('E'))
+        && q.len() >= 26 && q.len() <= 35 {
         return QueryType::Address;
     }
     
@@ -71,8 +83,18 @@ enum QueryType {
 
 /// Universal search
 pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    // Trim and validate up front: an empty/whitespace-only query is not found
+    // rather than a 500. Downstream lookups receive the trimmed query so a query
+    // like " 123" parses correctly instead of erroring (P3-4).
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(SearchResult::NotFound {
+            query: String::new(),
+        });
+    }
+
     let query_type = detect_query_type(query);
-    
+
     match query_type {
         QueryType::BlockHeight => search_block_by_height(db, query),
         QueryType::HashOrTxid => search_hash_or_txid(db, query),
