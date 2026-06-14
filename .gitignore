@@ -14,3 +14,8 @@ check_persisted_metrics.rs
 
 # Local node RPC credentials — ship config.toml.example instead
 config.toml
+
+# Editor/source backups (never track — may contain secrets)
+*.backup
+*.old
+*.save

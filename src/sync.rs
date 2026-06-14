@@ -307,9 +307,10 @@ async fn run_initial_sync_leveldb(
     metrics::set_indexed_height("block_index", leveldb_height as i64);
     
     // Verify against RPC to see if daemon has synced further
+    // Fail closed: no credential baked into the binary (see network.rs).
     let rpc_host = config.get_string("rpc.host").unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config.get_string("rpc.user").unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config.get_string("rpc.pass").unwrap_or_else(|_| "explorer_test_pass".to_string());
+    let rpc_user = config.get_string("rpc.user").unwrap_or_default();
+    let rpc_pass = config.get_string("rpc.pass").unwrap_or_default();
     
     // Verify against RPC - use separate OS thread to avoid runtime nesting
     let (tx, rx) = std::sync::mpsc::channel();

@@ -169,13 +169,12 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     let rpc_host = config
         .get_string("rpc.host")
         .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config
-        .get_string("rpc.user")
-        .unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config
-        .get_string("rpc.pass")
-        .unwrap_or_else(|_| "explorer_test_pass".to_string());
-    
+    // Fail closed: never embed a credential in the binary. Missing config
+    // yields empty creds → the node rejects auth and this errors, rather than
+    // silently using a known password.
+    let rpc_user = config.get_string("rpc.user").unwrap_or_default();
+    let rpc_pass = config.get_string("rpc.pass").unwrap_or_default();
+
     let host_port = rpc_host
         .replace("http://", "")
         .replace("https://", "");
