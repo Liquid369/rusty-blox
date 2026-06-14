@@ -206,7 +206,10 @@ pub async fn process_files_parallel(
                 
                 debug!(file_name = file_name, "Processing blk file");
                 
-                // Acquire permit - if this fails, semaphore is closed (shutdown)
+                // Acquire permit - if this fails, semaphore is closed (shutdown).
+                // The permit is held for the entire duration of the blocking task
+                // below (it is dropped when this scope ends), so the Semaphore(8)
+                // still bounds concurrency to `max_concurrent` files at a time.
                 let _permit = match sem.acquire().await {
                     Ok(permit) => permit,
                     Err(e) => {
@@ -214,11 +217,50 @@ pub async fn process_files_parallel(
                         return;
                     }
                 };
-                
-                // Process file (this is async but not Send, so we run it directly)
-                if let Err(e) = process_blk_file(st, file_path.clone(), db.clone(), bulk).await {
-                    warn!(file = %file_path.display(), error = %e, "Failed to process blk file");
-                    let _ = save_file_as_incomplete(&db, &file_path).await;
+
+                // LEVER 1: move the CPU-heavy per-file work (Quark/SHA256d block
+                // hashing, per-tx txid SHA256d, fixed-width chainwork add) OFF the
+                // tokio async worker threads and onto the blocking pool.
+                //
+                // `process_blk_file` is an async, `!Send` future (it holds the
+                // `AsyncCursor` borrow across awaits), so it cannot be `tokio::spawn`-ed
+                // onto the multi-threaded runtime. Instead we hand it to
+                // `spawn_blocking` and drive it to completion on a dedicated
+                // single-threaded (`current_thread`) tokio runtime built *inside*
+                // the blocking thread. A current-thread runtime accepts `!Send`
+                // futures, so the parse logic is reused byte-for-byte and unchanged;
+                // only the CPU now runs on a blocking thread instead of starving the
+                // async I/O executor. Everything moved into the closure is
+                // `Send + 'static`: the `Arc<DB>`, the cloned `AppState` (two Arcs),
+                // the owned `PathBuf`, and the `bool` durability flag. The RocksDB
+                // write batching inside `process_blk_file` is untouched.
+                let file_for_task = file_path.clone();
+                let db_for_task = db.clone();
+                let state_for_task = st;
+                let join = tokio::task::spawn_blocking(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build current-thread runtime for blk parsing");
+                    rt.block_on(process_blk_file(
+                        state_for_task,
+                        file_for_task,
+                        db_for_task,
+                        bulk,
+                    ))
+                })
+                .await;
+
+                match join {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        warn!(file = %file_path.display(), error = %e, "Failed to process blk file");
+                        let _ = save_file_as_incomplete(&db, &file_path).await;
+                    }
+                    Err(join_err) => {
+                        warn!(file = %file_path.display(), error = %join_err, "blk parsing task panicked");
+                        let _ = save_file_as_incomplete(&db, &file_path).await;
+                    }
                 }
                 
                 // Update progress
@@ -306,42 +348,65 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         .ok_or("chain_metadata CF not found")?;
     
     info!("Building hash map (loading all blocks into memory)");
-    
-    // Build hash map: prev_hash -> Vec<(block_hash, header_bytes)>
-    // Multiple children = fork, we'll need to pick the right one
-    let mut children_map: HashMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+
+    // [A] Single scan of the blocks CF building only the fields the chain-walk
+    // and chainwork BFS actually read — NO full-header copies are retained.
+    //
+    // Two maps replace the previous three full-chain hash maps
+    // (children_map-with-headers, blocks_map, and calculate_all_chainwork's
+    // internal parent_map/bits_map):
+    //
+    //   children_map: prev_hash -> Vec<block_hash>
+    //     Built over blocks with header len >= 68 (identical predicate to before).
+    //     The previous code stored (block_hash, header_bytes) here but only ever
+    //     read block_hash (tip discovery, line below discards the header with `_`),
+    //     so dropping the header bytes is output-identical. `total_blocks` is the
+    //     same count as before.
+    //
+    //   block_meta: block_hash -> (prev_hash[32], n_bits)
+    //     Built over blocks with header len >= 80 — exactly the set
+    //     calculate_all_chainwork used to keep (its parent_map/bits_map applied a
+    //     `< 80` skip). prev_hash (bytes 4..36) and n_bits (bytes 72..76) are the
+    //     ONLY header fields either the chainwork BFS or the genesis chain-walk
+    //     consult, so this is byte-for-byte equivalent to passing full headers.
+    //
+    // Real PIVX block headers are always >= 80 bytes, so the previous
+    // blocks_map (which the walk indexed with a `len >= 36` guard) and this
+    // >= 80 block_meta cover the same blocks. A block referenced as a parent but
+    // shorter than 80 bytes is absent from block_meta and the walk breaks with a
+    // chain-gap error — exactly as the old code's "header too short" / "not found
+    // in blocks_map" branches did, and in both cases NO height metadata is
+    // written (the function returns Err before the assignment loop), so the
+    // stored output is unchanged.
+    let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+    let mut block_meta: HashMap<Vec<u8>, (Vec<u8>, u32)> = HashMap::new();
     let iter = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
     let mut total_blocks = 0;
-    
+
     for item in iter {
         if let Ok((hash, header_bytes)) = item {
             if header_bytes.len() >= 68 {
                 let prev_hash = header_bytes[4..36].to_vec();
-                let hash_vec = hash.to_vec();
-                let header_vec = header_bytes.to_vec();
-                
                 children_map.entry(prev_hash)
                     .or_default()
-                    .push((hash_vec, header_vec));
-                
+                    .push(hash.to_vec());
+
                 total_blocks += 1;
+            }
+            if header_bytes.len() >= 80 {
+                let prev_hash = header_bytes[4..36].to_vec();
+                let n_bits = u32::from_le_bytes([
+                    header_bytes[72], header_bytes[73], header_bytes[74], header_bytes[75],
+                ]);
+                block_meta.insert(hash.to_vec(), (prev_hash, n_bits));
             }
         }
     }
-    
+
     info!(total_blocks = total_blocks, "Loaded blocks into memory");
-    
-    // Build blocks_map for chainwork calculation (hash -> header_bytes)
+
     info!("Calculating accumulated chainwork (Bitcoin consensus)");
-    let mut blocks_map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
-    let iter2 = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
-    for item in iter2 {
-        if let Ok((hash, header_bytes)) = item {
-            blocks_map.insert(hash.to_vec(), header_bytes.to_vec());
-        }
-    }
-    
-    let chainwork_map = calculate_all_chainwork(db, &blocks_map)?;
+    let chainwork_map = calculate_all_chainwork(db, &block_meta)?;
     info!(blocks = chainwork_map.len(), "Chainwork calculated");
     
     info!("Finding best chain tip");
@@ -352,7 +417,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     
     for (parent_hash, children) in &children_map {
         all_blocks.insert(parent_hash.clone());
-        for (child_hash, _) in children {
+        for child_hash in children {
             all_blocks.insert(child_hash.clone());
             has_children.insert(parent_hash.clone());
         }
@@ -505,32 +570,33 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     loop {
         chain_path.push(current_hash.clone());
         steps += 1;
-        
-        // Get the header to find prev_hash
-        if let Some(header) = blocks_map.get(&current_hash) {
-            if header.len() >= 36 {
-                let prev_hash = header[4..36].to_vec();
-                
-                // Check if we reached genesis
-                if prev_hash == genesis_parent {
-                    info!("Reached genesis block");
-                    chain_path.push(prev_hash);
-                    break;
-                }
-                
-                // Move to parent block
-                current_hash = prev_hash;
-            } else {
-                warn!(step = steps, "Block header too short");
+
+        // Look up this block's prev_hash from the compact block_meta map.
+        // block_meta stores prev_hash (header bytes 4..36) directly, so this is
+        // identical to the previous `header[4..36]` read. block_meta covers every
+        // block with a >= 80-byte header (all real PIVX blocks); a parent that is
+        // absent here is the same condition the old code hit as "header too
+        // short" / "not found in blocks_map" — both break and yield a chain-gap
+        // error with NO metadata written.
+        if let Some((prev_hash, _n_bits)) = block_meta.get(&current_hash) {
+            let prev_hash = prev_hash.clone();
+
+            // Check if we reached genesis
+            if prev_hash == genesis_parent {
+                info!("Reached genesis block");
+                chain_path.push(prev_hash);
                 break;
             }
+
+            // Move to parent block
+            current_hash = prev_hash;
         } else {
             let display_hash: Vec<u8> = current_hash.iter().rev().cloned().collect();
             warn!(
                 step = steps,
                 missing_hash = %hex::encode(&display_hash),
                 chain_breaks_at = steps,
-                "Block not found in blocks_map"
+                "Block not found in block_meta"
             );
             break;
         }

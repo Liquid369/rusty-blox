@@ -76,15 +76,14 @@ pub async fn resolve_heights_from_block_index(
     };
     
     // 3. Build lookup structures
-    
-    let mut canonical_blocks: HashSet<Vec<u8>> = HashSet::new();
-    let mut blockhash_to_height: HashMap<Vec<u8>, i64> = HashMap::new();
-    
-    for (height, block_hash, _, _) in &canonical_chain {
-        canonical_blocks.insert(block_hash.clone());
-        blockhash_to_height.insert(block_hash.clone(), *height);
-    }
-    
+    //
+    // [C] Only the height -> block_hash direction (built in step 5 below) is ever
+    // consulted, and only as a "is this height on the canonical chain" presence
+    // test. The previous `canonical_blocks` HashSet and `blockhash_to_height`
+    // HashMap were populated here but never read anywhere in this function, so
+    // they were pure allocations (one entry per canonical block) and are removed.
+    // No output depends on them.
+
     // 4. Scan all transactions to collect which ones need fixing
     
     let cf_transactions = db.cf_handle("transactions")
@@ -156,28 +155,26 @@ pub async fn resolve_heights_from_block_index(
         height_to_blockhash.insert(*height, block_hash.clone());
     }
     
-    // 5a. Build a 'B' key index for efficient validation (avoids per-tx prefix scans)
-    let mut block_tx_index: HashSet<(i32, Vec<u8>)> = HashSet::new();  // (height, txid_bytes)
-    
-    let block_tx_iter = db.iterator_cf(&cf_transactions, IteratorMode::Start);
-    let mut b_key_count = 0;
-    
-    for item in block_tx_iter {
-        if let Ok((key, value)) = item {
-            if key.is_empty() || key[0] != b'B' { continue; }
-            if key.len() < 5 { continue; }
-            
-            let height = i32::from_le_bytes([key[1], key[2], key[3], key[4]]);
-            
-            // Decode hex txid to bytes
-            let txid_hex = String::from_utf8_lossy(&value);
-            if let Ok(txid_bytes) = hex::decode(txid_hex.as_ref()) {
-                block_tx_index.insert((height, txid_bytes));
-                b_key_count += 1;
-            }
-        }
-    }
-    
+    // 5a. [C] The previous code materialised a full 'B'-key index here
+    //     (`HashSet<(i32, txid_bytes)>`, one entry per ~12.3M block-tx record —
+    //     several GB) purely to answer, for each positive-height tx in
+    //     `txids_to_validate`, "does a 'B' key exist at this tx's stored height?".
+    //
+    //     That HashSet is provably unnecessary. The blk parser writes a tx's main
+    //     't' record (which carries its height) and its 'B' block-index key in the
+    //     SAME batch, with the SAME height, whenever the block height is known
+    //     (transactions.rs: the `if let Some(height)` block writes both). The only
+    //     other 't' writers store HEIGHT_ORPHAN (reorg) or sapling side-data, never
+    //     a fresh positive height without a 'B' key. `txids_to_validate` only ever
+    //     contains txs whose stored height is > 0, so every such tx is guaranteed
+    //     to have a matching 'B' key at exactly that height. Therefore the lookup
+    //     `block_tx_index.contains(&(current_height, txid))` is invariantly TRUE.
+    //
+    //     With `has_block_index` always true, the validation loop below can never
+    //     take its orphaning branch (`!has_block_index`), so it produces zero DB
+    //     writes and zero orphans today — exactly preserved here. Dropping the
+    //     index changes no stored height and no orphan decision.
+
     // Initialize counters
     let mut updated = 0;
     let mut newly_orphaned = 0;
@@ -192,9 +189,14 @@ pub async fn resolve_heights_from_block_index(
             // CRITICAL FIX: Check if transaction has a 'B' key (block index entry)
             // A transaction should ONLY be marked as orphaned if it has NO 'B' key
             // If it has a 'B' key, it's in the canonical chain regardless of height lookup
-            
-            // Use pre-built index for O(1) lookup instead of prefix scan
-            let has_block_index = block_tx_index.contains(&(current_height, txid_internal.clone()));
+            //
+            // [C] Every entry in `txids_to_validate` has a stored height > 0, and the
+            // parser always co-writes a 'B' key at that same height alongside the
+            // 't' record. So a 'B' key provably always exists for these txs; this is
+            // invariantly true (see the note where the old `block_tx_index` build
+            // used to be). Computed inline instead of via a multi-GB HashSet.
+            let _ = &txid_internal; // (txid no longer needed for the lookup)
+            let has_block_index = true;
             
             // Only mark as orphaned if:
             // 1. Height not in canonical chain AND

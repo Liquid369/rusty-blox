@@ -71,68 +71,60 @@ fn compare_chainwork(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
 /// Calculate accumulated chainwork for all blocks in database
 /// Returns a map of block_hash -> total_chainwork_from_genesis
 /// Uses iterative topological sort to avoid stack overflow with millions of blocks
+///
+/// `blocks_map` maps block_hash -> (prev_hash, n_bits). These are the ONLY two
+/// header fields the chainwork BFS reads, so passing them pre-extracted (rather
+/// than the full ~80-byte header) is byte-for-byte equivalent to the previous
+/// `(hash -> header_bytes)` form while avoiding a duplicate full-header copy and
+/// the internal re-parse. The genesis-detection (all-zero prev_hash), the
+/// per-block `calculate_work_from_bits`, the cumulative `add_chainwork`, the
+/// keep-maximum fork rule and the BFS order are all unchanged.
 pub fn calculate_all_chainwork(
     _db: &Arc<DB>,
-    blocks_map: &std::collections::HashMap<Vec<u8>, Vec<u8>>,
+    blocks_map: &std::collections::HashMap<Vec<u8>, (Vec<u8>, u32)>,
 ) -> Result<std::collections::HashMap<Vec<u8>, [u8; 32]>, Box<dyn std::error::Error>> {
-    
+
     use std::collections::{HashMap, VecDeque};
-    
+
     let mut chainwork_map: HashMap<Vec<u8>, [u8; 32]> = HashMap::new();
-    
-    // Build parent_map and extract n_bits for each block
-    let mut parent_map: HashMap<Vec<u8>, Vec<u8>> = HashMap::new(); // hash -> prev_hash
-    let mut bits_map: HashMap<Vec<u8>, u32> = HashMap::new();       // hash -> n_bits
-    
-    for (block_hash, header_bytes) in blocks_map {
-        if header_bytes.len() < 80 {
-            continue;
-        }
-        
-        let mut prev_hash = [0u8; 32];
-        prev_hash.copy_from_slice(&header_bytes[4..36]);
-        
-        let mut n_bits_bytes = [0u8; 4];
-        n_bits_bytes.copy_from_slice(&header_bytes[72..76]);
-        let n_bits = u32::from_le_bytes(n_bits_bytes);
-        
-        parent_map.insert(block_hash.clone(), prev_hash.to_vec());
-        bits_map.insert(block_hash.clone(), n_bits);
-    }
-    
-    println!("📊 Calculating chainwork for {} blocks...", parent_map.len());
-    
+
+    // `blocks_map` already holds (prev_hash, n_bits) per block, so we reference it
+    // directly instead of materialising separate parent_map + bits_map copies.
+    println!("📊 Calculating chainwork for {} blocks...", blocks_map.len());
+
     // Find all genesis blocks (blocks with all-zero prev_hash)
     let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
-    for (block_hash, prev_hash) in &parent_map {
+    for (block_hash, (prev_hash, n_bits)) in blocks_map {
         if prev_hash.iter().all(|&b| b == 0) {
             // Genesis block
-            let work = calculate_work_from_bits(*bits_map.get(block_hash).unwrap_or(&0));
+            let work = calculate_work_from_bits(*n_bits);
             chainwork_map.insert(block_hash.clone(), work);
             queue.push_back(block_hash.clone());
         }
     }
-    
+
     println!("  Found {} genesis block(s)", queue.len());
-    
+
     // Build children map for forward traversal
     let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
-    for (block_hash, prev_hash) in &parent_map {
+    for (block_hash, (prev_hash, _n_bits)) in blocks_map {
         children_map.entry(prev_hash.clone())
             .or_default()
             .push(block_hash.clone());
     }
-    
+
     // Iterative BFS to calculate chainwork
     let mut processed = queue.len();
     let zero_work = [0u8; 32];
     while let Some(current_hash) = queue.pop_front() {
         let current_chainwork = *chainwork_map.get(&current_hash).unwrap_or(&zero_work);
-        
+
         // Process all children
         if let Some(children) = children_map.get(&current_hash) {
             for child_hash in children {
-                let child_work = calculate_work_from_bits(*bits_map.get(child_hash).unwrap_or(&0));
+                let child_work = calculate_work_from_bits(
+                    blocks_map.get(child_hash).map(|(_, b)| *b).unwrap_or(0)
+                );
                 let child_chainwork = add_chainwork(&current_chainwork, &child_work);
                 
                 // Handle forks: keep the maximum chainwork if block was already processed
