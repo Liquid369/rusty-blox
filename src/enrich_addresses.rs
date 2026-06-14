@@ -951,6 +951,18 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         info!("Metrics persisted to database after enrichment");
     }
 
+    // Free the big enrichment working set before the persist passes. The packed
+    // tx store (packed/tx_index/tx_rev, ~4GB), the spent-outpoint set and the
+    // HODL-dedup set are all dead once the write loop has run, and
+    // persist_tx_daily_series does its OWN independent iterator pass (it does not
+    // read any of these). Dropping them here keeps the peak at the Pass-2b crest
+    // (~6.6GB) instead of letting the persist phase stack on ~5GB of dead memory.
+    drop(packed);
+    drop(tx_index);
+    drop(tx_rev);
+    drop(spent_outputs);
+    drop(hodl_seen);
+
     // Precompute the rich list and wealth distribution from the per-address
     // totals we already have. balance == received - sent (verified to match
     // Blockbook), so this needs no extra DB reads and produces the TRUE top
