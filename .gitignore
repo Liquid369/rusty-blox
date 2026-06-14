@@ -11,3 +11,6 @@ COMMIT_REVIEW.md
 cloudflare-tunnel.yml
 check_persisted_metrics.rs
 .DS_Store
+
+# Local node RPC credentials — ship config.toml.example instead
+config.toml
