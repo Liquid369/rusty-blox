@@ -806,8 +806,9 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
         info!("Phase 3: Transaction repair already complete - skipping");
     }
     
-    info!("Post-sync enrichment complete - database ready");
-    
+    let tip_height = crate::chain_state::get_sync_height(db).unwrap_or(0);
+    info!(tip_height, "==================== SYNC COMPLETE - database ready, explorer live ====================");
+
     Ok(())
 }
 

@@ -152,8 +152,8 @@ pub fn calculate_all_chainwork(
                     queue.push_back(child_hash.clone());
                     
                     processed += 1;
-                    if processed % 100000 == 0 {
-                        debug!(processed = processed, "Chainwork calculation progress");
+                    if processed % 500_000 == 0 {
+                        info!(processed = processed, "Chainwork calculation progress");
                     }
                 }
             }

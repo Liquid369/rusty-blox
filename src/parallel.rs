@@ -432,6 +432,9 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
                     .push(hash32);
 
                 total_blocks += 1;
+                if total_blocks % 1_000_000 == 0 {
+                    info!(loaded = total_blocks, "Loading blocks into memory (resolving canonical heights)");
+                }
             }
             if header_bytes.len() >= 80 {
                 let prev_hash: [u8; 32] = header_bytes[4..36].try_into().unwrap();
