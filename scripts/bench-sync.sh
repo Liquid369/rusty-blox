@@ -122,9 +122,18 @@ run_native() {
     rss=$(( $(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0) * 1024 ))   # KiB -> bytes
     if in_enrich; then [ "$rss" -gt "$enr" ] && enr=$rss; else [ "$rss" -gt "$pre" ] && pre=$rss; fi
     if done_sync; then
-      if [ "$RECONCILE" = 1 ] && curl -s -m5 "$API/analytics/richlist" 2>/dev/null | grep -q '"rank":1'; then
-        curl -s -m8 "$API/address/$RANK1" > "$SCRATCH/rank1.json"
-        curl -s -m8 "$API/analytics/hodl"  > "$SCRATCH/hodl.json"
+      if [ "$RECONCILE" = 1 ]; then
+        # The log says "complete" a moment before the API can serve the address
+        # index, so a single poll usually misses. Retry until the address
+        # endpoint returns a balance (or give up after ~60s).
+        for _ in $(seq 1 20); do
+          if curl -s -m5 "$API/address/$RANK1" 2>/dev/null | grep -q '"balance"'; then
+            curl -s -m8 "$API/address/$RANK1" > "$SCRATCH/rank1.json"
+            curl -s -m8 "$API/analytics/hodl"  > "$SCRATCH/hodl.json"
+            break
+          fi
+          sleep 3
+        done
       fi
       sleep "$SAMPLE"
       rss=$(( $(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ' || echo 0) * 1024 )); [ "$rss" -gt "$enr" ] && enr=$rss
