@@ -20,19 +20,20 @@ use crate::telemetry::truncate_hex;
 
 /// Effective parallel-file concurrency for blk parsing.
 ///
-/// Takes the configured `sync.parallel_files` (default 8) and caps it to the
-/// number of CPUs actually available to this process. `available_parallelism`
-/// honors cgroup CPU quotas / affinity on Linux, so a 2-4 vCPU VPS won't run 8
-/// CPU-bound parses at once (each blk file saturates a core hashing
-/// Quark/SHA256d), which only thrashes caches and starves pivxd alongside it.
-/// Floored at 1 so a single-core host never builds a `Semaphore(0)` — that would
-/// deadlock the file pipeline on the first `acquire().await`.
+/// If `sync.parallel_files` is set explicitly (> 0) it is honored EXACTLY — the
+/// operator knows their box, and a mis-reported cgroup core count must never
+/// throttle the parse below what they chose. If it is unset (or <= 0), default
+/// to the CPUs available to this process (`available_parallelism`, which is
+/// cgroup / affinity aware), floored at 1 — so a small VPS isn't oversubscribed
+/// by default (each blk file saturates a core hashing Quark/SHA256d), yet the
+/// operator can still set it ABOVE the detected core count when the parse is
+/// partly I/O-bound. Floored at 1 so a single-core host never builds a
+/// `Semaphore(0)`, which would deadlock the file pipeline on `acquire().await`.
 fn effective_parallel_files(config: &crate::config::Config) -> usize {
-    let configured = config.get_int("sync.parallel_files").unwrap_or(8) as usize;
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    configured.min(cores).max(1)
+    match config.get_int("sync.parallel_files") {
+        Ok(n) if n > 0 => n as usize,
+        _ => std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).max(1),
+    }
 }
 
 /// Validate that canonical chain metadata is complete before parallel processing
