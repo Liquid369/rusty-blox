@@ -214,67 +214,58 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
     magic: &[u8; 4]
 ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
     
-    let mut buffer = [0u8; 4];
     let start_pos = reader.stream_position().await?;
-    let mut scan_pos = start_pos;
-    
+
     // Get file size for validation
     let file_size = reader.seek(tokio::io::SeekFrom::End(0)).await?;
-    reader.seek(tokio::io::SeekFrom::Start(scan_pos)).await?;
-    
+    reader.seek(tokio::io::SeekFrom::Start(start_pos)).await?;
+
     // Scan up to 10MB ahead (reasonable limit to prevent infinite loops)
     const MAX_SCAN: u64 = 10 * 1024 * 1024;
     
-    loop {
-        // Check if we have enough bytes for magic + size (8 bytes total)
-        if scan_pos + 8 > file_size {
-            return Ok(None); // EOF - not enough bytes for complete header
-        }
-        
-        // Try to read 4 bytes for magic
-        match reader.read_exact(&mut buffer).await {
-            Ok(_) => {
-                if buffer == *magic {
-                    // Priority 1.4: Validate size field before accepting this magic
-                    let mut size_buffer = [0u8; 4];
-                    match reader.read_exact(&mut size_buffer).await {
-                        Ok(_) => {
-                            let block_size = u32::from_le_bytes(size_buffer) as u64;
-                            
-                            // Check if size is plausible
-                            if (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) {
-                                // Check if complete block fits in file
-                                if scan_pos + 8 + block_size <= file_size {
-                                    // Valid magic + valid size! Position reader at start of magic
-                                    reader.seek(tokio::io::SeekFrom::Start(scan_pos)).await?;
-                                    return Ok(Some(scan_pos));
-                                }
-                            }
-                            // Size invalid or block doesn't fit - keep scanning
-                        },
-                        Err(_) => {
-                            // Can't read size, keep scanning
-                        }
-                    }
-                }
-                // Not magic or invalid size, advance by 1 byte and try again
-                scan_pos += 1;
-                reader.seek(tokio::io::SeekFrom::Start(scan_pos)).await?;
-                
-                if scan_pos - start_pos > MAX_SCAN {
-                    warn!(
-                        scanned_mb = MAX_SCAN / 1024 / 1024,
-                        "Scanned without finding valid magic+size, giving up"
-                    );
-                    return Ok(None);
-                }
-            },
-            Err(_) => {
-                // EOF reached
-                return Ok(None);
+    if start_pos + 8 > file_size {
+        return Ok(None); // EOF - not enough bytes for magic + size
+    }
+
+    // Read the scan window into memory ONCE and slide a 4-byte magic window over
+    // it, rather than seeking + reading 4 bytes per byte. The previous per-byte
+    // seek re-filled the BufReader on every iteration, so scanning the tip file's
+    // ~10MB pre-allocated zero tail took HOURS on a single core. Byte-for-byte
+    // equivalent: returns the first position (start_pos ..= start_pos+MAX_SCAN)
+    // whose 4-byte magic is followed by a plausible 4-byte size (MIN..=MAX, with
+    // the whole block fitting in the file) -- the same checks, same positions.
+    let scan_end = (start_pos + MAX_SCAN + 8).min(file_size);
+    let window_len = (scan_end - start_pos) as usize;
+    let mut window = vec![0u8; window_len];
+    reader.read_exact(&mut window).await?;
+
+    let last = window_len.saturating_sub(8);
+    for offset in 0..=last {
+        if &window[offset..offset + 4] == &magic[..] {
+            let block_size = u32::from_le_bytes([
+                window[offset + 4], window[offset + 5], window[offset + 6], window[offset + 7],
+            ]) as u64;
+            let pos = start_pos + offset as u64;
+            if (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)
+                && pos + 8 + block_size <= file_size
+            {
+                // Valid magic + size: position the reader at the magic and return.
+                reader.seek(tokio::io::SeekFrom::Start(pos)).await?;
+                return Ok(Some(pos));
             }
         }
     }
+
+    // Reached the MAX_SCAN cap without a valid magic+size (vs a plain EOF).
+    // (>= MAX_SCAN + 8 mirrors the old loop's give-up bound exactly, so the warn
+    // fires on identical inputs.)
+    if file_size >= start_pos + MAX_SCAN + 8 {
+        warn!(
+            scanned_mb = MAX_SCAN / 1024 / 1024,
+            "Scanned without finding valid magic+size, giving up"
+        );
+    }
+    Ok(None)
 }
 
 /// Process a single blk*.dat file.
