@@ -36,7 +36,10 @@ SAMPLE="${BENCH_SAMPLE:-2}"
 RECONCILE="${BENCH_RECONCILE:-1}"
 KEEP_DB="${BENCH_KEEP_DB:-0}"
 SCRATCH="${BENCH_DIR:-/tmp/rbx_bench}"
-BLOCKS="${BENCH_BLOCKS:-$HOME/Library/Application Support/PIVX/blocks}"
+# Default the blocks dir to the repo config.toml's blk_dir so the bench works on
+# Linux and macOS without setting BENCH_BLOCKS; fall back to the macOS default.
+_cfg_blk="$(grep -E '^[[:space:]]*blk_dir[[:space:]]*=' "$REPO/config.toml" 2>/dev/null | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/')"
+BLOCKS="${BENCH_BLOCKS:-${_cfg_blk:-$HOME/Library/Application Support/PIVX/blocks}}"
 RANK1="DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"   # duddino reconcile anchor
 API="http://127.0.0.1:$PORT/api/v2"
 GB() { awk "BEGIN{printf \"%.2f\", ${1:-0}/1073741824}"; }   # bytes -> GiB
