@@ -5,17 +5,14 @@
 
 use axum::{Json, Extension, http::StatusCode};
 use rocksdb::DB;
-use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
-use crate::config::get_global_config;
-use crate::parser::{get_script_type, deserialize_transaction_blocking};
+use crate::parser::deserialize_transaction_blocking;
 use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutput};
-use super::helpers::format_piv_amount;
 
 pub use axum::extract::Path as AxumPath;
 

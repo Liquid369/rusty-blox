@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::cache::CacheManager;
 use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
 use crate::parser::{deserialize_utxos, deserialize_transaction, deserialize_transaction_blocking};
-use crate::maturity::{filter_spendable_utxos, get_current_height};
+use crate::maturity::get_current_height;
 use super::types::{AddressInfo, AddressQuery, XPubInfo, UTXO, UtxoQuery};
 use super::transactions::{fetch_transactions_batch};
 
@@ -689,7 +689,7 @@ async fn aggregate_xpub_data(
     let mut used_addresses: Vec<(String, String, usize, i64, i64, i64)> = Vec::new();
     
     // Get current chain height for maturity checks
-    let current_height = get_current_height(db).unwrap_or(0);
+    let _current_height = get_current_height(db).unwrap_or(0);
     
     // PERFORMANCE OPTIMIZATION: Batch all address lookups into single multi_get_cf call
     // This replaces N sequential queries with 1 batched query (10-50x faster)

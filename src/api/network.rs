@@ -9,7 +9,6 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::constants::HEIGHT_ORPHAN;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 

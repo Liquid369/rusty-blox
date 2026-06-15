@@ -167,7 +167,7 @@ pub async fn rollback_to_height(
     let db_clone = db.clone();
     
     // Progress tracking for sampled logging (every 100 blocks)
-    let mut progress = ProgressCounter::new(100);
+    let progress = ProgressCounter::new(100);
     let mut blocks_processed = 0;
     
     // Process each block to be removed (in reverse order)

@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use tracing::{info, warn, info_span};
 use crate::metrics;
-use crate::telemetry::truncate_hex;
 
 // Parse PIVX's VARINT format
 pub fn read_varint(data: &[u8], offset: &mut usize) -> Option<u64> {
@@ -230,8 +229,7 @@ pub fn build_canonical_chain_from_leveldb(
         let mut n_data_pos: Option<u64> = None;
         
         let has_data = (status & BLOCK_HAVE_DATA) != 0;
-        let has_undo = (status & BLOCK_HAVE_UNDO) != 0;
-        
+
         if has_data {
             blocks_with_data_flag += 1;
         }
@@ -448,8 +446,7 @@ pub fn build_canonical_chain_from_leveldb(
     
     let mut chain: Vec<(i64, Vec<u8>, Option<u64>, Option<u64>)> = Vec::new();
     let mut current_hash = best_tip_hash;
-    let mut steps = 0;
-    
+
     loop {
         let block_info = match index.get(&current_hash) {
             Some(info) => info,
@@ -458,9 +455,7 @@ pub fn build_canonical_chain_from_leveldb(
                 break;
             }
         };
-        
-        steps += 1;
-        
+
         chain.push((block_info.height, current_hash.to_vec(), block_info.file, block_info.data_pos));
         
         // Check if we reached genesis

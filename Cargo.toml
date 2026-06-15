@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["Liquid369"]
 edition = "2021"
 
+[features]
+# Opt-in extra address-index diagnostics (e.g. logging skipped duplicate UTXOs
+# during reorg/reindex). Off by default; enable with --features debug-address-index.
+debug-address-index = []
+
 [[bin]]
 name = "rustyblox"
 path = "src/main.rs"

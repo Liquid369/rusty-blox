@@ -10,7 +10,6 @@ use crate::transactions::process_transaction_from_buffer;
 use crate::batch_writer::BatchWriter;
 use crate::config::get_global_config;
 use tracing::{info, warn, error};
-use crate::metrics;
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
 const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput

@@ -12,11 +12,8 @@ use crate::sync::validate_canonical_metadata_complete;
 use hex;
 use std::collections::HashMap;
 use crate::config::get_global_config;
-use reqwest::Client;
 use serde_json::Value;
 use tracing::{info, warn, debug, info_span, Instrument};
-use crate::metrics;
-use crate::telemetry::ProgressCounter;
 
 /// Update sync_height by finding the highest block in chain_metadata
 /// This allows incremental progress updates as files are processed
@@ -564,10 +561,6 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
                 }
                 Ok(Err(e)) => {
                     warn!(error = %e, "RPC error");
-                    None
-                }
-                Ok(Err(e)) => {
-                    warn!(error = %e, "RPC task panic");
                     None
                 }
                 Err(_) => {

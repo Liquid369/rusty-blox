@@ -85,10 +85,6 @@ pub async fn resolve_heights_from_block_index(
     let cf_transactions = db.cf_handle("transactions")
         .ok_or("transactions CF not found")?;
     
-    let mut total_txs = 0;
-    let mut orphaned_count = 0;
-    let mut already_correct = 0;
-    
     // Collect txids that need fixing:
     // - height=0 or HEIGHT_UNRESOLVED need resolution
     // - Positive heights need validation against canonical chain
@@ -104,9 +100,7 @@ pub async fn resolve_heights_from_block_index(
             Ok((key, value)) => {
                 // Only process 't' prefix entries (transaction data)
                 if key.is_empty() || key[0] != b't' { continue; }
-                
-                total_txs += 1;
-                
+
                 // Parse current transaction data
                 if value.len() < 8 {
                     continue;
@@ -121,12 +115,9 @@ pub async fn resolve_heights_from_block_index(
                     // CRITICAL: Also fix HEIGHT_ORPHAN transactions that may have been incorrectly marked
                     // They need to be checked against 'B' keys to see if they're actually in canonical chain
                     txids_needing_fix.insert(key[1..].to_vec());
-                    orphaned_count += 1;
                 } else if current_height > 0 {
                     // Positive height - need to validate against canonical chain
                     txids_to_validate.insert((key[1..].to_vec(), current_height));
-                } else {
-                    already_correct += 1;
                 }
             }
             Err(e) => {

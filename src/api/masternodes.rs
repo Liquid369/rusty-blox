@@ -9,7 +9,6 @@ use std::time::Duration;
 use super::helpers::rpc_call_json;
 
 use crate::cache::CacheManager;
-use crate::config::get_global_config;
 use super::types::MNCount;
 
 /// GET /api/v2/mncount

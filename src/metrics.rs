@@ -8,7 +8,7 @@
 /// - Standard histogram buckets
 
 use prometheus::{
-    Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Histogram, HistogramVec,
+    Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, HistogramVec,
     HistogramOpts, Opts, Encoder, TextEncoder,
 };
 use lazy_static::lazy_static;

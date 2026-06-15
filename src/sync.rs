@@ -16,7 +16,6 @@ use crate::types::AppState;
 use crate::cache::CacheManager;
 use crate::parallel::process_files_parallel;
 use crate::metrics;
-use crate::telemetry::truncate_hex;
 
 /// Effective parallel-file concurrency for blk parsing.
 ///
@@ -455,12 +454,7 @@ async fn run_initial_sync_leveldb(
     process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true).await?;
 
     let final_height = (chain_len - 1) as i32;
-    
-    let elapsed_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
+
     info!(
         final_height = final_height,
         canonical_blocks = chain_len,
