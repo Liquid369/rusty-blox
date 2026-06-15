@@ -449,7 +449,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     info!(total_blocks = total_blocks, "Loaded blocks into memory");
 
     info!("Calculating accumulated chainwork (Bitcoin consensus)");
-    let chainwork_map = calculate_all_chainwork(db, &block_meta)?;
+    let chainwork_map = calculate_all_chainwork(db, &block_meta, &children_map)?;
     info!(blocks = chainwork_map.len(), "Chainwork calculated");
     
     info!("Finding best chain tip");

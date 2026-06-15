@@ -409,6 +409,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_write_buffer_number = config.get_int("rocksdb.max_write_buffer_number").unwrap_or(4) as i32;
     let min_write_buffer_number_to_merge = config.get_int("rocksdb.min_write_buffer_number_to_merge").unwrap_or(2) as i32;
     let block_cache_size_mb = config.get_int("rocksdb.block_cache_size").unwrap_or(512);
+    // Global memtable ceiling across all CFs (0 = unlimited). Bounds total write-
+    // buffer RAM, which is otherwise capped only per-CF (write_buffer_size x
+    // max_write_buffer_number x CFs ~= several GB) — a real peak contributor on
+    // an 8 GB VPS shared with pivxd.
+    let db_write_buffer_size_mb = config.get_int("rocksdb.db_write_buffer_size").unwrap_or(1024);
     let target_file_size_mb = config.get_int("rocksdb.target_file_size_base").unwrap_or(256);
     let max_open_files = config.get_int("rocksdb.max_open_files").unwrap_or(5000) as i32;
     let level0_file_num_compaction_trigger = config.get_int("rocksdb.level0_file_num_compaction_trigger").unwrap_or(8) as i32;
@@ -505,6 +510,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db_options.set_max_open_files(max_open_files);
     db_options.set_max_background_jobs(max_background_jobs);
     db_options.set_max_subcompactions(max_subcompactions as u32);
+    // Cap total memtable memory across all column families. RocksDB flushes the
+    // largest memtable when the aggregate is exceeded, bounding RAM WITHOUT
+    // shrinking the per-CF buffers (which would multiply flush + compaction I/O
+    // and slow sync). 0 leaves it at per-CF bounds only.
+    if db_write_buffer_size_mb > 0 {
+        db_options.set_db_write_buffer_size(db_write_buffer_size_mb as usize * 1024 * 1024);
+    }
     
     // Advanced concurrency settings
     if enable_pipelined_write {
@@ -523,6 +535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!(
         write_buffer_mb = write_buffer_size_mb,
+        db_write_buffer_mb = db_write_buffer_size_mb,
         block_cache_mb = block_cache_size_mb,
         max_open_files = max_open_files,
         background_jobs = max_background_jobs,

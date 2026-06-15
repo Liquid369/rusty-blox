@@ -83,6 +83,7 @@ fn compare_chainwork(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
 pub fn calculate_all_chainwork(
     _db: &Arc<DB>,
     blocks_map: &std::collections::HashMap<[u8; 32], ([u8; 32], u32)>,
+    children_map: &std::collections::HashMap<[u8; 32], Vec<[u8; 32]>>,
 ) -> Result<std::collections::HashMap<[u8; 32], [u8; 32]>, Box<dyn std::error::Error>> {
 
     use std::collections::{HashMap, VecDeque};
@@ -110,13 +111,13 @@ pub fn calculate_all_chainwork(
 
     debug!(count = queue.len(), "Genesis blocks found");
 
-    // Build children map for forward traversal
-    let mut children_map: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
-    for (block_hash, (prev_hash, _n_bits)) in blocks_map {
-        children_map.entry(prev_hash.clone())
-            .or_default()
-            .push(block_hash.clone());
-    }
+    // `children_map` is now passed in by the caller (resolve_block_heights builds
+    // an identical prev_hash -> [block_hash] map for tip discovery), so we no
+    // longer rebuild a duplicate ~5.5M-entry copy that lived in RAM for the whole
+    // BFS. The guard inside the loop restricts traversal to children present in
+    // `blocks_map`, exactly matching the old internal map (built only from
+    // blocks_map keys); child order within a parent's list does not affect the
+    // result (each block's chainwork is its unique path sum; forks keep the max).
 
     // Iterative BFS to calculate chainwork
     let mut processed = queue.len();
@@ -127,6 +128,13 @@ pub fn calculate_all_chainwork(
         // Process all children
         if let Some(children) = children_map.get(&current_hash) {
             for child_hash in children {
+                // Skip children absent from blocks_map (the caller's map may
+                // include headers < 80 bytes): the previous internal children map
+                // was built only from blocks_map keys, so this keeps the traversed
+                // set — and the resulting chainwork — byte-identical.
+                if !blocks_map.contains_key(child_hash) {
+                    continue;
+                }
                 let child_work = calculate_work_from_bits(
                     blocks_map.get(child_hash).map(|(_, b)| *b).unwrap_or(0)
                 );
