@@ -613,8 +613,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
 
-    // Wait for minimum viable sync before starting web server
-    // Check every 2 seconds if we have at least 1000 blocks indexed
+    // Wait for minimum viable sync before starting web server. Poll every 2s, but
+    // throttle the "still waiting" heartbeat to ~once a minute so the multi-minute
+    // leveldb import doesn't flood the log with hundreds of identical lines. The
+    // gate still opens promptly (the height check runs every tick); only the
+    // logging is throttled.
+        let mut waited_ticks: u32 = 0;
         loop {
             let cf_state = match api_db.cf_handle("chain_state") {
                 Some(cf) => cf,
@@ -631,12 +635,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         info!(height = height, "Minimum viable data indexed - starting web server");
                         break;
                     }
-                    info!(height = height, "Indexing in progress - waiting for minimum 1000 blocks");
+                    if waited_ticks % 30 == 0 {
+                        info!(height = height, "Indexing in progress - waiting for minimum 1000 blocks");
+                    }
                 }
                 _ => {
-                    info!("Indexing in progress - waiting for initial data");
+                    if waited_ticks % 30 == 0 {
+                        info!("Indexing in progress - waiting for initial data");
+                    }
                 }
             }
+            waited_ticks += 1;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     } else {
