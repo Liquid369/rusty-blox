@@ -1207,6 +1207,30 @@ fn note_address(
     day_active.entry(date.to_string()).or_default().insert(addr);
 }
 
+/// Tier-A analytics recovery (Lever 2 follow-up): rebuild the daily transaction
+/// series when the deferred background pass never finished (e.g. a crash). This is
+/// the DEGRADED path -- it rebuilds block_times from chain headers and recomputes
+/// every NON-join daily metric (tx counts, volumes, difficulty, stakers, active
+/// addresses, PoW-era treasury) with EMPTY join aggregates, so only the
+/// prevout-join-derived fields (PoS-era treasury, fees/rewards, coin-days) are
+/// omitted until a full re-enrich. Balance-neutral: writes only analytics_* keys,
+/// never 'a'/'r'/'s'/'t'. Sets `analytics_complete` on success.
+pub async fn rebuild_daily_series_degraded(db: Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let tip = crate::chain_state::get_sync_height(&db).unwrap_or(0);
+    if tip <= 0 {
+        return Ok(());
+    }
+    let (block_times, block_bits) = build_block_times(&db, tip)?;
+    let empty_joins: HashMap<String, DayJoinAgg> = HashMap::new();
+    let empty_treasury: Vec<TreasuryPayout> = Vec::new();
+    persist_tx_daily_series(&db, tip, &block_times, &block_bits, &empty_joins, &empty_treasury).await?;
+    if let Some(cf_state) = db.cf_handle("chain_state") {
+        db.put_cf(&cf_state, b"analytics_complete", [1u8])?;
+    }
+    info!("Degraded daily-series rebuild complete (join-derived fields omitted until a full re-enrich)");
+    Ok(())
+}
+
 async fn persist_tx_daily_series(
     db: &Arc<DB>,
     tip: i32,

@@ -776,7 +776,28 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
     } else if fast_sync {
         info!("Address enrichment disabled in config (enrich_addresses=false)");
     }
-    
+
+    // [Lever 2 follow-up] On a RESTART where the address index is already built but
+    // the deferred daily-series analytics never finished (e.g. a crash during the
+    // background pass), rebuild it now (degraded: non-join metrics only). Uses the
+    // PRE-run `address_index_complete` local -- true only when the enrich block was
+    // SKIPPED this run -- so a fresh enrich, whose background daily-series is still
+    // in flight, does NOT double-run it. Balance-neutral (analytics keys only).
+    if address_index_complete {
+        let analytics_done = matches!(
+            db.get_cf(&cf_state, b"analytics_complete")?,
+            Some(b) if b.first() == Some(&1)
+        );
+        if !analytics_done {
+            info!("Address index built but deferred analytics incomplete - rebuilding degraded daily series");
+            if let Err(e) =
+                crate::enrich_addresses::rebuild_daily_series_degraded(Arc::clone(db)).await
+            {
+                warn!(error = ?e, "Degraded daily-series rebuild failed");
+            }
+        }
+    }
+
     // 2. Transaction block index (B prefix entries for faster block tx lookups)
     if !tx_block_index_complete {
         info!("Phase 2: Building transaction block index");
