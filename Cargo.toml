@@ -34,6 +34,10 @@ path = "tools/diagnostics/inspect_leveldb.rs"
 name = "dump-addr-snapshot"
 path = "tools/diagnostics/dump_addr_snapshot.rs"
 
+[[bin]]
+name = "reenrich"
+path = "tools/diagnostics/reenrich.rs"
+
 # Essential maintenance tools
 [[bin]]
 name = "rebuild-address-index"

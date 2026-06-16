@@ -28,9 +28,9 @@ use std::sync::Arc;
 use std::collections::{HashMap, HashSet};
 use rocksdb::DB;
 use tracing::{info, warn, info_span};
-use crate::parser::{deserialize_transaction, serialize_utxos};
+use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, serialize_utxos};
 use crate::tx_keys::{txid_from_key, txid_from_hex};
-use crate::types::{CTxOut, ScriptClassification};
+use crate::types::{CTransaction, CTxOut, ScriptClassification};
 
 /// Classify output script for correct PIVX Core attribution.
 /// Classification is driven by the SCRIPT structure (like PIVX Core's Solver()),
@@ -194,6 +194,570 @@ fn intern(addr_intern: &mut HashMap<String, u32>, addr_rev: &mut Vec<String>, s:
     id
 }
 
+/// Per-shard (or whole-DB serial) Pass-1 accumulator. Shards build these over
+/// disjoint txid ranges (`tx_shard_bounds`) and the merge concatenates them in
+/// shard order (`merge_pass1_shards`). Address interning is LOCAL to each shard —
+/// dense ids are purely in-memory and resolved to base58 strings only at write
+/// time, so shards never share mutable state and the merge remaps each shard's
+/// ids into one global table without changing any on-disk byte.
+#[derive(Default)]
+struct Pass1Shard {
+    spent_outputs: HashSet<([u8; 32], u32)>,
+    packed: Vec<PackedTx>,
+    tx_rev: Vec<[u8; 32]>,
+    addr_intern: HashMap<String, u32>,
+    addr_rev: Vec<String>,
+    // Metrics (summed across shards at merge; logging only, never on disk).
+    tx_total: u64,
+    tx_deserialized: u64,
+    tx_failed: u64,
+    inputs_processed: u64,
+    sapling_count: u64,
+}
+
+/// Run the Pass-1 body for ONE already-deserialized, should-index transaction:
+/// pack its outputs (interning into the shard's LOCAL table), append the
+/// PackedTx + its DISPLAY-order txid, and fold its non-coinbase inputs into the
+/// spent-outpoint set. This is the single source of Pass-1 per-tx logic shared
+/// by the serial scan and every parallel shard, so the two cannot diverge.
+///
+/// `tx_index` is intentionally NOT built here: it is rebuilt once from `tx_rev`
+/// after Pass 1 (identical content — last-writer-wins per txid), which frees
+/// shards from sharing a global slot counter.
+fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i32) {
+    // INVARIANT #2: detect the type while inputs[0]'s null/zerocoin prevout is
+    // still alive. INVARIANT #4: carry the SIGNED Sapling net value forward.
+    let ty = ty_to_u8(crate::tx_type::detect_transaction_type(tx));
+    let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+
+    // PUSH EVERY output (incl. kind=0 markers / zerocoin / nonstandard) so
+    // outs.len() == tx.outputs.len() and out_sum is identical (INVARIANT #1, #8).
+    let mut outs: Vec<PackedOut> = Vec::with_capacity(tx.outputs.len());
+    for output in &tx.outputs {
+        outs.push(pack_output(output, &mut sh.addr_intern, &mut sh.addr_rev));
+    }
+
+    // Append under the DISPLAY-order txid (INVARIANT #7); the slot is the
+    // position in `packed`/`tx_rev`, assigned globally by concat order at merge.
+    let txid_bytes = txid_from_key(key);
+    if !txid_bytes.is_empty() {
+        if let Ok(txid_arr) = <[u8; 32]>::try_from(txid_bytes.as_slice()) {
+            sh.tx_rev.push(txid_arr);
+            sh.packed.push(PackedTx {
+                height,
+                ty,
+                value_balance,
+                outs: outs.into_boxed_slice(),
+            });
+        }
+    }
+
+    // Scan inputs into the spent-outpoint set (then the caller drops the tx).
+    for input in &tx.inputs {
+        if input.coinbase.is_some() {
+            continue;
+        }
+        sh.inputs_processed += 1;
+        if let Some(prevout) = &input.prevout {
+            // prevout.hash from parser.rs is DISPLAY (reversed) format — the same
+            // byte order as DB keys / tx_index / tx_rev (INVARIANT #7).
+            if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
+                let t: [u8; 32] = prev_txid_display
+                    .as_slice()
+                    .try_into()
+                    .expect("spent-set prevout txid must be 32 bytes");
+                sh.spent_outputs.insert((t, prevout.n as u32));
+            }
+        }
+    }
+}
+
+/// Split the 't'-prefixed (0x74) transaction keyspace into `n` contiguous,
+/// disjoint `[lower, upper)` byte-bound pairs whose union is EXACTLY the set of
+/// keys the serial Pass-1 iterator visits — every `'t'`+txid key, ascending. The
+/// `'B'`-prefixed block-tx-index keys sort below 0x74 and are excluded by the
+/// lower bound; the final shard's exclusive upper `0x75` stops past the entire
+/// `'t'` prefix.
+///
+/// Sharding on the FIRST txid byte keeps shards ~even (txids are uniform hashes)
+/// and — because shard k's range sorts entirely before shard k+1's —
+/// concatenating shard results in index order reproduces serial SLOT ORDER
+/// byte-for-byte, which the unsorted `'a'` UTXO-list ordering depends on.
+///
+/// `n` is clamped to `[1, 4]`: the cap bounds concurrent enrichment RAM. Each
+/// shard holds ~1/n of the packed store, but transient merge overhead and
+/// per-thread buffers grow with n, and the full-sync RSS already sits at the
+/// 8 GiB target.
+fn tx_shard_bounds(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let n = n.clamp(1, 4);
+    (0..n)
+        .map(|k| {
+            let lo = vec![b't', (k * 256 / n) as u8];
+            let hi = if k + 1 == n {
+                vec![b't' + 1] // 0x75: exclusive upper past the whole 't' prefix
+            } else {
+                vec![b't', ((k + 1) * 256 / n) as u8]
+            };
+            (lo, hi)
+        })
+        .collect()
+}
+
+/// Per-shard (or whole-DB serial) Pass-2b accumulator. The two byte-exact
+/// outputs are `totals_sent` (i64 — plain `+=` is associative, so the merge is
+/// order-independent across any shard count) and `txs_map_adds` (the spend-side
+/// txids, which are sorted+deduped at write time, so push order is irrelevant).
+/// `day_joins` / `coinstake_treasury` are analytics only (persisted to
+/// chain_state, excluded from the address-index byte-diff gate), so their f64 /
+/// Vec accumulation tolerates shard-order reordering.
+#[derive(Default)]
+struct Pass2bShard {
+    /// id -> total spent (the ONLY writer of totals_sent; Pass 2 fills received).
+    totals_sent: HashMap<u32, i64>,
+    /// id -> spend-side txids to APPEND to the global txs_map (Pass 2 fills the
+    /// received side); deduped+sorted at write, so order does not matter.
+    txs_map_adds: HashMap<u32, Vec<Vec<u8>>>,
+    day_joins: HashMap<String, DayJoinAgg>,
+    coinstake_treasury: Vec<TreasuryPayout>,
+    // Metrics (logging only).
+    tx_total: u64,
+    tx_deserialized: u64,
+    tx_failed: u64,
+    coinstake_skipped: u64,
+    inputs_processed: u64,
+    prevout_resolved: u64,
+    input_processed: u64,
+}
+
+/// Run the Pass-2b body for ONE already-deserialized, slot-resolved transaction:
+/// join each input to its prevout through the FROZEN `tx_index`/`packed`
+/// (read-only, so shards share them by Arc), debit the spending address(es)
+/// in `sh.totals_sent` + append the txid to `sh.txs_map_adds`, and bucket the
+/// Tier-2 prevout-join aggregates (fees, rewards, coin-days, cold-staking flows,
+/// budget payouts) by the SPENDER's block date. Single source of Pass-2b per-tx
+/// logic shared by the serial scan and every parallel shard.
+#[allow(clippy::too_many_arguments)]
+fn pass2b_process_tx(
+    sh: &mut Pass2bShard,
+    packed: &[PackedTx],
+    tx_index: &HashMap<[u8; 32], u32>,
+    block_times: &[u32],
+    current_txid_bytes: &[u8],
+    cur_slot: u32,
+    tx: &CTransaction,
+    height: i32,
+    value_len: usize,
+) {
+    // Coinstake inputs ARE counted as "sent" (UTXO accounting, Blockbook parity):
+    // the staked output is consumed and its principal re-minted in the coinstake
+    // outputs (counted as received). (ty was computed in Pass 1; ty==1 => Coinstake.)
+    if packed[cur_slot as usize].ty == 1 {
+        sh.coinstake_skipped += 1; // metric retained: counts coinstakes seen
+    }
+
+    // Tier-2 accumulators for this spending transaction (prevout joins).
+    let mut input_sum: i64 = 0;
+    let mut inputs_with_prevout: u64 = 0;
+    let mut inputs_resolved: u64 = 0;
+    let mut tx_coin_days: f64 = 0.0;
+    let mut tx_p2cs_spent: i64 = 0;
+
+    // For every input, find the prevout's addresses and attribute this tx to them.
+    for input in &tx.inputs {
+        if input.coinbase.is_some() {
+            continue;
+        }
+        sh.inputs_processed += 1;
+        if let Some(prevout) = &input.prevout {
+            inputs_with_prevout += 1;
+            // prevout.hash from parser.rs is in DISPLAY (reversed) format — the
+            // same byte order as tx_index keys / tx_rev (INVARIANT #7).
+            if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
+                // INVARIANT #3 (zPoS null-prevout): resolve ONLY through tx_index.
+                // A zPoS coinstake's first input carries an all-zero/zerocoin prevout
+                // txid that was never inserted into tx_index, so the lookup MISSES,
+                // inputs_resolved is NOT incremented (while inputs_with_prevout IS),
+                // and the clamp `inputs_with_prevout>0 && inputs_resolved==inputs_with_prevout`
+                // correctly FAILS -> fee/minted suppressed for zPoS.
+                let prev = <[u8; 32]>::try_from(prev_txid_display.as_slice())
+                    .ok()
+                    .and_then(|a| tx_index.get(&a).copied())
+                    .map(|s| {
+                        let p = &packed[s as usize];
+                        (p, p.height)
+                    });
+
+                if let Some((prev_tx, prev_height)) = prev {
+                    if let Some(prev_out) = prev_tx.outs.get(prevout.n as usize) {
+                        // Tier 2: spend-side joins — input value sum (fees / rewards),
+                        // coin age, and cold-staking principal spent.
+                        inputs_resolved += 1;
+                        sh.prevout_resolved += 1;
+                        input_sum = input_sum.saturating_add(prev_out.value);
+                        if prev_height >= 0 && height >= prev_height {
+                            let age_days = (height - prev_height) as f64 / 1440.0;
+                            tx_coin_days += (prev_out.value as f64 / 100_000_000.0) * age_days;
+                        }
+                        // coldstake-spent test <= (prev_out.kind == 2), which coincides
+                        // exactly with the old get_script_type=="coldstake".
+                        if prev_out.kind == 2 {
+                            tx_p2cs_spent = tx_p2cs_spent.saturating_add(prev_out.value);
+                        }
+
+                        // Attribution from the packed kind / interned ids.
+                        match prev_out.kind {
+                            1 => {
+                                // Standard: address is spending.
+                                let id = prev_out.addr_a;
+                                *sh.totals_sent.entry(id).or_insert(0) += prev_out.value;
+                                sh.txs_map_adds.entry(id).or_default().push(current_txid_bytes.to_vec());
+                            }
+                            2 => {
+                                // Cold stake spend: debit BOTH addresses, mirroring the
+                                // credit-both in Pass 2. Staker and owner are DISTINCT ids.
+                                let staker_id = prev_out.addr_a;
+                                let owner_id = prev_out.addr_b;
+                                *sh.totals_sent.entry(staker_id).or_insert(0) += prev_out.value;
+                                *sh.totals_sent.entry(owner_id).or_insert(0) += prev_out.value;
+                                sh.txs_map_adds.entry(staker_id).or_default().push(current_txid_bytes.to_vec());
+                                sh.txs_map_adds.entry(owner_id).or_default().push(current_txid_bytes.to_vec());
+                            }
+                            _ => {
+                                // No attribution for nonstandard/OP_RETURN/etc.
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier 2: bucket this tx's join aggregates by the SPENDER's block date.
+    if height >= 0 && (height as usize) < block_times.len() && block_times[height as usize] != 0 {
+        let date = unix_to_date(block_times[height as usize] as u64);
+        let agg = sh.day_joins.entry(date.clone()).or_default();
+        // out_sum / p2cs_created from the CURRENT tx's packed outs.
+        let cur = &packed[cur_slot as usize];
+        let out_sum: i64 = cur.outs.iter().map(|o| o.value).sum();
+        let p2cs_created: i64 = cur
+            .outs
+            .iter()
+            .filter(|o| o.kind == 2)
+            .map(|o| o.value)
+            .sum();
+        agg.p2cs_created = agg.p2cs_created.saturating_add(p2cs_created);
+        agg.p2cs_spent = agg.p2cs_spent.saturating_add(tx_p2cs_spent);
+        agg.coin_days_destroyed += tx_coin_days;
+        match u8_to_ty(cur.ty) {
+            crate::tx_type::TransactionType::Normal => {
+                agg.normal_tx_bytes += (value_len as u64).saturating_sub(8);
+                // Fee = transparent_in + valueBalance - transparent_out. INVARIANT #4:
+                // value_balance is SIGNED and added with its sign. Credit only when
+                // every transparent input resolved, and clamp to a sane ceiling.
+                if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
+                    let value_balance = cur.value_balance;
+                    let fee = input_sum + value_balance - out_sum;
+                    if fee > 0 && fee < 1_000 * crate::emission::COIN {
+                        agg.fees_total = agg.fees_total.saturating_add(fee);
+                    }
+                }
+            }
+            crate::tx_type::TransactionType::Coinstake => {
+                // Minted value: outputs - staked inputs = era block reward PLUS any
+                // budget payout riding in the coinstake (node-verified, see emission.rs).
+                if inputs_resolved == inputs_with_prevout {
+                    let minted = out_sum.saturating_sub(input_sum);
+                    if minted > 0 {
+                        let expected = crate::emission::era_block_reward(height);
+                        let excess = minted.saturating_sub(expected);
+                        // Require >=100 PIV to call it a budget payout; smaller excess
+                        // is fee income and flows into the staker's rewards (else branch).
+                        if excess > 100 * crate::emission::COIN {
+                            sh.coinstake_treasury.push(TreasuryPayout {
+                                height,
+                                date: date.clone(),
+                                total_paid_sats: excess,
+                                n_outputs: cur.outs.len() as u32,
+                            });
+                            agg.rewards_total = agg.rewards_total.saturating_add(expected);
+                        } else {
+                            agg.rewards_total = agg.rewards_total.saturating_add(minted);
+                        }
+                        // Staker share (excl. masternode payment), capped by minted.
+                        agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(
+                            crate::emission::era_staker_reward(height).min(minted),
+                        );
+                    }
+                }
+            }
+            crate::tx_type::TransactionType::Coinbase => {}
+        }
+    }
+}
+
+/// Number of enrichment range-shards from `sync.enrich_parallel_shards`.
+/// Default 1 => the serial path (today's behavior, untouched). Clamped to
+/// `[1, 4]` (the RAM cap — see `tx_shard_bounds`).
+fn effective_enrich_shards() -> usize {
+    match crate::config::get_global_config().get_int("sync.enrich_parallel_shards") {
+        Ok(n) if n >= 1 => (n as usize).clamp(1, 4),
+        _ => 1,
+    }
+}
+
+/// PASS 1, parallel: one std::thread per `tx_shard_bounds` range, each scanning a
+/// DISJOINT, contiguous slice of the 't' keyspace with the blocking deserializer
+/// (byte-identical to the async one) into its own `Pass1Shard`. Threads share
+/// nothing mutable, so this is embarrassingly parallel; `merge_pass1_shards`
+/// reassembles them in shard order. A panicked shard aborts enrichment rather
+/// than silently dropping its transactions (fix: propagate, never swallow).
+fn run_pass1_parallel(db: Arc<DB>, n: usize) -> Result<Pass1Shard, String> {
+    let bounds = tx_shard_bounds(n);
+    let mut handles = Vec::with_capacity(bounds.len());
+    for (lo, hi) in bounds {
+        let db = Arc::clone(&db);
+        handles.push(std::thread::spawn(move || -> Pass1Shard {
+            let cf = db.cf_handle("transactions").expect("transactions CF not found");
+            let mut ro = rocksdb::ReadOptions::default();
+            ro.set_iterate_lower_bound(lo);
+            ro.set_iterate_upper_bound(hi);
+            let mut sh = Pass1Shard::default();
+            let iter = db.iterator_cf_opt(&cf, ro, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, value) = match item {
+                    Ok(kv) => kv,
+                    Err(_) => continue,
+                };
+                // Defensive guards (the bounds already exclude 'B' < 0x74).
+                if key.first() == Some(&b'B') {
+                    continue;
+                }
+                if value.len() < 8 {
+                    continue;
+                }
+                let height = i32::from_le_bytes(value[4..8].try_into().unwrap_or([0, 0, 0, 0]));
+                if !should_index_transaction(height) {
+                    continue;
+                }
+                let raw_tx = &value[8..];
+                let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+                tx_with_header.extend_from_slice(&[0u8; 4]);
+                tx_with_header.extend_from_slice(raw_tx);
+                sh.tx_total += 1;
+                let tx = match deserialize_transaction_blocking(&tx_with_header) {
+                    Ok(tx) => {
+                        sh.tx_deserialized += 1;
+                        if tx.sapling_data.is_some() {
+                            sh.sapling_count += 1;
+                        }
+                        tx
+                    }
+                    Err(_) => {
+                        sh.tx_failed += 1;
+                        continue;
+                    }
+                };
+                pass1_index_tx(&mut sh, &key, &tx, height);
+            }
+            sh
+        }));
+    }
+    // Join IN SHARD ORDER so the merge concatenates slots ascending; propagate panics.
+    let mut shards = Vec::with_capacity(handles.len());
+    for h in handles {
+        match h.join() {
+            Ok(sh) => shards.push(sh),
+            Err(_) => return Err("Pass 1 shard thread panicked".to_string()),
+        }
+    }
+    Ok(merge_pass1_shards(shards))
+}
+
+/// Reassemble per-shard Pass-1 results into one global `Pass1Shard`, byte-exact
+/// with the serial scan:
+///  - `packed`/`tx_rev` concatenated in SHARD ORDER (== ascending txid == serial
+///    slot order); each shard's global base is the running length (realized,
+///    post-filter counts — empty shards contribute nothing).
+///  - each shard's LOCAL interned ids remapped to GLOBAL ids (NO_ADDR preserved,
+///    BOTH addr_a and addr_b remapped for P2CS). Global id assignment differs from
+///    serial, but ids are in-memory only and resolve to the SAME base58 strings,
+///    so every on-disk byte is identical.
+///  - `spent_outputs` unioned (a set — order-independent).
+fn merge_pass1_shards(shards: Vec<Pass1Shard>) -> Pass1Shard {
+    let total_packed: usize = shards.iter().map(|s| s.packed.len()).sum();
+    let mut out = Pass1Shard {
+        packed: Vec::with_capacity(total_packed),
+        tx_rev: Vec::with_capacity(total_packed),
+        ..Default::default()
+    };
+    for mut sh in shards {
+        // Build this shard's LOCAL id -> GLOBAL id remap by re-interning its
+        // strings (in local-id order) into the global table.
+        let mut remap = vec![0u32; sh.addr_rev.len()];
+        for (local_id, s) in sh.addr_rev.iter().enumerate() {
+            remap[local_id] = intern(&mut out.addr_intern, &mut out.addr_rev, s);
+        }
+        // Remap every packed out's addr_a/addr_b (skip NO_ADDR; P2CS uses addr_b)
+        // and append in shard order — the global slot base is out.packed.len().
+        for mut ptx in sh.packed.drain(..) {
+            for o in ptx.outs.iter_mut() {
+                if o.addr_a != NO_ADDR {
+                    o.addr_a = remap[o.addr_a as usize];
+                }
+                if o.addr_b != NO_ADDR {
+                    o.addr_b = remap[o.addr_b as usize];
+                }
+            }
+            out.packed.push(ptx);
+        }
+        out.tx_rev.extend(sh.tx_rev.drain(..));
+        // Union the spent-outpoint set (order-independent).
+        if out.spent_outputs.is_empty() {
+            out.spent_outputs = std::mem::take(&mut sh.spent_outputs);
+        } else {
+            for e in sh.spent_outputs.drain() {
+                out.spent_outputs.insert(e);
+            }
+        }
+        out.tx_total += sh.tx_total;
+        out.tx_deserialized += sh.tx_deserialized;
+        out.tx_failed += sh.tx_failed;
+        out.inputs_processed += sh.inputs_processed;
+        out.sapling_count += sh.sapling_count;
+    }
+    out
+}
+
+/// PASS 2b, parallel: one std::thread per shard, each scanning its 't'-keyspace
+/// slice and joining prevouts through the FROZEN (Arc, read-only) `packed` /
+/// `tx_index` / `block_times`, accumulating into its own `Pass2bShard`. The
+/// frozen globals are shared by Arc (no duplication of the ~4 GB packed store).
+/// Panics propagate. `merge_pass2b_shards` combines the results.
+fn run_pass2b_parallel(
+    db: Arc<DB>,
+    n: usize,
+    packed: Arc<Vec<PackedTx>>,
+    tx_index: Arc<HashMap<[u8; 32], u32>>,
+    block_times: Arc<Vec<u32>>,
+) -> Result<Pass2bShard, String> {
+    let bounds = tx_shard_bounds(n);
+    let mut handles = Vec::with_capacity(bounds.len());
+    for (lo, hi) in bounds {
+        let db = Arc::clone(&db);
+        let packed = Arc::clone(&packed);
+        let tx_index = Arc::clone(&tx_index);
+        let block_times = Arc::clone(&block_times);
+        handles.push(std::thread::spawn(move || -> Pass2bShard {
+            let cf = db.cf_handle("transactions").expect("transactions CF not found");
+            let mut ro = rocksdb::ReadOptions::default();
+            ro.set_iterate_lower_bound(lo);
+            ro.set_iterate_upper_bound(hi);
+            let mut sh = Pass2bShard::default();
+            let iter = db.iterator_cf_opt(&cf, ro, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, value) = match item {
+                    Ok(kv) => kv,
+                    Err(_) => continue,
+                };
+                if key.first() == Some(&b'B') {
+                    continue;
+                }
+                if value.len() < 8 {
+                    continue;
+                }
+                let height = i32::from_le_bytes(value[4..8].try_into().unwrap_or([0, 0, 0, 0]));
+                if !should_index_transaction(height) {
+                    continue;
+                }
+                let current_txid_bytes = txid_from_key(&key);
+                if current_txid_bytes.is_empty() {
+                    continue;
+                }
+                let cur_slot = match <[u8; 32]>::try_from(current_txid_bytes.as_slice())
+                    .ok()
+                    .and_then(|a| tx_index.get(&a).copied())
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                sh.tx_total += 1;
+                let raw_tx = &value[8..];
+                let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+                tx_with_header.extend_from_slice(&[0u8; 4]);
+                tx_with_header.extend_from_slice(raw_tx);
+                let tx = match deserialize_transaction_blocking(&tx_with_header) {
+                    Ok(tx) => {
+                        sh.tx_deserialized += 1;
+                        tx
+                    }
+                    Err(_) => {
+                        sh.tx_failed += 1;
+                        continue;
+                    }
+                };
+                pass2b_process_tx(
+                    &mut sh,
+                    &packed,
+                    &tx_index,
+                    &block_times,
+                    &current_txid_bytes,
+                    cur_slot,
+                    &tx,
+                    height,
+                    value.len(),
+                );
+                sh.input_processed += 1;
+            }
+            sh
+        }));
+    }
+    let mut shards = Vec::with_capacity(handles.len());
+    for h in handles {
+        match h.join() {
+            Ok(sh) => shards.push(sh),
+            Err(_) => return Err("Pass 2b shard thread panicked".to_string()),
+        }
+    }
+    Ok(merge_pass2b_shards(shards))
+}
+
+/// Combine per-shard Pass-2b results. The two byte-exact outputs merge
+/// order-independently: `totals_sent` by plain `+=` (i64 — associative), and the
+/// `txs_map_adds` by append (sorted+deduped at write). `day_joins` /
+/// `coinstake_treasury` are analytics (chain_state, excluded from the
+/// address-index byte-diff gate), so their f64 / Vec accumulation tolerates the
+/// shard-order reordering.
+fn merge_pass2b_shards(shards: Vec<Pass2bShard>) -> Pass2bShard {
+    let mut out = Pass2bShard::default();
+    for mut sh in shards {
+        for (id, v) in sh.totals_sent.drain() {
+            *out.totals_sent.entry(id).or_insert(0) += v;
+        }
+        for (id, mut adds) in sh.txs_map_adds.drain() {
+            out.txs_map_adds.entry(id).or_default().append(&mut adds);
+        }
+        for (date, j) in sh.day_joins.drain() {
+            let agg = out.day_joins.entry(date).or_default();
+            agg.fees_total = agg.fees_total.saturating_add(j.fees_total);
+            agg.normal_tx_bytes += j.normal_tx_bytes;
+            agg.rewards_total = agg.rewards_total.saturating_add(j.rewards_total);
+            agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(j.staker_rewards_total);
+            agg.coin_days_destroyed += j.coin_days_destroyed;
+            agg.p2cs_created = agg.p2cs_created.saturating_add(j.p2cs_created);
+            agg.p2cs_spent = agg.p2cs_spent.saturating_add(j.p2cs_spent);
+        }
+        out.coinstake_treasury.extend(sh.coinstake_treasury.drain(..));
+        out.tx_total += sh.tx_total;
+        out.tx_deserialized += sh.tx_deserialized;
+        out.tx_failed += sh.tx_failed;
+        out.coinstake_skipped += sh.coinstake_skipped;
+        out.inputs_processed += sh.inputs_processed;
+        out.prevout_resolved += sh.prevout_resolved;
+        out.input_processed += sh.input_processed;
+    }
+    out
+}
+
 /// Build address index from all transactions
 /// This creates the addr_index CF entries for address lookups
 pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
@@ -223,146 +787,114 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         (Vec::new(), Vec::new())
     };
 
+    // Enrichment parallelism: 1 => serial (default, today's path untouched),
+    // 2..=4 => range-sharded Pass 1 / Pass 2b. The dump-addr-snapshot byte-diff
+    // gate must pass at every shard count before the default is raised.
+    let shards = effective_enrich_shards();
+    if shards >= 2 {
+        info!(shards = shards, "Enrichment: parallel range-sharded Pass 1 / Pass 2b enabled");
+    }
+
     let mut processed = 0;
     let mut indexed_outputs = 0;
     let batch_size = 10000;
     
     info!("Pass 1: Building complete spent outputs set");
     
-    // PASS 1: Build complete spent outputs set by scanning ALL transaction inputs
-    // O1 OPTIMIZATION: Build transaction cache to avoid repeated deserialization
-    // Packed spent-outpoint set: ([u8;32] txid, u32 vout) inline keys — no
-    // per-entry heap allocation, ~half the RAM and faster hashing than the old
-    // (Vec<u8>, u64). Keys stay in display byte order (matching Pass 1).
-    let mut spent_outputs: HashSet<([u8; 32], u32)> = HashSet::new();
+    // PASS 1: Build the packed tx store + the complete spent-outpoint set by
+    // scanning every indexed transaction. The per-tx body lives in
+    // `pass1_index_tx` so this serial scan and each parallel shard share ONE
+    // implementation and cannot diverge. Interning is local to `sh`; `tx_index`
+    // is rebuilt from `tx_rev` after the scan (identical content, no shared slot
+    // counter), and the working set is destructured back out below.
+    //   spent_outputs : ([u8;32] DISPLAY txid, u32 vout) inline keys, ~half RAM
+    //   packed/tx_rev : slot -> PackedTx / DISPLAY-order txid (slot == position)
+    //   addr_intern/addr_rev : base58 string <-> dense u32 id (in-memory only)
+    let sh = if shards >= 2 {
+        // Parallel range-sharded scan on a blocking-pool thread: the per-shard
+        // threads each hold a RocksDB iterator across the blocking deserializer,
+        // so they must not run on the async executor.
+        let dbc = Arc::clone(&db);
+        let merged = tokio::task::spawn_blocking(move || run_pass1_parallel(dbc, shards)).await??;
+        processed = merged.tx_deserialized as i32; // transactions_scanned (log only)
+        merged
+    } else {
+        let mut sh = Pass1Shard::default();
+        let iter1 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
 
-    // ONE packed store replacing tx_cache / tx_heights / the per-tx deserialized
-    // objects (~13-18GB saved). Pass 2 / Pass 2b / HODL primitive directly off
-    // these and NEVER re-deserialize.
-    //   tx_index : DISPLAY-order 32-byte txid -> dense slot
-    //   packed   : slot -> PackedTx (height, ty, value_balance, packed outs)
-    //   tx_rev   : slot -> DISPLAY-order 32-byte txid (for UTXO/txs_map serialize)
-    let mut tx_index: HashMap<[u8; 32], u32> = HashMap::new();
-    let mut packed: Vec<PackedTx> = Vec::new();
-    let mut tx_rev: Vec<[u8; 32]> = Vec::new();
-
-    // Address interning (Step 3) is hoisted ABOVE Pass 1 because Pass 1 now
-    // classifies + interns every output while building the packed store. Intern
-    // each distinct base58 string ONCE to a dense u32 id; resolve id->String only
-    // when building on-disk key bytes, so the output stays byte-identical.
-    // addr_rev[id] is the exact string; addr_intern[s] is its id.
-    let mut addr_intern: HashMap<String, u32> = HashMap::new();
-    let mut addr_rev: Vec<String> = Vec::new();
-    // (intern() and pack_output() are free fns above — they borrow both maps
-    // mutably at each call site.)
-
-    // Phase 2 Instrumentation: Track deserialization metrics
-    let mut pass1_tx_total = 0;
-    let mut pass1_tx_deserialized = 0;
-    let mut pass1_tx_failed = 0;
-    let mut pass1_inputs_processed = 0;
-    let mut pass1_sapling_count = 0;  // NEW: Track Sapling transactions
-    
-    let iter1 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
-    
-    for item in iter1 {
-        let (key, value) = item?;
-        // Skip block transaction index keys
-        if key.first() == Some(&b'B') {
-            continue;
-        }
-        // Skip invalid transactions
-        if value.len() < 8 {
-            continue;
-        }
-        // Check height: skip orphaned and unresolved transactions
-        let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
-        let height = i32::from_le_bytes(height_bytes);
-        if !should_index_transaction(height) {
-            continue;
-        }
-        let raw_tx = &value[8..];
-        let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
-        tx_with_header.extend_from_slice(&[0u8; 4]);
-        tx_with_header.extend_from_slice(raw_tx);
-        
-        pass1_tx_total += 1;
-        
-        let tx = match deserialize_transaction(&tx_with_header).await {
-            Ok(tx) => {
-                pass1_tx_deserialized += 1;
-                // NEW: Count Sapling transactions (version >= 3 with Sapling data)
-                if tx.sapling_data.is_some() {
-                    pass1_sapling_count += 1;
-                }
-                tx
-            }
-            Err(e) => {
-                pass1_tx_failed += 1;
-                // CRITICAL: Log deserialization failures
-                let txid_bytes = txid_from_key(&key);
-                let txid_hex = hex::encode(&txid_bytes);
-                warn!(txid = %txid_hex, height = height, error = ?e, "Pass 1: Failed to deserialize transaction");
+        for item in iter1 {
+            let (key, value) = item?;
+            // Skip block transaction index keys.
+            if key.first() == Some(&b'B') {
                 continue;
             }
-        };
-
-        // INVARIANT #2: detect the type NOW, while the inputs are still alive —
-        // it depends on inputs[0]'s null/zerocoin prevout, which is dropped below.
-        let ty = ty_to_u8(crate::tx_type::detect_transaction_type(&tx));
-        // INVARIANT #4: carry the SIGNED Sapling net value forward for the fee calc.
-        let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
-
-        // Build the packed outputs by running the SAME classify_output logic Pass 2
-        // used to run, interning the resulting address string(s) to u32 ONCE here.
-        // PUSH EVERY output (incl. kind=0 markers / zerocoin / nonstandard) so
-        // outs.len() == tx.outputs.len() and out_sum is identical (INVARIANT #1, #8).
-        let mut outs: Vec<PackedOut> = Vec::with_capacity(tx.outputs.len());
-        for output in &tx.outputs {
-            outs.push(pack_output(output, &mut addr_intern, &mut addr_rev));
-        }
-
-        // Insert the packed tx under its DISPLAY-order txid (same source the old
-        // tx_cache key used: txid_from_key on the CF key). INVARIANT #7.
-        let txid_bytes = txid_from_key(&key);
-        if !txid_bytes.is_empty() {
-            if let Ok(txid_arr) = <[u8; 32]>::try_from(txid_bytes.as_slice()) {
-                let slot = packed.len() as u32;
-                tx_index.insert(txid_arr, slot);
-                tx_rev.push(txid_arr);
-                packed.push(PackedTx {
-                    height,
-                    ty,
-                    value_balance,
-                    outs: outs.into_boxed_slice(),
-                });
+            // Skip invalid transactions.
+            if value.len() < 8 {
+                continue;
             }
-        }
+            // Check height: skip orphaned and unresolved transactions.
+            let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0, 0, 0, 0]);
+            let height = i32::from_le_bytes(height_bytes);
+            if !should_index_transaction(height) {
+                continue;
+            }
+            let raw_tx = &value[8..];
+            let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+            tx_with_header.extend_from_slice(&[0u8; 4]);
+            tx_with_header.extend_from_slice(raw_tx);
 
-        // Scan inputs into the spent-outpoint set (UNCHANGED), then DROP the tx.
-        for input in &tx.inputs {
-                if input.coinbase.is_some() {
+            sh.tx_total += 1;
+            let tx = match deserialize_transaction(&tx_with_header).await {
+                Ok(tx) => {
+                    sh.tx_deserialized += 1;
+                    // Count Sapling transactions (version >= 3 with Sapling data).
+                    if tx.sapling_data.is_some() {
+                        sh.sapling_count += 1;
+                    }
+                    tx
+                }
+                Err(e) => {
+                    sh.tx_failed += 1;
+                    // CRITICAL: Log deserialization failures.
+                    let txid_bytes = txid_from_key(&key);
+                    let txid_hex = hex::encode(&txid_bytes);
+                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 1: Failed to deserialize transaction");
                     continue;
                 }
-                pass1_inputs_processed += 1;
-                if let Some(prevout) = &input.prevout {
-                    // FIXED: parser.rs now returns prevout.hash in DISPLAY format (reversed)
-                    // This matches the format used in database keys ('t' + reversed_txid)
-                    // and matches blocks.rs::read_outpoint() and transactions.rs::read_outpoint()
-                    if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
-                        // prev_txid_display is in display/reversed format
-                        // This NOW matches the database key format
+            };
 
-                        let t: [u8; 32] = prev_txid_display.as_slice().try_into()
-                            .expect("spent-set prevout txid must be 32 bytes");
-                        spent_outputs.insert((t, prevout.n as u32));
-                    }
-                }
+            pass1_index_tx(&mut sh, &key, &tx, height);
+            processed += 1;
         }
-        processed += 1;
+        sh
+    };
+
+    // Destructure the shard back into the per-pass working set and rebuild
+    // tx_index (DISPLAY txid -> slot) from tx_rev — same content the old inline
+    // insert produced (last-writer-wins per txid).
+    let Pass1Shard {
+        spent_outputs,
+        packed,
+        tx_rev,
+        addr_intern,
+        addr_rev,
+        tx_total: pass1_tx_total,
+        tx_deserialized: pass1_tx_deserialized,
+        tx_failed: pass1_tx_failed,
+        inputs_processed: pass1_inputs_processed,
+        sapling_count: pass1_sapling_count,
+    } = sh;
+    let mut tx_index: HashMap<[u8; 32], u32> = HashMap::with_capacity(tx_rev.len());
+    for (slot, txid) in tx_rev.iter().enumerate() {
+        tx_index.insert(*txid, slot as u32);
     }
-    
-    
+
+    // Freeze the packed store + tx_index behind Arc so the parallel Pass 2b shards
+    // share them read-only (no ~4 GB duplication). Pass 2, the serial Pass 2b and
+    // the write loop all index through the Arc transparently (Deref coercion).
+    let packed = Arc::new(packed);
+    let tx_index = Arc::new(tx_index);
+
     info!(
         transactions_scanned = processed,
         spent_outputs_found = spent_outputs.len(),
@@ -511,253 +1043,112 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
           "Writing address index to database");
     info!("Pass 2b: Scanning inputs to include sent transactions and calculate totals");
     
-    // Phase 2 Instrumentation: Track Pass 2b metrics. Prevout joins now resolve
-    // through tx_index -> packed (no prevout re-deserialize, no tx_cache); the
-    // current tx is still deserialized once for its INPUTS (not packed), while
-    // its outs / ty / value_balance are read from packed[slot].
-    let mut pass2b_tx_total = 0;
-    let mut pass2b_tx_deserialized = 0;
-    let mut pass2b_tx_failed = 0;
-    let mut pass2b_coinstake_skipped = 0;
-    let mut pass2b_inputs_processed = 0;
-    let mut pass2b_prevout_resolved: u64 = 0;
+    // Pass 2b accumulators live in a shard so this serial scan and each parallel
+    // shard share ONE per-tx implementation (pass2b_process_tx) and merge the
+    // same way. The byte-exact outputs are totals_sent (i64, plain += is
+    // associative) and the txs_map adds (sorted+deduped at write); day_joins /
+    // coinstake_treasury are analytics (gate-excluded). Prevout joins resolve
+    // through the frozen tx_index -> packed; the current tx is deserialized once
+    // for its INPUTS while its outs / ty / value_balance come from packed[slot].
+    let sh2 = if shards >= 2 {
+        // Parallel Pass 2b on a blocking-pool thread. Shards read the frozen
+        // packed / tx_index by Arc (no ~4 GB duplication); block_times (~22 MB) is
+        // cloned once into an Arc so the original stays available for the daily
+        // series persist below.
+        let dbc = Arc::clone(&db);
+        let packed = Arc::clone(&packed);
+        let tx_index = Arc::clone(&tx_index);
+        let block_times_arc = Arc::new(block_times.clone());
+        tokio::task::spawn_blocking(move || {
+            run_pass2b_parallel(dbc, shards, packed, tx_index, block_times_arc)
+        })
+        .await??
+    } else {
+        let mut sh2 = Pass2bShard::default();
+        let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
+        for item in iter3 {
+            let (key, value) = item?;
+            if key.first() == Some(&b'B') { continue; }
+            if value.len() < 8 { continue; }
+            let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
+            let height = i32::from_le_bytes(height_bytes);
+            if !should_index_transaction(height) { continue; }
 
-    // Tier-2 per-day aggregates from the prevout joins below (fees, staking
-    // rewards, coin days destroyed, cold-staking flows), bucketed by the
-    // SPENDER's block date and merged into the daily series afterwards.
-    let mut day_joins: HashMap<String, DayJoinAgg> = HashMap::new();
-    // Tier-4: budget payouts minted INSIDE coinstakes (modern PIVX pays
-    // proposals in the coinstake at heights at/after each 43200-block cycle
-    // boundary). Detected here, where outputs - inputs is already joined,
-    // as the minted excess over the era's scheduled block reward.
-    let mut coinstake_treasury: Vec<TreasuryPayout> = Vec::new();
+            // Extract current txid from key
+            let current_txid_bytes = txid_from_key(&key);
+            if current_txid_bytes.is_empty() { continue; }
 
-    let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
-    let mut input_processed: usize = 0;
-    for item in iter3 {
-        let (key, value) = item?;
-        if key.first() == Some(&b'B') { continue; }
-        if value.len() < 8 { continue; }
-        let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
-        let height = i32::from_le_bytes(height_bytes);
-        if !should_index_transaction(height) { continue; }
+            // Resolve this tx's slot in the packed store (built in Pass 1). Outputs,
+            // ty and value_balance come from packed[slot]; the raw inputs come from
+            // the deserialize below (inputs are not packed).
+            let cur_slot = match <[u8; 32]>::try_from(current_txid_bytes.as_slice())
+                .ok()
+                .and_then(|a| tx_index.get(&a).copied())
+            {
+                Some(s) => s,
+                None => continue, // not indexed in Pass 1 (failed deserialize) — skip
+            };
 
-        // Extract current txid from key
-        let current_txid_bytes = txid_from_key(&key);
-        if current_txid_bytes.is_empty() { continue; }
+            sh2.tx_total += 1;
 
-        // Resolve this tx's slot in the packed store (built in Pass 1). Outputs,
-        // ty and value_balance come from packed[slot]; the raw inputs come from
-        // the deserialize below (inputs are not packed).
-        let cur_slot = match <[u8; 32]>::try_from(current_txid_bytes.as_slice())
-            .ok()
-            .and_then(|a| tx_index.get(&a).copied())
-        {
-            Some(s) => s,
-            None => continue, // not indexed in Pass 1 (failed deserialize) — skip
-        };
-
-        pass2b_tx_total += 1;
-
-        // Deserialize the current tx ONCE for its INPUTS (not held in packed).
-        let raw_tx = &value[8..];
-        let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
-        tx_with_header.extend_from_slice(&[0u8; 4]);
-        tx_with_header.extend_from_slice(raw_tx);
-        let tx = match deserialize_transaction(&tx_with_header).await {
-            Ok(tx) => {
-                pass2b_tx_deserialized += 1;
-                tx
-            }
-            Err(e) => {
-                pass2b_tx_failed += 1;
-                let txid_hex = hex::encode(&current_txid_bytes);
-                warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2b: Failed to deserialize transaction");
-                continue;
-            }
-        };
-
-        // Coinstake inputs ARE counted as "sent" (UTXO accounting, Blockbook parity):
-        // the staked output is consumed and its principal re-minted in the coinstake
-        // outputs (counted as received). This keeps balance == received - sent.
-        // (ty was computed in Pass 1; ty==1 => Coinstake.)
-        if packed[cur_slot as usize].ty == 1 {
-            pass2b_coinstake_skipped += 1; // metric retained: counts coinstakes seen
-        }
-
-        // Tier-2 accumulators for this spending transaction (prevout joins).
-        let mut input_sum: i64 = 0;
-        let mut inputs_with_prevout: u64 = 0;
-        let mut inputs_resolved: u64 = 0;
-        let mut tx_coin_days: f64 = 0.0;
-        let mut tx_p2cs_spent: i64 = 0;
-
-        // For every input, find the prevout's addresses and attribute this tx to them
-        for input in &tx.inputs {
-            if input.coinbase.is_some() { continue; }
-            pass2b_inputs_processed += 1;
-            if let Some(prevout) = &input.prevout {
-                inputs_with_prevout += 1;
-                // prevout.hash from parser.rs is in DISPLAY (reversed) format — the
-                // same byte order as tx_index keys / tx_rev (INVARIANT #7).
-                if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
-                    // INVARIANT #3 (zPoS null-prevout): resolve ONLY through tx_index.
-                    // A zPoS coinstake's first input carries an all-zero/zerocoin
-                    // prevout txid that was never inserted into tx_index, so the
-                    // lookup MISSES, inputs_resolved is NOT incremented (while
-                    // inputs_with_prevout IS), and the clamp
-                    // `inputs_with_prevout>0 && inputs_resolved==inputs_with_prevout`
-                    // correctly FAILS -> fee/minted suppressed for zPoS. The
-                    // all-zero txid cannot map to a real slot: it is never inserted
-                    // (only real CF-key txids are), so .get() returns None.
-                    let prev = <[u8; 32]>::try_from(prev_txid_display.as_slice())
-                        .ok()
-                        .and_then(|a| tx_index.get(&a).copied())
-                        .map(|s| {
-                            let p = &packed[s as usize];
-                            (p, p.height)
-                        });
-
-                    if let Some((prev_tx, prev_height)) = prev {
-                        if let Some(prev_out) = prev_tx.outs.get(prevout.n as usize) {
-                            // Tier 2: spend-side joins — input value sum (fees /
-                            // rewards), coin age, and cold-staking principal spent.
-                            inputs_resolved += 1;
-                            pass2b_prevout_resolved += 1;
-                            input_sum = input_sum.saturating_add(prev_out.value);
-                            if prev_height >= 0 && height >= prev_height {
-                                let age_days = (height - prev_height) as f64 / 1440.0;
-                                tx_coin_days += (prev_out.value as f64 / 100_000_000.0) * age_days;
-                            }
-                            // coldstake-spent test <= (prev_out.kind == 2), which
-                            // coincides exactly with the old get_script_type=="coldstake".
-                            if prev_out.kind == 2 {
-                                tx_p2cs_spent = tx_p2cs_spent.saturating_add(prev_out.value);
-                            }
-
-                            // Attribution from the packed kind / interned ids
-                            // (already classified + interned in Pass 1).
-                            match prev_out.kind {
-                                1 => {
-                                    // Standard: address is spending
-                                    let id = prev_out.addr_a;
-                                    *totals_sent.entry(id).or_insert(0) += prev_out.value;
-                                    txs_map.entry(id).or_default().push(current_txid_bytes.clone());
-                                }
-
-                                2 => {
-                                    // Cold stake spend: debit BOTH addresses, mirroring the
-                                    // credit both received in Pass 2 (see Pass 2 comment).
-                                    // This keeps balance == received - sent for the staker
-                                    // and the owner independently. Staker and owner are
-                                    // DISTINCT ids.
-                                    let staker_id = prev_out.addr_a;
-                                    let owner_id = prev_out.addr_b;
-                                    *totals_sent.entry(staker_id).or_insert(0) += prev_out.value;
-                                    *totals_sent.entry(owner_id).or_insert(0) += prev_out.value;
-
-                                    // Both appear in transaction list
-                                    txs_map.entry(staker_id).or_default().push(current_txid_bytes.clone());
-                                    txs_map.entry(owner_id).or_default().push(current_txid_bytes.clone());
-                                }
-
-                                _ => {
-                                    // No attribution for nonstandard/OP_RETURN/etc
-                                }
-                            }
-                        }
-                    }
+            // Deserialize the current tx ONCE for its INPUTS (not held in packed).
+            let raw_tx = &value[8..];
+            let mut tx_with_header = Vec::with_capacity(4 + raw_tx.len());
+            tx_with_header.extend_from_slice(&[0u8; 4]);
+            tx_with_header.extend_from_slice(raw_tx);
+            let tx = match deserialize_transaction(&tx_with_header).await {
+                Ok(tx) => {
+                    sh2.tx_deserialized += 1;
+                    tx
                 }
-            }
-        }
-
-        // Tier 2: bucket this tx's join aggregates by the SPENDER's block date.
-        if height >= 0 && (height as usize) < block_times.len() && block_times[height as usize] != 0 {
-            let date = unix_to_date(block_times[height as usize] as u64);
-            let agg = day_joins.entry(date.clone()).or_default();
-            // out_sum / p2cs_created from the CURRENT tx's packed outs.
-            let cur = &packed[cur_slot as usize];
-            let out_sum: i64 = cur.outs.iter().map(|o| o.value).sum();
-            let p2cs_created: i64 = cur
-                .outs
-                .iter()
-                .filter(|o| o.kind == 2)
-                .map(|o| o.value)
-                .sum();
-            agg.p2cs_created = agg.p2cs_created.saturating_add(p2cs_created);
-            agg.p2cs_spent = agg.p2cs_spent.saturating_add(tx_p2cs_spent);
-            agg.coin_days_destroyed += tx_coin_days;
-            match u8_to_ty(cur.ty) {
-                crate::tx_type::TransactionType::Normal => {
-                    agg.normal_tx_bytes += (value.len() as u64).saturating_sub(8);
-                    // Fee = transparent_in + valueBalance - transparent_out.
-                    // Sapling txs move value via valueBalance (negative =
-                    // transparent->shield, positive = shield->transparent);
-                    // ignoring it booked the entire shielded amount as "fee"
-                    // (a t->z tx reported ~1998 PIV vs a real ~0.5). Credit only
-                    // when every transparent input resolved, and clamp to a sane
-                    // ceiling to reject any residual mis-join. INVARIANT #4:
-                    // value_balance is SIGNED and added with its sign.
-                    if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
-                        let value_balance = cur.value_balance;
-                        let fee = input_sum + value_balance - out_sum;
-                        if fee > 0 && fee < 1_000 * crate::emission::COIN {
-                            agg.fees_total = agg.fees_total.saturating_add(fee);
-                        }
-                    }
+                Err(e) => {
+                    sh2.tx_failed += 1;
+                    let txid_hex = hex::encode(&current_txid_bytes);
+                    warn!(txid = %txid_hex, height = height, error = ?e, "Pass 2b: Failed to deserialize transaction");
+                    continue;
                 }
-                crate::tx_type::TransactionType::Coinstake => {
-                    // Minted value: outputs - staked inputs. This is the era
-                    // block reward PLUS any budget payout riding in the
-                    // coinstake (PIVX pays treasury proposals inside the
-                    // coinstake at heights at/after each budget cycle, e.g.
-                    // 12,200 PIV at h=5,400,000 and 100,800 PIV at
-                    // h=5,443,200 — node-verified, see src/emission.rs).
-                    if inputs_resolved == inputs_with_prevout {
-                        let minted = out_sum.saturating_sub(input_sum);
-                        if minted > 0 {
-                            let expected = crate::emission::era_block_reward(height);
-                            let excess = minted.saturating_sub(expected);
-                            // Budget payouts are large (hundreds–thousands of
-                            // PIV). A coinstake whose excess is only a few PIV is
-                            // collecting transaction fees, not paying a proposal —
-                            // the old >1 PIV threshold swept ~19 fee-bearing
-                            // coinstakes into the treasury history. Require
-                            // >=100 PIV; fee excess then correctly flows into the
-                            // staker's rewards (the else branch).
-                            if excess > 100 * crate::emission::COIN {
-                                // Budget payout: record it as treasury and
-                                // keep ONLY the era emission in rewards_total
-                                // so the staking APY series isn't polluted by
-                                // superblocks. (>1 PIV tolerance for fees /
-                                // rounding.)
-                                coinstake_treasury.push(TreasuryPayout {
-                                    height,
-                                    date: date.clone(),
-                                    total_paid_sats: excess,
-                                    n_outputs: cur.outs.len() as u32,
-                                });
-                                agg.rewards_total =
-                                    agg.rewards_total.saturating_add(expected);
-                            } else {
-                                agg.rewards_total =
-                                    agg.rewards_total.saturating_add(minted);
-                            }
-                            // Staker share (excl. masternode payment) per the
-                            // v5.6.1 schedule, capped by what was minted.
-                            agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(
-                                crate::emission::era_staker_reward(height).min(minted),
-                            );
-                        }
-                    }
-                }
-                crate::tx_type::TransactionType::Coinbase => {}
-            }
-        }
+            };
 
-        input_processed += 1;
+            pass2b_process_tx(
+                &mut sh2,
+                &packed,
+                &tx_index,
+                &block_times,
+                &current_txid_bytes,
+                cur_slot,
+                &tx,
+                height,
+                value.len(),
+            );
+            sh2.input_processed += 1;
+        }
+        sh2
+    };
+
+    // Merge the shard into the global per-address maps. totals_sent was empty
+    // (Pass 2 fills only totals_received), so its entries move in directly; the
+    // txs_map adds extend Pass 2's received-side lists (sorted+deduped at write,
+    // so the order they arrive in does not matter).
+    let Pass2bShard {
+        totals_sent: sh2_totals_sent,
+        txs_map_adds,
+        day_joins,
+        coinstake_treasury,
+        tx_total: pass2b_tx_total,
+        tx_deserialized: pass2b_tx_deserialized,
+        tx_failed: pass2b_tx_failed,
+        coinstake_skipped: pass2b_coinstake_skipped,
+        inputs_processed: pass2b_inputs_processed,
+        prevout_resolved: pass2b_prevout_resolved,
+        input_processed,
+    } = sh2;
+    for (id, v) in sh2_totals_sent {
+        *totals_sent.entry(id).or_insert(0) += v;
     }
-    
+    for (id, adds) in txs_map_adds {
+        txs_map.entry(id).or_default().extend(adds);
+    }
+
     info!(
         input_processed = input_processed,
         pass2b_total = pass2b_tx_total,
@@ -1704,6 +2095,48 @@ fn persist_hodl_snapshot(
 mod tests {
     use super::*;
     use crate::types::CScript;
+
+    /// The shard bounds must form an EXACT partition of the 't' keyspace: floor
+    /// at the prefix, ceiling past it, contiguous (no gap), disjoint (no overlap),
+    /// every shard non-empty. This is the keystone that lets concatenated shard
+    /// output equal serial slot order byte-for-byte.
+    #[test]
+    fn tx_shard_bounds_partition_is_exact() {
+        for n in 1..=4 {
+            let b = tx_shard_bounds(n);
+            assert_eq!(b.len(), n, "n={n}");
+            assert_eq!(b[0].0, vec![b't', 0], "floor at the 't' prefix");
+            assert_eq!(b[n - 1].1, vec![b't' + 1], "ceiling past the 't' prefix");
+            for (lo, hi) in &b {
+                assert!(lo < hi, "empty shard range {lo:?}..{hi:?} at n={n}");
+            }
+            for k in 0..n - 1 {
+                assert_eq!(b[k].1, b[k + 1].0, "gap/overlap at shard {k} (n={n})");
+            }
+        }
+        // Clamp: > 4 collapses to 4 (RAM cap), 0 collapses to 1 (serial).
+        assert_eq!(tx_shard_bounds(9).len(), 4);
+        assert_eq!(tx_shard_bounds(0).len(), 1);
+    }
+
+    /// Every possible first txid byte must fall in EXACTLY one shard's [lo, hi),
+    /// so the union of shards == the serial iterator's full visit set (each tx
+    /// processed once, in the same order — no tx dropped, none double-counted).
+    #[test]
+    fn tx_shard_bounds_assign_every_txid_once() {
+        for n in 1..=4 {
+            let b = tx_shard_bounds(n);
+            for first in 0u8..=255 {
+                let key = [b't', first, 0x00, 0x00]; // a representative 't'+txid key
+                let k = key.as_slice();
+                let hits = b
+                    .iter()
+                    .filter(|(lo, hi)| k >= lo.as_slice() && k < hi.as_slice())
+                    .count();
+                assert_eq!(hits, 1, "first byte {first} matched {hits} shards at n={n}");
+            }
+        }
+    }
 
     /// Build a CTxOut with the given value/index/script/addresses (the fields
     /// classify_output() reads). script_length is informational and unused here.
