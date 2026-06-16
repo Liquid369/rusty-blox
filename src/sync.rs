@@ -640,7 +640,7 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    let height_resolution_complete = match db.get_cf(&cf_state, b"height_resolution_complete")? {
+    let mut height_resolution_complete = match db.get_cf(&cf_state, b"height_resolution_complete")? {
         Some(bytes) => bytes[0] == 1,
         None => false,
     };
@@ -655,7 +655,7 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
         None => false,
     };
     
-    let repair_complete = match db.get_cf(&cf_state, b"repair_complete")? {
+    let mut repair_complete = match db.get_cf(&cf_state, b"repair_complete")? {
         Some(bytes) => bytes[0] == 1,
         None => false,
     };
@@ -698,9 +698,17 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
                         "Height resolution complete"
                     );
                     db.put_cf(&cf_state, b"height_resolution_complete", [1u8])?;
-                    
+
                     // Mark repair as complete too since we just did it
                     db.put_cf(&cf_state, b"repair_complete", [1u8])?;
+                    // [Lever 1] Sync the in-memory gate flags with the DB markers
+                    // we just wrote. The repair phase below is gated on these
+                    // locals, which were read ONCE at the top of the function and
+                    // would otherwise stay stale-false -> repair re-scans the whole
+                    // tx CF (and the 'B' index) to fix nothing. Set ONLY on this Ok
+                    // arm; on Err they stay false so repair still runs as fallback.
+                    height_resolution_complete = true;
+                    repair_complete = true;
                 }
                 Err(e) => {
                     tracing::warn!(error = ?e, "Height resolution failed - will fall back to repair phase");

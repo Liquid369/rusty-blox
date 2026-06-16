@@ -975,21 +975,47 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         warn!(error = %e, "Failed to persist HODL snapshot");
     }
 
-    // Precompute the daily transaction time-series using REAL block times, so
-    // the transactions-analytics endpoint serves exact, correctly-dated data
-    // instantly instead of full-scanning with a height->date estimate.
-    if let Err(e) = persist_tx_daily_series(
-        &db,
-        tip,
-        &block_times,
-        &block_bits,
-        &day_joins,
-        &coinstake_treasury,
-    )
-    .await
-    {
-        warn!(error = %e, "Failed to persist transaction daily series");
-    }
+    // [Lever 2] Defer the daily transaction time-series (~56 min -- a full
+    // independent rescan of all 12M txs) OFF the critical path: run it on a
+    // detached background thread so the explorer goes live ~56 min sooner. It
+    // writes only analytics_tx_day* / treasury keys, which the balance/tx API
+    // never reads (analytics readers are null-safe), so balances are unaffected.
+    // The owned accumulators are MOVED into the thread (otherwise dropped at
+    // return). A detached std::thread + current-thread runtime is used (not
+    // tokio::spawn) because persist_tx_daily_series holds a RocksDB iterator
+    // across .await and so is !Send. On success it sets `analytics_complete`.
+    // NOTE: a crash during this background pass leaves the daily-series unbuilt
+    // until a re-enrichment -- analytics only, never a balance.
+    let db_bg = Arc::clone(&db);
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!(error = %e, "Background: failed to build runtime for daily series");
+                return;
+            }
+        };
+        rt.block_on(async move {
+            info!("Background: precomputing transaction daily series");
+            if let Err(e) = persist_tx_daily_series(
+                &db_bg,
+                tip,
+                &block_times,
+                &block_bits,
+                &day_joins,
+                &coinstake_treasury,
+            )
+            .await
+            {
+                warn!(error = %e, "Background: failed to persist transaction daily series");
+                return;
+            }
+            if let Some(cf_state) = db_bg.cf_handle("chain_state") {
+                let _ = db_bg.put_cf(&cf_state, b"analytics_complete", [1u8]);
+            }
+            info!("Background: transaction daily series complete - analytics ready");
+        });
+    });
 
     Ok(())
 }

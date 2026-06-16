@@ -9,7 +9,7 @@
 use rocksdb::{DB, WriteBatch, WriteOptions, IteratorMode};
 use std::sync::Arc;
 use std::collections::{HashSet, HashMap};
-use tracing::{error, warn, info};
+use tracing::{warn, info};
 use crate::leveldb_index::build_canonical_chain_from_leveldb;
 use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 use crate::db_utils::bulk_write_options;
@@ -41,35 +41,14 @@ pub async fn resolve_heights_from_block_index(
     bulk: bool,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let wo = bulk_write_options();
-    // 1. Determine PIVX data directory
+    // [Lever 3] The canonical height set is built from chain_metadata further
+    // down (after the early-exit check) instead of here. The parse phase already
+    // imported PIVX Core's leveldb index into chain_metadata and
+    // validate_canonical_metadata_complete verified it is contiguous 0..=tip, so
+    // re-copying and re-chainworking the full 5.5M-block leveldb a second time
+    // (~35 min) is pure redundancy. pivx_dir is retained only for the safety
+    // fallback used when chain_metadata is unexpectedly empty.
     let pivx_dir = pivx_data_dir.unwrap_or_else(crate::config::default_pivx_data_dir);
-    
-    let block_index_src = format!("{}/blocks/index", pivx_dir);
-    let block_index_copy = "/tmp/pivx_block_index_current";
-    
-    // Copy block index to temp location
-    // Remove old copy if exists
-    std::fs::remove_dir_all(block_index_copy).ok();
-    
-    // Copy using cp command
-    let copy_result = std::process::Command::new("cp")
-        .args(["-R", &block_index_src, block_index_copy])
-        .output()?;
-    
-    if !copy_result.status.success() {
-        return Err(format!("Failed to copy block index: {}", 
-            String::from_utf8_lossy(&copy_result.stderr)).into());
-    }
-    
-    // 2. Build canonical chain from copied block index
-    
-    let canonical_chain = match build_canonical_chain_from_leveldb(block_index_copy) {
-        Ok(chain) => chain,
-        Err(e) => {
-            error!(path = %block_index_copy, error = ?e, "Failed to read block index - make sure PIVX Core is installed and has synced");
-            return Err(e);
-        }
-    };
     
     // 3. Build lookup structures
     //
@@ -136,10 +115,38 @@ pub async fn resolve_heights_from_block_index(
         return Ok((0, 0));
     }
     
-    // 5. Build a reverse lookup: height -> block_hash
+    // 5. Build the canonical height -> hash map from chain_metadata (already in
+    // the DB from the parse-phase resolve). Only the height KEY set is consulted
+    // below (a presence test); the stored value is never read, so any byte is
+    // fine. Falls back to a one-off leveldb re-import only if chain_metadata is
+    // unexpectedly empty (it is validated complete+contiguous before parse).
+    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
     let mut height_to_blockhash: HashMap<i64, Vec<u8>> = HashMap::new();
-    for (height, block_hash, _, _) in &canonical_chain {
-        height_to_blockhash.insert(*height, block_hash.clone());
+    for item in db.iterator_cf(&cf_metadata, IteratorMode::Start) {
+        if let Ok((key, value)) = item {
+            // height -> hash keys are the 4-byte little-endian height; skip the
+            // 33-byte 'h'+hash and the 'w'+height chainwork keys.
+            if key.len() == 4 {
+                let h = i32::from_le_bytes([key[0], key[1], key[2], key[3]]) as i64;
+                height_to_blockhash.insert(h, value.to_vec());
+            }
+        }
+    }
+    if height_to_blockhash.is_empty() {
+        warn!("chain_metadata has no canonical heights - falling back to leveldb re-import");
+        let block_index_copy = "/tmp/pivx_block_index_current";
+        let block_index_src = format!("{}/blocks/index", pivx_dir);
+        std::fs::remove_dir_all(block_index_copy).ok();
+        let copy_result = std::process::Command::new("cp")
+            .args(["-R", &block_index_src, block_index_copy])
+            .output()?;
+        if !copy_result.status.success() {
+            return Err(format!("Failed to copy block index: {}",
+                String::from_utf8_lossy(&copy_result.stderr)).into());
+        }
+        for (height, block_hash, _, _) in &build_canonical_chain_from_leveldb(block_index_copy)? {
+            height_to_blockhash.insert(*height, block_hash.clone());
+        }
     }
     
     // 5a. [C] The previous code materialised a full 'B'-key index here
