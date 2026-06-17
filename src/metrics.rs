@@ -714,17 +714,25 @@ pub fn load_metrics_from_db(db: &std::sync::Arc<rocksdb::DB>) -> Result<(), Box<
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use std::sync::Once;
+
+    // init_metrics() registers into the process-global REGISTRY, which can only
+    // happen once; all tests share one process, so guard it with Once (the first
+    // call still validates that registration succeeds).
+    fn ensure_init() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| init_metrics().expect("metrics init should succeed"));
+    }
+
     #[test]
     fn test_init_metrics() {
-        // Should not panic
-        init_metrics().unwrap();
+        ensure_init();
     }
-    
+
     #[test]
     fn test_gather_metrics() {
-        init_metrics().unwrap();
-        
+        ensure_init();
+
         // Increment some metrics
         increment_blocks_processed("test", 100);
         set_chain_tip_height("rpc", 1000);
