@@ -193,7 +193,7 @@
 
 <script setup>
 import Icon from '@/components/common/Icon.vue'
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
@@ -373,10 +373,14 @@ watch(addressFilter, async (newFilter) => {
   }
 })
 
-// Lifecycle
-onMounted(() => {
+// Refetch when navigating between xpubs. The router reuses this component
+// instance for /xpub/:xpub, so onMounted alone would leave /xpub/A's data on
+// screen after navigating straight to /xpub/B.
+watch(() => route.params.xpub, (newXpub) => {
+  if (!newXpub) return
+  xpub.value = newXpub
   fetchXPubData()
-})
+}, { immediate: true })
 </script>
 
 <style scoped>

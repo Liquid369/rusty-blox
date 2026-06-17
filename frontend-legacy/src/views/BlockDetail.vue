@@ -131,13 +131,10 @@
               />
             </InfoRow>
 
-            <InfoRow v-if="block.nextblockhash" label="Next Block" icon="arrow-right">
-              <HashDisplay
-                :hash="block.nextblockhash"
-                :truncate="true"
-                show-copy
-                :link-to="`/block/${block.height + 1}`"
-              />
+            <InfoRow v-if="block.height < chainStore.syncHeight" label="Next Block" icon="arrow-right">
+              <router-link :to="`/block/${block.height + 1}`" class="next-block-link">
+                #{{ formatNumber(block.height + 1) }}
+              </router-link>
             </InfoRow>
           </div>
         </Card>
@@ -592,6 +589,17 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.next-block-link {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.next-block-link:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 768px) {

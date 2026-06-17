@@ -27,10 +27,8 @@ defineProps({
   value: {
     type: [String, Number],
     required: true
-  },  suffix: {
-    type: String,
-    default: ''
-  },  suffix: {
+  },
+  suffix: {
     type: String,
     default: ''
   },
