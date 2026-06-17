@@ -222,7 +222,8 @@ async fn update_network_height(db: &Arc<DB>) {
     }
 }
 
-/// Refresh canonical chain metadata ('h' + hash → height, height → hash, offsets)
+/// Refresh canonical chain metadata ('h' + hash → height, height → hash; offsets
+/// only when sync.validate_offset_indexing is set)
 /// from PIVX Core's LevelDB block index.
 ///
 /// The blk-file processor resolves each block's height at parse time via the
@@ -599,13 +600,6 @@ async fn run_initial_sync(
     Ok(())
 }
 
-/// Run post-sync enrichment: address indexing + transaction reconciliation
-/// This runs after blockchain sync to ensure all explorer data is available
-///
-/// `bulk` is `true` only when this runs as part of the initial full reindex
-/// (the DB is reconstructible, so the WAL-heavy height-resolution writeback can
-/// run with the WAL disabled). On the live / existing-index / catch-up paths it
-/// is `false` so those writes stay WAL-recoverable.
 /// Hand freed-but-retained jemalloc pages back to the OS.
 ///
 /// The block-parse and height-resolution phases allocate and free several GB of
@@ -645,6 +639,13 @@ fn purge_jemalloc() {
     }
 }
 
+/// Run post-sync enrichment: address indexing + transaction reconciliation, run
+/// after blockchain sync so all explorer data is available.
+///
+/// `bulk` is `true` only on the initial full reindex (the DB is reconstructible,
+/// so the WAL-heavy height-resolution writeback runs with the WAL disabled). On
+/// the live / existing-index / catch-up paths it is `false` so those writes stay
+/// WAL-recoverable.
 async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error>> {
     let config = get_global_config();
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
@@ -685,7 +686,7 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
         None => false,
     };
     
-    // PHASE 0: Resolve heights from PIVX Core block index (NEW - Strategy 1)
+    // PHASE 0: Resolve heights from PIVX Core block index
     // Only run this if we actually have transactions in the database!
     if use_block_index && !height_resolution_complete {
         // Check if we have any transactions to fix

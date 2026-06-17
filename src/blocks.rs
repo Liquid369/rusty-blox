@@ -602,8 +602,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // ALL blocks are stored, even if height is unknown
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
         
-        // If we have a height (genesis or previously resolved), store mappings
-        // CRITICAL FIX: Now uses tx_batch for atomic writes with transactions
+        // If we have a height (genesis or previously resolved), record it — and,
+        // on the live path only, the chain_metadata height/chainwork mappings
+        // (the bulk reindex skips those; see [Levers A+B] inside the block).
         if let Some(height) = block_height {
             if height > max_height {
                 max_height = height;
@@ -773,80 +774,6 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     Ok(if max_height == i32::MIN { None } else { Some(max_height) })
 }
 
-/// Read and process a single block by file number and offset (Pattern A helper)
-///
-/// This helper opens the blkNNN.dat file, seeks to the exact data position
-/// (nDataPos as stored in PIVX Core's block index) and parses the block from
-/// that point. It validates magic/size and then uses the same parsing logic
-/// as `process_blk_file` to index the block. This function is a focused
-/// helper so the sync logic can read blocks directly using the block index
-/// (file number + offset) instead of scanning blk files sequentially.
-pub async fn process_block_by_offset(
-    _state: AppState,
-    blk_dir: impl AsRef<std::path::Path>,
-    file_num: u32,
-    data_pos: u64,
-    _db: Arc<DB>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::AsyncSeekExt;
-    use tokio::io::SeekFrom;
-    use std::path::PathBuf;
-
-    // Construct filename (blkNNNNN.dat - 5 digits is standard)
-    let filename = format!("blk{:05}.dat", file_num);
-    let mut path = PathBuf::from(blk_dir.as_ref());
-    path.push(filename);
-
-    let file = tokio::fs::File::open(&path).await?;
-    let mut reader = BufReader::new(file);
-
-    // Seek to data position reported by leveldb index
-    reader.seek(SeekFrom::Start(data_pos)).await?;
-
-    // Read magic and size
-    let mut magic_bytes = [0u8; 4];
-    reader.read_exact(&mut magic_bytes).await?;
-    if magic_bytes != PREFIX {
-        return Err(format!("Magic mismatch at {}:{} (got {:02x?})", path.display(), data_pos, magic_bytes).into());
-    }
-
-    let mut size_buf = [0u8; 4];
-    reader.read_exact(&mut size_buf).await?;
-    let _block_size = u32::from_le_bytes(size_buf) as u64;
-
-    // Read header version to detect header size
-    let mut version_bytes = [0u8; 4];
-    reader.read_exact(&mut version_bytes).await?;
-    let ver_as_int = u32::from_le_bytes(version_bytes);
-
-    let header_size = get_header_size(ver_as_int);
-
-    // Rewind back to start of header (we already read 4 bytes of version)
-    let header_start = reader.stream_position().await? - 4;
-    reader.seek(SeekFrom::Start(header_start)).await?;
-
-    // Read full header
-    let mut header_buffer = vec![0u8; header_size];
-    reader.read_exact(&mut header_buffer).await?;
-
-    let _block_header = parse_block_header_sync(&header_buffer, header_size)?;
-
-    // At this point we can reuse the same logic as process_blk_file to index
-    // the header and then process transactions (process_transaction helper).
-    // For brevity we call into the same internal helpers - this keeps logic
-    // consistent and ensures Pattern A (direct file+offset reads) is used.
-
-    // Note: This function is intentionally conservative: it reads the block
-    // at the exact offset provided by Core's index and validates magic/size.
-    // Upstream code should handle storing the parsed header and calling
-    // transaction processors as needed (to avoid code duplication).
-
-    // TODO: invoke transaction parsing and DB writes here, or provide a
-    // public helper that accepts the positioned reader to continue parsing.
-
-    Ok(())
-}
-
 /// Get deterministic header size based on block version
 /// 
 /// PIVX block header sizes by version:
@@ -960,7 +887,8 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
         _ => (None, None),
     };
 
-    // Height will be assigned sequentially by process_blk_file
+    // Placeholder height; process_blk_file resolves the real height via the
+    // chain_metadata 'h'+hash lookup (or leaves it None for orphans).
     let block_height = Some(0);
 
     Ok(CBlockHeader {

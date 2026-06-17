@@ -10,14 +10,13 @@ use crate::chain_state::{set_sync_height, get_sync_height};
 use crate::chainwork::calculate_all_chainwork;
 use crate::sync::validate_canonical_metadata_complete;
 use hex;
-use std::collections::HashMap;
 use crate::config::get_global_config;
 use serde_json::Value;
 use tracing::{info, warn, debug, info_span, Instrument};
 
 /// Update sync_height by finding the highest block in chain_metadata
 /// This allows incremental progress updates as files are processed
-/// Optimized: reads in reverse to find max height quickly
+/// Full forward scan of all 4-byte height keys to find the max.
 async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
@@ -50,45 +49,6 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
     Ok(())
 }
 
-
-/// Find the maximum chainwork among all descendants of a block
-/// This is used to pick the "best" fork - the one leading to the most work
-/// Uses iterative DFS with memoization to avoid stack overflow
-#[allow(dead_code)]
-fn find_max_descendant_chainwork(
-    start_hash: &[u8],
-    children_map: &HashMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>,
-    chainwork_map: &HashMap<Vec<u8>, [u8; 32]>,
-) -> [u8; 32] {
-    use std::collections::VecDeque;
-    
-    let zero_work = [0u8; 32];
-    let mut max_work = chainwork_map.get(start_hash).copied().unwrap_or(zero_work);
-    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
-    queue.push_back(start_hash.to_vec());
-    
-    let mut visited = std::collections::HashSet::new();
-    
-    while let Some(current_hash) = queue.pop_front() {
-        if !visited.insert(current_hash.clone()) {
-            continue; // Already processed
-        }
-        
-        let current_work = chainwork_map.get(&current_hash).copied().unwrap_or(zero_work);
-        if current_work > max_work {
-            max_work = current_work;
-        }
-        
-        // Add all children to queue
-        if let Some(children) = children_map.get(&current_hash) {
-            for (child_hash, _) in children {
-                queue.push_back(child_hash.clone());
-            }
-        }
-    }
-    
-    max_work
-}
 
 /// Process multiple block files in parallel with controlled concurrency
 /// 

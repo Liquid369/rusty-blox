@@ -3,8 +3,9 @@
 /// This module reads PIVX Core's leveldb block index to build the canonical chain,
 /// then updates all transactions in our database with correct heights BEFORE enrichment.
 /// 
-/// This eliminates the need for the "repair" phase and ensures orphaned transactions
-/// are identified using Core's canonical chain data.
+/// On success this supersedes the "repair" phase (which remains as a fallback
+/// when resolution fails) and identifies orphaned transactions using Core's
+/// canonical chain data.
 
 use rocksdb::{DB, WriteBatch, WriteOptions, IteratorMode};
 use std::sync::Arc;

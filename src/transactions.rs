@@ -1048,7 +1048,7 @@ async fn handle_address_outputs_only(
             key_address,
             serialize_utxos(&existing_utxos).await
         ).await {
-            warn!(error = ?e, "Failed to add zerocoin UTXO to address index");
+            warn!(error = ?e, "Failed to add UTXO to address index");
         }
     }
 
