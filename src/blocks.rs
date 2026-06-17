@@ -608,69 +608,76 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             if height > max_height {
                 max_height = height;
             }
-            // Store: 'h' + block_hash -> height (for parent lookup, uses internal byte order)
-            let mut height_key = vec![b'h'];
-            height_key.extend_from_slice(&block_hash_vec);
-            let height_bytes = height.to_le_bytes().to_vec();
-            
-            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
-            tx_batch.put("chain_metadata", height_key, height_bytes.clone());
-            
-            // Store: height -> block_hash (for height-based queries, use display format - reversed)
-            let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
-            
-            // CRITICAL FIX: Write to batch instead of direct db.put_cf()
-            tx_batch.put("chain_metadata", height_bytes.clone(), reversed_hash);
-            
-            // Calculate and store chainwork
-            if n_bits > 0 {
-                // Calculate work for this block
-                let block_work = calculate_work_from_bits(n_bits);
+            // [Levers A+B] On the bulk reindex these per-block chain_metadata writes
+            // are pure dead/redundant work, so skip them on `bulk` (keep them on the
+            // live/RPC path, which does no full canonical rebuild per block):
+            //  - 'h'+hash→height and height→hash were ALREADY written by the leveldb
+            //    import (the height READ above consumed the import's 'h' value) and
+            //    are rewritten canonically by STEP 3D (parallel.rs) after the parse;
+            //    this loop only copied the import's bytes back verbatim.
+            //  - 'w'+height→chainwork is read by NOTHING but this loop's own parent
+            //    lookup, and since files are parsed in reverse + parallel the parent
+            //    is usually unprocessed so the read misses anyway; the authoritative
+            //    chainwork is recomputed in-memory by calculate_all_chainwork.
+            // INVARIANT: this assumes the leveldb import pre-populated 'h' (the read
+            // at ~570 depends on it); STEP 3D + the height_resolver remain the sole
+            // height authority. Do not make the parse DERIVE heights by walking
+            // parents without restoring these writes.
+            if !bulk {
+                // Store: 'h' + block_hash -> height (for parent lookup, internal byte order)
+                let mut height_key = vec![b'h'];
+                height_key.extend_from_slice(&block_hash_vec);
+                let height_bytes = height.to_le_bytes().to_vec();
+                tx_batch.put("chain_metadata", height_key, height_bytes.clone());
 
-                // Get parent chainwork (if not genesis)
-                let parent_chainwork = if height > 0 {
-                    let prev_height = height - 1;
-                    let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
-                    chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
+                // Store: height -> block_hash (display format - reversed)
+                let reversed_hash: Vec<u8> = block_hash_vec.iter().rev().cloned().collect();
+                tx_batch.put("chain_metadata", height_bytes.clone(), reversed_hash);
 
-                    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-                    match db.get_cf(&cf_metadata, &chainwork_key)? {
-                        Some(parent_work_bytes) => {
-                            if parent_work_bytes.len() == 32 {
-                                let mut parent_work = [0u8; 32];
-                                parent_work.copy_from_slice(&parent_work_bytes);
-                                Some(parent_work)
-                            } else {
-                                None
+                // Calculate and store chainwork
+                if n_bits > 0 {
+                    // Calculate work for this block
+                    let block_work = calculate_work_from_bits(n_bits);
+
+                    // Get parent chainwork (if not genesis)
+                    let parent_chainwork = if height > 0 {
+                        let prev_height = height - 1;
+                        let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
+                        chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
+
+                        let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+                        match db.get_cf(&cf_metadata, &chainwork_key)? {
+                            Some(parent_work_bytes) => {
+                                if parent_work_bytes.len() == 32 {
+                                    let mut parent_work = [0u8; 32];
+                                    parent_work.copy_from_slice(&parent_work_bytes);
+                                    Some(parent_work)
+                                } else {
+                                    None
+                                }
                             }
+                            None => None,
                         }
-                        None => None,
-                    }
-                } else {
-                    None // Genesis has no parent
-                };
+                    } else {
+                        None // Genesis has no parent
+                    };
 
-                // Calculate cumulative chainwork
-                let chainwork = if let Some(parent_work) = parent_chainwork {
-                    // Add parent chainwork + this block's work using the
-                    // fixed-width 256-bit add (no per-block BigUint allocation).
-                    // Byte-for-byte identical to the previous
-                    // `BigUint::from_bytes_be` add for every value PIVX chainwork
-                    // can reach (cumulative work is ~2^90, nowhere near 2^256, so
-                    // the add never overflows 256 bits and never hits the legacy
-                    // overflow path).
-                    add_chainwork_be(&parent_work, &block_work)
-                } else {
-                    // Genesis block or parent not found - use just this block's work
-                    block_work
-                };
+                    // Calculate cumulative chainwork
+                    let chainwork = if let Some(parent_work) = parent_chainwork {
+                        // Fixed-width 256-bit add (no per-block BigUint allocation);
+                        // byte-for-byte identical to the legacy BigUint add for every
+                        // value PIVX chainwork can reach (~2^90, never overflows 256).
+                        add_chainwork_be(&parent_work, &block_work)
+                    } else {
+                        // Genesis block or parent not found - use just this block's work
+                        block_work
+                    };
 
-                // Store chainwork: 'w' + height -> chainwork (32 bytes)
-                let mut chainwork_key = vec![b'w'];
-                chainwork_key.extend_from_slice(&height.to_le_bytes());
-
-                // CRITICAL FIX: Write to batch instead of direct db.put_cf()
-                tx_batch.put("chain_metadata", chainwork_key, chainwork.to_vec());
+                    // Store chainwork: 'w' + height -> chainwork (32 bytes)
+                    let mut chainwork_key = vec![b'w'];
+                    chainwork_key.extend_from_slice(&height.to_le_bytes());
+                    tx_batch.put("chain_metadata", chainwork_key, chainwork.to_vec());
+                }
             }
         }
         

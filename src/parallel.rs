@@ -107,6 +107,11 @@ pub async fn process_files_parallel(
     state: AppState,
     max_concurrent: usize,
     bulk: bool,
+    // [Lever G] true ONLY when the caller already ran validate_canonical_metadata_complete
+    // immediately before, with no intervening writer (the leveldb fast path). The
+    // fallback + live-catchup callers pass false and run the [F3] re-check below —
+    // the fallback also relies on its height_count==0 "assign dynamically" branch.
+    already_validated: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _span = info_span!("parallel_processing",
         file_count = %"calculating",
@@ -114,44 +119,53 @@ pub async fn process_files_parallel(
     ).entered();
     info!("Starting parallel block file processing");
     
-    // [F3] CRITICAL: Validate canonical metadata completeness BEFORE parallel processing
+    // [F3] CRITICAL: Validate canonical metadata completeness BEFORE parallel processing.
     // This prevents the height=0 bug where all transactions get stored with height=0
     // instead of their correct heights due to missing height→hash mappings.
-    info!("[F3] Validating canonical chain metadata before parallel processing");
-    
-    let cf_metadata = db_arc.cf_handle("chain_metadata")
-        .ok_or("chain_metadata CF not found")?;
-    
-    // Count height→hash mappings (4-byte keys) to determine expected chain length
-    let mut height_count = 0;
-    let iter = db_arc.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
-    for item in iter {
-        if let Ok((key, _)) = item {
-            if key.len() == 4 {
-                height_count += 1;
+    // [Lever G] Skip this re-scan only when the caller already validated (the leveldb
+    // fast path validated ~30 lines earlier with no intervening writer). Callers that
+    // did NOT pre-validate (fallback, live catch-up, and any resume-after-crash that
+    // reclassifies to live) pass already_validated=false and run the full check —
+    // [F3] is their sole integrity gate before the destructive parallel parse.
+    if already_validated {
+        info!("[F3] Canonical metadata already validated by caller - skipping redundant re-scan");
+    } else {
+        info!("[F3] Validating canonical chain metadata before parallel processing");
+
+        let cf_metadata = db_arc.cf_handle("chain_metadata")
+            .ok_or("chain_metadata CF not found")?;
+
+        // Count height→hash mappings (4-byte keys) to determine expected chain length
+        let mut height_count = 0;
+        let iter = db_arc.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, _)) = item {
+                if key.len() == 4 {
+                    height_count += 1;
+                }
             }
         }
-    }
-    
-    if height_count > 0 {
-        // Metadata exists - validate it's complete
-        let metadata_complete = validate_canonical_metadata_complete(&db_arc, height_count).await?;
-        
-        if !metadata_complete {
-            return Err(format!(
-                "FATAL [F3]: Canonical metadata incomplete ({} height mappings found).\n\
-                 This would cause ALL transactions to get height=0 instead of correct heights.\n\
-                 Check leveldb import logs for errors.\n\
-                 Recommendation: Delete database and resync from scratch.",
-                height_count
-            ).into());
+
+        if height_count > 0 {
+            // Metadata exists - validate it's complete
+            let metadata_complete = validate_canonical_metadata_complete(&db_arc, height_count).await?;
+
+            if !metadata_complete {
+                return Err(format!(
+                    "FATAL [F3]: Canonical metadata incomplete ({} height mappings found).\n\
+                     This would cause ALL transactions to get height=0 instead of correct heights.\n\
+                     Check leveldb import logs for errors.\n\
+                     Recommendation: Delete database and resync from scratch.",
+                    height_count
+                ).into());
+            }
+
+            info!(height_count = height_count, "[F3] Canonical metadata validated - complete and contiguous");
+        } else {
+            info!("[F3] No canonical metadata found - will assign heights dynamically (normal for first sync)");
         }
-        
-        info!(height_count = height_count, "[F3] Canonical metadata validated - complete and contiguous");
-    } else {
-        info!("[F3] No canonical metadata found - will assign heights dynamically (normal for first sync)");
     }
-    
+
     info!(workers = max_concurrent, "Starting parallel file processing");
     
     // Filter for .dat files

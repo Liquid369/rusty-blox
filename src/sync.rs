@@ -244,6 +244,12 @@ fn refresh_canonical_metadata(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::E
     let leveldb_height = (canonical_chain.len() - 1) as i32;
 
     let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    // 'o' offset keys feed only the optional offset-indexer validator (Lever H);
+    // skip them unless sync.validate_offset_indexing is set (kept consistent with
+    // the initial-import store).
+    let store_offsets = config
+        .get_bool("sync.validate_offset_indexing")
+        .unwrap_or(false);
     let mut batch = rocksdb::WriteBatch::default();
     for (height, hash, opt_file, opt_pos) in &canonical_chain {
         let height_key = (*height as i32).to_le_bytes();
@@ -255,13 +261,15 @@ fn refresh_canonical_metadata(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::E
         hash_key.extend_from_slice(hash); // internal format
         batch.put_cf(&cf_metadata, &hash_key, height_key);
 
-        if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
-            let mut off_key = vec![b'o'];
-            off_key.extend_from_slice(hash);
-            let mut buf = Vec::with_capacity(12);
-            buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
-            buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
-            batch.put_cf(&cf_metadata, &off_key, &buf);
+        if store_offsets {
+            if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
+                let mut off_key = vec![b'o'];
+                off_key.extend_from_slice(hash);
+                let mut buf = Vec::with_capacity(12);
+                buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
+                buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
+                batch.put_cf(&cf_metadata, &off_key, &buf);
+            }
         }
         if batch.len() >= 50_000 {
             db.write(std::mem::take(&mut batch))?;
@@ -369,6 +377,16 @@ async fn run_initial_sync_leveldb(
     let mut offsets_stored = 0;
     let mut offsets_missing = 0;
 
+    // The 'o'+hash → file+offset keys are consumed ONLY by the optional offset-
+    // indexer validator (sync.validate_offset_indexing, default false; see the
+    // gated call below at "Pattern A validation"). On the default path they are
+    // written and never read, so skip the ~5.5M dead writes. NOTE: the validator
+    // runs only inside this initial leveldb import — set the flag BEFORE a from-
+    // scratch sync; flipping it on a warm (already-synced) DB does nothing.
+    let store_offsets = get_global_config()
+        .get_bool("sync.validate_offset_indexing")
+        .unwrap_or(false);
+
     // Initial full reindex: this writeback is reconstructible from Core's LevelDB,
     // so the WAL is pure fsync overhead. Batch the 3-puts-per-block into a single
     // WriteBatch flushed every 50k entries (same pattern as
@@ -390,16 +408,19 @@ async fn run_initial_sync_leveldb(
         batch.put_cf(&cf_metadata, &hash_key, height_key);
 
         // If the leveldb index provided blk file number and data position, store it
-        if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
-            let mut off_key = vec![b'o'];
-            off_key.extend_from_slice(hash); // internal format
-            let mut buf = Vec::with_capacity(12);
-            buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
-            buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
-            batch.put_cf(&cf_metadata, &off_key, &buf);
-            offsets_stored += 1;
-        } else {
-            offsets_missing += 1;
+        // — but only when the offset-indexer validator will consume it (Lever H).
+        if store_offsets {
+            if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
+                let mut off_key = vec![b'o'];
+                off_key.extend_from_slice(hash); // internal format
+                let mut buf = Vec::with_capacity(12);
+                buf.extend_from_slice(&(*file_num as u32).to_le_bytes());
+                buf.extend_from_slice(&{ *data_pos }.to_le_bytes());
+                batch.put_cf(&cf_metadata, &off_key, &buf);
+                offsets_stored += 1;
+            } else {
+                offsets_missing += 1;
+            }
         }
 
         if batch.len() >= 50_000 {
@@ -451,7 +472,9 @@ async fn run_initial_sync_leveldb(
     // Process files in parallel (this will index all blocks, including orphans)
     // The chainwork calculation later will determine which ones are canonical
     // bulk=true: initial full reindex, DB reconstructible from .blk → WAL disabled.
-    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true).await?;
+    // already_validated=true: validate_canonical_metadata_complete just ran above
+    // (no intervening writer), so [F3] skips the redundant re-scan (Lever G).
+    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true, true).await?;
 
     let final_height = (chain_len - 1) as i32;
 
@@ -528,7 +551,9 @@ async fn run_initial_sync(
     
     // Process files in parallel
     // bulk=true: this is the initial-sync fallback (from-scratch reindex).
-    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true).await?;
+    // already_validated=false: this path writes NO canonical metadata first and
+    // relies on [F3]'s height_count==0 "assign dynamically" branch (Lever G).
+    process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, true, false).await?;
 
     // Find highest block height
     let cf_metadata = db.cf_handle("chain_metadata")
@@ -1044,7 +1069,10 @@ async fn run_live_sync(
             info!(files = entries.len(), "Processing blk*.dat files in parallel");
             // bulk=false: live/RPC catch-up on an already-synced DB — a crash here
             // must be WAL-recoverable, so the WAL stays enabled for these writes.
-            process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, false).await?;
+            // already_validated=false: catch-up runs no pre-validation (and a
+            // resume-after-crash reclassifies here over possibly-incomplete
+            // metadata), so [F3] must run — it's the sole integrity gate (Lever G).
+            process_files_parallel(entries, Arc::clone(&db), state.clone(), max_concurrent, false, false).await?;
 
             info!("Finished processing blk*.dat files");
 
