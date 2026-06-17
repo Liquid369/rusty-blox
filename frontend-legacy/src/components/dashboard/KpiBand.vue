@@ -185,13 +185,15 @@ const tiles = computed(() => {
     })
   }
 
-  if (price.value && usd > 0) {
-    const sats = (price.value.btc || 0) * 1e8
+  // PIV price lives in the header, so the band shows network difficulty here
+  // instead (no extra fetch — networkDay is already loaded for '24h Blocks').
+  if (networkDay.value?.difficulty != null) {
+    const diff = parseFloat(networkDay.value.difficulty)
     out.push({
-      key: 'price',
-      label: 'PIV Price',
-      value: `$${usd.toFixed(4)}`,
-      sub: sats > 0 ? `≈ ${sats.toFixed(1)} sats` : ''
+      key: 'difficulty',
+      label: 'Difficulty',
+      value: isNaN(diff) ? '—' : compact(diff),
+      sub: 'PoS network weight'
     })
   }
 

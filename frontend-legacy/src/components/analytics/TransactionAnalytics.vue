@@ -41,6 +41,15 @@
       height="400px"
     />
 
+    <!-- Daily Active & New Addresses -->
+    <BaseChart
+      title="Daily Active & New Addresses"
+      :option="addressActivityOption"
+      :loading="loading"
+      :error="error"
+      height="350px"
+    />
+
     <!-- Transaction Type Distribution -->
     <div class="chart-grid">
       <BaseChart
@@ -210,6 +219,53 @@ const avgValueOption = computed(() => {
   return getLineChartOption(dates, values, 'Average Value (PIV)')
 })
 
+// Daily Active & New Addresses — dual Y axis because the scales differ widely
+// (active is hundreds–thousands per day, new is single digits–tens). Active on
+// the left axis (filled), new on the right; axis names are colored to match
+// their line so no legend is needed.
+const addressActivityOption = computed(() => {
+  const base = getBaseOption()
+  const dates = txData.value.map(d => d.date)
+  return {
+    ...base,
+    xAxis: { ...base.xAxis, data: dates },
+    yAxis: [
+      { ...base.yAxis, name: 'Active', nameTextStyle: { color: colors.primary } },
+      {
+        ...base.yAxis,
+        name: 'New',
+        position: 'right',
+        splitLine: { show: false },
+        nameTextStyle: { color: colors.accent }
+      }
+    ],
+    series: [
+      {
+        name: 'Active Addresses',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: txData.value.map(d => d.active),
+        lineStyle: { color: colors.primary, width: 2 },
+        itemStyle: { color: colors.primary },
+        areaStyle: { color: colors.primary, opacity: 0.08 },
+        emphasis: { focus: 'series' }
+      },
+      {
+        name: 'New Addresses',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        yAxisIndex: 1,
+        data: txData.value.map(d => d.newAddrs),
+        lineStyle: { color: colors.accent, width: 2 },
+        itemStyle: { color: colors.accent },
+        emphasis: { focus: 'series' }
+      }
+    ]
+  }
+})
+
 const fetchData = async () => {
   loading.value = true
   error.value = null
@@ -226,6 +282,8 @@ const fetchData = async () => {
         coinbase: d.coinbase_count || 0,
         shield: d.sapling_txs || 0,
         coldstake: d.coldstake_txs || 0,
+        active: d.active_addresses || 0,
+        newAddrs: d.new_addresses || 0,
         // volume is already a PIV decimal string — no satoshi conversion
         volume: parseFloat(d.volume) || 0,
         // avg_value is the average transaction value as a satoshi string —
