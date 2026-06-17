@@ -68,7 +68,7 @@ pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry
 
     // Scan blk files (0 to 141)
     for file_num in 0..=141 {
-        let blk_path = PathBuf::from(blk_dir).join(format!("blk{:05}.dat", file_num));
+        let blk_path = PathBuf::from(blk_dir).join(format!("blk{file_num:05}.dat"));
 
         if !blk_path.exists() {
             break;

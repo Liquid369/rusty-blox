@@ -5,9 +5,9 @@
 
 #[cfg(test)]
 mod xpub_tests {
-    use crate::api::addresses::derive_address;
-    use rocksdb::DB;
-    use std::sync::Arc;
+    
+    
+    
     
     /// Test that xpub parsing works for valid PIVX mainnet xpubs
     #[test]
@@ -44,7 +44,7 @@ mod xpub_tests {
         
         for invalid in invalid_xpubs {
             let result = ExtendedPubKey::from_str(invalid);
-            assert!(result.is_err(), "Invalid xpub '{}' should fail to parse", invalid);
+            assert!(result.is_err(), "Invalid xpub '{invalid}' should fail to parse");
         }
     }
     
@@ -71,16 +71,16 @@ mod xpub_tests {
         
         for (chain, index) in test_cases {
             let result = crate::api::addresses::derive_address(&xpub, &secp, chain, index, xpub.depth);
-            assert!(result.is_ok(), "Derivation should succeed for chain {} index {}", chain, index);
+            assert!(result.is_ok(), "Derivation should succeed for chain {chain} index {index}");
             
             let (address, path) = result.unwrap();
             // PIVX mainnet P2PKH addresses start with 'D'
             assert!(address.starts_with('D'), 
-                "PIVX mainnet address should start with 'D', got: {}", address);
+                "PIVX mainnet address should start with 'D', got: {address}");
             // Verify path format is correct
             assert!(path.contains("m/44'/119'"), "Path should contain PIVX BIP44 prefix");
-            assert!(path.contains(&format!("/{}/", chain)), "Path should contain chain");
-            assert!(path.ends_with(&format!("/{}", index)), "Path should end with index");
+            assert!(path.contains(&format!("/{chain}/")), "Path should contain chain");
+            assert!(path.ends_with(&format!("/{index}")), "Path should end with index");
         }
     }
     
@@ -149,8 +149,8 @@ mod xpub_tests {
     /// Test that depth validation works
     #[test]
     fn test_depth_validation() {
-        use bitcoin::util::bip32::ExtendedPubKey;
-        use std::str::FromStr;
+        
+        
         
         // Different depth xpubs would need to be generated for this test
         // For now, we validate the logic:
@@ -161,7 +161,7 @@ mod xpub_tests {
         assert!(valid_depth == 3, "Depth 3 is valid for account-level xpub");
         
         for depth in invalid_depths {
-            assert!(depth != 3, "Depth {} should be rejected", depth);
+            assert!(depth != 3, "Depth {depth} should be rejected");
         }
     }
     
@@ -179,7 +179,7 @@ mod xpub_tests {
         
         assert!(address.is_some(), "Address encoding should succeed");
         let addr = address.unwrap();
-        assert!(addr.starts_with('D'), "PIVX mainnet address should start with 'D', got: {}", addr);
+        assert!(addr.starts_with('D'), "PIVX mainnet address should start with 'D', got: {addr}");
     }
     
     /// Integration test: Full xpub flow (requires test database)
@@ -236,12 +236,12 @@ mod xpub_tests {
         let duration = start.elapsed();
         let per_derivation = duration / iterations;
         
-        println!("Derived {} addresses in {:?}", iterations, duration);
-        println!("Average per address: {:?}", per_derivation);
+        println!("Derived {iterations} addresses in {duration:?}");
+        println!("Average per address: {per_derivation:?}");
         
         // Performance target: < 1ms per address
         assert!(per_derivation.as_micros() < 1000, 
-            "Address derivation should take < 1ms, took {:?}", per_derivation);
+            "Address derivation should take < 1ms, took {per_derivation:?}");
     }
 }
 
@@ -268,14 +268,14 @@ mod validation_tests {
         // Full path: m/44'/119'/account'/chain/address_index
         
         let coin_type = 119;
-        let path_template = format!("m/44'/{}'", coin_type);
+        let path_template = format!("m/44'/{coin_type}'");
         
         assert_eq!(path_template, "m/44'/119'", "PIVX uses BIP44 coin type 119");
         
         // External chain (receive): chain = 0
         // Internal chain (change): chain = 1
-        let external_path = format!("{}/0'/0/0", path_template);
-        let internal_path = format!("{}/0'/1/0", path_template);
+        let external_path = format!("{path_template}/0'/0/0");
+        let internal_path = format!("{path_template}/0'/1/0");
         
         assert_eq!(external_path, "m/44'/119'/0'/0/0");
         assert_eq!(internal_path, "m/44'/119'/0'/1/0");

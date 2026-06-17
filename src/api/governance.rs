@@ -46,7 +46,7 @@ pub async fn budget_votes_v2(
     AxumPath(proposal_name): AxumPath<String>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let cache_key = format!("budget:votes:{}", proposal_name);
+    let cache_key = format!("budget:votes:{proposal_name}");
     let proposal_clone = proposal_name.clone();
     
     let result = cache

@@ -199,7 +199,7 @@ pub async fn calculate_transaction_fee(
                     // Validate fee is non-negative
                     if fee < 0 {
                         return Ok(FeeCalculation::failure(
-                            format!("Invalid fee: inputs ({}) < outputs ({})", value_in, value_out)
+                            format!("Invalid fee: inputs ({value_in}) < outputs ({value_out})")
                         ));
                     }
                     

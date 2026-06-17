@@ -57,9 +57,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     
-    println!("  Total transaction entries: {}", total_txs);
-    println!("  Valid transactions (height != -1): {}", valid_txs);
-    println!("  Orphaned transactions (height == -1): {}", orphaned_txs);
+    println!("  Total transaction entries: {total_txs}");
+    println!("  Valid transactions (height != -1): {valid_txs}");
+    println!("  Orphaned transactions (height == -1): {orphaned_txs}");
     
     // 2. Count address index entries
     println!("\n📇 Checking address index...");
@@ -85,27 +85,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     
-    println!("  Address transaction lists ('t' prefix): {}", addr_tx_lists);
-    println!("  Address UTXO lists ('a' prefix): {}", addr_utxo_lists);
+    println!("  Address transaction lists ('t' prefix): {addr_tx_lists}");
+    println!("  Address UTXO lists ('a' prefix): {addr_utxo_lists}");
     println!("  Unique addresses indexed: {}", unique_addresses.len());
     
     // 3. Validate against external explorer for test address
     println!("\n🔍 Validating against external PIVX explorer...");
     let test_address = "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6";
-    println!("  Test address: {}", test_address);
+    println!("  Test address: {test_address}");
     
     // Get our count
-    let our_key = format!("t{}", test_address);
+    let our_key = format!("t{test_address}");
     let our_count = match db.get_cf(addr_cf, our_key.as_bytes())? {
         Some(data) => data.len() / 32,
         None => 0
     };
     
-    println!("  Our transaction count: {}", our_count);
+    println!("  Our transaction count: {our_count}");
     
     // Get external count via API
     println!("  Querying external explorer API...");
-    let url = format!("https://explorer.pivx.org/api/v2/address/{}", test_address);
+    let url = format!("https://explorer.pivx.org/api/v2/address/{test_address}");
     let output = Command::new("curl")
         .arg("-s")
         .arg(&url)
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let received = json["totalReceived"].as_str().unwrap_or("0");
             let sent = json["totalSent"].as_str().unwrap_or("0");
             
-            println!("  External transaction count: {}", external_count);
+            println!("  External transaction count: {external_count}");
             println!("  External balance: {} satoshis ({} PIV)", balance, 
                      balance.parse::<i64>().unwrap_or(0) as f64 / 100_000_000.0);
             println!("  External received: {} satoshis ({} PIV)", received,
@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             
             let missing = external_count as i64 - our_count as i64;
             if missing > 0 {
-                println!("\n  ⚠️  DISCREPANCY: {} transactions missing from our database", missing);
+                println!("\n  ⚠️  DISCREPANCY: {missing} transactions missing from our database");
                 println!("     This indicates INCOMPLETE BLOCKCHAIN SYNC");
                 println!("     Missing transactions were never downloaded from PIVX daemon");
             } else if missing < 0 {

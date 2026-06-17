@@ -188,7 +188,7 @@ pub async fn supply_analytics(
     // Separate long-lived backup so a failed recompute can fall back to the last
     // good value even after the 300s primary key has expired (get_json evicts on
     // TTL, so the primary key alone can't back stale-while-revalidate).
-    let stale_key = format!("{}:last", cache_key);
+    let stale_key = format!("{cache_key}:last");
 
     // Fresh cache hit: serve immediately.
     if let Some(cached) = cache.get_json::<SupplyAnalytics>(&cache_key).await {
@@ -943,9 +943,7 @@ fn compute_transaction_analytics(
     }
     
     // Convert to data points
-    let mut data_points: Vec<TransactionDataPoint> = daily_stats
-        .into_iter()
-        .map(|(_, stats)| {
+    let mut data_points: Vec<TransactionDataPoint> = daily_stats.into_values().map(|stats| {
             // Legacy fallback path (used only before the daily series is built).
             // total_size is not populated here, so this averages to 0; the field
             // is average transaction VALUE, not byte size.
@@ -1174,8 +1172,8 @@ fn compute_network_health_analytics(
             total_blocks += 1;
             
             // Check if block exists and is valid
-            let key = format!("H{}", h);
-            if let Some(_) = db.get_cf(blocks_cf, key.as_bytes())? {
+            let key = format!("H{h}");
+            if (db.get_cf(blocks_cf, key.as_bytes())?).is_some() {
                 // Assume average block size
                 total_block_size += 10000; // ~10KB average
             }
@@ -1591,5 +1589,5 @@ fn format_timestamp(timestamp: u64) -> String {
         day -= days_in_month;
     }
     
-    format!("{:04}-{:02}-{:02}", year, month, day)
+    format!("{year:04}-{month:02}-{day:02}")
 }

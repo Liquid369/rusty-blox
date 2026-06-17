@@ -57,7 +57,7 @@ pub struct Hash(pub [u8; 32]);
 impl fmt::LowerHex for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for byte in self.0.iter().rev() {
-            write!(f, "{:02x}", byte)?;
+            write!(f, "{byte:02x}")?;
         }
         Ok(())
     }
@@ -122,7 +122,7 @@ impl std::fmt::Debug for CBlockHeader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Block Header {{")?;
         if let Some(block_height) = &self.block_height {
-            writeln!(f, "Block Height: {}", block_height)?;
+            writeln!(f, "Block Height: {block_height}")?;
         } else {
             writeln!(f, "Block Height: None")?;
         }
@@ -171,7 +171,7 @@ impl std::fmt::Debug for CTransaction {
         writeln!(f, "    outputs: {:?}", self.outputs)?;
         writeln!(f, "    lock_time: {}", self.lock_time)?;
         if let Some(ref sapling) = self.sapling_data {
-            writeln!(f, "    sapling_data: {:?}", sapling)?;
+            writeln!(f, "    sapling_data: {sapling:?}")?;
         }
         writeln!(f, "}}")?;
         Ok(())

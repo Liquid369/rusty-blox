@@ -118,8 +118,8 @@ fn address_recompute_cap() -> usize {
 /// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
 /// Returns (total_received, total_sent); missing keys read as 0.
 async fn read_address_totals(db: &Arc<DB>, address: &str) -> (i64, i64) {
-    let r_key = format!("r{}", address).into_bytes();
-    let s_key = format!("s{}", address).into_bytes();
+    let r_key = format!("r{address}").into_bytes();
+    let s_key = format!("s{address}").into_bytes();
     let db_clone = Arc::clone(db);
 
     tokio::task::spawn_blocking(move || -> (i64, i64) {
@@ -155,7 +155,7 @@ pub async fn addr_v2(
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             Json(super::types::BlockbookError::new(format!(
-                "Invalid address '{}': checksum mismatch", address
+                "Invalid address '{address}': checksum mismatch"
             ))),
         ));
     }
@@ -204,7 +204,7 @@ async fn compute_address_info(
     address: &str,
     params: &AddressQuery,
 ) -> Result<AddressInfo, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("a{}", address);
+    let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     
@@ -220,7 +220,7 @@ async fn compute_address_info(
     let unspent_utxos = deserialize_utxos(&result).await;
     
     // Get transaction list
-    let tx_list_key = format!("t{}", address);
+    let tx_list_key = format!("t{address}");
     let tx_list_key_bytes = tx_list_key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     
@@ -514,7 +514,7 @@ async fn compute_xpub_info(
     
     // Parse and validate the xpub
     let xpub = ExtendedPubKey::from_str(xpub_str)
-        .map_err(|e| format!("Invalid xpub format: {}. Please provide a valid BIP32 extended public key.", e))?;
+        .map_err(|e| format!("Invalid xpub format: {e}. Please provide a valid BIP32 extended public key."))?;
     
     // Validate xpub is at correct depth (account level = 3 for m/44'/119'/account')
     if xpub.depth != 3 {
@@ -631,7 +631,7 @@ pub(crate) fn derive_address(
     
     // Construct full derivation path
     let account = xpub_depth.saturating_sub(3);
-    let path = format!("m/44'/119'/{}'/{}/{}", account, chain, index);
+    let path = format!("m/44'/119'/{account}'/{chain}/{index}");
     
     Ok((address, path))
 }
@@ -642,11 +642,11 @@ async fn check_address_activity(
     address: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Check UTXO key: 'a' + address
-    let utxo_key = format!("a{}", address);
+    let utxo_key = format!("a{address}");
     let utxo_key_bytes = utxo_key.as_bytes().to_vec();
     
     // Check transaction list key: 't' + address
-    let tx_key = format!("t{}", address);
+    let tx_key = format!("t{address}");
     let tx_key_bytes = tx_key.as_bytes().to_vec();
     
     let db_clone = db.clone();
@@ -696,12 +696,12 @@ async fn aggregate_xpub_data(
     
     // Build batch of UTXO keys ("a" + address)
     let utxo_keys: Vec<Vec<u8>> = all_addresses.iter()
-        .map(|(addr, _)| format!("a{}", addr).into_bytes())
+        .map(|(addr, _)| format!("a{addr}").into_bytes())
         .collect();
     
     // Build batch of transaction list keys ("t" + address)
     let tx_list_keys: Vec<Vec<u8>> = all_addresses.iter()
-        .map(|(addr, _)| format!("t{}", addr).into_bytes())
+        .map(|(addr, _)| format!("t{addr}").into_bytes())
         .collect();
     
     let db_clone = db.clone();
@@ -734,14 +734,13 @@ async fn aggregate_xpub_data(
         Ok((utxo_results, tx_list_results))
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
     .map_err(|e| e.to_string())?;
     
     // Process each address with pre-fetched data
     for (idx, (address, path)) in all_addresses.iter().enumerate() {
         let utxo_data = utxo_results.get(idx)
-            .and_then(|opt| opt.as_ref())
-            .map(|v| v.clone())
+            .and_then(|opt| opt.as_ref()).cloned()
             .unwrap_or_default();
         
         let utxos = deserialize_utxos(&utxo_data).await;
@@ -764,7 +763,7 @@ async fn aggregate_xpub_data(
                     .map_err(|e| e.to_string())
             })
             .await
-            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Task join error: {e}"))?
             .map_err(|e| e.to_string())?;
             
             if let Some(tx_data) = tx_data {
@@ -787,8 +786,7 @@ async fn aggregate_xpub_data(
         
         // Get transaction list from pre-fetched batch data
         let tx_list_data = tx_list_results.get(idx)
-            .and_then(|opt| opt.as_ref())
-            .map(|v| v.clone())
+            .and_then(|opt| opt.as_ref()).cloned()
             .unwrap_or_default();
         
         // Parse transaction list (32 bytes per txid)
@@ -813,7 +811,7 @@ async fn aggregate_xpub_data(
                     .map_err(|e| e.to_string())
             })
             .await
-            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Task join error: {e}"))?
             .map_err(|e| e.to_string())?;
             
             if let Some(tx_data) = tx_data {
@@ -1048,7 +1046,7 @@ async fn aggregate_xpub_data(
     let total_transfers: usize = used_addresses.iter().map(|(_, _, tx_count, _, _, _)| tx_count).sum();
     
     Ok(XPubInfo {
-        page: page,
+        page,
         total_pages,
         items_on_page: actual_items as u32,  // Actual count, not pageSize
         address: xpub_str.to_string(),
@@ -1084,7 +1082,7 @@ pub async fn utxo_v2(
         return Err((
             axum::http::StatusCode::BAD_REQUEST,
             Json(super::types::BlockbookError::new(format!(
-                "Invalid address '{}': checksum mismatch", address
+                "Invalid address '{address}': checksum mismatch"
             ))),
         ));
     }
@@ -1113,7 +1111,7 @@ async fn compute_utxos(
     db: &Arc<DB>,
     address: &str,
 ) -> Result<Vec<UTXO>, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("a{}", address);
+    let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     

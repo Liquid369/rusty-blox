@@ -385,7 +385,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let worker_threads_str: String = config
         .get("server.worker_threads")
-        .map_err(|e| format!("Error getting server.worker_threads: {}", e))?;
+        .map_err(|e| format!("Error getting server.worker_threads: {e}"))?;
     let _worker_threads: usize = worker_threads_str
         .parse()
         .map_err(|_| "Invalid number for worker_threads")?;
@@ -555,7 +555,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // This validates all required CFs exist at startup
     info!("Initializing database column family handles");
     let _db_handles = rustyblox::db_handles::DbHandles::new(Arc::clone(&db_arc))
-        .map_err(|e| format!("Failed to initialize DB handles: {}", e))?;
+        .map_err(|e| format!("Failed to initialize DB handles: {e}"))?;
     info!("Database handles validated");
 
     // Restore persisted metrics from database

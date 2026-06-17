@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Get PIVX block index path
     let home = std::env::var("HOME").expect("HOME not set");
-    let pivx_blocks_index = PathBuf::from(format!("{}/Library/Application Support/PIVX/blocks/index", home));
+    let pivx_blocks_index = PathBuf::from(format!("{home}/Library/Application Support/PIVX/blocks/index"));
     
     println!("📍 Source: PIVX block index");
     println!("   Path: {}", pivx_blocks_index.display());
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let percentage = (blocks_with_offsets as f64 / canonical_chain.len() as f64) * 100.0;
     
     println!("\n📊 Offset Data Availability:");
-    println!("   Blocks WITH offsets:    {} ({:.2}%)", blocks_with_offsets, percentage);
+    println!("   Blocks WITH offsets:    {blocks_with_offsets} ({percentage:.2}%)");
     println!("   Blocks WITHOUT offsets: {} ({:.2}%)", blocks_without_offsets, 100.0 - percentage);
     
     if blocks_with_offsets == 0 {
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open RocksDB
     let db_path = "data";
     println!("\n📂 Opening RocksDB database...");
-    println!("   Path: {}", db_path);
+    println!("   Path: {db_path}");
     
     let mut opts = RocksOptions::default();
     opts.create_if_missing(false);
@@ -131,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stored += 1;
             
             if stored % 100_000 == 0 {
-                println!("   Progress: {} offset mappings written...", stored);
+                println!("   Progress: {stored} offset mappings written...");
             }
         } else {
             skipped += 1;
@@ -139,8 +139,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     println!("\n✅ Backfill complete!");
-    println!("   Offset mappings written: {}", stored);
-    println!("   Blocks without offsets:  {}", skipped);
+    println!("   Offset mappings written: {stored}");
+    println!("   Blocks without offsets:  {skipped}");
     println!("   Coverage: {:.2}%", (stored as f64 / canonical_chain.len() as f64) * 100.0);
     
     // Clean up temp directory
@@ -159,10 +159,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    println!("✅ Verification complete: {} offset mappings found in database", offset_count);
+    println!("✅ Verification complete: {offset_count} offset mappings found in database");
     
     if offset_count != stored {
-        println!("⚠️  Warning: Stored {} but found {} in verification", stored, offset_count);
+        println!("⚠️  Warning: Stored {stored} but found {offset_count} in verification");
     }
     
     println!("\n╔════════════════════════════════════════════════════╗");

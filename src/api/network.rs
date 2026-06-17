@@ -33,9 +33,8 @@ pub async fn status_v2(
             Duration::from_secs(5),
             || async move {
                 get_chain_state(&db_clone)
-                    .map_err(|e| Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to get chain state: {}", e)
+                    .map_err(|e| Box::new(std::io::Error::other(
+                        format!("Failed to get chain state: {e}")
                     )) as Box<dyn std::error::Error + Send + Sync>)
             }
         )
@@ -183,7 +182,7 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     
     let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[false]}"#;
-    let auth = format!("{}:{}", rpc_user, rpc_pass);
+    let auth = format!("{rpc_user}:{rpc_pass}");
     let auth_b64 = base64::encode(auth);
     
     let http_request = format!(

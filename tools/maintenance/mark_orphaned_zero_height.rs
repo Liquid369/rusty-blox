@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚════════════════════════════════════════════════════╝\n");
     
     let db_path = "data/pivx";
-    println!("📂 Opening database: {}", db_path);
+    println!("📂 Opening database: {db_path}");
     
     let opts = Options::default();
     let cfs = vec![
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     
                     if tx_scanned % 500_000 == 0 {
-                        println!("   Scanned {} transactions...", tx_scanned);
+                        println!("   Scanned {tx_scanned} transactions...");
                     }
                 }
             }
@@ -175,8 +175,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     println!("\n✅ COMPLETE!");
-    println!("   Fixed {} canonical transactions with correct heights", canonical_count);
-    println!("   Marked {} transactions as orphaned (height=-1)", orphaned_count);
+    println!("   Fixed {canonical_count} canonical transactions with correct heights");
+    println!("   Marked {orphaned_count} transactions as orphaned (height=-1)");
     println!("\n💡 Orphaned transactions are now excluded from:");
     println!("   - UTXO sets (no more 0-confirmation UTXOs)");
     println!("   - Address balances");

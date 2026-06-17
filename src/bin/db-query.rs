@@ -39,13 +39,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let su = SpentUtxo::from_bytes(&bytes).map_err(|e| e.to_string())?;
                 let mut spender_display = su.spending_txid.clone();
                 spender_display.reverse();
-                println!("[{} key] FOUND undo record:", label);
+                println!("[{label} key] FOUND undo record:");
                 println!("  value: {}", su.value);
                 println!("  created_height: {}", su.created_height);
                 println!("  spent_height: {}", su.spent_height);
                 println!("  spending_txid: {}", hex::encode(spender_display));
             }
-            None => println!("[{} key] no undo record", label),
+            None => println!("[{label} key] no undo record"),
         }
     }
     Ok(())
@@ -92,6 +92,6 @@ fn find_spender(db: &rocksdb::DB, target_internal: &[u8], target_vout: u32) -> R
             pos += slen + 4;
         }
     }
-    println!("scanned {} txs, {} spender(s) found", scanned, hits);
+    println!("scanned {scanned} txs, {hits} spender(s) found");
     Ok(())
 }

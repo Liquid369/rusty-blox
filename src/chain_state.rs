@@ -103,7 +103,7 @@ pub fn mark_reorg(db: &Arc<DB>, height: i32, reason: &str) -> Result<(), Box<dyn
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     
-    let key = format!("reorg_{}", height);
+    let key = format!("reorg_{height}");
     let value = reason.to_string();
     
     db.put_cf(&cf_state, key.as_bytes(), value.as_bytes())?;

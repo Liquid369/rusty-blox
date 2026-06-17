@@ -38,7 +38,7 @@ pub fn load_processed_files_from_db(db: &DB) -> Result<HashMap<PathBuf, String>,
         let (key, value) = result.map_err(|e| e.to_string())?;
         let key_path = PathBuf::from(String::from_utf8_lossy(&key).into_owned());
         let state = String::from_utf8(value.to_vec())
-            .map_err(|e| format!("Error converting value to String: {}", e))?;
+            .map_err(|e| format!("Error converting value to String: {e}"))?;
         file_states.insert(key_path, state);
     }
 
@@ -124,7 +124,7 @@ pub async fn db_get_blocking(db: Arc<DB>, key: &[u8]) -> Result<Option<Vec<u8>>,
         db.get(&key).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_put_blocking(db: Arc<DB>, key: &[u8], value: &[u8]) -> Result<(), String> {
@@ -134,7 +134,7 @@ pub async fn db_put_blocking(db: Arc<DB>, key: &[u8], value: &[u8]) -> Result<()
         db.put(&key, &value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_delete_blocking(db: Arc<DB>, key: &[u8]) -> Result<(), String> {
@@ -143,7 +143,7 @@ pub async fn db_delete_blocking(db: Arc<DB>, key: &[u8]) -> Result<(), String> {
         db.delete(&key).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Batch write multiple key-value pairs to a column family in a single atomic operation

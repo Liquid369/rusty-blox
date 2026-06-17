@@ -32,12 +32,12 @@ impl BlockValidationResult {
     pub fn error_message(&self) -> Option<String> {
         match self {
             BlockValidationResult::Valid => None,
-            BlockValidationResult::InvalidSignature(msg) => Some(format!("Invalid signature: {}", msg)),
-            BlockValidationResult::InvalidCoinstake(msg) => Some(format!("Invalid coinstake: {}", msg)),
-            BlockValidationResult::InvalidStakeKernel(msg) => Some(format!("Invalid stake kernel: {}", msg)),
-            BlockValidationResult::InvalidStakeModifier(msg) => Some(format!("Invalid stake modifier: {}", msg)),
-            BlockValidationResult::InvalidTimestamp(msg) => Some(format!("Invalid timestamp: {}", msg)),
-            BlockValidationResult::InvalidVersion(msg) => Some(format!("Invalid version: {}", msg)),
+            BlockValidationResult::InvalidSignature(msg) => Some(format!("Invalid signature: {msg}")),
+            BlockValidationResult::InvalidCoinstake(msg) => Some(format!("Invalid coinstake: {msg}")),
+            BlockValidationResult::InvalidStakeKernel(msg) => Some(format!("Invalid stake kernel: {msg}")),
+            BlockValidationResult::InvalidStakeModifier(msg) => Some(format!("Invalid stake modifier: {msg}")),
+            BlockValidationResult::InvalidTimestamp(msg) => Some(format!("Invalid timestamp: {msg}")),
+            BlockValidationResult::InvalidVersion(msg) => Some(format!("Invalid version: {msg}")),
         }
     }
 }
@@ -207,8 +207,7 @@ pub fn validate_block_timestamp(
     if block_time > current_time + MAX_FUTURE_BLOCK_TIME {
         return BlockValidationResult::InvalidTimestamp(
             format!(
-                "Block time {} is too far in the future (current: {}, max drift: {})",
-                block_time, current_time, MAX_FUTURE_BLOCK_TIME
+                "Block time {block_time} is too far in the future (current: {current_time}, max drift: {MAX_FUTURE_BLOCK_TIME})"
             )
         );
     }
@@ -218,8 +217,7 @@ pub fn validate_block_timestamp(
         if block_time < prev_time {
             return BlockValidationResult::InvalidTimestamp(
                 format!(
-                    "Block time {} is before previous block time {}",
-                    block_time, prev_time
+                    "Block time {block_time} is before previous block time {prev_time}"
                 )
             );
         }
@@ -230,8 +228,7 @@ pub fn validate_block_timestamp(
         if prev_time > block_time + MAX_TIME_REGRESSION {
             return BlockValidationResult::InvalidTimestamp(
                 format!(
-                    "Block time {} is suspiciously far before previous block {}",
-                    block_time, prev_time
+                    "Block time {block_time} is suspiciously far before previous block {prev_time}"
                 )
             );
         }
@@ -268,7 +265,7 @@ pub fn validate_block_version(
             return BlockValidationResult::Valid;
         }
         return BlockValidationResult::InvalidVersion(
-            format!("Pre-PoS block has invalid version {}", version)
+            format!("Pre-PoS block has invalid version {version}")
         );
     }
     
@@ -278,7 +275,7 @@ pub fn validate_block_version(
             return BlockValidationResult::Valid;
         }
         return BlockValidationResult::InvalidVersion(
-            format!("PoS block at height {} must have version >= 4, got {}", height, version)
+            format!("PoS block at height {height} must have version >= 4, got {version}")
         );
     }
     
@@ -288,7 +285,7 @@ pub fn validate_block_version(
             return BlockValidationResult::Valid;
         }
         return BlockValidationResult::InvalidVersion(
-            format!("Sapling-era block must have version >= 4, got {}", version)
+            format!("Sapling-era block must have version >= 4, got {version}")
         );
     }
     
@@ -378,7 +375,7 @@ mod tests {
         for i in 0..num_inputs {
             inputs.push(CTxIn {
                 prevout: Some(COutPoint {
-                    hash: format!("{}000000000000000000000000000000000000000000000000000000000000", i),
+                    hash: format!("{i}000000000000000000000000000000000000000000000000000000000000"),
                     n: 0,
                 }),
                 script_sig: CScript { script: vec![] },

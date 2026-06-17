@@ -317,7 +317,7 @@ where
         Some(s) if s == "-Infinity" => Ok(Some(0)), // Treat -Infinity as 0 (from beginning)
         Some(s) => s.parse::<u32>()
             .map(Some)
-            .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {}", s))),
+            .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {s}"))),
     }
 }
 

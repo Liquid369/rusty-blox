@@ -28,8 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let block_height = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     
-    println!("Block version: {}", block_version);
-    println!("Block height: {}", block_height);
+    println!("Block version: {block_version}");
+    println!("Block height: {block_height}");
     
     // Try parsing with dummy header
     let mut tx_data_with_header = vec![0u8; 4];
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Lock time: {}", tx.lock_time);
             
             for (i, input) in tx.inputs.iter().enumerate() {
-                println!("\nInput {}:", i);
+                println!("\nInput {i}:");
                 if let Some(coinbase) = &input.coinbase {
                     println!("  Coinbase: {}", hex::encode(coinbase));
                 } else if let Some(prevout) = &input.prevout {
@@ -61,14 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             
             for (i, output) in tx.outputs.iter().enumerate() {
-                println!("\nOutput {}:", i);
+                println!("\nOutput {i}:");
                 println!("  Value: {}", output.value);
                 println!("  Address: {:?}", output.address);
                 println!("  Script: {}", hex::encode(&output.script_pubkey.script));
             }
         }
         Err(e) => {
-            println!("\n❌ Failed to parse: {:?}", e);
+            println!("\n❌ Failed to parse: {e:?}");
         }
     }
     

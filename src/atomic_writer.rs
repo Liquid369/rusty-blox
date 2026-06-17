@@ -156,7 +156,7 @@ impl AtomicBatchWriter {
                 let cf = match db.cf_handle(&cf_name) {
                     Some(cf) => cf,
                     None => {
-                        let err_msg = format!("Column family not found: {}", cf_name);
+                        let err_msg = format!("Column family not found: {cf_name}");
                         return (Err(err_msg), HashMap::new());
                     }
                 };
@@ -274,7 +274,7 @@ pub async fn atomic_batch_write(
         
         for (cf_name, key, value) in operations {
             let cf = db_clone.cf_handle(&cf_name)
-                .ok_or_else(|| format!("Column family not found: {}", cf_name))?;
+                .ok_or_else(|| format!("Column family not found: {cf_name}"))?;
             batch.put_cf(&cf, key, value);
         }
 
@@ -302,7 +302,7 @@ pub async fn atomic_batch_delete(
         
         for (cf_name, key) in operations {
             let cf = db_clone.cf_handle(&cf_name)
-                .ok_or_else(|| format!("Column family not found: {}", cf_name))?;
+                .ok_or_else(|| format!("Column family not found: {cf_name}"))?;
             batch.delete_cf(&cf, key);
         }
 

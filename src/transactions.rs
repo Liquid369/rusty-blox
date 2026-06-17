@@ -76,7 +76,7 @@ pub async fn process_transaction_from_buffer(
     let tx_amt = read_varint(&mut async_cursor).await?;
     
     if tx_amt > 100000 {
-        return Err(format!("Invalid transaction count: {} (likely corrupt)", tx_amt).into());
+        return Err(format!("Invalid transaction count: {tx_amt} (likely corrupt)").into());
     }
     
     for tx_index in 0..tx_amt {
@@ -118,7 +118,7 @@ pub async fn process_transaction(
     
     if tx_amt > 100000 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, 
-            format!("Invalid transaction count: {} (likely corrupt varint)", tx_amt)));
+            format!("Invalid transaction count: {tx_amt} (likely corrupt varint)")));
     }
     
     for tx_index in 0..tx_amt {
@@ -144,7 +144,7 @@ pub async fn process_transaction(
             fast_sync,
         ).await {
             warn!(version = tx_ver_out, error = %e, "Error processing transaction");
-            return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
+            return Err(io::Error::other(e.to_string()));
         }
     }
     Ok(())
@@ -254,7 +254,7 @@ async fn process_transaction_v1(
             // Read and skip vShieldSpend (384 bytes each)
             let spend_count = read_varint(reader).await?;
             if spend_count > 5_000 {
-                return Err(format!("Sapling spend count {} exceeds maximum", spend_count).into());
+                return Err(format!("Sapling spend count {spend_count} exceeds maximum").into());
             }
             let mut spend_buf = vec![0u8; 384];
             for _ in 0..spend_count {
@@ -264,7 +264,7 @@ async fn process_transaction_v1(
             // Read and skip vShieldOutput (948 bytes each)
             let output_count = read_varint(reader).await?;
             if output_count > 5_000 {
-                return Err(format!("Sapling output count {} exceeds maximum", output_count).into());
+                return Err(format!("Sapling output count {output_count} exceeds maximum").into());
             }
             let mut output_buf = vec![0u8; 948];
             for _ in 0..output_count {
@@ -285,7 +285,7 @@ async fn process_transaction_v1(
             if payload_flag[0] != 0 {
                 let payload_size = read_varint(reader).await?;
                 if payload_size > 10_000_000 {
-                    return Err(format!("extraPayload size {} exceeds maximum", payload_size).into());
+                    return Err(format!("extraPayload size {payload_size} exceeds maximum").into());
                 }
                 let mut payload = vec![0u8; payload_size as usize];
                 reader.read_exact(&mut payload).await?;
@@ -574,13 +574,13 @@ async fn parse_sapling_tx_data(
 ) -> Result<SaplingTxData, io::Error> {
     let _cf_transactions = _db
         .cf_handle("transactions")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "transactions CF not found"))?;
+        .ok_or_else(|| io::Error::other("transactions CF not found"))?;
     let _cf_pubkey = _db
         .cf_handle("pubkey")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "pubkey CF not found"))?;
+        .ok_or_else(|| io::Error::other("pubkey CF not found"))?;
     let _cf_utxo = _db
         .cf_handle("utxo")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "utxo CF not found"))?;
+        .ok_or_else(|| io::Error::other("utxo CF not found"))?;
 
     // Set empty vectors for later access
     let _inputs: Vec<CTxIn> = Vec::new();
@@ -661,7 +661,7 @@ async fn parse_sapling_tx_data(
     };
 
     let serialized_data = bincode::serialize(&sapling_tx_data)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let end_pos: u64 = set_end_pos(reader, start_pos).await?;
     let tx_bytes: Vec<u8> = get_txid_bytes(reader, start_pos, end_pos).await?;
     let reversed_txid: Vec<u8> = hash_txid(&tx_bytes).await?;
@@ -862,8 +862,7 @@ async fn parse_payload_data(reader: &mut BufReader<File>) -> Result<Option<Vec<u
     // Check if the byte count exceeds the maximum payload size
     if byte_count > MAX_PAYLOAD_SIZE {
         // Handle the case where the payload exceeds the maximum size
-        Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(io::Error::other(
             "Payload size exceeds the maximum.",
         ))
     } else {

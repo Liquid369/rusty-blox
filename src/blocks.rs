@@ -136,7 +136,7 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
     if input_count > MAX_TX_INPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction input count {} exceeds maximum {}", input_count, MAX_TX_INPUTS)
+            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}")
         ));
     }
     let mut inputs = Vec::new();
@@ -181,7 +181,7 @@ async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<
     if output_count > MAX_TX_OUTPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction output count {} exceeds maximum {}", output_count, MAX_TX_OUTPUTS)
+            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}")
         ));
     }
     let mut outputs = Vec::new();
@@ -241,7 +241,7 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 
     let last = window_len.saturating_sub(8);
     for offset in 0..=last {
-        if &window[offset..offset + 4] == &magic[..] {
+        if window[offset..offset + 4] == magic[..] {
             let block_size = u32::from_le_bytes([
                 window[offset + 4], window[offset + 5], window[offset + 6], window[offset + 7],
             ]) as u64;

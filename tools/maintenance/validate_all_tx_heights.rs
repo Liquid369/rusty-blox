@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::var("DB_PATH")
         .unwrap_or_else(|_| "data/blocks.db".to_string());
     
-    println!("📂 Opening database: {}", db_path);
+    println!("📂 Opening database: {db_path}");
     
     let mut opts = Options::default();
     opts.create_if_missing(false);
@@ -47,17 +47,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📂 Reading PIVX Core block index...");
     
     let pivx_dir = std::env::var("HOME")
-        .map(|h| format!("{}/Library/Application Support/PIVX", h))
+        .map(|h| format!("{h}/Library/Application Support/PIVX"))
         .unwrap_or_else(|_| "/Users/liquid/Library/Application Support/PIVX".to_string());
     
-    let block_index_src = format!("{}/blocks/index", pivx_dir);
+    let block_index_src = format!("{pivx_dir}/blocks/index");
     let block_index_copy = "/tmp/pivx_block_index_validate";
     
     // Remove old copy
     std::fs::remove_dir_all(block_index_copy).ok();
     
     // Copy block index
-    println!("   Copying from: {}", block_index_src);
+    println!("   Copying from: {block_index_src}");
     let copy_result = std::process::Command::new("cp")
         .args(["-R", &block_index_src, block_index_copy])
         .output()?;
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let canonical_chain = match build_canonical_chain_from_leveldb(block_index_copy) {
         Ok(chain) => chain,
         Err(e) => {
-            eprintln!("❌ Failed to read block index: {}", e);
+            eprintln!("❌ Failed to read block index: {e}");
             return Err(e);
         }
     };
@@ -142,15 +142,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         
         if total_scanned % 500000 == 0 {
-            println!("   Scanned {} transactions ({} invalid found)...", total_scanned, invalid_heights);
+            println!("   Scanned {total_scanned} transactions ({invalid_heights} invalid found)...");
         }
     }
     
     println!("\n📈 Validation complete:");
-    println!("   Total scanned: {}", total_scanned);
-    println!("   Valid canonical heights: {}", valid_heights);
-    println!("   Invalid/non-canonical: {}", invalid_heights);
-    println!("   Already orphaned (-1): {}", already_orphaned);
+    println!("   Total scanned: {total_scanned}");
+    println!("   Valid canonical heights: {valid_heights}");
+    println!("   Invalid/non-canonical: {invalid_heights}");
+    println!("   Already orphaned (-1): {already_orphaned}");
     println!();
     
     if to_mark_orphan.is_empty() {
@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if marked % BATCH_SIZE == 0 {
                     db.write(batch)?;
                     batch = WriteBatch::default();
-                    println!("      Marked {} transactions...", marked);
+                    println!("      Marked {marked} transactions...");
                 }
             }
         }
@@ -192,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db.write(batch)?;
     }
     
-    println!("\n✅ Marked {} transactions as HEIGHT_ORPHAN\n", marked);
+    println!("\n✅ Marked {marked} transactions as HEIGHT_ORPHAN\n");
     
     println!("╔════════════════════════════════════════════════════╗");
     println!("║              ✅ VALIDATION COMPLETE! ✅             ║");

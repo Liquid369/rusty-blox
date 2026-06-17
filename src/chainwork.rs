@@ -104,8 +104,8 @@ pub fn calculate_all_chainwork(
         if prev_hash.iter().all(|&b| b == 0) {
             // Genesis block
             let work = calculate_work_from_bits(*n_bits);
-            chainwork_map.insert(block_hash.clone(), work);
-            queue.push_back(block_hash.clone());
+            chainwork_map.insert(*block_hash, work);
+            queue.push_back(*block_hash);
         }
     }
 
@@ -148,8 +148,8 @@ pub fn calculate_all_chainwork(
                 };
                 
                 if should_update {
-                    chainwork_map.insert(child_hash.clone(), child_chainwork);
-                    queue.push_back(child_hash.clone());
+                    chainwork_map.insert(*child_hash, child_chainwork);
+                    queue.push_back(*child_hash);
                     
                     processed += 1;
                     if processed % 500_000 == 0 {

@@ -53,7 +53,7 @@ pub async fn mempool_tx_v2(
         Some(tx) => Ok(Json(tx)),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(BlockbookError::new(format!("Transaction {} not found in mempool", txid)))
+            Json(BlockbookError::new(format!("Transaction {txid} not found in mempool")))
         )),
     }
 }

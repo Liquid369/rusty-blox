@@ -198,7 +198,7 @@ async fn fetch_block_data(
     let timer = metrics::Timer::new();
     let block_hash = rpc_call_json("getblockhash", serde_json::json!([height as i64]))
         .await
-        .map_err(|e| format!("RPC error getting block hash: {}", e))?
+        .map_err(|e| format!("RPC error getting block hash: {e}"))?
         .as_str()
         .ok_or("getblockhash returned non-string")?
         .to_string();
@@ -332,7 +332,7 @@ async fn index_block_from_rpc(
         serde_json::json!([height as i64]),
     )
     .await
-    .map_err(|e| format!("RPC error getting block hash: {}", e))?
+    .map_err(|e| format!("RPC error getting block hash: {e}"))?
     .as_str()
     .ok_or("getblockhash returned non-string")?
     .to_string();
@@ -368,7 +368,7 @@ async fn index_block_from_rpc(
     
     // Step 3: Set processing marker to claim this height
     // Use a short TTL value as the marker (height as bytes)
-    db.put_cf(&cf_state, &processing_key, &height.to_le_bytes())?;
+    db.put_cf(&cf_state, &processing_key, height.to_le_bytes())?;
     
     // RAII guard to ensure processing marker is cleaned up even on error
     struct ProcessingGuard<'a> {
@@ -385,7 +385,7 @@ async fn index_block_from_rpc(
     
     let _guard = ProcessingGuard {
         db,
-        cf_state: &cf_state,
+        cf_state,
         key: processing_key.clone(),
     };
     
@@ -1089,7 +1089,7 @@ async fn index_block_from_rpc(
                         .unwrap_or(0);
                     
                     let new_total = current_total + received_delta;
-                    db.put_cf(&cf_addr_index, &key_r, &new_total.to_le_bytes())?;
+                    db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())?;
                 }
                 
                 // Calculate sent amount (inputs spending from this address)
@@ -1145,7 +1145,7 @@ async fn index_block_from_rpc(
                         .unwrap_or(0);
                     
                     let new_total = current_total + sent_delta;
-                    db.put_cf(&cf_addr_index, &key_s, &new_total.to_le_bytes())?;
+                    db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())?;
                 }
             }
         }
@@ -1546,7 +1546,7 @@ pub async fn run_block_monitor(
                 let height_key = block.height.to_le_bytes();
                 
                 // Check if we already have a canonical hash for this height
-                if let Some(stored_hash) = db.get_cf(&cf_metadata, &height_key)? {
+                if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
                     let stored_hash_hex = hex::encode(&stored_hash);
 
                     if stored_hash_hex != block.block_hash {

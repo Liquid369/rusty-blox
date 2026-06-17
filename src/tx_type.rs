@@ -98,9 +98,9 @@ fn is_zerocoin_public_spend_input(input: &CTxIn) -> bool {
 /// Detect transaction type using PIVX Core's rules
 ///
 /// This matches the exact logic from PIVX Core (primitives/transaction.cpp):
-/// - IsCoinBase(): vin.size() == 1 && vin[0].prevout.IsNull() && !ContainsZerocoins()
-/// - IsCoinStake(): !vin.empty() && (vin[0].prevout NOT null, unless vin[0] is a
-///   zerocoin spend / zPoS) && vout.size() >= 2 && vout[0].IsEmpty()
+/// - `IsCoinBase()`: `vin.size() == 1 && vin[0].prevout.IsNull() && !ContainsZerocoins()`
+/// - `IsCoinStake()`: `!vin.empty()` && (`vin[0].prevout` NOT null, unless `vin[0]` is a
+///   zerocoin spend / zPoS) && `vout.size() >= 2 && vout[0].IsEmpty()`
 ///
 /// A coinstake spends a REAL stake outpoint — a null first prevout disqualifies it
 /// (except zerocoin stakes). This is the opposite of coinbase.

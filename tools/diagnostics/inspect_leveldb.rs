@@ -12,12 +12,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "/tmp/pivx_index_current".to_string()
     };
 
-    println!("Inspecting LevelDB at: {}", copy_leveldb_path);
+    println!("Inspecting LevelDB at: {copy_leveldb_path}");
 
     let chain = build_canonical_chain_from_leveldb(&copy_leveldb_path)?;
 
     let len = chain.len();
-    println!("Canonical chain entries found: {}", len);
+    println!("Canonical chain entries found: {len}");
 
     if len > 0 {
     let first = &chain[0];

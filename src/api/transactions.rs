@@ -25,7 +25,7 @@ pub async fn tx_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
-    let cache_key = format!("tx:{}", txid);
+    let cache_key = format!("tx:{txid}");
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
     
@@ -436,7 +436,7 @@ async fn send_transaction_internal(
             StatusCode::BAD_REQUEST,
             // Node rejection reasons (e.g. "bad-txns-inputs-spent") are part of the
             // Blockbook contract — wallets rely on them.
-            Json(BlockbookError::new(format!("Failed to send transaction: {}", e))),
+            Json(BlockbookError::new(format!("Failed to send transaction: {e}"))),
         )),
     }
 }

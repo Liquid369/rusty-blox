@@ -319,7 +319,7 @@ pub fn build_canonical_chain_from_leveldb(
             data_pos: n_data_pos,
         };
         
-        index.insert(block_hash.clone(), info);
+        index.insert(block_hash, info);
         height_to_hashes.entry(height).or_default().push(block_hash);
         leveldb_count += 1;
     }
@@ -366,7 +366,7 @@ pub fn build_canonical_chain_from_leveldb(
         if let Some(block_hashes) = height_to_hashes.get(&height) {
             for block_hash in block_hashes {
                 if let Some(block_info) = index.get(block_hash) {
-                    let parent_hash = block_info.hash_prev.clone();
+                    let parent_hash = block_info.hash_prev;
                     let n_bits = block_info.n_bits;
                     
                     if let Some(parent_info) = index.get(&parent_hash) {
@@ -403,11 +403,11 @@ pub fn build_canonical_chain_from_leveldb(
                     if let Some(chainwork) = block_info.chainwork {
                         match &best_tip {
                             None => {
-                                best_tip = Some((block_hash.clone(), block_info.height, chainwork));
+                                best_tip = Some((*block_hash, block_info.height, chainwork));
                             }
                             Some((_, _, best_chainwork)) => {
                                 if cmp_u256(&chainwork, best_chainwork) == std::cmp::Ordering::Greater {
-                                    best_tip = Some((block_hash.clone(), block_info.height, chainwork));
+                                    best_tip = Some((*block_hash, block_info.height, chainwork));
                                 }
                             }
                         }
@@ -430,7 +430,7 @@ pub fn build_canonical_chain_from_leveldb(
         warn!("No blocks found with valid chainwork, using max height as fallback");
         if let Some(hashes) = height_to_hashes.get(&max_height) {
             if let Some(hash) = hashes.first() {
-                (hash.clone(), max_height, [0, 0, 0, 0])
+                (*hash, max_height, [0, 0, 0, 0])
             } else {
                 return Err("No blocks found at max height".into());
             }
@@ -439,7 +439,7 @@ pub fn build_canonical_chain_from_leveldb(
         }
     };
     
-    info!(height = best_tip_height, hash = %hex::encode(&best_tip_hash), "Best tip found");
+    info!(height = best_tip_height, hash = %hex::encode(best_tip_hash), "Best tip found");
     
     // Step 4: Build canonical chain by walking BACKWARDS from best tip
     info!("Building canonical chain (walking backwards from tip)");
@@ -464,7 +464,7 @@ pub fn build_canonical_chain_from_leveldb(
         }
         
         // Move to parent
-        current_hash = block_info.hash_prev.clone();
+        current_hash = block_info.hash_prev;
     }
     
     // Reverse to get genesis -> tip order

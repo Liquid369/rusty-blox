@@ -285,7 +285,7 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
         data[72..76].try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     );
-    let bits = format!("{:08x}", bits_value);
+    let bits = format!("{bits_value:08x}");
     
     // Parse nonce (4 bytes at offset 76)
     let nonce = u32::from_le_bytes(
@@ -476,7 +476,7 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
         if tx.value_in > 0.0 {
             let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
             let calculated_fee = tx.value_in + value_balance - tx.value_out;
-            tx.fees = if calculated_fee < 0.0 || calculated_fee > 1000.0 { 0.0 } else { calculated_fee };
+            tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) { 0.0 } else { calculated_fee };
         } else {
             tx.fees = 0.0;
         }
@@ -572,7 +572,7 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
     // because the output includes staking rewards. We should report 0 fee for these.
     // For regular transactions and coinbase, calculate normally.
     let has_coinbase_input = vin.iter().any(|i| i.coinbase.is_some());
-    let first_output_empty = vout.first().map_or(false, |o| o.value == 0.0 && o.addresses.is_empty());
+    let first_output_empty = vout.first().is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
     
     let (tx_type, reward, fees) = if has_coinbase_input {
         if first_output_empty && vout.len() > 1 {
@@ -675,8 +675,8 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
     // - Coinbase: first input has coinbase data, first output has value (standard mining reward)
     // - Coinstake: first output is empty (0 value, 0-length script), has regular inputs
     // - Normal: regular transaction
-    let has_coinbase_input = vin.first().map_or(false, |i| i.coinbase.is_some());
-    let first_output_empty = vout.first().map_or(false, |o| 
+    let has_coinbase_input = vin.first().is_some_and(|i| i.coinbase.is_some());
+    let first_output_empty = vout.first().is_some_and(|o| 
         o.value == 0.0 && o.addresses.is_empty()
     );
     

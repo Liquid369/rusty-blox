@@ -5,12 +5,14 @@
 //! v5.6.1), with the mainnet upgrade heights from `src/chainparams.cpp`
 //! (CMainParams) inlined:
 //!
+//! ```text
 //!   consensus.vUpgrades[UPGRADE_POS].nActivationHeight   = 259201;
 //!   consensus.vUpgrades[UPGRADE_ZC_V2].nActivationHeight = 1153160;
 //!   consensus.vUpgrades[UPGRADE_V5_5].nActivationHeight  = 3715200;
 //!   consensus.nMNBlockReward    = 3 * COIN;
 //!   consensus.nNewMNBlockReward = 6 * COIN;
 //!   consensus.nBudgetCycleBlocks = 43200;  // approx. 1 every 30 days
+//! ```
 //!
 //! Schedule (mainnet, total minted per block, excluding budget superblocks):
 //!

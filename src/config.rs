@@ -41,9 +41,9 @@ pub fn load_config() -> Result<Config, Box<dyn Error>> {
 pub fn default_pivx_data_dir() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     if cfg!(target_os = "macos") {
-        format!("{}/Library/Application Support/PIVX", home)
+        format!("{home}/Library/Application Support/PIVX")
     } else {
-        format!("{}/.pivx", home)
+        format!("{home}/.pivx")
     }
 }
 
@@ -51,5 +51,5 @@ pub fn default_pivx_data_dir() -> String {
 pub fn get_db_path(config: &Config) -> Result<String, Box<dyn Error>> {
     config
         .get_string("paths.db_path")
-        .map_err(|e| format!("Missing paths.db_path in config: {}", e).into())
+        .map_err(|e| format!("Missing paths.db_path in config: {e}").into())
 }

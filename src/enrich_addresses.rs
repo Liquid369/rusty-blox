@@ -266,7 +266,7 @@ fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i3
                     .as_slice()
                     .try_into()
                     .expect("spent-set prevout txid must be 32 bytes");
-                sh.spent_outputs.insert((t, prevout.n as u32));
+                sh.spent_outputs.insert((t, prevout.n));
             }
         }
     }
@@ -610,7 +610,7 @@ fn merge_pass1_shards(shards: Vec<Pass1Shard>) -> Pass1Shard {
             }
             out.packed.push(ptx);
         }
-        out.tx_rev.extend(sh.tx_rev.drain(..));
+        out.tx_rev.append(&mut sh.tx_rev);
         // Union the spent-outpoint set (order-independent).
         if out.spent_outputs.is_empty() {
             out.spent_outputs = std::mem::take(&mut sh.spent_outputs);
@@ -746,7 +746,7 @@ fn merge_pass2b_shards(shards: Vec<Pass2bShard>) -> Pass2bShard {
             agg.p2cs_created = agg.p2cs_created.saturating_add(j.p2cs_created);
             agg.p2cs_spent = agg.p2cs_spent.saturating_add(j.p2cs_spent);
         }
-        out.coinstake_treasury.extend(sh.coinstake_treasury.drain(..));
+        out.coinstake_treasury.append(&mut sh.coinstake_treasury);
         out.tx_total += sh.tx_total;
         out.tx_deserialized += sh.tx_deserialized;
         out.tx_failed += sh.tx_failed;
@@ -1320,8 +1320,8 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let total_unspent_utxos = total_utxos_checked - total_spent_found;
     metrics::set_total_addresses_indexed(total_addresses as u64);
     metrics::set_total_utxos_tracked(total_unspent_utxos as u64);
-    metrics::set_sapling_transactions_count(pass1_sapling_count as u64);
-    metrics::increment_sapling_transactions(pass1_sapling_count as u64);
+    metrics::set_sapling_transactions_count(pass1_sapling_count);
+    metrics::increment_sapling_transactions(pass1_sapling_count);
     
     info!(
         metric_addresses = total_addresses,
@@ -1538,7 +1538,7 @@ pub fn unix_to_date(ts: u64) -> String {
     // Howard Hinnant's civil_from_days algorithm.
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64;
+    let doe = z - era * 146_097;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
@@ -1546,7 +1546,7 @@ pub fn unix_to_date(ts: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Build a height -> block nTime index by reading every canonical block header.

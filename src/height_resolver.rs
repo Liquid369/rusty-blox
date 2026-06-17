@@ -136,7 +136,7 @@ pub async fn resolve_heights_from_block_index(
     if height_to_blockhash.is_empty() {
         warn!("chain_metadata has no canonical heights - falling back to leveldb re-import");
         let block_index_copy = "/tmp/pivx_block_index_current";
-        let block_index_src = format!("{}/blocks/index", pivx_dir);
+        let block_index_src = format!("{pivx_dir}/blocks/index");
         std::fs::remove_dir_all(block_index_copy).ok();
         let copy_result = std::process::Command::new("cp")
             .args(["-R", &block_index_src, block_index_copy])
@@ -283,7 +283,7 @@ pub async fn resolve_heights_from_block_index(
                     // Log at warn level (only first occurrence to avoid spam)
                     if validated_orphaned == 0 {
                         warn!(
-                            txid = %hex::encode(&txid_internal[..8].to_vec()),
+                            txid = %hex::encode(&txid_internal[..8]),
                             height = current_height,
                             "Transaction has 'B' key but height not in canonical lookup - keeping as valid"
                         );

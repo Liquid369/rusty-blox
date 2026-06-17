@@ -208,7 +208,7 @@ pub async fn rollback_to_height(
         }
         Err(e) => {
             // Address rollback failure is critical - abort the entire reorg
-            return Err(format!("FATAL: Address index rollback failed: {}. Reorg aborted to prevent inconsistency.", e).into());
+            return Err(format!("FATAL: Address index rollback failed: {e}. Reorg aborted to prevent inconsistency.").into());
         }
     }
     

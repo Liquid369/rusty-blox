@@ -21,9 +21,9 @@ pub fn format_piv_amount(amount: i64) -> String {
     let whole = abs / 100_000_000u64;
     let frac = abs % 100_000_000u64;
     if neg {
-        format!("-{}.{:08}", whole, frac)
+        format!("-{whole}.{frac:08}")
     } else {
-        format!("{}.{:08}", whole, frac)
+        format!("{whole}.{frac:08}")
     }
 }
 
@@ -86,7 +86,7 @@ pub async fn rpc_call_json(
     let url = if rpc_host.starts_with("http://") || rpc_host.starts_with("https://") {
         rpc_host
     } else {
-        format!("http://{}", rpc_host)
+        format!("http://{rpc_host}")
     };
 
     let body = serde_json::json!({
@@ -103,7 +103,7 @@ pub async fn rpc_call_json(
         .await?;
     let value: serde_json::Value = resp.json().await?;
     if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
-        return Err(format!("RPC error: {}", err).into());
+        return Err(format!("RPC error: {err}").into());
     }
     value
         .get("result")

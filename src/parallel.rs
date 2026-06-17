@@ -112,11 +112,10 @@ pub async fn process_files_parallel(
 
             if !metadata_complete {
                 return Err(format!(
-                    "FATAL [F3]: Canonical metadata incomplete ({} height mappings found).\n\
+                    "FATAL [F3]: Canonical metadata incomplete ({height_count} height mappings found).\n\
                      This would cause ALL transactions to get height=0 instead of correct heights.\n\
                      Check leveldb import logs for errors.\n\
-                     Recommendation: Delete database and resync from scratch.",
-                    height_count
+                     Recommendation: Delete database and resync from scratch."
                 ).into());
             }
 
@@ -433,10 +432,10 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     let mut has_children: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     
     for (parent_hash, children) in &children_map {
-        all_blocks.insert(parent_hash.clone());
+        all_blocks.insert(*parent_hash);
         for child_hash in children {
-            all_blocks.insert(child_hash.clone());
-            has_children.insert(parent_hash.clone());
+            all_blocks.insert(*child_hash);
+            has_children.insert(*parent_hash);
         }
     }
     
@@ -458,10 +457,10 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     for tip in &potential_tips {
         if let Some(work) = chainwork_map.get(tip) {
             match &best_tip {
-                None => best_tip = Some((tip.clone(), *work)),
+                None => best_tip = Some((*tip, *work)),
                 Some((_, best_work)) => {
                     if work > best_work {
-                        best_tip = Some((tip.clone(), *work));
+                        best_tip = Some((*tip, *work));
                     }
                 }
             }
@@ -489,7 +488,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             let url = if host.starts_with("http://") || host.starts_with("https://") {
                 host
             } else {
-                format!("http://{}", host)
+                format!("http://{host}")
             };
             
             debug!("Validating chosen tip with RPC");
@@ -581,7 +580,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     let mut steps = 0;
     
     loop {
-        chain_path.push(current_hash.clone());
+        chain_path.push(current_hash);
         steps += 1;
 
         // Look up this block's prev_hash from the compact block_meta map.
@@ -592,7 +591,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         // short" / "not found in blocks_map" — both break and yield a chain-gap
         // error with NO metadata written.
         if let Some((prev_hash, _n_bits)) = block_meta.get(&current_hash) {
-            let prev_hash = prev_hash.clone();
+            let prev_hash = *prev_hash;
 
             // Check if we reached genesis
             if prev_hash == genesis_parent {

@@ -135,7 +135,7 @@ pub async fn deserialize_transaction(
     if input_count > MAX_TX_INPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction input count {} exceeds maximum {}", input_count, MAX_TX_INPUTS)
+            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}")
         ));
     }
     // [M1] Optimize: Pre-allocate with known capacity to avoid reallocations
@@ -162,7 +162,7 @@ pub async fn deserialize_transaction(
     if output_count > MAX_TX_OUTPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction output count {} exceeds maximum {}", output_count, MAX_TX_OUTPUTS)
+            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}")
         ));
     }
     
@@ -200,7 +200,7 @@ pub async fn deserialize_transaction(
         if spend_count > MAX_SAPLING_SPENDS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Sapling spend count {} exceeds maximum {}", spend_count, MAX_SAPLING_SPENDS)
+                format!("Sapling spend count {spend_count} exceeds maximum {MAX_SAPLING_SPENDS}")
             ));
         }
         // [M1] Optimize: Pre-allocate for Sapling spends
@@ -243,7 +243,7 @@ pub async fn deserialize_transaction(
         if output_count > MAX_SAPLING_OUTPUTS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Sapling output count {} exceeds maximum {}", output_count, MAX_SAPLING_OUTPUTS)
+                format!("Sapling output count {output_count} exceeds maximum {MAX_SAPLING_OUTPUTS}")
             ));
         }
         // [M1] Optimize: Pre-allocate for Sapling outputs
@@ -336,7 +336,7 @@ async fn read_extra_payload(
         if new_pos > data_len as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("extraPayload size {} exceeds transaction bounds", payload_size),
+                format!("extraPayload size {payload_size} exceeds transaction bounds"),
             ));
         }
         cursor.set_position(new_pos);
@@ -652,7 +652,7 @@ pub async fn read_script(cursor: &mut Cursor<&[u8]>) -> Result<Vec<u8>, std::io:
     if script_length > remaining {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("script length {} exceeds {} remaining bytes", script_length, remaining),
+            format!("script length {script_length} exceeds {remaining} remaining bytes"),
         ));
     }
     let mut script = vec![0u8; script_length as usize];

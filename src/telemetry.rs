@@ -157,7 +157,7 @@ pub fn truncate_hex(hex: &str, len: usize) -> String {
 /// Example: ["a", "b", "c", "d", "e", "f"] (max 3) → "[3 of 6]: [a, b, c]"
 pub fn truncate_list<T: std::fmt::Display + std::fmt::Debug>(items: &[T], max: usize) -> String {
     if items.len() <= max {
-        format!("{:?}", items)
+        format!("{items:?}")
     } else {
         let preview: Vec<String> = items.iter().take(max).map(|i| i.to_string()).collect();
         format!("[{} of {}]: {:?}", max, items.len(), preview)

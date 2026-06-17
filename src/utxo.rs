@@ -38,9 +38,9 @@ impl From<std::io::Error> for ChainstateError {
 impl std::fmt::Display for ChainstateError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            ChainstateError::IoError(e) => write!(f, "IO error: {}", e),
-            ChainstateError::ParseError(s) => write!(f, "Parse error: {}", s),
-            ChainstateError::InvalidScript(s) => write!(f, "Invalid script: {}", s),
+            ChainstateError::IoError(e) => write!(f, "IO error: {e}"),
+            ChainstateError::ParseError(s) => write!(f, "Parse error: {s}"),
+            ChainstateError::InvalidScript(s) => write!(f, "Invalid script: {s}"),
         }
     }
 }
@@ -256,7 +256,7 @@ fn decompress_script(data: &[u8]) -> Result<Vec<u8>, ChainstateError> {
             
             if size > 10000 {
                 return Err(ChainstateError::InvalidScript(
-                    format!("Script too large: {} bytes", size)
+                    format!("Script too large: {size} bytes")
                 ));
             }
             
@@ -333,7 +333,7 @@ pub fn parse_ccoins(data: &[u8]) -> Result<CCoins, ChainstateError> {
             // Peek at first byte to determine script format
             if remaining.is_empty() {
                 return Err(ChainstateError::ParseError(
-                    format!("Unexpected end of data at output {}", bit_position)
+                    format!("Unexpected end of data at output {bit_position}")
                 ));
             }
             
@@ -342,7 +342,7 @@ pub fn parse_ccoins(data: &[u8]) -> Result<CCoins, ChainstateError> {
             // Determine how many bytes to read based on script type
             let script_bytes = match script_type {
                 0x00 | 0x01 => 21,  // P2PKH, P2SH: prefix + 20 bytes
-                0x02 | 0x03 | 0x04 | 0x05 => 33,  // P2PK: prefix + 32 bytes
+                0x02..=0x05 => 33,  // P2PK: prefix + 32 bytes
                 0x06 => 41,  // P2CS: prefix + 40 bytes
                 _ => {
                     // Uncompressed: varint(size) + data
@@ -461,21 +461,21 @@ mod tests {
     
     #[test]
     fn test_varint_single_byte() {
-        let data = vec![0x42];
+        let data = [0x42];
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 0x42);
     }
     
     #[test]
     fn test_varint_two_bytes() {
-        let data = vec![0xFD, 0xFF, 0xFF]; // 65535
+        let data = [0xFD, 0xFF, 0xFF]; // 65535
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 65535);
     }
     
     #[test]
     fn test_varint_four_bytes() {
-        let data = vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF]; // 4294967295
+        let data = [0xFE, 0xFF, 0xFF, 0xFF, 0xFF]; // 4294967295
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 4294967295);
     }

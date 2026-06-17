@@ -91,7 +91,7 @@ pub async fn block_index_v2(
 ) -> Result<Json<BlockHash>, (StatusCode, Json<BlockbookError>)> {
     if let Ok(height) = param.parse::<u32>() {
         // Height lookup - use cache
-        let cache_key = format!("block_index:height:{}", height);
+        let cache_key = format!("block_index:height:{height}");
         let db_clone = Arc::clone(&db);
         
         let result = cache
@@ -111,13 +111,12 @@ pub async fn block_index_v2(
                                 },
                                 Ok(None) => Err(Box::new(std::io::Error::new(
                                     std::io::ErrorKind::NotFound,
-                                    format!("Block not found at height {}", height)
+                                    format!("Block not found at height {height}")
                                 )) as Box<dyn std::error::Error + Send + Sync>),
                                 Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                             }
                         },
-                        None => Err(Box::new(std::io::Error::new(
-                            std::io::ErrorKind::Other,
+                        None => Err(Box::new(std::io::Error::other(
                             "chain_metadata column family not found"
                         )) as Box<dyn std::error::Error + Send + Sync>),
                     }
@@ -155,7 +154,7 @@ pub async fn block_index_v2(
             Some(cf) => {
                 match db.get_cf(&cf, &reversed_hash) {
                     Ok(Some(_)) => Ok(Json(BlockHash { block_hash: param })),
-                    Ok(None) => Err(not_found(format!("Block not found with hash {}", param))),
+                    Ok(None) => Err(not_found(format!("Block not found with hash {param}"))),
                     Err(e) => {
                         tracing::error!(error = %e, "block index lookup failed");
                         Err(internal_error("Internal error"))
@@ -188,7 +187,7 @@ pub async fn block_v2(
         Some(h) => h,
         None => return Err(StatusCode::NOT_FOUND),
     };
-    let cache_key = format!("block:height:{}", height);
+    let cache_key = format!("block:height:{height}");
     let db_clone = Arc::clone(&db);
     
     // Determine TTL based on block age
@@ -230,7 +229,7 @@ async fn compute_block_details(
             .cf_handle("chain_metadata")
             .ok_or("chain_metadata CF not found")?;
         let block_hash = db_clone
-            .get_cf(&cf_metadata, &height_bytes)?
+            .get_cf(&cf_metadata, height_bytes)?
             .ok_or("Block not found")?;
         
         // Get block header from blocks CF
@@ -329,7 +328,7 @@ pub async fn block_stats_v2(
     // DoS guard: each block costs several DB reads plus a per-block tx prefix scan.
     // Without a cap, a single request could walk the entire chain.
     let count = count.min(1_000);
-    let cache_key = format!("block_stats:{}", count);
+    let cache_key = format!("block_stats:{count}");
     let db_clone = Arc::clone(&db);
     
     let result = cache
@@ -359,7 +358,7 @@ async fn compute_block_stats(
     
     tokio::task::spawn_blocking(move || {
         let chain_state = get_chain_state(&db_clone)
-            .map_err(|e| format!("Failed to get chain state: {}", e))?;
+            .map_err(|e| format!("Failed to get chain state: {e}"))?;
         let tip_height = chain_state.height as u32;
         
         let mut stats = Vec::new();
@@ -381,7 +380,7 @@ async fn compute_block_stats(
             let height_bytes = (height as i32).to_le_bytes();
             
             // Get block hash from chain_metadata
-            let block_hash = match db_clone.get_cf(&cf_metadata, &height_bytes) {
+            let block_hash = match db_clone.get_cf(&cf_metadata, height_bytes) {
                 Ok(Some(hash)) => hash,
                 _ => continue,
             };
@@ -417,7 +416,7 @@ async fn compute_block_stats(
                 // Calculate difficulty from nBits
                 let difficulty = if header.n_bits != 0 {
                     let compact = header.n_bits;
-                    let size = (compact >> 24) as u32;
+                    let size = compact >> 24;
                     let word = compact & 0x00ffffff;
                     
                     let target = if size <= 3 {

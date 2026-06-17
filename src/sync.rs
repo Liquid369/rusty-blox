@@ -500,7 +500,7 @@ async fn run_initial_sync_leveldb(
             // and the canonical chain metadata (height/hash/offset mappings).
             for cf_name in ["blocks", "transactions", "chain_metadata"] {
                 if let Some(cf) = db_flush.cf_handle(cf_name) {
-                    db_flush.flush_cf(&cf).map_err(|e| format!("{}: {}", cf_name, e))?;
+                    db_flush.flush_cf(&cf).map_err(|e| format!("{cf_name}: {e}"))?;
                 }
             }
             // Default CF (and any others) for completeness.
@@ -509,7 +509,7 @@ async fn run_initial_sync_leveldb(
         })
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        .map_err(Box::<dyn std::error::Error>::from)?;
     }
     info!("Flushed all memtables to disk after bulk import (WAL-disabled writes now durable)");
 
@@ -583,7 +583,7 @@ async fn run_initial_sync(
         tokio::task::spawn_blocking(move || -> Result<(), String> {
             for cf_name in ["blocks", "transactions", "chain_metadata"] {
                 if let Some(cf) = db_flush.cf_handle(cf_name) {
-                    db_flush.flush_cf(&cf).map_err(|e| format!("{}: {}", cf_name, e))?;
+                    db_flush.flush_cf(&cf).map_err(|e| format!("{cf_name}: {e}"))?;
                 }
             }
             db_flush.flush().map_err(|e| e.to_string())?;
@@ -591,7 +591,7 @@ async fn run_initial_sync(
         })
         .await
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .map_err(|e| Box::<dyn std::error::Error>::from(e))?;
+        .map_err(Box::<dyn std::error::Error>::from)?;
     }
 
     // Mark sync complete

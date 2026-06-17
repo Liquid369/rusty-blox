@@ -46,7 +46,7 @@ pub async fn enrich_from_chainstate(db: Arc<DB>) -> Result<(), Box<dyn std::erro
         .get_string("paths.pivx_data_dir")
         .unwrap_or_else(|_| crate::config::default_pivx_data_dir());
     
-    let chainstate_src = format!("{}/chainstate", pivx_data_dir);
+    let chainstate_src = format!("{pivx_data_dir}/chainstate");
     let chainstate_copy = "/tmp/pivx_chainstate_current";
     
     info!(src = %chainstate_src, dst = %chainstate_copy, "Copying chainstate from PIVX Core");

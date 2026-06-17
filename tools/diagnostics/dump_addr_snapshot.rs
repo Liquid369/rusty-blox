@@ -33,6 +33,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     lines.sort_unstable();
     eprintln!("addr_index entries: {}", lines.len());
     let out = lines.join("\n");
-    println!("{}", out);
+    println!("{out}");
     Ok(())
 }

@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     if !chainstate_path.exists() {
         eprintln!("❌ Chainstate path does not exist: {}", chainstate_path.display());
-        eprintln!("   Default path: {} (from config.toml)", chainstate_path_str);
+        eprintln!("   Default path: {chainstate_path_str} (from config.toml)");
         eprintln!("   Or specify with: --chainstate-path <path>");
         std::process::exit(1);
     }
@@ -98,10 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Read raw chainstate
     println!("\n⏳ Reading chainstate LevelDB...");
-    let raw_map = match read_chainstate_map(&chainstate_path.to_str().unwrap()) {
+    let raw_map = match read_chainstate_map(chainstate_path.to_str().unwrap()) {
         Ok(map) => map,
         Err(e) => {
-            eprintln!("❌ Failed to read chainstate: {}", e);
+            eprintln!("❌ Failed to read chainstate: {e}");
             eprintln!("   Make sure PIVX Core is stopped before copying chainstate");
             std::process::exit(1);
         }
@@ -124,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("\n💰 Chainstate Summary:");
     println!("   Addresses with balance: {}", balances.len());
-    println!("   Total supply:           {:.2} PIV ({} satoshis)", total_piv, total_supply);
+    println!("   Total supply:           {total_piv:.2} PIV ({total_supply} satoshis)");
     
     // Show top addresses
     let mut sorted: Vec<_> = balances.iter().collect();
@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         
         // Config already initialized above, just get db path
-        let db_path_str = get_db_path(&config)?;
+        let db_path_str = get_db_path(config)?;
         
         // Open DB with column families
         const COLUMN_FAMILIES: [&str; 8] = [
@@ -171,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db = match DB::open_cf_descriptors(&db_options, db_path_str, cf_descriptors) {
             Ok(db) => Arc::new(db),
             Err(e) => {
-                eprintln!("❌ Failed to open explorer database: {}", e);
+                eprintln!("❌ Failed to open explorer database: {e}");
                 eprintln!("   Make sure rustyblox has been run at least once");
                 std::process::exit(1);
             }
@@ -307,7 +307,7 @@ async fn verify_balances(
 
 async fn get_address_balance(db: &Arc<DB>, address: &str) -> Result<u64, Box<dyn std::error::Error>> {
     // Get UTXOs for this address (key: 'a' + address) from addr_index CF
-    let key = format!("a{}", address);
+    let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = db.clone();
     
@@ -331,7 +331,7 @@ async fn get_address_balance(db: &Arc<DB>, address: &str) -> Result<u64, Box<dyn
     }
     
     // Get current chain height for maturity checks
-    let current_height = get_current_height(&db).unwrap_or(0);
+    let current_height = get_current_height(db).unwrap_or(0);
     
     // Filter UTXOs by maturity rules (coinbase/coinstake must meet maturity requirements)
     let spendable_utxos = filter_spendable_utxos(
@@ -404,7 +404,7 @@ fn print_verification_results(results: &VerificationResults) {
             println!("   {}. {} {}", i + 1, symbol, diff.address);
             println!("      Chainstate: {:.8} PIV", diff.chainstate as f64 / 100_000_000.0);
             println!("      TxDB:       {:.8} PIV", diff.txdb as f64 / 100_000_000.0);
-            println!("      Difference: {:.8} PIV", diff_piv);
+            println!("      Difference: {diff_piv:.8} PIV");
         }
     }
     

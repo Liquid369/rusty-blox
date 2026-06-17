@@ -29,7 +29,7 @@ impl DbHandles {
         
         for cf_name in required_cfs {
             if db.cf_handle(cf_name).is_none() {
-                return Err(format!("{} column family not found", cf_name));
+                return Err(format!("{cf_name} column family not found"));
             }
         }
         

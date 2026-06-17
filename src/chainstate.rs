@@ -417,12 +417,12 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
                     // assign to unknown coinbase bucket
                     let key_snip = hex::encode(script.iter().take(6).cloned().collect::<Vec<u8>>());
                     if is_coinbase_output {
-                        let key = format!("UNKNOWN_COINBASE_{}", key_snip);
+                        let key = format!("UNKNOWN_COINBASE_{key_snip}");
                         let entry = coinbase_balances.entry(key).or_insert(0);
                         *entry = entry.saturating_add(amount);
                     }
                     if opts.include_unknown {
-                        let key = format!("UNKNOWN_{}", key_snip);
+                        let key = format!("UNKNOWN_{key_snip}");
                         let entry = balances.entry(key).or_insert(0);
                         *entry = entry.saturating_add(amount);
                     }

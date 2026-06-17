@@ -33,7 +33,7 @@ async fn index_block_by_offset(
     _state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Construct blk file path
-    let filename = format!("blk{:05}.dat", file_num);
+    let filename = format!("blk{file_num:05}.dat");
     let mut path = blk_dir.clone();
     path.push(filename);
 
@@ -72,7 +72,7 @@ async fn index_block_by_offset(
     let parsed_header = parse_block_header_sync(&header_buffer, header_size)?;
     
     // Verify block hash matches what we expect from LevelDB
-    if &parsed_header.block_hash != block_hash {
+    if parsed_header.block_hash != block_hash {
         return Err(format!("Block hash mismatch at {}:{} - expected {}, got {}", 
             path.display(), data_pos,
             hex::encode(block_hash),

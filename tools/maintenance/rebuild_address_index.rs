@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = std::env::var("DB_PATH")
         .unwrap_or_else(|_| "data/blocks.db".to_string());
     
-    println!("📂 Opening database: {}", db_path);
+    println!("📂 Opening database: {db_path}");
     
     // Open database with all column families
     let mut opts = Options::default();
@@ -62,11 +62,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         delete_count += 1;
         
         if delete_count % 100000 == 0 {
-            println!("   Deleted {} address entries...", delete_count);
+            println!("   Deleted {delete_count} address entries...");
         }
     }
     
-    println!("   ✅ Deleted {} old address index entries\n", delete_count);
+    println!("   ✅ Deleted {delete_count} old address index entries\n");
     
     // Step 2: Rebuild with proper UTXO tracking
     println!("🔨 Step 2: Rebuilding address index with UTXO tracking...");
