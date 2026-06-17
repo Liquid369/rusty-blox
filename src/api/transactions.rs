@@ -330,7 +330,37 @@ pub(crate) async fn build_transaction_from_db(
         } else {
             0
         };
-        
+
+        // Sapling (shielded) detail for version >= 3 transactions. Mirrors the
+        // block-detail endpoint's mapping exactly so the tx page renders the same
+        // shielded card (counts, value balance, binding sig, spend/output crypto).
+        let sapling = tx.sapling_data.as_ref().map(|sap| {
+            let spends = sap.vshielded_spend.iter().map(|spend| crate::block_detail::SpendInfo {
+                cv: hex::encode(spend.cv),
+                anchor: hex::encode(spend.anchor),
+                nullifier: hex::encode(spend.nullifier),
+                rk: hex::encode(spend.rk),
+                zkproof: hex::encode(spend.zkproof),
+                spend_auth_sig: hex::encode(spend.spend_auth_sig),
+            }).collect();
+            let outputs = sap.vshielded_output.iter().map(|output| crate::block_detail::OutputInfo {
+                cv: hex::encode(output.cv),
+                cmu: hex::encode(output.cmu),
+                ephemeral_key: hex::encode(output.ephemeral_key),
+                enc_ciphertext: hex::encode(output.enc_ciphertext),
+                out_ciphertext: hex::encode(output.out_ciphertext),
+                zkproof: hex::encode(output.zkproof),
+            }).collect();
+            crate::block_detail::SaplingInfo {
+                value_balance: sap.value_balance as f64 / 100_000_000.0, // satoshis -> PIV
+                shielded_spend_count: sap.vshielded_spend.len() as u64,
+                shielded_output_count: sap.vshielded_output.len() as u64,
+                binding_sig: hex::encode(sap.binding_sig),
+                spends: Some(spends),
+                outputs: Some(outputs),
+            }
+        });
+
         Ok(Transaction {
             txid: tx.txid,
             version: Some(tx.version as i32),
@@ -347,6 +377,7 @@ pub(crate) async fn build_transaction_from_db(
             value_in: value_in.to_string(),
             fees: fees.to_string(),
             hex: hex::encode(&data[8..]),
+            sapling,
         })
     })
     .await

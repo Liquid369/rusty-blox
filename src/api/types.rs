@@ -193,6 +193,10 @@ pub struct Transaction {
     pub value_in: String,
     pub fees: String,
     pub hex: String,
+    /// Sapling (shielded) detail for version >= 3 transactions. Same shape the
+    /// block-detail endpoint emits; omitted entirely for transparent txs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sapling: Option<crate::block_detail::SaplingInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

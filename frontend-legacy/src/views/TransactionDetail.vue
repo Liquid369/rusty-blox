@@ -145,7 +145,7 @@
             <div class="card-header-content">
               <span><Icon name="shield" :size="16" /> Sapling Shielded Transaction</span>
               <Badge variant="accent">Private</Badge>
-              <Badge v-if="transaction.sapling?.transaction_type" :variant="shieldedTypeBadgeVariant">
+              <Badge v-if="shieldedTypeLabel" :variant="shieldedTypeBadgeVariant">
                 {{ shieldedTypeLabel }}
               </Badge>
             </div>
@@ -168,9 +168,9 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="formatPIV(transaction.sapling?.value_balance)" label="Value Balance" icon="scale">
+            <InfoRow v-if="valueBalancePiv" label="Value Balance" icon="scale">
               <div class="value-balance">
-                <span class="balance-amount" :class="valueBalanceClass">{{ formatPIV(transaction.sapling.value_balance) }} PIV</span>
+                <span class="balance-amount" :class="valueBalanceClass">{{ valueBalancePiv }} PIV</span>
                 <span class="balance-explanation">{{ valueBalanceExplanation }}</span>
               </div>
             </InfoRow>
@@ -245,8 +245,8 @@
                 <li><strong>Shielded Amounts:</strong> Values are cryptographically hidden using Pedersen commitments</li>
                 <li><strong>Private Addresses:</strong> Recipient addresses are encrypted and unlinkable</li>
                 <li><strong>Zero-Knowledge Proofs:</strong> Transactions are verified without revealing transaction details</li>
-                <li v-if="transaction.sapling?.transaction_type === 'shielding'"><strong>Shielding:</strong> Moving funds from transparent to shielded pool for privacy</li>
-                <li v-if="transaction.sapling?.transaction_type === 'unshielding'"><strong>Unshielding:</strong> Moving funds from shielded to transparent pool</li>
+                <li v-if="shieldedDirection === 'shielding'"><strong>Shielding:</strong> Moving funds from transparent to shielded pool for privacy</li>
+                <li v-if="shieldedDirection === 'deshielding'"><strong>Deshielding:</strong> Moving funds from shielded to transparent pool</li>
               </ul>
             </div>
           </div>
@@ -481,49 +481,78 @@ const isShieldedTransaction = computed(() => {
          transaction.value?.sapling?.shielded_output_count > 0
 })
 
+// Shielded direction from the signed value balance (PIV). Backend convention:
+// < 0 shielding (transparent -> shielded), > 0 deshielding, 0 pure z->z transfer.
+const shieldedDirection = computed(() => {
+  const vb = transaction.value?.sapling?.value_balance
+  if (vb === undefined || vb === null) return null
+  const n = Number(vb)
+  if (n < 0) return 'shielding'
+  if (n > 0) return 'deshielding'
+  return 'transfer'
+})
+
 const shieldedTypeLabel = computed(() => {
-  const type = transaction.value?.sapling?.transaction_type
-  if (type === 'shielding') return 'Shielding'
-  if (type === 'unshielding') return 'Unshielding'
-  if (type === 'shielded_transfer') return 'Shielded Transfer'
-  return 'Unknown'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'Shielding'
+    case 'deshielding': return 'Deshielding'
+    case 'transfer': return 'Shielded Transfer'
+    default: return ''
+  }
 })
 
 const shieldedTypeBadgeVariant = computed(() => {
-  const type = transaction.value?.sapling?.transaction_type
-  if (type === 'shielding') return 'info'
-  if (type === 'unshielding') return 'warning'
-  if (type === 'shielded_transfer') return 'success'
-  return 'default'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'info'
+    case 'deshielding': return 'warning'
+    case 'transfer': return 'success'
+    default: return 'default'
+  }
+})
+
+// value_balance is already a PIV float from the API — format directly (no /1e8).
+const valueBalancePiv = computed(() => {
+  const vb = transaction.value?.sapling?.value_balance
+  if (vb === undefined || vb === null) return ''
+  return Number(vb).toFixed(8)
 })
 
 const valueBalanceClass = computed(() => {
-  const balance = transaction.value?.sapling?.value_balance_sat
-  if (!balance) return ''
-  return balance < 0 ? 'balance-negative' : balance > 0 ? 'balance-positive' : 'balance-zero'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'balance-negative'
+    case 'deshielding': return 'balance-positive'
+    case 'transfer': return 'balance-zero'
+    default: return ''
+  }
 })
 
 const valueBalanceExplanation = computed(() => {
-  const balance = transaction.value?.sapling?.value_balance_sat
-  if (!balance) return ''
-  if (balance < 0) return '(Adding to shielded pool)'
-  if (balance > 0) return '(Removing from shielded pool)'
-  return '(Pure shielded transfer)'
+  switch (shieldedDirection.value) {
+    case 'shielding': return '(Adding to shielded pool)'
+    case 'deshielding': return '(Removing from shielded pool)'
+    case 'transfer': return '(Pure shielded transfer)'
+    default: return ''
+  }
 })
 
+let fetchToken = 0
+
 const fetchTransaction = async (txid) => {
+  const token = ++fetchToken
   loading.value = true
   error.value = ''
   transaction.value = null
 
   try {
     const txData = await transactionService.getTransaction(txid)
+    if (token !== fetchToken) return // superseded by a newer navigation
     transaction.value = txData
   } catch (err) {
+    if (token !== fetchToken) return
     console.error('Failed to fetch transaction:', err)
     error.value = err.message || 'Failed to load transaction'
   } finally {
-    loading.value = false
+    if (token === fetchToken) loading.value = false
   }
 }
 
