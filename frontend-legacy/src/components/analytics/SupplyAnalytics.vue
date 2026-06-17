@@ -1,7 +1,6 @@
 <template>
   <div class="supply-analytics">
     <div class="controls">
-      <TimeRangeSelector v-model="timeRange" />
       <Button variant="ghost" size="sm" @click="exportData">
         <Icon name="download" :size="14" /> Export
       </Button>
@@ -61,9 +60,8 @@
 
 <script setup>
 import Icon from '@/components/common/Icon.vue'
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
-import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import Button from '@/components/common/Button.vue'
 import Card from '@/components/common/Card.vue'
 import { analyticsService } from '@/services/analyticsService'
@@ -269,10 +267,6 @@ const exportData = () => {
   }
 }
 
-watch(timeRange, () => {
-  fetchData()
-})
-
 onMounted(() => {
   fetchData()
 })
@@ -286,7 +280,7 @@ onMounted(() => {
 
 .controls {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);
