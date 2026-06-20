@@ -246,6 +246,50 @@ pub async fn transaction_analytics(
 
 /// Read the precomputed transaction daily series from chain_state, filtered to
 /// the requested range. Returns None if the series hasn't been built.
+/// PIVX produces ~1440 blocks/day; a TRAILING day well below this is a partial /
+/// stale-enrichment tail that renders as a cliff (counts dip) or a spike
+/// (block-time = 86400/blocks shoots up). Drop such trailing days — and the
+/// current day — so series end on a genuinely complete day. Interior low-block
+/// days (real chain stalls) are kept. `dates` must be sorted ascending.
+const MIN_COMPLETE_DAY_BLOCKS: u64 = 1000;
+
+fn drop_incomplete_trailing_days(db: &Arc<DB>, dates: &mut Vec<String>) {
+    let cf_state = match db.cf_handle("chain_state") {
+        Some(c) => c,
+        None => return,
+    };
+    // Anchor "today" to the chain TIP, not wall-clock. Under node-lag the freshest
+    // data lives in the tip's calendar day (a partial day), while wall-clock today
+    // may have no blocks at all; dropping wall-clock-today would then keep a stale
+    // partial tip day (the spike/cliff). Fall back to wall-clock only if the tip
+    // header time is unreadable.
+    let tip = crate::chain_state::get_sync_height(db).unwrap_or(0);
+    let today = block_time_at_height(db, tip)
+        .map(|t| crate::enrich_addresses::unix_to_date(t as u64))
+        .unwrap_or_else(|| {
+            crate::enrich_addresses::unix_to_date(
+                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            )
+        });
+    dates.retain(|d| *d != today);
+    while let Some(last) = dates.last() {
+        let mut k = b"analytics_tx_day:".to_vec();
+        k.extend_from_slice(last.as_bytes());
+        let blocks = db
+            .get_cf(&cf_state, &k)
+            .ok()
+            .flatten()
+            .and_then(|b| bincode::deserialize::<crate::enrich_addresses::TxDayAgg>(&b).ok())
+            .map(|a| a.blocks)
+            .unwrap_or(0);
+        if blocks < MIN_COMPLETE_DAY_BLOCKS {
+            dates.pop();
+        } else {
+            break;
+        }
+    }
+}
+
 fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionDataPoint>> {
     let cf_state = db.cf_handle("chain_state")?;
     let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
@@ -257,11 +301,9 @@ fn read_tx_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<TransactionData
     if dates.len() > days {
         dates = dates.split_off(dates.len() - days);
     }
-    // Drop the partial current day so series/headline tiles read complete days.
-    let today = crate::enrich_addresses::unix_to_date(
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-    );
-    dates.retain(|d| *d != today);
+    // Drop the partial current day AND any incomplete (stale-enrichment) trailing
+    // days so series/headline tiles read genuinely complete days.
+    drop_incomplete_trailing_days(db, &mut dates);
 
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
@@ -347,11 +389,8 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
     }
     // Drop the partial current day so the staking headline tiles (active
     // stakers, APY, block time) read the last COMPLETE day, not a few hours
-    // of today that read as a cliff.
-    let today = crate::enrich_addresses::unix_to_date(
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-    );
-    dates.retain(|d| *d != today);
+    // of today that read as a cliff. Also drop any incomplete trailing days.
+    drop_incomplete_trailing_days(db, &mut dates);
 
     // Real circulating supply from the wealth snapshot (sum of all positive
     // address balances, satoshis) — calculate_total_supply_at_height() is a
@@ -442,11 +481,9 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
     }
     // Daily network metrics are only meaningful for COMPLETE days: a partial
     // current day under-reports blocks and over-reports orphan rate (recent
-    // stale-vs-canonical classification lags the live tip).
-    let today = crate::enrich_addresses::unix_to_date(
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-    );
-    dates.retain(|d| *d != today);
+    // stale-vs-canonical classification lags the live tip). Also drop incomplete
+    // trailing days (stale-enrichment partial tail).
+    drop_incomplete_trailing_days(db, &mut dates);
 
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
@@ -786,12 +823,9 @@ fn read_coldstaking_series(db: &Arc<DB>, range: &str) -> Option<Vec<ColdStakingD
     let idx_bytes = db.get_cf(&cf_state, b"analytics_tx_days").ok()??;
     let mut dates: Vec<String> = bincode::deserialize(&idx_bytes).ok()?;
     dates.sort();
-    // Drop the partial current day; the cumulative line should end on the last
-    // complete day rather than a partial today.
-    let today = crate::enrich_addresses::unix_to_date(
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-    );
-    dates.retain(|d| *d != today);
+    // Drop the partial current day + any incomplete trailing days; the cumulative
+    // line should end on the last genuinely complete day.
+    drop_incomplete_trailing_days(db, &mut dates);
     let days = parse_time_range(range) as usize;
     let start = dates.len().saturating_sub(days);
 
