@@ -757,8 +757,14 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
         if use_chainstate {
+            // NOTE: the chainstate path builds the address index but NEVER the join
+            // daily-series (it does not call persist_tx_daily_series / set
+            // analytics_in_progress), so with use_chainstate=true the join-derived
+            // analytics (cold staking, PoS-era treasury, fees/rewards/coin-days) are
+            // only ever produced by the degraded fallback = zeroed. Use the
+            // transaction path (use_chainstate_for_utxos=false) when analytics matter.
             info!("Building address index from PIVX Core chainstate");
-            
+
             use crate::enrich_from_chainstate::enrich_from_chainstate;
             if let Err(e) = enrich_from_chainstate(Arc::clone(db)).await {
                 tracing::warn!(error = ?e, "Chainstate enrichment failed - falling back to transaction-based");
@@ -815,11 +821,80 @@ async fn run_post_sync_enrichment(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dy
             Some(b) if b.first() == Some(&1)
         );
         if !analytics_done {
-            info!("Address index built but deferred analytics incomplete - rebuilding degraded daily series");
-            if let Err(e) =
-                crate::enrich_addresses::rebuild_daily_series_degraded(Arc::clone(db)).await
-            {
-                warn!(error = ?e, "Degraded daily-series rebuild failed");
+            let analytics_interrupted = matches!(
+                db.get_cf(&cf_state, b"analytics_in_progress")?,
+                Some(b) if b.first() == Some(&1)
+            );
+            if analytics_interrupted {
+                // A prior full enrich's detached join daily-series was interrupted (a
+                // restart before it set analytics_complete). Re-run the FULL join
+                // enrich so the join-derived analytics (p2cs/cold staking, PoS-era
+                // treasury, fees, rewards, coin-days) are rebuilt. Falling back to the
+                // degraded rebuild here would zero those AND mark analytics_complete,
+                // permanently wedging the DB in degraded state.
+                //
+                // Circuit-breaker: a host that dies mid-enrich every boot (e.g. OOM on
+                // a memory-constrained box) would otherwise livelock re-running the
+                // heavy enrich forever. After MAX_RECOVERY_ATTEMPTS interrupted tries,
+                // fall back to the cheap degraded rebuild so the explorer at least
+                // serves (partial) analytics. The counter resets on a successful enrich
+                // (the detached daily-series clears it).
+                const MAX_RECOVERY_ATTEMPTS: u8 = 3;
+                let attempts = db
+                    .get_cf(&cf_state, b"analytics_recovery_attempts")?
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(0);
+                if attempts >= MAX_RECOVERY_ATTEMPTS {
+                    warn!(
+                        attempts,
+                        "Analytics recovery exceeded its retry budget - falling back to degraded. \
+                         Fix the host, then clear address_index_complete + analytics_complete to retry the full join enrich."
+                    );
+                    if let Err(e) =
+                        crate::enrich_addresses::rebuild_daily_series_degraded(Arc::clone(db)).await
+                    {
+                        warn!(error = ?e, "Degraded daily-series rebuild failed");
+                    }
+                    let mut batch = rocksdb::WriteBatch::default();
+                    batch.delete_cf(&cf_state, b"analytics_in_progress");
+                    batch.delete_cf(&cf_state, b"analytics_recovery_attempts");
+                    db.write(batch)?;
+                } else if let Some(_reenrich_guard) =
+                    crate::analytics_live::ReenrichGuard::try_acquire()
+                {
+                    // Single-flighted vs the monitor's auto-reenrich (shared guard).
+                    // _reenrich_guard releases on drop, so the `?` below cannot leak it.
+                    // NOTE: the guard covers the SYNCHRONOUS enrich (Pass 1/2b); it
+                    // drops when enrich_all_addresses returns, i.e. once the ~1h join
+                    // daily-series has been SPAWNED (detached), not finished. A
+                    // concurrent auto-reenrich during that tail is therefore possible
+                    // only with sync.live_analytics_auto_reenrich=true AND a deep reorg
+                    // in the window — bounded, and the day-blob writes are
+                    // overwrite-idempotent, so it is contention/RAM, never corruption.
+                    // Count the attempt BEFORE running so an interruption is remembered;
+                    // a successful enrich resets the counter.
+                    db.put_cf(&cf_state, b"analytics_recovery_attempts", [attempts + 1])?;
+                    warn!(
+                        attempt = attempts + 1,
+                        max = MAX_RECOVERY_ATTEMPTS,
+                        "Interrupted analytics daily-series detected - re-running full join enrich \
+                         (live analytics paused until it completes, ~1h on a full chain)"
+                    );
+                    if let Err(e) =
+                        crate::enrich_addresses::enrich_all_addresses(Arc::clone(db)).await
+                    {
+                        warn!(error = ?e, "Full analytics re-enrich failed");
+                    }
+                } else {
+                    info!("Analytics recovery skipped - a full enrich is already in progress");
+                }
+            } else {
+                info!("Address index built but deferred analytics incomplete - rebuilding degraded daily series");
+                if let Err(e) =
+                    crate::enrich_addresses::rebuild_daily_series_degraded(Arc::clone(db)).await
+                {
+                    warn!(error = ?e, "Degraded daily-series rebuild failed");
+                }
             }
         }
     }

@@ -22,8 +22,34 @@ use tracing::{debug, info, warn};
 /// so default to logging + a manual re-enrich).
 pub const AUTO_REENRICH_KEY: &str = "sync.live_analytics_auto_reenrich";
 
-/// Process-local single-flight guard for `run_full_analytics_enrich`.
+/// Process-local single-flight guard for the full join enrich (shared by
+/// `run_full_analytics_enrich` and the startup interrupted-enrich recovery).
 static REENRICH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// RAII single-flight guard for the full join enrich. Acquire via
+/// `ReenrichGuard::try_acquire`; it releases automatically on drop — covering EVERY
+/// exit path (normal return, `?` error propagation, panic unwind) — so the guard can
+/// never leak and permanently brick future re-enrich. Shares the same atomic as
+/// `run_full_analytics_enrich`, so the startup interrupted-enrich recovery and the
+/// monitor's auto-reenrich can never overlap.
+pub struct ReenrichGuard(());
+
+impl ReenrichGuard {
+    /// Take the guard if no full enrich is already running in this process.
+    pub fn try_acquire() -> Option<ReenrichGuard> {
+        if REENRICH_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(ReenrichGuard(()))
+        }
+    }
+}
+
+impl Drop for ReenrichGuard {
+    fn drop(&mut self) {
+        REENRICH_IN_PROGRESS.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Is auto-reenrich opted in?
 fn auto_reenrich() -> bool {
@@ -35,16 +61,18 @@ fn auto_reenrich() -> bool {
 /// live gate strictly-last. Used to recover from a deep reorg / degraded base. The
 /// process-local guard prevents a concurrent heavy Pass-1/2b overlap.
 pub fn run_full_analytics_enrich(db: &Arc<DB>) {
-    if REENRICH_IN_PROGRESS.swap(true, Ordering::SeqCst) {
+    let Some(guard) = ReenrichGuard::try_acquire() else {
         return; // already running in this process
-    }
+    };
     let db_bg = Arc::clone(db);
     std::thread::spawn(move || {
+        // Moved into the thread: the guard releases when this thread ends, covering
+        // every exit (incl. the runtime-build-fail early return below).
+        let _guard = guard;
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "run_full_analytics_enrich: runtime build failed");
-                REENRICH_IN_PROGRESS.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -54,7 +82,6 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
                 warn!(error = %e, "live-analytics: full re-enrich failed");
             }
         });
-        REENRICH_IN_PROGRESS.store(false, Ordering::SeqCst);
     });
 }
 
@@ -1007,6 +1034,18 @@ fn diff_agg(s: &TxDayAgg, r: &TxDayAgg) -> Vec<String> {
 mod tests {
     use super::*;
     use rocksdb::{Options, DB};
+
+    /// The single-flight guard must release on drop and be re-acquirable — pins the
+    /// RAII contract that closes the prior put_cf(...)? guard-leak.
+    #[test]
+    fn reenrich_guard_releases_on_drop() {
+        let g = ReenrichGuard::try_acquire().expect("first acquire succeeds");
+        assert!(ReenrichGuard::try_acquire().is_none(), "blocked while held");
+        drop(g);
+        let g2 = ReenrichGuard::try_acquire().expect("re-acquirable after drop");
+        drop(g2);
+        assert!(ReenrichGuard::try_acquire().is_some(), "free again");
+    }
 
     /// A `'t'`-CF value: `[version 4][height 4 LE][raw tx bytes]`.
     fn t_value(height: i32) -> Vec<u8> {

@@ -1526,7 +1526,15 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // can never write a day blob concurrently with this enrich nor onto a partial
     // baseline. The pass re-greens it strictly-last on success (below).
     if let Some(cf_state) = db.cf_handle("chain_state") {
-        let _ = db.put_cf(&cf_state, crate::analytics_live::K_READY, [0u8]);
+        // Mark the join daily-series IN-FLIGHT before the detached thread starts.
+        // If the process restarts before the thread sets analytics_complete (below),
+        // startup sees this marker and recovers as a FULL re-enrich rather than the
+        // degraded fallback (which would zero the join fields AND set
+        // analytics_complete, permanently wedging the DB in degraded state).
+        let mut batch = rocksdb::WriteBatch::default();
+        batch.put_cf(&cf_state, crate::analytics_live::K_READY, [0u8]);
+        batch.put_cf(&cf_state, b"analytics_in_progress", [1u8]);
+        let _ = db.write(batch);
     }
     let db_bg = Arc::clone(&db);
     std::thread::spawn(move || {
@@ -1561,6 +1569,11 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 batch.put_cf(&cf_state, b"analytics_complete", [1u8]);
                 batch.put_cf(&cf_state, crate::analytics_live::K_WATERMARK, tip.to_le_bytes());
                 batch.put_cf(&cf_state, crate::analytics_live::K_READY, [1u8]);
+                // Join series is durably persisted — clear the in-flight marker so a
+                // later restart does NOT trigger the interrupted-enrich recovery, and
+                // reset the recovery-attempt counter (the circuit-breaker budget).
+                batch.delete_cf(&cf_state, b"analytics_in_progress");
+                batch.delete_cf(&cf_state, b"analytics_recovery_attempts");
                 let _ = db_bg.write(batch);
             }
             info!("Background: transaction daily series complete - analytics ready");
