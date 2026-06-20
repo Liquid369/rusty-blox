@@ -16,12 +16,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = config.get_string("paths.db_path")
         .unwrap_or_else(|_| "./data/blocks.db".to_string());
     
-    let cf_names = vec![
-        "default", "blocks", "transactions", "addr_index", 
-        "utxo", "chain_metadata", "pubkey", "chain_state"
-    ];
-    
-    let db = Arc::new(DB::open_cf(&Options::default(), &db_path, &cf_names)?);
+    let opts = Options::default();
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+
+    let db = Arc::new(DB::open_cf(&opts, &db_path, &cf_names)?);
     
     // Get address data from our DB
     let cf_addr_index = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;

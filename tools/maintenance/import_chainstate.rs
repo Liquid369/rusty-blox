@@ -145,28 +145,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Config already initialized above, just get db path
         let db_path_str = get_db_path(config)?;
         
-        // Open DB with column families
-        const COLUMN_FAMILIES: [&str; 8] = [
-            "blocks",
-            "transactions",
-            "addr_index",
-            "utxo",
-            "chain_metadata",
-            "pubkey",
-            "chain_state",
-            "utxo_undo",
-        ];
-        
-        let mut cf_descriptors = vec![ColumnFamilyDescriptor::new("default", Options::default())];
-        for cf in COLUMN_FAMILIES.iter() {
-            cf_descriptors.push(ColumnFamilyDescriptor::new(
-                cf.to_string(),
-                Options::default(),
-            ));
-        }
-        
+        // Open DB read-write. The DB must already exist (created by the main
+        // binary), so discover its CFs dynamically — this self-adapts to any CF
+        // the main binary adds (e.g. the private tail_blocks/tail_meta CFs) and
+        // can never drift from the canonical set.
         let mut db_options = Options::default();
         db_options.create_if_missing(false);  // DB must already exist
+
+        let cf_names = DB::list_cf(&db_options, &db_path_str)
+            .unwrap_or_else(|_| vec!["default".to_string()]);
+        let cf_descriptors: Vec<ColumnFamilyDescriptor> = cf_names
+            .iter()
+            .map(|cf| ColumnFamilyDescriptor::new(cf, Options::default()))
+            .collect();
         
         let db = match DB::open_cf_descriptors(&db_options, db_path_str, cf_descriptors) {
             Ok(db) => Arc::new(db),

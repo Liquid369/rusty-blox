@@ -28,18 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut opts = Options::default();
     opts.create_if_missing(false);
     
-    let cfs = vec![
-        ColumnFamilyDescriptor::new("default", Options::default()),
-        ColumnFamilyDescriptor::new("blocks", Options::default()),
-        ColumnFamilyDescriptor::new("transactions", Options::default()),
-        ColumnFamilyDescriptor::new("addr_index", Options::default()),
-        ColumnFamilyDescriptor::new("utxo", Options::default()),
-        ColumnFamilyDescriptor::new("chain_metadata", Options::default()),
-        ColumnFamilyDescriptor::new("pubkey", Options::default()),
-        ColumnFamilyDescriptor::new("chain_state", Options::default()),
-        ColumnFamilyDescriptor::new("utxo_undo", Options::default()),
-    ];
-    
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+    let cfs: Vec<ColumnFamilyDescriptor> = cf_names
+        .iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+        .collect();
+
     let db = Arc::new(DB::open_cf_descriptors(&opts, &db_path, cfs)?);
     
     println!("✅ Database opened\n");

@@ -31,12 +31,12 @@ name = "inspect-leveldb"
 path = "tools/diagnostics/inspect_leveldb.rs"
 
 [[bin]]
-name = "dump-addr-snapshot"
-path = "tools/diagnostics/dump_addr_snapshot.rs"
+name = "db-query"
+path = "tools/diagnostics/db_query.rs"
 
 [[bin]]
-name = "reenrich"
-path = "tools/diagnostics/reenrich.rs"
+name = "live-debug"
+path = "tools/diagnostics/live_debug.rs"
 
 # Essential maintenance tools
 [[bin]]
@@ -81,7 +81,22 @@ path = "tools/maintenance/validate_all_tx_heights.rs"
 # Chainstate import and verification
 [[bin]]
 name = "import-chainstate"
-path = "src/bin/import-chainstate.rs"
+path = "tools/maintenance/import_chainstate.rs"
+
+# chain_state marker admin (get/set/clear e.g. address_index_complete)
+[[bin]]
+name = "db-marker"
+path = "tools/maintenance/db_marker.rs"
+
+# Live daily-analytics ops: rebuild the persistent orphan index
+[[bin]]
+name = "build-orphan-index"
+path = "tools/maintenance/build_orphan_index.rs"
+
+# Live daily-analytics ops: reset the live watermark + rebuild recent days
+[[bin]]
+name = "reset-live-watermark"
+path = "tools/maintenance/reset_live_watermark.rs"
 
 [dependencies]
 # jemalloc global allocator: returns freed memory to the OS far more aggressively

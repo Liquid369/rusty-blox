@@ -92,16 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     opts.create_if_missing(false);
     opts.create_missing_column_families(false);
     
-    let cf_names = vec![
-        "blocks",
-        "transactions",
-        "chain_metadata",
-        "addr_index",
-        "utxo",
-        "pubkey",
-        "chain_state",
-    ];
-    
+    let cf_names = DB::list_cf(&opts, db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+
     let db = DB::open_cf(&opts, db_path, &cf_names)?;
     println!("✅ Database opened");
     
