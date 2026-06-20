@@ -1127,13 +1127,9 @@ pub async fn run_sync_service(
     if resync {
         warn!("RESYNC MODE ENABLED - clearing all databases and rebuilding from scratch");
 
-        // Clear all column families
-        let cf_names = vec![
-            "blocks", "transactions", "chain_metadata",
-            "addr_index", "utxo", "pubkey", "chain_state"
-        ];
-
-        for cf_name in cf_names {
+        // Clear all column families (derived from the single CF source of truth so
+        // resync can never drift — this list previously omitted utxo_undo).
+        for cf_name in crate::COLUMN_FAMILIES.iter().copied() {
             if let Some(cf) = db.cf_handle(cf_name) {
                 info!(cf = cf_name, "Clearing column family");
 

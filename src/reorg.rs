@@ -193,7 +193,7 @@ pub async fn rollback_to_height(
         }
         
         // 3. Delete block metadata
-        delete_block_metadata(&mut writer, height)?;
+        delete_block_metadata(&mut writer, &db_clone, height)?;
         
         // Flush in batches to avoid excessive memory usage
         if writer.should_flush() {
@@ -376,20 +376,46 @@ async fn disconnect_transaction(
     Ok(())
 }
 
-/// Delete block metadata
+/// Delete block metadata for a height being rolled back.
+///
+/// Removes the forward `height -> hash` map AND the reverse `'h' + hash -> height`
+/// map from `chain_metadata`. Two writers produce the reverse key with different
+/// byte order, so we delete both to leave no stale entry:
+///   - parse path (blocks.rs):  `'h' + INTERNAL hash`
+///   - live path  (monitor.rs): `'h' + DISPLAY hash` (= reversed internal)
+/// The forward map value is the hash in DISPLAY order (both writers), so we read
+/// it first, then delete `'h'+display` and `'h'+reversed(display)=internal`.
+///
+/// (Prior bug: this deleted `'h' + height` from the `blocks` CF — a key that is
+/// never written — so the real `'h' + hash` entries in `chain_metadata` leaked on
+/// every reorg.)
 fn delete_block_metadata(
     writer: &mut AtomicBatchWriter,
+    db: &Arc<DB>,
     height: i32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Delete height -> hash mapping
     let height_key = height.to_le_bytes().to_vec();
-    writer.delete("chain_metadata", height_key.clone());
-    
-    // Delete 'h' + height -> block hash mapping
-    let mut h_key = vec![b'h'];
-    h_key.extend_from_slice(&height_key);
-    writer.delete("blocks", h_key);
-    
+
+    // Read the (display-order) hash from the forward map BEFORE deleting it, so we
+    // can construct and delete the matching reverse `'h'` keys.
+    if let Some(cf_metadata) = db.cf_handle("chain_metadata") {
+        if let Some(display_hash) = db.get_cf(&cf_metadata, &height_key)? {
+            // Reverse key as written by the live RPC path (display byte order).
+            let mut h_display = vec![b'h'];
+            h_display.extend_from_slice(&display_hash);
+            writer.delete("chain_metadata", h_display);
+
+            // Reverse key as written by the parse path (internal = reversed display).
+            let internal_hash: Vec<u8> = display_hash.iter().rev().cloned().collect();
+            let mut h_internal = vec![b'h'];
+            h_internal.extend_from_slice(&internal_hash);
+            writer.delete("chain_metadata", h_internal);
+        }
+    }
+
+    // Delete the forward height -> hash mapping.
+    writer.delete("chain_metadata", height_key);
+
     Ok(())
 }
 
@@ -519,5 +545,56 @@ mod tests {
         assert_eq!(info.orphaned_blocks, 5);
         assert_eq!(info.old_tip_hash, "old_hash");
         assert_eq!(info.new_tip_hash, "new_hash");
+    }
+
+    /// Regression: rolling back a block must delete the forward `height -> hash`
+    /// map AND both reverse `'h' + hash -> height` entries (the live-path display
+    /// ordering and the parse-path internal ordering). The prior bug deleted
+    /// `'h' + height` from the `blocks` CF, leaving the real `'h' + hash` entries
+    /// in `chain_metadata` to leak on every reorg.
+    #[tokio::test]
+    async fn test_delete_block_metadata_removes_both_h_orderings() {
+        use rocksdb::{Options, DB};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["chain_metadata"]).unwrap());
+
+        let height: i32 = 4242;
+        let height_key = height.to_le_bytes().to_vec();
+
+        // 32-byte hash in display order, plus its internal (reversed) counterpart.
+        let display_hash: Vec<u8> = (0u8..32).collect();
+        let internal_hash: Vec<u8> = display_hash.iter().rev().cloned().collect();
+
+        let cf = db.cf_handle("chain_metadata").unwrap();
+        // Forward map: height -> display hash (both writers store display order).
+        db.put_cf(&cf, &height_key, &display_hash).unwrap();
+        // Reverse 'h' as written by the live RPC path (display order).
+        let mut h_display = vec![b'h'];
+        h_display.extend_from_slice(&display_hash);
+        db.put_cf(&cf, &h_display, &height_key).unwrap();
+        // Reverse 'h' as written by the parse path (internal order).
+        let mut h_internal = vec![b'h'];
+        h_internal.extend_from_slice(&internal_hash);
+        db.put_cf(&cf, &h_internal, &height_key).unwrap();
+
+        // Sanity: all three present before rollback.
+        assert!(db.get_cf(&cf, &height_key).unwrap().is_some());
+        assert!(db.get_cf(&cf, &h_display).unwrap().is_some());
+        assert!(db.get_cf(&cf, &h_internal).unwrap().is_some());
+
+        // Roll back this block's metadata.
+        let mut writer = AtomicBatchWriter::new(db.clone(), 1000);
+        delete_block_metadata(&mut writer, &db, height).unwrap();
+        writer.flush().await.unwrap();
+
+        // No stale entry may survive — forward and BOTH reverse 'h' keys gone.
+        assert!(db.get_cf(&cf, &height_key).unwrap().is_none(), "forward height->hash leaked");
+        assert!(db.get_cf(&cf, &h_display).unwrap().is_none(), "live-path 'h'+display hash leaked");
+        assert!(db.get_cf(&cf, &h_internal).unwrap().is_none(), "parse-path 'h'+internal hash leaked");
     }
 }

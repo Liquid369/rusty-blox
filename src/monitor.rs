@@ -439,9 +439,16 @@ async fn index_block_from_rpc(
     // Store height -> hash mapping
     db.put_cf(&cf_metadata, &height_key, &hash_bytes)?;
     
-    // Store hash -> height mapping for reverse lookups
+    // Store hash -> height mapping for reverse lookups. The 'h' key MUST be the
+    // INTERNAL (little-endian) hash to match the parse path (blocks.rs/offset_indexer)
+    // and every 'h' reader (enrichment orphan classifier, reorg cleanup). Writing it
+    // in display order (as this did previously) made live-monitored canonical blocks
+    // invisible to those readers — they were miscounted as orphans, which corrupted
+    // the orphan-rate / daily-series analytics. The forward height->hash map above
+    // stays display order (consistent with blocks.rs).
+    let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     let mut hash_key = vec![b'h'];
-    hash_key.extend_from_slice(&hash_bytes);
+    hash_key.extend_from_slice(&internal_hash);
     let height_bytes = height.to_le_bytes().to_vec();
     db.put_cf(&cf_metadata, &hash_key, &height_bytes)?;
     
@@ -1355,6 +1362,56 @@ pub async fn run_block_monitor(
         }
     };
     
+    // Surface the live daily-analytics gate state at startup. It activates only
+    // after a FULL enrich flips the ready gate; a degraded restart rebuild (zeroed
+    // join fields) keeps it dark until a full re-enrich.
+    if crate::analytics_live::is_enabled() {
+        info!(
+            shadow = crate::analytics_live::shadow_mode(),
+            ready = crate::analytics_live::is_ready(&db),
+            "Live daily-analytics enabled (active once the ready gate is set by a full enrich)"
+        );
+    }
+
+    // One-shot Phase-0 shadow validator: if `sync.live_analytics_shadow_validate_days`
+    // > 0, wait for the daily series to be built, then re-run Lane I/R over that many
+    // recent days into the shadow keyspace and diff each complete day vs the full
+    // enrich, logging the report. (Join-field mismatches vs a DEGRADED rebuild are
+    // expected — run a FULL re-enrich for a true join comparison.)
+    let validate_days = config.get_int("sync.live_analytics_shadow_validate_days").unwrap_or(0);
+    if validate_days > 0 {
+        let db_v = Arc::clone(&db);
+        // std::thread + current-thread runtime: shadow_validate holds a RocksDB
+        // iterator across .await (so it is !Send), the same reason the daily-series
+        // pass is detached this way.
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(error = %e, "shadow_validate: failed to build runtime");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                for _ in 0..1440 {
+                    let done = db_v
+                        .cf_handle("chain_state")
+                        .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
+                        .map(|v| v.first() == Some(&1u8))
+                        .unwrap_or(false);
+                    if done {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
+                    Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
+                    Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
+                }
+            });
+        });
+    }
+
     // Tier-3 hourly snapshot tracking (resumes from the persisted series).
     let mut last_snapshot_hour: u64 = read_last_snapshot_hour(&db);
     let mut snapshot_failure_warned = false;
@@ -1430,6 +1487,15 @@ pub async fn run_block_monitor(
             ).await {
                 Ok(reorg_info) => {
                     info!(orphaned = reorg_info.orphaned_blocks, fork_height = reorg_info.fork_height, "Reorg handled successfully");
+
+                    // Keep live daily-analytics correct across the rollback: clear
+                    // the affected (>= fork date) day blobs + reset the watermark so
+                    // the subsequent ticks rebuild them as the new chain is indexed.
+                    crate::analytics_live::on_reorg(
+                        &db,
+                        reorg_info.fork_height,
+                        reorg_info.orphaned_blocks,
+                    );
 
                     // Continue to re-index from the rollback point
                     // The normal sync logic below will pick up from the new chain tip
@@ -1625,5 +1691,11 @@ pub async fn run_block_monitor(
             // We're caught up - sleep before checking again
             tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
         }
+
+        // Live daily-analytics: drive Lane I over (watermark, sync_height] + the
+        // cadence Lane-R recompute. No-ops unless `sync.live_analytics` is on AND a
+        // full enrich has set the live-ready gate. Steady-state only (this is the
+        // post-enrich monitor; the pre-enrich bulk sync lives in sync.rs).
+        crate::analytics_live::tick(&db).await;
     }
 }

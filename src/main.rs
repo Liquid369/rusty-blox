@@ -54,16 +54,8 @@ use std::path::PathBuf;
 use lazy_static::lazy_static;
 use tracing::info_span;
 
-const COLUMN_FAMILIES: [&str; 8] = [
-    "blocks",
-    "transactions",
-    "addr_index",
-    "utxo",
-    "chain_metadata",
-    "pubkey",
-    "chain_state",
-    "utxo_undo",  // Spent UTXO tracking for reorg handling and input value calculation
-];
+// Single source of truth for the DB column-family set (incl. the private tail CFs).
+use rustyblox::COLUMN_FAMILIES;
 
 lazy_static! {
     static ref DB_MUTEX: TokioMutex<()> = TokioMutex::new(());
@@ -586,6 +578,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!(error = ?e, "Mempool monitor error");
         }
     });
+
+    // Spawn the live orphan-tail (opt-in; sync.live_tail_blkfiles, default off).
+    // Pure observer: reads blk*.dat into the private tail_blocks/tail_meta CFs and
+    // writes NO canonical CF. See DESIGN-live-orphan-capture.md.
+    if rustyblox::blk_tail::is_enabled() {
+        let tail_db = Arc::clone(&db_arc);
+        let tail_blk_dir = blk_dir_path.clone();
+        tokio::spawn(async move {
+            rustyblox::blk_tail::run_tail(tail_db, tail_blk_dir, rustyblox::blk_tail::PIVX_MAGIC).await;
+        });
+    }
 
     // Start sync service in background only if enabled in config.
     // If `sync.auto_start` is false, we skip the sync phase and start the web

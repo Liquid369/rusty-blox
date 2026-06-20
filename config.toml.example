@@ -68,6 +68,32 @@ enrich_parallel_shards = 1
 # Recommended: false (testing/validation only).
 validate_offset_indexing = false
 
+# Live orphan discovery: tail Core's blk*.dat files to capture side-branch/stale
+# blocks the RPC tip-poll misses, into the private tail_blocks/tail_meta CFs.
+# Pure observer — makes ZERO canonical writes (see DESIGN-live-orphan-capture.md).
+# Opt-in; default false. When off, the two private CFs are created empty and unused.
+live_tail_blkfiles = false
+
+# Live daily-analytics updater: keep the analytics_tx_day:<date> blobs current as
+# the monitor connects blocks (incremental Lane I + window Lane R), instead of only
+# at full-enrich time. Opt-in; default false. Activates only AFTER a full enrich
+# sets the live-ready gate (a degraded restart rebuild keeps it dark, since its
+# join fields are zeroed). See DESIGN-live-analytics-update.md.
+live_analytics = false
+# Phase-0 shadow mode (default true): write shadow_tx_day:<date> blobs and leave
+# the real analytics_tx_day:<date> untouched, for diffing against a full enrich
+# before promoting. Set false to write the real blobs once validated.
+live_analytics_shadow = true
+# One-shot validator: if > 0, after the daily series is built, re-run Lane I/R over
+# this many recent days into the shadow keyspace and log a field-by-field diff vs
+# the full enrich (integer fields exact; avg_difficulty/coin_days within an epsilon;
+# new_addresses skipped). 0 = off. Run a FULL re-enrich first for a true join diff.
+live_analytics_shadow_validate_days = 0
+# Opt-in: auto-trigger a full re-enrich to re-green the live gate after a deep
+# reorg (default false — a full enrich is heavy, so default to logging + a manual
+# re-enrich). Only relevant when live_analytics = true.
+live_analytics_auto_reenrich = false
+
 [rocksdb]
 # Memtable RAM. db_write_buffer_size is a HARD global ceiling across ALL column
 # families; write_buffer_size x max_write_buffer_number is only the per-CF shape.

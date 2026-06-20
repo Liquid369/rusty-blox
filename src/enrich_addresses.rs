@@ -35,7 +35,7 @@ use crate::types::{CTransaction, CTxOut, ScriptClassification};
 /// Classify output script for correct PIVX Core attribution.
 /// Classification is driven by the SCRIPT structure (like PIVX Core's Solver()),
 /// not by guessing from base58 prefixes of the extracted address strings.
-fn classify_output(output: &CTxOut) -> ScriptClassification {
+pub(crate) fn classify_output(output: &CTxOut) -> ScriptClassification {
     if output.address.is_empty() {
         return ScriptClassification::Nonstandard;
     }
@@ -330,12 +330,173 @@ struct Pass2bShard {
 }
 
 /// Run the Pass-2b body for ONE already-deserialized, slot-resolved transaction:
+/// Already-resolved per-tx inputs to the shared join arithmetic. The PREVOUT
+/// RESOLUTION (value/kind/height per input) is done by the CALLER — the full
+/// enrich via the frozen `packed`/`tx_index`, the live updater via the
+/// `transactions` CF — so this struct is resolver-source-agnostic.
+#[derive(Debug, Clone)]
+pub(crate) struct TxJoinInputs {
+    pub height: i32,
+    pub ty: crate::tx_type::TransactionType,
+    /// Σ output values of THIS tx.
+    pub out_sum: i64,
+    /// Σ this tx's P2CS (kind==2) output values.
+    pub p2cs_created: i64,
+    /// Signed Sapling value balance of this tx.
+    pub value_balance: i64,
+    /// Serialized tx byte length (for `normal_tx_bytes`).
+    pub value_len: usize,
+    pub n_outputs: u32,
+    /// Σ resolved input prevout values.
+    pub input_sum: i64,
+    /// Non-coinbase inputs carrying a prevout.
+    pub inputs_with_prevout: u64,
+    /// Of those, how many resolved (clamp basis; an unresolved/zPoS input is NOT
+    /// counted so the clamp suppresses fee/minted).
+    pub inputs_resolved: u64,
+    /// Σ coin-days destroyed by this tx's resolved inputs.
+    pub coin_days: f64,
+    /// Σ resolved-input prevout values whose kind==2 (cold-stake spent).
+    pub p2cs_spent: i64,
+}
+
+/// Per-tx join contributions to a day aggregate. The UNCONDITIONAL group
+/// (coin_days/p2cs/normal_tx_bytes) is always emitted; fee/minted are clamp-gated
+/// (zero when not all inputs resolved). `treasury` carries a budget payout if any.
+#[derive(Clone, Default)]
+pub(crate) struct TxJoinContribution {
+    pub p2cs_created: i64,
+    pub p2cs_spent: i64,
+    pub coin_days: f64,
+    pub normal_tx_bytes: u64,
+    pub fees_total: i64,
+    pub rewards_total: i64,
+    pub staker_rewards_total: i64,
+    pub treasury: Option<TreasuryPayout>,
+}
+
+/// THE shared per-tx join arithmetic — the single source of truth for the
+/// daily-analytics join fields, called identically by the full enrich
+/// (`pass2b_process_tx`) and the live updater. Byte-for-byte mirrors the original
+/// inline pass2b logic: unconditional coin_days/p2cs/normal_tx_bytes, clamp-gated
+/// fee (Normal) and minted/era split (Coinstake) with both clamps verbatim, the
+/// >100 PIV budget threshold, and the era reward functions.
+pub(crate) fn compute_tx_join(inp: &TxJoinInputs, date: &str) -> TxJoinContribution {
+    let mut c = TxJoinContribution {
+        p2cs_created: inp.p2cs_created,
+        p2cs_spent: inp.p2cs_spent,
+        coin_days: inp.coin_days,
+        ..Default::default()
+    };
+    match inp.ty {
+        crate::tx_type::TransactionType::Normal => {
+            c.normal_tx_bytes = (inp.value_len as u64).saturating_sub(8);
+            // Fee = transparent_in + valueBalance - transparent_out. Credit only
+            // when every transparent input resolved, clamped to a sane ceiling.
+            if inp.inputs_with_prevout > 0 && inp.inputs_resolved == inp.inputs_with_prevout {
+                let fee = inp.input_sum + inp.value_balance - inp.out_sum;
+                if fee > 0 && fee < 1_000 * crate::emission::COIN {
+                    c.fees_total = fee;
+                }
+            }
+        }
+        crate::tx_type::TransactionType::Coinstake => {
+            if inp.inputs_resolved == inp.inputs_with_prevout {
+                let minted = inp.out_sum.saturating_sub(inp.input_sum);
+                if minted > 0 {
+                    let expected = crate::emission::era_block_reward(inp.height);
+                    let excess = minted.saturating_sub(expected);
+                    if excess > 100 * crate::emission::COIN {
+                        c.treasury = Some(TreasuryPayout {
+                            height: inp.height,
+                            date: date.to_string(),
+                            total_paid_sats: excess,
+                            n_outputs: inp.n_outputs,
+                        });
+                        c.rewards_total = expected;
+                    } else {
+                        c.rewards_total = minted;
+                    }
+                    c.staker_rewards_total =
+                        crate::emission::era_staker_reward(inp.height).min(minted);
+                }
+            }
+        }
+        crate::tx_type::TransactionType::Coinbase => {}
+    }
+    c
+}
+
+/// THE shared per-tx INLINE accumulation (counts / volumes / type-specific),
+/// called identically by the full enrich (`persist_tx_daily_series`) and the live
+/// updater (Lane I) so neither can drift on the subtle bits — the `coldstake`
+/// script test and the >10 PIV PoW-coinbase budget threshold. Updates `agg` in
+/// place and RETURNS a PoW-era coinbase budget `TreasuryPayout` if this coinbase
+/// minted more than 10 PIV over the era reward. Does NOT touch the set fields
+/// (stakers / active / first-seen), which are Lane R (window recompute).
+pub(crate) fn accumulate_tx_inline(
+    agg: &mut TxDayAgg,
+    tx: &CTransaction,
+    tx_type: crate::tx_type::TransactionType,
+    raw_len: usize,
+    height: i32,
+    date: &str,
+) -> Option<TreasuryPayout> {
+    agg.tx_count += 1;
+    agg.tx_bytes += raw_len as u64;
+    if tx.sapling_data.is_some() {
+        agg.sapling_txs += 1;
+    }
+    let mut treasury = None;
+    match tx_type {
+        crate::tx_type::TransactionType::Coinbase => {
+            agg.coinbase += 1;
+            // PoW-era budget payouts ride in the coinbase as value minted in
+            // excess of the era block reward; >=10 PIV excludes tx-fee noise.
+            if height > 0 {
+                let total: i64 = tx.outputs.iter().map(|o| o.value).sum();
+                let excess = total.saturating_sub(crate::emission::era_block_reward(height));
+                if excess > 10 * crate::emission::COIN {
+                    treasury = Some(TreasuryPayout {
+                        height,
+                        date: date.to_string(),
+                        total_paid_sats: excess,
+                        n_outputs: tx.outputs.len() as u32,
+                    });
+                }
+            }
+        }
+        crate::tx_type::TransactionType::Coinstake => {
+            agg.coinstake += 1;
+            // A delegated (P2CS) stake re-mints its principal to the same P2CS
+            // script, so any coldstake output marks this as cold staking.
+            if tx
+                .outputs
+                .iter()
+                .any(|o| crate::parser::get_script_type(&o.script_pubkey.script) == "coldstake")
+            {
+                agg.coldstake_txs += 1;
+            }
+            agg.stake_volume = agg
+                .stake_volume
+                .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+        }
+        crate::tx_type::TransactionType::Normal => {
+            agg.payment += 1;
+            agg.volume = agg
+                .volume
+                .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+        }
+    }
+    treasury
+}
+
 /// join each input to its prevout through the FROZEN `tx_index`/`packed`
 /// (read-only, so shards share them by Arc), debit the spending address(es)
 /// in `sh.totals_sent` + append the txid to `sh.txs_map_adds`, and bucket the
 /// Tier-2 prevout-join aggregates (fees, rewards, coin-days, cold-staking flows,
-/// budget payouts) by the SPENDER's block date. Single source of Pass-2b per-tx
-/// logic shared by the serial scan and every parallel shard.
+/// budget payouts) by the SPENDER's block date via the shared `compute_tx_join`.
+/// Single source of Pass-2b per-tx logic shared by the serial scan + every shard.
 #[allow(clippy::too_many_arguments)]
 fn pass2b_process_tx(
     sh: &mut Pass2bShard,
@@ -432,11 +593,11 @@ fn pass2b_process_tx(
         }
     }
 
-    // Tier 2: bucket this tx's join aggregates by the SPENDER's block date.
+    // Tier 2: bucket this tx's join aggregates by the SPENDER's block date,
+    // through the SHARED `compute_tx_join` arithmetic (same code the live updater
+    // calls; the only difference is HOW the inputs above were resolved).
     if height >= 0 && (height as usize) < block_times.len() && block_times[height as usize] != 0 {
         let date = unix_to_date(block_times[height as usize] as u64);
-        let agg = sh.day_joins.entry(date.clone()).or_default();
-        // out_sum / p2cs_created from the CURRENT tx's packed outs.
         let cur = &packed[cur_slot as usize];
         let out_sum: i64 = cur.outs.iter().map(|o| o.value).sum();
         let p2cs_created: i64 = cur
@@ -445,52 +606,35 @@ fn pass2b_process_tx(
             .filter(|o| o.kind == 2)
             .map(|o| o.value)
             .sum();
-        agg.p2cs_created = agg.p2cs_created.saturating_add(p2cs_created);
-        agg.p2cs_spent = agg.p2cs_spent.saturating_add(tx_p2cs_spent);
-        agg.coin_days_destroyed += tx_coin_days;
-        match u8_to_ty(cur.ty) {
-            crate::tx_type::TransactionType::Normal => {
-                agg.normal_tx_bytes += (value_len as u64).saturating_sub(8);
-                // Fee = transparent_in + valueBalance - transparent_out. INVARIANT #4:
-                // value_balance is SIGNED and added with its sign. Credit only when
-                // every transparent input resolved, and clamp to a sane ceiling.
-                if inputs_with_prevout > 0 && inputs_resolved == inputs_with_prevout {
-                    let value_balance = cur.value_balance;
-                    let fee = input_sum + value_balance - out_sum;
-                    if fee > 0 && fee < 1_000 * crate::emission::COIN {
-                        agg.fees_total = agg.fees_total.saturating_add(fee);
-                    }
-                }
-            }
-            crate::tx_type::TransactionType::Coinstake => {
-                // Minted value: outputs - staked inputs = era block reward PLUS any
-                // budget payout riding in the coinstake (node-verified, see emission.rs).
-                if inputs_resolved == inputs_with_prevout {
-                    let minted = out_sum.saturating_sub(input_sum);
-                    if minted > 0 {
-                        let expected = crate::emission::era_block_reward(height);
-                        let excess = minted.saturating_sub(expected);
-                        // Require >=100 PIV to call it a budget payout; smaller excess
-                        // is fee income and flows into the staker's rewards (else branch).
-                        if excess > 100 * crate::emission::COIN {
-                            sh.coinstake_treasury.push(TreasuryPayout {
-                                height,
-                                date: date.clone(),
-                                total_paid_sats: excess,
-                                n_outputs: cur.outs.len() as u32,
-                            });
-                            agg.rewards_total = agg.rewards_total.saturating_add(expected);
-                        } else {
-                            agg.rewards_total = agg.rewards_total.saturating_add(minted);
-                        }
-                        // Staker share (excl. masternode payment), capped by minted.
-                        agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(
-                            crate::emission::era_staker_reward(height).min(minted),
-                        );
-                    }
-                }
-            }
-            crate::tx_type::TransactionType::Coinbase => {}
+        let contrib = compute_tx_join(
+            &TxJoinInputs {
+                height,
+                ty: u8_to_ty(cur.ty),
+                out_sum,
+                p2cs_created,
+                value_balance: cur.value_balance,
+                value_len,
+                n_outputs: cur.outs.len() as u32,
+                input_sum,
+                inputs_with_prevout,
+                inputs_resolved,
+                coin_days: tx_coin_days,
+                p2cs_spent: tx_p2cs_spent,
+            },
+            &date,
+        );
+        let agg = sh.day_joins.entry(date.clone()).or_default();
+        agg.p2cs_created = agg.p2cs_created.saturating_add(contrib.p2cs_created);
+        agg.p2cs_spent = agg.p2cs_spent.saturating_add(contrib.p2cs_spent);
+        agg.coin_days_destroyed += contrib.coin_days;
+        agg.normal_tx_bytes += contrib.normal_tx_bytes;
+        agg.fees_total = agg.fees_total.saturating_add(contrib.fees_total);
+        agg.rewards_total = agg.rewards_total.saturating_add(contrib.rewards_total);
+        agg.staker_rewards_total = agg
+            .staker_rewards_total
+            .saturating_add(contrib.staker_rewards_total);
+        if let Some(t) = contrib.treasury {
+            sh.coinstake_treasury.push(t);
         }
     }
 }
@@ -1377,6 +1521,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // across .await and so is !Send. On success it sets `analytics_complete`.
     // NOTE: a crash during this background pass leaves the daily-series unbuilt
     // until a re-enrichment -- analytics only, never a balance.
+    // Live-analytics gate (DESIGN-live-analytics-update.md §0): park the live
+    // updater by clearing `analytics_live_ready` BEFORE the detached pass, so live
+    // can never write a day blob concurrently with this enrich nor onto a partial
+    // baseline. The pass re-greens it strictly-last on success (below).
+    if let Some(cf_state) = db.cf_handle("chain_state") {
+        let _ = db.put_cf(&cf_state, crate::analytics_live::K_READY, [0u8]);
+    }
     let db_bg = Arc::clone(&db);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -1401,8 +1552,16 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 warn!(error = %e, "Background: failed to persist transaction daily series");
                 return;
             }
+            // Strictly-last handoff: flip the live gate green WITH the watermark
+            // (= this enrich's frozen tip; live takes over at tip+1) and the
+            // degraded gate, in ONE batch. Live resumes only on this valid,
+            // join-complete baseline.
             if let Some(cf_state) = db_bg.cf_handle("chain_state") {
-                let _ = db_bg.put_cf(&cf_state, b"analytics_complete", [1u8]);
+                let mut batch = rocksdb::WriteBatch::default();
+                batch.put_cf(&cf_state, b"analytics_complete", [1u8]);
+                batch.put_cf(&cf_state, crate::analytics_live::K_WATERMARK, tip.to_le_bytes());
+                batch.put_cf(&cf_state, crate::analytics_live::K_READY, [1u8]);
+                let _ = db_bg.write(batch);
             }
             info!("Background: transaction daily series complete - analytics ready");
         });
@@ -1522,7 +1681,7 @@ pub struct TreasuryPayout {
 }
 
 /// Convert compact nBits to difficulty (diff1 target 0x1d00ffff convention).
-fn nbits_to_difficulty(nbits: u32) -> f64 {
+pub(crate) fn nbits_to_difficulty(nbits: u32) -> f64 {
     let exp = (nbits >> 24) as i32;
     let mant = (nbits & 0x00ff_ffff) as f64;
     if mant == 0.0 {
@@ -1576,6 +1735,192 @@ fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<(Vec<u32>, Vec<u32>), Box
     Ok((times, bits))
 }
 
+/// Canonical iff the reverse 'h' hint (EITHER byte order — parse writes
+/// 'h'+internal, legacy live-monitor wrote 'h'+display) resolves to a height whose
+/// FORWARD map entry round-trips back to this (internal) `hash`. Confirming against
+/// the forward map (correctly maintained on reorg) means a stale/leaked 'h' entry
+/// cannot make a genuine orphan look canonical.
+fn is_canonical_hash(
+    db: &Arc<DB>,
+    cf_metadata: &impl rocksdb::AsColumnFamilyRef,
+    hash: &[u8],
+) -> bool {
+    let mut h_internal = vec![b'h'];
+    h_internal.extend_from_slice(hash);
+    let mut h_display = vec![b'h'];
+    h_display.extend(hash.iter().rev());
+    for hk in [&h_internal, &h_display] {
+        let Ok(Some(hb)) = db.get_cf(cf_metadata, hk) else { continue };
+        if hb.len() != 4 {
+            continue;
+        }
+        let height = i32::from_le_bytes([hb[0], hb[1], hb[2], hb[3]]);
+        if let Ok(Some(fwd)) = db.get_cf(cf_metadata, height.to_le_bytes()) {
+            if fwd.len() == 32 && fwd.iter().rev().eq(hash.iter()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Header nTime of the canonical block at `height` (forward map → blocks CF).
+fn header_ntime_at(
+    db: &Arc<DB>,
+    cf_metadata: &impl rocksdb::AsColumnFamilyRef,
+    cf_blocks: &impl rocksdb::AsColumnFamilyRef,
+    height: i32,
+) -> Option<u32> {
+    let display = db.get_cf(cf_metadata, height.to_le_bytes()).ok()??;
+    let internal: Vec<u8> = display.iter().rev().cloned().collect();
+    let header = db.get_cf(cf_blocks, &internal).ok()??;
+    if header.len() >= 72 {
+        Some(u32::from_le_bytes(header[68..72].try_into().ok()?))
+    } else {
+        None
+    }
+}
+
+/// Persistent orphan keyspace (in `chain_state`). `tail_blocks` is EPHEMERAL —
+/// blk-tail prunes settled records ~K_RETENTION blocks past the tip — so orphans
+/// must be PERSISTED as discovered, never re-derived from a scan (else a pruned
+/// tail orphan would silently drop out of the count). `orphanseen:<hash>` → date is
+/// the append-only dedup marker; `orphancount:<date>` → u64 LE is the count, bumped
+/// atomically with each new marker. A settled orphan never un-orphans (that needs a
+/// deep reorg, ~impossible on PIVX), so the markers are never removed.
+pub const ORPHAN_SEEN_PFX: &[u8] = b"orphanseen:";
+pub const ORPHAN_COUNT_PFX: &[u8] = b"orphancount:";
+
+/// The persisted orphan count for a date (= `orphan_blocks`), 0 if unset.
+pub fn orphan_count(db: &Arc<DB>, date: &str) -> u64 {
+    db.cf_handle("chain_state")
+        .and_then(|cf| {
+            let mut k = ORPHAN_COUNT_PFX.to_vec();
+            k.extend_from_slice(date.as_bytes());
+            db.get_cf(&cf, &k).ok().flatten()
+        })
+        .filter(|v| v.len() == 8)
+        .map(|v| u64::from_le_bytes(v[..8].try_into().unwrap()))
+        .unwrap_or(0)
+}
+
+/// Mark one non-canonical block (internal `hash`, header time `t`) as a NEW orphan
+/// unless already seen this run or persisted in a prior run.
+fn mark_one(
+    db: &Arc<DB>,
+    cf_state: &impl rocksdb::AsColumnFamilyRef,
+    batch: &mut rocksdb::WriteBatch,
+    seen: &mut HashSet<[u8; 32]>,
+    new_by_date: &mut HashMap<String, u64>,
+    hash: &[u8],
+    t: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut h = [0u8; 32];
+    h.copy_from_slice(hash);
+    if !seen.insert(h) {
+        return Ok(()); // already processed this run
+    }
+    let mut mk = ORPHAN_SEEN_PFX.to_vec();
+    mk.extend_from_slice(hash);
+    if db.get_cf(cf_state, &mk)?.is_some() {
+        return Ok(()); // already persisted in a prior run
+    }
+    let date = unix_to_date(t as u64);
+    batch.put_cf(cf_state, &mk, date.as_bytes());
+    *new_by_date.entry(date).or_insert(0) += 1;
+    Ok(())
+}
+
+/// Discover stale (non-canonical) blocks past the 2h tip-window exemption and
+/// PERSIST each NEW one into the orphan index (marker + per-date count), so it
+/// survives blk-tail's pruning of the ephemeral `tail_blocks` CF and a reorg
+/// rebuild. Idempotent: a block already marked (this run or prior) is never
+/// recounted.
+/// - `tail_only=false` (full enrich): scans the canonical `blocks` CF AND
+///   `tail_blocks` to build the baseline.
+/// - `tail_only=true` (Lane R, ~hourly): scans ONLY `tail_blocks` (~hundreds of
+///   records) — no blocks-CF iterate, so it is cheap enough to run every tick.
+/// A main-CF orphan is dated by its own header nTime; a tail orphan (no stored
+/// nTime) by the canonical block's time at its claimed height. Dedup by internal hash.
+pub fn mark_orphans(
+    db: &Arc<DB>,
+    tip: i32,
+    tip_time: u32,
+    tail_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
+    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let mut batch = rocksdb::WriteBatch::default();
+    let mut new_by_date: HashMap<String, u64> = HashMap::new();
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+
+    // 1. Canonical blocks CF — stale headers dated by their own nTime (full only).
+    if !tail_only {
+        for item in db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start) {
+            let (key, header) = item?;
+            let hash: &[u8] = if key.len() == 33 && key[0] == b'b' { &key[1..] } else { &key[..] };
+            if hash.len() != 32 || header.len() < 72 {
+                continue;
+            }
+            let t = u32::from_le_bytes(header[68..72].try_into().unwrap_or([0; 4]));
+            if t == 0 || (tip_time > 0 && t + 7_200 > tip_time) {
+                continue;
+            }
+            if is_canonical_hash(db, &cf_metadata, hash) {
+                continue;
+            }
+            mark_one(db, &cf_state, &mut batch, &mut seen, &mut new_by_date, hash, t)?;
+        }
+    }
+
+    // 2. blk-tail private capture — dated by the canonical nTime at claimed_height
+    // (records are `b'b' || hash(32)`; claimed_height is a LE i32 at value offset 33;
+    // the `b'i'` index keys are 38 bytes and skipped).
+    if let Some(cf_tail) = db.cf_handle("tail_blocks") {
+        for item in db.iterator_cf(&cf_tail, rocksdb::IteratorMode::Start) {
+            let (key, value) = item?;
+            if key.len() != 33 || key[0] != b'b' || value.len() < 37 {
+                continue;
+            }
+            let claimed_height = i32::from_le_bytes(value[33..37].try_into().unwrap_or([0; 4]));
+            // Settle a tail orphan by DEPTH (blk-tail's own K_CONFIRM), not by a
+            // wall-clock 2h exemption: depth is reached well before the K_RETENTION
+            // prune AND is independent of block spacing, so a fast-block burst can't
+            // prune the record before the exemption lifts. (The main-CF path keeps
+            // the time exemption — it has each header's own nTime.)
+            if claimed_height > tip - crate::blk_tail::K_CONFIRM {
+                continue;
+            }
+            let Some(t) = header_ntime_at(db, &cf_metadata, &cf_blocks, claimed_height) else {
+                continue;
+            };
+            if t == 0 {
+                continue;
+            }
+            let hash = &key[1..];
+            if is_canonical_hash(db, &cf_metadata, hash) {
+                continue;
+            }
+            mark_one(db, &cf_state, &mut batch, &mut seen, &mut new_by_date, hash, t)?;
+        }
+    }
+
+    // Bump the per-date counts for the newly-marked orphans, atomic with the markers.
+    for (date, n) in new_by_date {
+        let mut ck = ORPHAN_COUNT_PFX.to_vec();
+        ck.extend_from_slice(date.as_bytes());
+        let cur = db
+            .get_cf(&cf_state, &ck)?
+            .filter(|v| v.len() == 8)
+            .map(|v| u64::from_le_bytes(v[..8].try_into().unwrap()))
+            .unwrap_or(0);
+        batch.put_cf(&cf_state, &ck, (cur + n).to_le_bytes());
+    }
+    db.write(batch)?;
+    Ok(())
+}
+
 /// Record an address occurrence for the active/new-address daily metrics.
 /// The transaction scan is NOT chronological, so first-seen is tracked as a
 /// per-address MINIMUM date and bucketed afterwards.
@@ -1617,6 +1962,10 @@ pub async fn rebuild_daily_series_degraded(db: Arc<DB>) -> Result<(), Box<dyn st
     persist_tx_daily_series(&db, tip, &block_times, &block_bits, &empty_joins, &empty_treasury).await?;
     if let Some(cf_state) = db.cf_handle("chain_state") {
         db.put_cf(&cf_state, b"analytics_complete", [1u8])?;
+        // The degraded base has ZEROED join fields, so it is NOT a valid live
+        // baseline: clear the live gate so Lane I/R stay dark until a full
+        // re-enrich re-greens it (DESIGN-live-analytics-update.md §0).
+        let _ = db.put_cf(&cf_state, crate::analytics_live::K_READY, [0u8]);
     }
     info!("Degraded daily-series rebuild complete (join-derived fields omitted until a full re-enrich)");
     Ok(())
@@ -1666,76 +2015,31 @@ async fn persist_tx_daily_series(
         };
 
         let agg_date = unix_to_date(t as u64);
-        let agg = days.entry(agg_date.clone()).or_default();
-        agg.tx_count += 1;
-        agg.tx_bytes += raw_tx.len() as u64;
-        if tx.sapling_data.is_some() {
-            agg.sapling_txs += 1;
-        }
         let tx_type = crate::tx_type::detect_transaction_type(&tx);
-        match tx_type {
-            crate::tx_type::TransactionType::Coinbase => {
-                agg.coinbase += 1;
-                // Tier 4: PoW-era budget payouts ride in the coinbase as
-                // value minted in excess of the era's scheduled block reward
-                // (>1 PIV tolerance for tx fees). Node-verified: h=86,400
-                // coinbase paid 1,000,250 = 250 era + 1,000,000 budget;
-                // h=129,600 paid 325 = 225 era + 100 budget. PoS-era budget
-                // payouts ride in COINSTAKES and are detected in Pass 2b.
-                if height > 0 {
-                    let total: i64 = tx.outputs.iter().map(|o| o.value).sum();
-                    let excess =
-                        total.saturating_sub(crate::emission::era_block_reward(height));
-                    // Require >=10 PIV: excludes sub-PIV tx-fee noise (which the
-                    // old >1 PIV bar let through) while keeping every legit
-                    // PoW-era coinbase budget (smallest node-verified is 100 PIV
-                    // at h=129,600). Budgets here are 100 PIV..1M PIV; fees are
-                    // well under 10 PIV.
-                    if excess > 10 * crate::emission::COIN {
-                        treasury.push(TreasuryPayout {
-                            height,
-                            date: agg_date.clone(),
-                            total_paid_sats: excess,
-                            n_outputs: tx.outputs.len() as u32,
-                        });
-                    }
-                }
-            }
-            crate::tx_type::TransactionType::Coinstake => {
-                agg.coinstake += 1;
-                // Cold-staked coinstake: a delegated (P2CS) stake re-mints its
-                // principal back to the same P2CS script, so any coldstake
-                // output marks the stake as cold staking (same script test as
-                // the Pass 2b p2cs_created join).
-                if tx
-                    .outputs
-                    .iter()
-                    .any(|o| crate::parser::get_script_type(&o.script_pubkey.script) == "coldstake")
-                {
-                    agg.coldstake_txs += 1;
-                }
-                agg.stake_volume = agg
-                    .stake_volume
-                    .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
-                // First address of the first paying output identifies the staker
-                if let Some(addr) = tx
-                    .outputs
-                    .iter()
-                    .find(|o| !o.address.is_empty())
-                    .and_then(|o| o.address.first())
-                {
-                    *day_stakers
-                        .entry(agg_date.clone())
-                        .or_default()
-                        .entry(addr.clone())
-                        .or_insert(0) += 1;
-                }
-            }
-            crate::tx_type::TransactionType::Normal => {
-                agg.payment += 1;
-                agg.volume = agg
-                    .volume
-                    .saturating_add(tx.outputs.iter().map(|o| o.value).sum());
+        // Inline counts/volumes/type + the PoW-coinbase budget, via the SHARED
+        // accumulator (Lane I calls the exact same fn — no drift on coldstake_txs
+        // or the >10 PIV budget threshold).
+        let pow_treasury = {
+            let agg = days.entry(agg_date.clone()).or_default();
+            accumulate_tx_inline(agg, &tx, tx_type, raw_tx.len(), height, &agg_date)
+        };
+        if let Some(t) = pow_treasury {
+            treasury.push(t);
+        }
+        // The day's stakers (for unique_stakers / top10 concentration) — a Lane-R
+        // set field; the staker is the first address of the first paying output.
+        if tx_type == crate::tx_type::TransactionType::Coinstake {
+            if let Some(addr) = tx
+                .outputs
+                .iter()
+                .find(|o| !o.address.is_empty())
+                .and_then(|o| o.address.first())
+            {
+                *day_stakers
+                    .entry(agg_date.clone())
+                    .or_default()
+                    .entry(addr.clone())
+                    .or_insert(0) += 1;
             }
         }
 
@@ -1771,32 +2075,22 @@ async fn persist_tx_daily_series(
         e.0 += nbits_to_difficulty(block_bits[h]);
         e.1 += 1;
     }
-    // Stale blocks: every stored header whose hash is NOT in the canonical
-    // 'h' index, bucketed by its own header time.
+    // Discover + PERSIST all orphans (blocks CF + blk-tail) into the orphan index,
+    // then set each day's orphan_blocks from the persistent count (incl. orphan-only
+    // days). The count survives blk-tail pruning + reorg, so Lane R just reads it.
     {
-        let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
-        let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
-        let iter = db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (key, header) = item?;
-            let hash: &[u8] = if key.len() == 33 && key[0] == b'b' { &key[1..] } else { &key[..] };
-            if hash.len() != 32 || header.len() < 72 {
-                continue;
+        let tip_time = block_times[tip as usize];
+        mark_orphans(db, tip, tip_time, false)?;
+        for item in db.prefix_iterator_cf(&cf_state, ORPHAN_COUNT_PFX) {
+            let (k, v) = item?;
+            if !k.starts_with(ORPHAN_COUNT_PFX) {
+                break;
             }
-            let mut h_key = vec![b'h'];
-            h_key.extend_from_slice(hash);
-            if db.get_cf(&cf_metadata, &h_key)?.is_some() {
-                continue; // canonical
+            if v.len() == 8 {
+                let date = String::from_utf8_lossy(&k[ORPHAN_COUNT_PFX.len()..]).to_string();
+                days.entry(date).or_default().orphan_blocks =
+                    u64::from_le_bytes(v[..8].try_into().unwrap());
             }
-            let t = u32::from_le_bytes(header[68..72].try_into().unwrap_or([0; 4]));
-            if t == 0 { continue; }
-            // Blocks within 2h of the canonical tip may simply postdate the
-            // canonical index snapshot — not classifiable as stale yet.
-            let tip_time = block_times[tip as usize];
-            if tip_time > 0 && t + 7_200 > tip_time {
-                continue;
-            }
-            days.entry(unix_to_date(t as u64)).or_default().orphan_blocks += 1;
         }
     }
 
@@ -2250,6 +2544,178 @@ mod tests {
         for t in [Normal, Coinstake, Coinbase] {
             assert_eq!(u8_to_ty(ty_to_u8(t)), t);
         }
+    }
+
+    // ---- compute_tx_join: the shared join arithmetic (live == enrich) ----
+    use crate::emission::{era_block_reward, era_staker_reward, COIN};
+    use crate::tx_type::TransactionType;
+
+    fn base_inputs() -> TxJoinInputs {
+        TxJoinInputs {
+            height: 100,
+            ty: TransactionType::Normal,
+            out_sum: 0,
+            p2cs_created: 0,
+            value_balance: 0,
+            value_len: 250,
+            n_outputs: 2,
+            input_sum: 0,
+            inputs_with_prevout: 0,
+            inputs_resolved: 0,
+            coin_days: 0.0,
+            p2cs_spent: 0,
+        }
+    }
+
+    /// Normal tx, all inputs resolved -> fee credited; normal_tx_bytes = len-8.
+    #[test]
+    fn join_normal_fee_clamped_and_bytes() {
+        let inp = TxJoinInputs {
+            input_sum: 10 * COIN,
+            out_sum: 9 * COIN, // fee = 1 PIV (+ value_balance 0)
+            inputs_with_prevout: 2,
+            inputs_resolved: 2,
+            value_len: 300,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "2024-01-01");
+        assert_eq!(c.fees_total, 1 * COIN);
+        assert_eq!(c.normal_tx_bytes, 300 - 8);
+        assert_eq!(c.rewards_total, 0);
+        assert_eq!(c.treasury.is_none(), true);
+    }
+
+    /// Mixed resolved+unresolved inputs -> fee SUPPRESSED, but coin_days / p2cs /
+    /// normal_tx_bytes are UNCONDITIONAL (the v4-review regression guard).
+    #[test]
+    fn join_normal_unresolved_suppresses_fee_only() {
+        let inp = TxJoinInputs {
+            input_sum: 10 * COIN,
+            out_sum: 9 * COIN,
+            inputs_with_prevout: 2,
+            inputs_resolved: 1, // not all resolved
+            coin_days: 42.5,
+            p2cs_spent: 3 * COIN,
+            p2cs_created: 7 * COIN,
+            value_len: 300,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "2024-01-01");
+        assert_eq!(c.fees_total, 0, "fee suppressed when not all inputs resolved");
+        assert_eq!(c.coin_days, 42.5);
+        assert_eq!(c.p2cs_spent, 3 * COIN);
+        assert_eq!(c.p2cs_created, 7 * COIN);
+        assert_eq!(c.normal_tx_bytes, 300 - 8);
+    }
+
+    /// Out-of-range / non-positive fee is dropped (clamp ceiling + positivity).
+    #[test]
+    fn join_normal_fee_out_of_range_dropped() {
+        // Negative fee (out > in) -> dropped.
+        let neg = TxJoinInputs {
+            input_sum: 9 * COIN,
+            out_sum: 10 * COIN,
+            inputs_with_prevout: 1,
+            inputs_resolved: 1,
+            ..base_inputs()
+        };
+        assert_eq!(compute_tx_join(&neg, "d").fees_total, 0);
+        // Absurd fee (>= 1000 PIV) -> dropped.
+        let huge = TxJoinInputs {
+            input_sum: 5000 * COIN,
+            out_sum: 0,
+            inputs_with_prevout: 1,
+            inputs_resolved: 1,
+            ..base_inputs()
+        };
+        assert_eq!(compute_tx_join(&huge, "d").fees_total, 0);
+    }
+
+    /// Coinstake with small minted (<= expected + 100 PIV) -> rewards = minted,
+    /// no treasury payout; normal_tx_bytes stays 0 for coinstake.
+    #[test]
+    fn join_coinstake_small_minted_no_treasury() {
+        let h = 200_000;
+        let expected = era_block_reward(h);
+        let minted = expected + 50 * COIN; // excess 50 PIV (< 100 threshold)
+        let inp = TxJoinInputs {
+            height: h,
+            ty: TransactionType::Coinstake,
+            input_sum: 1000 * COIN,
+            out_sum: 1000 * COIN + minted,
+            inputs_with_prevout: 1,
+            inputs_resolved: 1,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "d");
+        assert_eq!(c.rewards_total, minted);
+        assert!(c.treasury.is_none());
+        assert_eq!(c.normal_tx_bytes, 0, "coinstake never counts normal_tx_bytes");
+        assert_eq!(c.staker_rewards_total, era_staker_reward(h).min(minted));
+    }
+
+    /// Coinstake with budget payout (excess > 100 PIV) -> treasury = excess,
+    /// rewards = expected era reward (not minted).
+    #[test]
+    fn join_coinstake_budget_payout_split() {
+        let h = 200_000;
+        let expected = era_block_reward(h);
+        let excess = 5000 * COIN; // well over 100 PIV
+        let minted = expected + excess;
+        let inp = TxJoinInputs {
+            height: h,
+            ty: TransactionType::Coinstake,
+            input_sum: 1000 * COIN,
+            out_sum: 1000 * COIN + minted,
+            n_outputs: 4,
+            inputs_with_prevout: 1,
+            inputs_resolved: 1,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "2024-02-02");
+        assert_eq!(c.rewards_total, expected);
+        let t = c.treasury.expect("budget payout present");
+        assert_eq!(t.total_paid_sats, excess);
+        assert_eq!(t.n_outputs, 4);
+        assert_eq!(t.date, "2024-02-02");
+        assert_eq!(t.height, h);
+    }
+
+    /// zPoS-style coinstake: a null prevout never resolves (inputs_with_prevout=1,
+    /// inputs_resolved=0) -> clamp fails -> rewards/staker suppressed, but the
+    /// output-only p2cs_created still passes through.
+    #[test]
+    fn join_coinstake_zpos_suppressed() {
+        let inp = TxJoinInputs {
+            height: 200_000,
+            ty: TransactionType::Coinstake,
+            input_sum: 0,
+            out_sum: 250 * COIN,
+            p2cs_created: 11 * COIN,
+            inputs_with_prevout: 1,
+            inputs_resolved: 0,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "d");
+        assert_eq!(c.rewards_total, 0);
+        assert_eq!(c.staker_rewards_total, 0);
+        assert_eq!(c.p2cs_created, 11 * COIN, "output-only field is unconditional");
+    }
+
+    /// Coinbase contributes only the unconditional output-derived fields.
+    #[test]
+    fn join_coinbase_only_unconditional() {
+        let inp = TxJoinInputs {
+            ty: TransactionType::Coinbase,
+            p2cs_created: 2 * COIN,
+            value_len: 500,
+            ..base_inputs()
+        };
+        let c = compute_tx_join(&inp, "d");
+        assert_eq!(c.fees_total, 0);
+        assert_eq!(c.rewards_total, 0);
+        assert_eq!(c.normal_tx_bytes, 0);
+        assert_eq!(c.p2cs_created, 2 * COIN);
     }
 }
 

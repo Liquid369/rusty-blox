@@ -3,6 +3,31 @@ extern crate sha2;
 use sha2::{Sha512, Digest};
 use std::ffi::c_void;
 
+/// The authoritative set of RocksDB column families this database creates and
+/// opens, in ONE place so every read-write open path stays in sync. The "default"
+/// CF is implicit and handled separately by each open site.
+///
+/// Read-WRITE opens must list every on-disk CF (RocksDB requirement), so they
+/// either use this constant (creator paths: the main binary, import-chainstate,
+/// resync) or `DB::list_cf` dynamic discovery (occasional maintenance tools).
+/// Read-only opens may list a subset.
+///
+/// `tail_blocks` / `tail_meta` are private to the opt-in live orphan-tail feature
+/// (see DESIGN-live-orphan-capture.md); they are created empty and stay empty
+/// when `sync.live_tail_blkfiles` is off.
+pub const COLUMN_FAMILIES: &[&str] = &[
+    "blocks",
+    "transactions",
+    "addr_index",
+    "utxo",
+    "chain_metadata",
+    "pubkey",
+    "chain_state",
+    "utxo_undo", // spent-UTXO tracking for reorg handling + input-value calc
+    "tail_blocks", // private: live orphan-tail block records (opt-in)
+    "tail_meta",   // private: tail cursor/anchor + (claimed_height,state) index
+];
+
 pub mod chainwork;
 pub mod canonical_chain;
 pub mod config;
@@ -28,6 +53,8 @@ pub mod db_sampler;
 pub mod leveldb_index;
 pub mod block_index;
 pub mod offset_indexer;
+pub mod blk_tail;
+pub mod analytics_live;
 pub mod pivx_copy;
 pub mod api;
 pub mod mempool;
