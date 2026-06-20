@@ -12,17 +12,18 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor, WriteBatch, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║     RE-VALIDATE ALL TRANSACTION HEIGHTS            ║");
     println!("╚════════════════════════════════════════════════════╝\n");
-    
+
     // 1. Open database
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "data/blocks.db".to_string());
-    
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
     println!("📂 Opening database: {db_path}");
     
     let mut opts = Options::default();

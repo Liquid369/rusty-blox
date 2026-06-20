@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::io;
 use rocksdb::{DB, Options as RocksOptions};
+use rustyblox::config::{load_config, get_db_path};
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
@@ -84,17 +85,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Open RocksDB
-    let db_path = "data";
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     println!("\n📂 Opening RocksDB database...");
     println!("   Path: {db_path}");
-    
+
     let mut opts = RocksOptions::default();
     opts.create_if_missing(false);
     opts.create_missing_column_families(false);
-    
-    let cf_names = DB::list_cf(&opts, db_path).unwrap_or_else(|_| vec!["default".to_string()]);
 
-    let db = DB::open_cf(&opts, db_path, &cf_names)?;
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+
+    let db = DB::open_cf(&opts, &db_path, &cf_names)?;
     println!("✅ Database opened");
     
     // Get chain_metadata CF

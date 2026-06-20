@@ -12,8 +12,10 @@ Two rules of thumb:
   **while the explorer is running**.
 - **Read-write** tools take the RocksDB lock and require the **backend stopped**.
 
-The DB path is `./data/blocks.db` relative to the working directory (run from the
-repo root).
+Every tool resolves the RocksDB path from **`config.toml`** (`paths.db_path`), so
+run each from the repo root (where `config.toml` lives) — no hardcoded paths. To
+point a tool at a different DB without editing config, set the `DB_PATH` env var:
+`DB_PATH=/srv/rustyblox/data/blocks.db cargo run --release --bin <tool>`.
 
 ---
 

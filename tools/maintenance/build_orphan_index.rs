@@ -2,14 +2,16 @@
 //! from the existing blocks CF + tail_blocks, then rewrite every analytics_tx_day
 //! blob's orphan_blocks from the persistent count. RUN ONCE WITH THE BACKEND
 //! STOPPED. After this, the live tail-only path maintains the index — no resync.
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::enrich_addresses::{mark_orphans, orphan_count, TxDayAgg};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = "./data/blocks.db";
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(false);
-    let cfs = rocksdb::DB::list_cf(&opts, db_path)?;
-    let db = std::sync::Arc::new(rocksdb::DB::open_cf(&opts, db_path, &cfs)?);
+    let cfs = rocksdb::DB::list_cf(&opts, &db_path)?;
+    let db = std::sync::Arc::new(rocksdb::DB::open_cf(&opts, &db_path, &cfs)?);
     let cf_state = db.cf_handle("chain_state").ok_or("no chain_state")?;
     let cf_meta = db.cf_handle("chain_metadata").ok_or("no chain_metadata")?;
     let cf_blocks = db.cf_handle("blocks").ok_or("no blocks")?;

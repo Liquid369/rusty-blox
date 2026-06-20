@@ -1,4 +1,5 @@
 //! Throwaway: dump live-analytics state (read-only secondary; safe while running).
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::enrich_addresses::TxDayAgg;
 
 fn i32_at(db: &rocksdb::DB, cf: &impl rocksdb::AsColumnFamilyRef, k: &[u8]) -> Option<i32> {
@@ -10,11 +11,12 @@ fn i32_at(db: &rocksdb::DB, cf: &impl rocksdb::AsColumnFamilyRef, k: &[u8]) -> O
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = "./data/blocks.db";
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let opts = rocksdb::Options::default();
-    let cfs = rocksdb::DB::list_cf(&opts, db_path)?;
-    let secondary = "/tmp/rustyblox-secondary-livedebug";
-    let db = rocksdb::DB::open_cf_as_secondary(&opts, db_path, secondary, &cfs)?;
+    let cfs = rocksdb::DB::list_cf(&opts, &db_path)?;
+    let secondary = "/tmp/rustyblox-secondary-livedebug".to_string();
+    let db = rocksdb::DB::open_cf_as_secondary(&opts, &db_path, &secondary, &cfs)?;
     let _ = db.try_catch_up_with_primary();
     let cf = db.cf_handle("chain_state").ok_or("no chain_state")?;
 

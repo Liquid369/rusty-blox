@@ -1,15 +1,18 @@
 use rocksdb::{DB, Options};
+use rustyblox::config::{load_config, get_db_path};
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let test_address = "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6";
-    
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let opts = Options::default();
     let db = DB::open_cf_for_read_only(
         &opts,
-        "data/blocks.db",
+        &db_path,
         vec!["transactions", "addr_index"],
         false
     )?;

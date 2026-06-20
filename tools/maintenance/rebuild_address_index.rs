@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor};
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::enrich_addresses::enrich_all_addresses;
 use rustyblox::telemetry::{TelemetryConfig, init_tracing};
 
@@ -22,9 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║      REBUILD ADDRESS INDEX WITH UTXO TRACKING      ║");
     println!("╚════════════════════════════════════════════════════╝\n");
 
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "data/blocks.db".to_string());
-    
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
     println!("📂 Opening database: {db_path}");
     
     // Open database with all column families

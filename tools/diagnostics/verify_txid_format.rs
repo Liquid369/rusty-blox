@@ -1,20 +1,21 @@
 /// Verify TXID Storage Format
-/// 
+///
 /// This tool checks if transactions are stored in reversed or display format
 /// and validates if spent UTXO detection would work correctly
 
 use rocksdb::{DB, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n═══════════════════════════════════════════════════════════");
     println!("  TXID STORAGE FORMAT VERIFICATION");
     println!("═══════════════════════════════════════════════════════════\n");
-    
+
     // Open database
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "/Users/liquid/Projects/rusty-blox/data/blocks.db".to_string());
-    
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
     println!("Opening database: {}", db_path);
     
     let mut cf_opts = rocksdb::Options::default();

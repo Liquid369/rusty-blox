@@ -1,25 +1,28 @@
 use rocksdb::{DB, Options};
+use rustyblox::config::{load_config, get_db_path};
 use std::error::Error;
 
 fn deserialize_tx_height(data: &[u8]) -> Result<i32, Box<dyn Error>> {
     if data.len() < 8 {
         return Err("Transaction data too short".into());
     }
-    
+
     let height = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     Ok(height)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let test_address = "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6";
-    
+
     println!("Counting ALL orphaned transactions for: {test_address}");
     println!("=============================================================\n");
-    
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let opts = Options::default();
     let db = DB::open_cf_for_read_only(
         &opts,
-        "data/blocks.db",
+        &db_path,
         vec!["transactions", "addr_index"],
         false
     )?;

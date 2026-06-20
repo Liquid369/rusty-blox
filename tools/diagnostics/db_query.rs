@@ -2,6 +2,7 @@
 //! explorer is running (opens RocksDB as a secondary instance).
 //! Usage: db-query spent <txid-hex-display> <vout>
 
+use rustyblox::config::{get_db_path, load_config};
 use rustyblox::spent_utxo::SpentUtxo;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,10 +15,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
     let vout: u64 = args[3].parse()?;
 
-    let settings = config::Config::builder()
-        .add_source(config::File::with_name("config.toml"))
-        .build()?;
-    let db_path: String = settings.get_string("paths.db_path")?;
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
 
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(false);

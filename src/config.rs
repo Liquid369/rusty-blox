@@ -47,8 +47,15 @@ pub fn default_pivx_data_dir() -> String {
     }
 }
 
-/// Get db_path from config
+/// Resolve the RocksDB path for the tools: the `DB_PATH` env var if set (a
+/// documented per-invocation override), otherwise `paths.db_path` from config.toml.
+/// The main binary reads `paths.db_path` directly and is unaffected by this.
 pub fn get_db_path(config: &Config) -> Result<String, Box<dyn Error>> {
+    if let Ok(p) = std::env::var("DB_PATH") {
+        if !p.trim().is_empty() {
+            return Ok(p);
+        }
+    }
     config
         .get_string("paths.db_path")
         .map_err(|e| format!("Missing paths.db_path in config: {e}").into())

@@ -6,6 +6,7 @@
 /// 3. Validating address index completeness
 
 use rocksdb::{DB, Options, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 use std::sync::Arc;
 use std::error::Error;
 use std::collections::HashSet;
@@ -17,8 +18,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("║       BLOCKCHAIN SYNC VALIDATION REPORT            ║");
     println!("╚════════════════════════════════════════════════════╝\n");
 
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "data/blocks.db".to_string());
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     
     let opts = Options::default();
     let db = Arc::new(DB::open_cf_for_read_only(

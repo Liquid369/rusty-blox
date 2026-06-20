@@ -1,18 +1,19 @@
 /// Analyze Orphaned Transactions
-/// 
+///
 /// Provides detailed analysis of transactions marked with height=-1
 
 use rocksdb::{DB, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n═══════════════════════════════════════════════════════════");
     println!("  ORPHANED TRANSACTION ANALYSIS");
     println!("═══════════════════════════════════════════════════════════\n");
-    
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "/Users/liquid/Projects/rusty-blox/data/db".to_string());
-    
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
     println!("Opening database: {}\n", db_path);
     
     let mut cf_opts = rocksdb::Options::default();

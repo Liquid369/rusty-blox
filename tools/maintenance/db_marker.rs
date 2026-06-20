@@ -4,6 +4,7 @@
 //!   db-marker clear <marker>
 //! Operates on the db_path from config.toml in the current directory.
 
+use rustyblox::config::{get_db_path, load_config};
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,10 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let action = args[1].as_str();
     let marker = args[2].as_bytes();
 
-    let settings = config::Config::builder()
-        .add_source(config::File::with_name("config.toml"))
-        .build()?;
-    let db_path: String = settings.get_string("paths.db_path")?;
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
 
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(false);

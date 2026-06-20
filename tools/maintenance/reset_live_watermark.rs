@@ -4,6 +4,7 @@
 //!
 //! Usage: reset-live-watermark [days]   (default 2 = redo the tip day + the day
 //! before it)
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::enrich_addresses::unix_to_date;
 use std::collections::BTreeSet;
 
@@ -24,11 +25,12 @@ fn header_date(db: &rocksdb::DB, height: i32) -> Option<String> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let days: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2);
-    let db_path = "./data/blocks.db";
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let mut opts = rocksdb::Options::default();
     opts.create_if_missing(false);
-    let cfs = rocksdb::DB::list_cf(&opts, db_path)?;
-    let db = rocksdb::DB::open_cf(&opts, db_path, &cfs)?;
+    let cfs = rocksdb::DB::list_cf(&opts, &db_path)?;
+    let db = rocksdb::DB::open_cf(&opts, &db_path, &cfs)?;
     let cf = db.cf_handle("chain_state").ok_or("no chain_state")?;
 
     let tip = db

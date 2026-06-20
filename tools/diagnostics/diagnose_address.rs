@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use rocksdb::{DB, Options};
-use rustyblox::config::load_config;
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::parser::deserialize_transaction;
 
 #[tokio::main]
@@ -13,8 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Open RocksDB
     let config = load_config()?;
-    let db_path = config.get_string("paths.db_path")
-        .unwrap_or_else(|_| "./data/blocks.db".to_string());
+    let db_path = get_db_path(&config)?;
     
     let opts = Options::default();
     let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
