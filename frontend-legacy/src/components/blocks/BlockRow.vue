@@ -100,7 +100,8 @@ const age = computed(() => {
 const totalPiv = computed(() => {
   const sats = props.block.totalSats
   if (!sats) return '0.00'
-  return formatNumber(Number(formatPIV(sats, 2)))
+  // formatPIV already groups with thousands-separator commas.
+  return formatPIV(sats, 2)
 })
 
 const rewardPiv = computed(() => {

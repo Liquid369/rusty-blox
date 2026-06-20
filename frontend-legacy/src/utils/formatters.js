@@ -26,7 +26,25 @@ export function formatPIV(value, decimals = 8) {
   
   // Convert satoshis to PIV (1 PIV = 100,000,000 satoshis)
   const piv = satoshis / 100000000
-  return piv.toFixed(decimals)
+  return groupThousands(piv.toFixed(decimals))
+}
+
+/**
+ * Insert thousands-separator commas into the integer part of a numeric string,
+ * preserving the fractional part EXACTLY (no rounding / precision change), e.g.
+ * "381780.99997730" -> "381,780.99997730", "-1234.5" -> "-1,234.5".
+ * @param {string|number} numStr
+ * @returns {string}
+ */
+export function groupThousands(numStr) {
+  const str = String(numStr)
+  const neg = str.startsWith('-')
+  const body = neg ? str.slice(1) : str
+  const dot = body.indexOf('.')
+  const intPart = dot === -1 ? body : body.slice(0, dot)
+  const decPart = dot === -1 ? '' : body.slice(dot) // includes the '.'
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `${neg ? '-' : ''}${grouped}${decPart}`
 }
 
 /**
