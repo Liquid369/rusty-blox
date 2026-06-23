@@ -12,28 +12,48 @@
       <!-- Navigation Tabs -->
       <Tabs v-model="activeTab" :tabs="tabs">
         <!-- Supply Analytics -->
-        <div v-show="activeTab === 'supply'" class="tab-content">
+        <div v-if="activeTab === 'supply'" class="tab-content">
           <SupplyAnalytics />
         </div>
 
         <!-- Transaction Analytics -->
-        <div v-show="activeTab === 'transactions'" class="tab-content">
+        <div v-if="activeTab === 'transactions'" class="tab-content">
           <TransactionAnalytics />
         </div>
 
         <!-- Staking Analytics -->
-        <div v-show="activeTab === 'staking'" class="tab-content">
+        <div v-if="activeTab === 'staking'" class="tab-content">
           <StakingAnalytics />
         </div>
 
         <!-- Network Health -->
-        <div v-show="activeTab === 'network'" class="tab-content">
+        <div v-if="activeTab === 'network'" class="tab-content">
           <NetworkHealth />
         </div>
 
         <!-- Rich List -->
-        <div v-show="activeTab === 'richlist'" class="tab-content">
+        <div v-if="activeTab === 'richlist'" class="tab-content">
           <RichList />
+        </div>
+
+        <!-- HODL Waves -->
+        <div v-if="activeTab === 'hodl'" class="tab-content">
+          <HodlWaves />
+        </div>
+
+        <!-- Treasury -->
+        <div v-if="activeTab === 'treasury'" class="tab-content">
+          <TreasuryHistory />
+        </div>
+
+        <!-- Cold Staking -->
+        <div v-if="activeTab === 'coldstaking'" class="tab-content">
+          <ColdStakingTrend />
+        </div>
+
+        <!-- Network Snapshots -->
+        <div v-if="activeTab === 'snapshots'" class="tab-content">
+          <NetworkSnapshots />
         </div>
       </Tabs>
     </div>
@@ -49,6 +69,10 @@ import TransactionAnalytics from '@/components/analytics/TransactionAnalytics.vu
 import StakingAnalytics from '@/components/analytics/StakingAnalytics.vue'
 import NetworkHealth from '@/components/analytics/NetworkHealth.vue'
 import RichList from '@/components/analytics/RichList.vue'
+import HodlWaves from '@/components/analytics/HodlWaves.vue'
+import TreasuryHistory from '@/components/analytics/TreasuryHistory.vue'
+import ColdStakingTrend from '@/components/analytics/ColdStakingTrend.vue'
+import NetworkSnapshots from '@/components/analytics/NetworkSnapshots.vue'
 
 const activeTab = ref('supply')
 
@@ -57,7 +81,11 @@ const tabs = [
   { value: 'transactions', label: 'Transactions' },
   { value: 'staking', label: 'Staking' },
   { value: 'network', label: 'Network Health' },
-  { value: 'richlist', label: 'Rich List' }
+  { value: 'richlist', label: 'Rich List' },
+  { value: 'hodl', label: 'HODL Waves' },
+  { value: 'treasury', label: 'Treasury' },
+  { value: 'coldstaking', label: 'Cold Staking' },
+  { value: 'snapshots', label: 'Network' }
 ]
 </script>
 

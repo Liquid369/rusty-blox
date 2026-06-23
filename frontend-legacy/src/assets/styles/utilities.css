@@ -7,6 +7,42 @@
   padding: 0 var(--space-6);
 }
 
+/* Page Titles - gradient ink + accent underline (page titles only) */
+.page-header h1,
+.page-title {
+  position: relative;
+  display: inline-block;
+  color: var(--text-primary);
+  background: linear-gradient(100deg, #FFFFFF 30%, var(--purple-accent) 85%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  padding-bottom: var(--space-2);
+}
+
+.page-header h1::after,
+.page-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 56px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(90deg, var(--green-accent), var(--purple-accent));
+  opacity: 0.9;
+}
+
+/* Glass Surface - shared glassmorphism recipe */
+.glass-surface {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-md), var(--glass-highlight);
+}
+
 .flex {
   display: flex;
 }
@@ -51,6 +87,11 @@
 
 .font-mono {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
 }
 
 .text-sm {
@@ -223,7 +264,7 @@
 .warning-icon {
   width: 1.5rem;
   height: 1.5rem;
-  background-image: url('@/assets/icons/pivx_icon_warning: .svg;');
+  background-image: url('../icons/pivx_icon_warning.svg');
   background-size: contain;
   background-repeat: no-repeat;
   background-position: center;

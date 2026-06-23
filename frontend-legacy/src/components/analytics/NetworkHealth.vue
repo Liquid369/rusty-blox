@@ -3,7 +3,7 @@
     <div class="controls">
       <TimeRangeSelector v-model="timeRange" />
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
@@ -12,14 +12,14 @@
       <StatCard
         label="Chain Difficulty"
         :value="formatNumber(metrics.difficulty)"
-        icon="⚡"
+        icon="zap"
         :loading="loading"
       />
       <StatCard
         label="Orphan Rate"
         :value="formatPercentage(metrics.orphanRate)"
         suffix="%"
-        icon="🔀"
+        icon="shuffle"
         :loading="loading"
         :valueClass="metrics.orphanRate < 1 ? 'text-success' : 'text-warning'"
       />
@@ -27,13 +27,13 @@
         label="Avg Block Size"
         :value="formatNumber(metrics.avgBlockSize)"
         suffix="KB"
-        icon="📦"
+        icon="box"
         :loading="loading"
       />
       <StatCard
         label="Blocks Today"
         :value="formatNumber(metrics.blocksToday)"
-        icon="🎯"
+        icon="target"
         :loading="loading"
       />
     </div>
@@ -80,6 +80,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
@@ -162,11 +163,11 @@ const orphanRateOption = computed(() => {
     data: dates.map(() => 2),
     lineStyle: {
       type: 'dashed',
-      color: '#F59E0B',
+      color: '#f6ff78',
       width: 2
     },
     itemStyle: {
-      color: '#F59E0B'
+      color: '#f6ff78'
     },
     symbol: 'none'
   })
@@ -192,11 +193,11 @@ const blocksPerDayOption = computed(() => {
     data: dates.map(() => 1440),
     lineStyle: {
       type: 'dashed',
-      color: '#10B981',
+      color: '#B359FC',
       width: 2
     },
     itemStyle: {
-      color: '#10B981'
+      color: '#B359FC'
     },
     symbol: 'none'
   })
@@ -222,17 +223,23 @@ const fetchData = async () => {
 
   try {
     const data = await analyticsService.getNetworkHealth(timeRange.value)
-    
+
     if (data && Array.isArray(data)) {
-      healthData.value = data
+      healthData.value = data.map(d => ({
+        date: d.date,
+        // difficulty comes back as a numeric string
+        difficulty: parseFloat(d.difficulty) || 0,
+        orphanRate: d.orphan_rate || 0,
+        avgBlockSize: d.avg_block_size || 0,
+        blocksPerDay: d.blocks_per_day || 0
+      }))
     } else {
-      // Fallback to mock data
-      healthData.value = generateMockHealthData(timeRange.value)
+      healthData.value = []
+      error.value = 'No network health data available'
     }
   } catch (err) {
-    console.error('Failed to fetch network health:', err)
-    error.value = 'Network health API not available. Using mock data.'
-    healthData.value = generateMockHealthData(timeRange.value)
+    error.value = 'Failed to load network health data. The analytics API may not be available.'
+    healthData.value = []
   } finally {
     loading.value = false
   }
@@ -242,29 +249,6 @@ const exportData = () => {
   if (healthData.value && healthData.value.length > 0) {
     exportToCSV(healthData.value, `network-health-${timeRange.value}.csv`)
   }
-}
-
-const generateMockHealthData = (range) => {
-  const days = range === '24h' ? 1 : range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : 365
-  const data = []
-  let baseDifficulty = 1250000000
-  
-  for (let i = days; i >= 0; i--) {
-    const date = new Date()
-    date.setDate(date.getDate() - i)
-    
-    baseDifficulty *= (1 + (Math.random() * 0.02 - 0.01)) // Vary by ±1%
-    
-    data.push({
-      date: date.toISOString().split('T')[0],
-      difficulty: baseDifficulty,
-      orphanRate: Math.random() * 1.5 + 0.2,
-      avgBlockSize: Math.random() * 5 + 8,
-      blocksPerDay: 1440 + Math.floor(Math.random() * 40 - 20)
-    })
-  }
-
-  return data
 }
 
 watch(timeRange, () => {
@@ -290,10 +274,23 @@ onMounted(() => {
   gap: var(--space-3);
 }
 
+/* 4 tiles: keep rows balanced (4 / 2x2 / 1) instead of wrapping 3+1 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
+}
+
+@media (max-width: 1024px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .chart-grid {

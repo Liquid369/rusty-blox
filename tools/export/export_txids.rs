@@ -1,15 +1,18 @@
 use rocksdb::{DB, Options};
+use rustyblox::config::{load_config, get_db_path};
 use std::error::Error;
 use std::fs::File;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let test_address = "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6";
-    
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let opts = Options::default();
     let db = DB::open_cf_for_read_only(
         &opts,
-        "data/blocks.db",
+        &db_path,
         vec!["transactions", "addr_index"],
         false
     )?;
@@ -17,7 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let addr_cf = db.cf_handle("addr_index").unwrap();
     
     // Get indexed transaction list
-    let addr_txs_key = format!("t{}", test_address);
+    let addr_txs_key = format!("t{test_address}");
     let indexed_txids: Vec<Vec<u8>> = if let Some(data) = db.get_cf(addr_cf, addr_txs_key.as_bytes())? {
         data.chunks(32)
             .filter(|c| c.len() == 32)
@@ -35,7 +38,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|txid| {
             let mut reversed = txid.clone();
             reversed.reverse();
-            reversed.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            reversed.iter().map(|b| format!("{b:02x}")).collect::<String>()
         })
         .collect();
     
@@ -44,7 +47,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Write to file
     let mut file = File::create("/tmp/our_txids.txt")?;
     for txid in &txid_list {
-        writeln!(file, "{}", txid)?;
+        writeln!(file, "{txid}")?;
     }
     
     println!("Exported {} transactions to /tmp/our_txids.txt", txid_list.len());

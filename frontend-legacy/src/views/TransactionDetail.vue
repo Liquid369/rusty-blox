@@ -9,7 +9,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Transaction Not Found"
           :message="error"
         >
@@ -25,9 +25,14 @@
         <div class="page-header">
           <div class="header-content">
             <h1>Transaction Details</h1>
-            <Badge :variant="transactionTypeBadgeVariant">
-              {{ transactionTypeLabel }}
-            </Badge>
+            <div class="header-badges">
+              <Badge :variant="transactionTypeBadgeVariant">
+                {{ transactionTypeLabel }}
+              </Badge>
+              <Badge v-if="showColdStakeTag" variant="accent">
+                Cold-Stake
+              </Badge>
+            </div>
           </div>
         </div>
 
@@ -40,7 +45,7 @@
               <HashDisplay :hash="transaction.txid" :truncate="false" show-copy />
             </InfoRow>
 
-            <InfoRow label="Block" icon="📦">
+            <InfoRow label="Block" icon="box">
               <div class="block-info">
                 <HashDisplay
                   v-if="transaction.blockHash"
@@ -56,18 +61,21 @@
               </div>
             </InfoRow>
 
-            <InfoRow label="Confirmations" icon="✅">
+            <InfoRow label="Confirmations" icon="check-circle">
               <div class="confirmation-display">
                 <Badge :variant="confirmationBadgeVariant">
                   {{ confirmations }} confirmation{{ confirmations !== 1 ? 's' : '' }}
                 </Badge>
+                <span v-if="transaction.blockTime" class="confirmation-age">
+                  first seen {{ formatTimeAgo(transaction.blockTime) }}
+                </span>
                 <Badge v-if="isSyncLagging" variant="warning" class="sync-warning">
-                  ⚠️ Node syncing ({{ syncLag }} blocks behind)
+                  <Icon name="alert-triangle" :size="12" /> Node syncing ({{ syncLag }} blocks behind)
                 </Badge>
               </div>
             </InfoRow>
 
-            <InfoRow label="Timestamp" icon="🕐">
+            <InfoRow label="Timestamp" icon="clock">
               <div class="timestamp-group" v-if="transaction.blockTime">
                 <span>{{ formatDate(transaction.blockTime) }}</span>
                 <span class="time-ago">{{ formatTimeAgo(transaction.blockTime) }}</span>
@@ -75,25 +83,59 @@
               <span v-else class="unconfirmed">Pending</span>
             </InfoRow>
 
-            <InfoRow label="Amount" icon="💰">
-              <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
+            <InfoRow label="Amount" icon="coins">
+              <div class="amount-group">
+                <span class="amount-value">{{ formatPIV(transaction.value) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.value), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
-            <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="⚙️">
-              <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
+            <InfoRow label="Total Input" icon="arrow-down-left">
+              <span class="flow-value">{{ formatPIV(transaction.valueIn) }} PIV</span>
             </InfoRow>
 
-            <InfoRow label="Size" icon="💾">
-              {{ formatBytes(transaction.size || 0) }}
+            <InfoRow label="Total Output" icon="arrow-up-right">
+              <div class="amount-group">
+                <span class="flow-value">{{ formatPIV(transaction.value) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.value), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
-            <InfoRow label="Version" icon="🔢">
-              {{ transaction.version }}
+            <InfoRow v-if="shouldShowFees" label="Transaction Fee" icon="settings">
+              <div class="amount-group">
+                <span class="fee-value">{{ formatPIV(transaction.fees) }} PIV</span>
+                <span v-if="showFiat" class="amount-fiat">
+                  ≈ {{ formatAmount(pivFromSats(transaction.fees), { showPIV: false }) }}
+                </span>
+              </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.locktime" label="Lock Time" icon="🔒">
-              {{ formatNumber(transaction.locktime) }}
+            <InfoRow v-if="feeRate !== null" label="Fee Rate" icon="trending-up">
+              <span class="fee-value">{{ feeRate }} sat/byte</span>
             </InfoRow>
+          </div>
+
+          <div class="structure-grid">
+            <div class="structure-cell">
+              <span class="structure-label">Size</span>
+              <span class="structure-value">{{ formatBytes(transaction.size || 0) }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Version</span>
+              <span class="structure-value">{{ transaction.version ?? '—' }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Lock Time</span>
+              <span class="structure-value">{{ formatNumber(transaction.lockTime || 0) }}</span>
+            </div>
+            <div class="structure-cell">
+              <span class="structure-label">Inputs / Outputs</span>
+              <span class="structure-value">{{ transaction.vin?.length || 0 }} / {{ transaction.vout?.length || 0 }}</span>
+            </div>
           </div>
         </Card>
 
@@ -101,16 +143,16 @@
         <Card v-if="isShieldedTransaction" class="sapling-card">
           <template #header>
             <div class="card-header-content">
-              <span>🛡️ Sapling Shielded Transaction</span>
+              <span><Icon name="shield" :size="16" /> Sapling Shielded Transaction</span>
               <Badge variant="accent">Private</Badge>
-              <Badge v-if="transaction.sapling?.transaction_type" :variant="shieldedTypeBadgeVariant">
+              <Badge v-if="shieldedTypeLabel" :variant="shieldedTypeBadgeVariant">
                 {{ shieldedTypeLabel }}
               </Badge>
             </div>
           </template>
 
           <div class="info-grid">
-            <InfoRow v-if="transaction.sapling?.shielded_spend_count !== undefined" label="Shielded Spends" icon="🔒">
+            <InfoRow v-if="transaction.sapling?.shielded_spend_count !== undefined" label="Shielded Spends" icon="lock">
               <div class="shielded-count">
                 <span class="count-number">{{ transaction.sapling.shielded_spend_count }}</span>
                 <span class="count-label">input{{ transaction.sapling.shielded_spend_count !== 1 ? 's' : '' }}</span>
@@ -118,7 +160,7 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.sapling?.shielded_output_count !== undefined" label="Shielded Outputs" icon="🔐">
+            <InfoRow v-if="transaction.sapling?.shielded_output_count !== undefined" label="Shielded Outputs" icon="lock">
               <div class="shielded-count">
                 <span class="count-number">{{ transaction.sapling.shielded_output_count }}</span>
                 <span class="count-label">output{{ transaction.sapling.shielded_output_count !== 1 ? 's' : '' }}</span>
@@ -126,21 +168,21 @@
               </div>
             </InfoRow>
 
-            <InfoRow v-if="formatPIV(transaction.sapling?.value_balance)" label="Value Balance" icon="⚖️">
+            <InfoRow v-if="valueBalancePiv" label="Value Balance" icon="scale">
               <div class="value-balance">
-                <span class="balance-amount" :class="valueBalanceClass">{{ formatPIV(transaction.sapling.value_balance) }} PIV</span>
+                <span class="balance-amount" :class="valueBalanceClass">{{ valueBalancePiv }} PIV</span>
                 <span class="balance-explanation">{{ valueBalanceExplanation }}</span>
               </div>
             </InfoRow>
 
-            <InfoRow v-if="transaction.sapling?.binding_sig" label="Binding Signature" icon="🔐">
+            <InfoRow v-if="transaction.sapling?.binding_sig" label="Binding Signature" icon="lock">
               <HashDisplay :hash="transaction.sapling.binding_sig" :truncate="true" show-copy />
             </InfoRow>
           </div>
 
           <!-- Shielded Spend Details -->
           <div v-if="transaction.sapling?.spends?.length > 0" class="shielded-details">
-            <h3 class="details-title">🔒 Shielded Spend Details</h3>
+            <h3 class="details-title"><Icon name="lock" :size="16" /> Shielded Spend Details</h3>
             <div class="spend-list">
               <div v-for="(spend, idx) in transaction.sapling.spends" :key="idx" class="spend-item">
                 <div class="spend-header">
@@ -166,7 +208,7 @@
 
           <!-- Shielded Output Details -->
           <div v-if="transaction.sapling?.outputs?.length > 0" class="shielded-details">
-            <h3 class="details-title">🔐 Shielded Output Details</h3>
+            <h3 class="details-title"><Icon name="lock" :size="16" /> Shielded Output Details</h3>
             <div class="output-list">
               <div v-for="(output, idx) in transaction.sapling.outputs" :key="idx" class="output-item">
                 <div class="output-header">
@@ -195,7 +237,7 @@
           </div>
 
           <div class="sapling-note">
-            <div class="note-icon">ℹ️</div>
+            <div class="note-icon"><Icon name="info" :size="18" /></div>
             <div class="note-content">
               <p class="note-title">Privacy Information</p>
               <p>This transaction contains Sapling shielded components. The amounts, addresses, and memos within shielded transfers are encrypted using zero-knowledge proofs and are not visible on the blockchain. Only the transaction participants with the correct viewing keys can decrypt this information.</p>
@@ -203,8 +245,8 @@
                 <li><strong>Shielded Amounts:</strong> Values are cryptographically hidden using Pedersen commitments</li>
                 <li><strong>Private Addresses:</strong> Recipient addresses are encrypted and unlinkable</li>
                 <li><strong>Zero-Knowledge Proofs:</strong> Transactions are verified without revealing transaction details</li>
-                <li v-if="transaction.sapling?.transaction_type === 'shielding'"><strong>Shielding:</strong> Moving funds from transparent to shielded pool for privacy</li>
-                <li v-if="transaction.sapling?.transaction_type === 'unshielding'"><strong>Unshielding:</strong> Moving funds from shielded to transparent pool</li>
+                <li v-if="shieldedDirection === 'shielding'"><strong>Shielding:</strong> Moving funds from transparent to shielded pool for privacy</li>
+                <li v-if="shieldedDirection === 'deshielding'"><strong>Deshielding:</strong> Moving funds from shielded to transparent pool</li>
               </ul>
             </div>
           </div>
@@ -234,17 +276,46 @@
             <CopyButton v-if="transaction.hex" :text="transaction.hex" />
           </div>
         </Card>
+
+        <!-- Decoded Transaction JSON (Collapsible) -->
+        <Card class="raw-tx-card">
+          <template #header>
+            <button class="raw-tx-toggle" @click="showDecodedTx = !showDecodedTx">
+              <span>Decoded (JSON)</span>
+              <span class="toggle-icon">{{ showDecodedTx ? '▼' : '▶' }}</span>
+            </button>
+          </template>
+
+          <div v-if="showDecodedTx" class="raw-tx-content">
+            <div class="decoded-toolbar">
+              <CopyButton :text="decodedJson" show-text />
+            </div>
+            <pre class="raw-tx-hex decoded-json"><span
+              v-for="(token, idx) in decodedTokens"
+              :key="idx"
+              :class="token.cls"
+            >{{ token.text }}</span></pre>
+          </div>
+        </Card>
       </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
+import { useCurrency } from '@/composables/useCurrency'
 import { transactionService } from '@/services/transactionService'
-import { detectTransactionType, getTransactionTypeLabel, getTransactionTypeBadgeVariant } from '@/utils/transactionHelpers'
+import {
+  detectTransactionType,
+  getTransactionTypeLabel,
+  getTransactionTypeBadgeVariant,
+  hasColdStakeOutput,
+  getFeeRate
+} from '@/utils/transactionHelpers'
 import { formatNumber, formatDate, formatTimeAgo, formatBytes, formatPIV } from '@/utils/formatters'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
@@ -260,14 +331,104 @@ import CopyButton from '@/components/common/CopyButton.vue'
 const route = useRoute()
 const router = useRouter()
 const chainStore = useChainStore()
+const { formatAmount, preferredCurrency, hasValidPrices } = useCurrency()
+
+// Gate fiat annotations on a non-PIV preference with live prices (P1-3).
+const showFiat = computed(() => preferredCurrency.value !== 'PIV' && hasValidPrices.value)
+
+// API amounts are satoshi strings; convert to a PIV float before fiat conversion
+// so we never double-apply the 1e8 scale.
+const pivFromSats = (sats) => {
+  const n = typeof sats === 'string' ? parseFloat(sats) : Number(sats)
+  return Number.isFinite(n) ? n / 100000000 : 0
+}
 
 const transaction = ref(null)
 const loading = ref(false)
 const error = ref('')
 const showRawTx = ref(false)
+const showDecodedTx = ref(false)
 
 const transactionType = computed(() => {
   return transaction.value ? detectTransactionType(transaction.value) : 'regular'
+})
+
+// Secondary tag: coinstakes/transfers that involve P2CS (cold-staking) scripts
+const showColdStakeTag = computed(() => {
+  return transactionType.value !== 'coldstake' &&
+         hasColdStakeOutput(transaction.value)
+})
+
+// Fee rate in satoshi per byte (only meaningful when fees were paid)
+const feeRate = computed(() => {
+  if (!transaction.value) return null
+  if (transactionType.value === 'coinbase' || transactionType.value === 'coinstake') return null
+  const rate = getFeeRate(transaction.value)
+  return rate === null ? null : rate.toFixed(2)
+})
+
+// Pretty-printed JSON of the full API transaction object
+const decodedJson = computed(() => {
+  return transaction.value ? JSON.stringify(transaction.value, null, 2) : ''
+})
+
+/**
+ * Tokenize a JS value into { text, cls } spans for lightweight,
+ * CSS-only JSON syntax highlighting (no v-html, no libraries).
+ */
+function tokenizeJson(value, indent, out) {
+  const pad = '  '.repeat(indent)
+  const childPad = '  '.repeat(indent + 1)
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      out.push({ text: '[]', cls: 'json-punct' })
+      return
+    }
+    out.push({ text: '[\n', cls: 'json-punct' })
+    value.forEach((item, i) => {
+      out.push({ text: childPad, cls: 'json-punct' })
+      tokenizeJson(item, indent + 1, out)
+      out.push({ text: (i < value.length - 1 ? ',' : '') + '\n', cls: 'json-punct' })
+    })
+    out.push({ text: pad + ']', cls: 'json-punct' })
+    return
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const keys = Object.keys(value)
+    if (keys.length === 0) {
+      out.push({ text: '{}', cls: 'json-punct' })
+      return
+    }
+    out.push({ text: '{\n', cls: 'json-punct' })
+    keys.forEach((key, i) => {
+      out.push({ text: childPad, cls: 'json-punct' })
+      out.push({ text: JSON.stringify(key), cls: 'json-key' })
+      out.push({ text: ': ', cls: 'json-punct' })
+      tokenizeJson(value[key], indent + 1, out)
+      out.push({ text: (i < keys.length - 1 ? ',' : '') + '\n', cls: 'json-punct' })
+    })
+    out.push({ text: pad + '}', cls: 'json-punct' })
+    return
+  }
+
+  if (typeof value === 'string') {
+    out.push({ text: JSON.stringify(value), cls: 'json-string' })
+  } else if (typeof value === 'number') {
+    out.push({ text: String(value), cls: 'json-number' })
+  } else if (typeof value === 'boolean') {
+    out.push({ text: String(value), cls: 'json-boolean' })
+  } else {
+    out.push({ text: 'null', cls: 'json-null' })
+  }
+}
+
+const decodedTokens = computed(() => {
+  if (!transaction.value || !showDecodedTx.value) return []
+  const tokens = []
+  tokenizeJson(transaction.value, 0, tokens)
+  return tokens
 })
 
 const transactionTypeLabel = computed(() => {
@@ -320,49 +481,78 @@ const isShieldedTransaction = computed(() => {
          transaction.value?.sapling?.shielded_output_count > 0
 })
 
+// Shielded direction from the signed value balance (PIV). Backend convention:
+// < 0 shielding (transparent -> shielded), > 0 deshielding, 0 pure z->z transfer.
+const shieldedDirection = computed(() => {
+  const vb = transaction.value?.sapling?.value_balance
+  if (vb === undefined || vb === null) return null
+  const n = Number(vb)
+  if (n < 0) return 'shielding'
+  if (n > 0) return 'deshielding'
+  return 'transfer'
+})
+
 const shieldedTypeLabel = computed(() => {
-  const type = transaction.value?.sapling?.transaction_type
-  if (type === 'shielding') return '🛡️ Shielding'
-  if (type === 'unshielding') return '🔓 Unshielding'
-  if (type === 'shielded_transfer') return '🔐 Shielded Transfer'
-  return 'Unknown'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'Shielding'
+    case 'deshielding': return 'Deshielding'
+    case 'transfer': return 'Shielded Transfer'
+    default: return ''
+  }
 })
 
 const shieldedTypeBadgeVariant = computed(() => {
-  const type = transaction.value?.sapling?.transaction_type
-  if (type === 'shielding') return 'info'
-  if (type === 'unshielding') return 'warning'
-  if (type === 'shielded_transfer') return 'success'
-  return 'default'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'info'
+    case 'deshielding': return 'warning'
+    case 'transfer': return 'success'
+    default: return 'default'
+  }
+})
+
+// value_balance is already a PIV float from the API — format directly (no /1e8).
+const valueBalancePiv = computed(() => {
+  const vb = transaction.value?.sapling?.value_balance
+  if (vb === undefined || vb === null) return ''
+  return Number(vb).toFixed(8)
 })
 
 const valueBalanceClass = computed(() => {
-  const balance = transaction.value?.sapling?.value_balance_sat
-  if (!balance) return ''
-  return balance < 0 ? 'balance-negative' : balance > 0 ? 'balance-positive' : 'balance-zero'
+  switch (shieldedDirection.value) {
+    case 'shielding': return 'balance-negative'
+    case 'deshielding': return 'balance-positive'
+    case 'transfer': return 'balance-zero'
+    default: return ''
+  }
 })
 
 const valueBalanceExplanation = computed(() => {
-  const balance = transaction.value?.sapling?.value_balance_sat
-  if (!balance) return ''
-  if (balance < 0) return '(Adding to shielded pool)'
-  if (balance > 0) return '(Removing from shielded pool)'
-  return '(Pure shielded transfer)'
+  switch (shieldedDirection.value) {
+    case 'shielding': return '(Adding to shielded pool)'
+    case 'deshielding': return '(Removing from shielded pool)'
+    case 'transfer': return '(Pure shielded transfer)'
+    default: return ''
+  }
 })
 
+let fetchToken = 0
+
 const fetchTransaction = async (txid) => {
+  const token = ++fetchToken
   loading.value = true
   error.value = ''
   transaction.value = null
 
   try {
     const txData = await transactionService.getTransaction(txid)
+    if (token !== fetchToken) return // superseded by a newer navigation
     transaction.value = txData
   } catch (err) {
+    if (token !== fetchToken) return
     console.error('Failed to fetch transaction:', err)
     error.value = err.message || 'Failed to load transaction'
   } finally {
-    loading.value = false
+    if (token === fetchToken) loading.value = false
   }
 }
 
@@ -376,7 +566,6 @@ watch(() => route.params.txid, (newTxid) => {
 // Watch for reorg detection and refetch transaction
 watch(() => chainStore.reorgDetected, (detected) => {
   if (detected && route.params.txid) {
-    console.log('🔄 Reorg detected - refetching transaction data')
     fetchTransaction(route.params.txid)
   }
 })
@@ -446,9 +635,77 @@ watch(() => chainStore.reorgDetected, (detected) => {
   font-family: var(--font-mono);
 }
 
+.amount-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-end;
+}
+
+.amount-fiat {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-weight: var(--weight-normal);
+  font-variant-numeric: tabular-nums;
+}
+
 .fee-value {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
+}
+
+.flow-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.confirmation-age {
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+}
+
+.structure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.structure-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.structure-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.structure-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-base);
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
 }
 
 .card-header-content {
@@ -460,7 +717,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .sapling-card {
   background: linear-gradient(135deg, rgba(102, 45, 145, 0.1) 0%, rgba(42, 27, 66, 0.3) 100%);
-  border: 2px solid rgba(89, 252, 179, 0.2);
+  border: 1px solid rgba(179, 255, 120, 0.25);
 }
 
 .shielded-count {
@@ -503,7 +760,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .balance-negative {
   color: var(--pivx-accent);
-  text-shadow: 0 0 10px rgba(89, 252, 179, 0.3);
+  text-shadow: 0 0 10px rgba(179, 255, 120, 0.3);
 }
 
 .balance-positive {
@@ -523,7 +780,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .shielded-details {
   margin-top: var(--space-6);
   padding-top: var(--space-6);
-  border-top: 2px solid var(--border-subtle);
+  border-top: 1px solid var(--border-secondary);
 }
 
 .details-title {
@@ -545,7 +802,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 
 .spend-item,
 .output-item {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
   border: 1px solid var(--border-secondary);
   border-radius: var(--radius-md);
   padding: var(--space-4);
@@ -555,7 +812,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .spend-item:hover,
 .output-item:hover {
   border-color: var(--pivx-accent);
-  box-shadow: 0 0 12px rgba(89, 252, 179, 0.2);
+  box-shadow: 0 0 12px rgba(179, 255, 120, 0.2);
 }
 
 .spend-header,
@@ -575,7 +832,7 @@ watch(() => chainStore.reorgDetected, (detected) => {
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-2);
-  background: var(--bg-quaternary);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
   border-radius: var(--radius-sm);
 }
 
@@ -596,8 +853,8 @@ watch(() => chainStore.reorgDetected, (detected) => {
 .sapling-note {
   margin-top: var(--space-6);
   padding: var(--space-4);
-  background: rgba(89, 252, 179, 0.05);
-  border: 1px solid rgba(89, 252, 179, 0.2);
+  background: rgba(179, 255, 120, 0.05);
+  border: 1px solid rgba(179, 255, 120, 0.2);
   border-radius: var(--radius-md);
   display: flex;
   gap: var(--space-3);
@@ -695,7 +952,8 @@ watch(() => chainStore.reorgDetected, (detected) => {
 }
 
 .raw-tx-hex {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.6);
+  border: 1px solid var(--border-subtle);
   padding: var(--space-4);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);
@@ -706,6 +964,45 @@ watch(() => chainStore.reorgDetected, (detected) => {
   white-space: pre-wrap;
   max-height: 400px;
   overflow-y: auto;
+}
+
+.decoded-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--space-3);
+}
+
+.decoded-json {
+  max-height: 600px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* CSS-only JSON syntax highlighting */
+.decoded-json .json-key {
+  color: var(--pivx-accent);
+  font-weight: var(--weight-semibold);
+}
+
+.decoded-json .json-string {
+  color: #CD97F7;
+}
+
+.decoded-json .json-number {
+  color: var(--warning);
+}
+
+.decoded-json .json-boolean {
+  color: var(--green-accent);
+  font-weight: var(--weight-bold);
+}
+
+.decoded-json .json-null {
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+.decoded-json .json-punct {
+  color: var(--text-secondary);
 }
 
 .loading-container,

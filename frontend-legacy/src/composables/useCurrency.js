@@ -1,6 +1,7 @@
 import { computed } from 'vue'
 import { usePriceStore } from '@/stores/priceStore'
 import { useSettingsStore } from '@/stores/settingsStore'
+import { groupThousands } from '@/utils/formatters'
 
 /**
  * Currency formatting composable
@@ -30,14 +31,14 @@ export function useCurrency() {
 
     // If currency is PIV or we have no price data, just return PIV amount
     if (currency === 'PIV' || !priceStore.hasValidPrices) {
-      const formatted = decimals !== null 
-        ? pivAmount.toFixed(decimals)
-        : pivAmount.toFixed(8)
+      const formatted = groupThousands(
+        decimals !== null ? pivAmount.toFixed(decimals) : pivAmount.toFixed(8)
+      )
       return showSymbol ? `${formatted} PIV` : formatted
     }
 
     // Convert to fiat
-    const fiatAmount = priceStore.convertToFiat(pivAmount, currency)
+    const fiatAmount = groupThousands(priceStore.convertToFiat(pivAmount, currency))
     const symbol = getCurrencySymbol(currency)
 
     let result
@@ -49,9 +50,9 @@ export function useCurrency() {
 
     // Optionally show PIV amount in parentheses
     if (showPIV) {
-      const pivFormatted = decimals !== null 
-        ? pivAmount.toFixed(decimals)
-        : pivAmount.toFixed(8)
+      const pivFormatted = groupThousands(
+        decimals !== null ? pivAmount.toFixed(decimals) : pivAmount.toFixed(8)
+      )
       return `${result} (${pivFormatted} PIV)`
     }
 

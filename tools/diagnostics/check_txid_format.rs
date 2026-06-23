@@ -1,9 +1,11 @@
 use rocksdb::DB;
 use hex;
+use rustyblox::config::{load_config, get_db_path};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Open database
-    let db_path = "data/blocks.db";
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let cf_names = vec!["default", "blocks", "transactions", "addr_index", "utxo", 
                         "chain_metadata", "pubkey", "chain_state", "utxo_undo"];
     

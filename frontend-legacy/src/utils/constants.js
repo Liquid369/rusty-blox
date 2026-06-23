@@ -17,7 +17,10 @@ export const LAST_POW_BLOCK = 259200 // Last Proof of Work block (from chainpara
 export const MASTERNODE_COLLATERAL = 10000 // PIV required for masternode
 
 // Governance Constants
-export const MAX_MONTHLY_BUDGET = 432000 // PIV
+// Current-era monthly treasury cap. Historically 43,200 PIV (1 PIV/block era);
+// later increased 10x to 432,000 PIV (10 PIV/block to treasury). The 100,800 PIV
+// superblock payout at height 5,443,200 confirms the higher cap is active.
+export const MAX_MONTHLY_BUDGET = 432000
 export const GOVERNANCE_VOTE_THRESHOLD = 0.10 // 10% NET yes votes required
 
 // Pagination
@@ -38,7 +41,9 @@ export const TX_TYPES = {
   COINSTAKE: 'coinstake',
   COLDSTAKE: 'coldstake',
   BUDGET: 'budget',
-  SAPLING: 'sapling',
+  SAPLING: 'sapling',         // pure shielded (z->z): no transparent value moved
+  SHIELDING: 'shielding',     // transparent -> shielded (value_balance < 0)
+  DESHIELDING: 'deshielding', // shielded -> transparent (value_balance > 0)
   REGULAR: 'regular'
 }
 

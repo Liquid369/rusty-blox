@@ -1,25 +1,28 @@
 use rocksdb::{DB, Options};
+use rustyblox::config::{load_config, get_db_path};
 use std::error::Error;
 
 fn deserialize_tx_height(data: &[u8]) -> Result<i32, Box<dyn Error>> {
     if data.len() < 8 {
         return Err("Transaction data too short".into());
     }
-    
+
     let height = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     Ok(height)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let test_address = "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6";
-    
-    println!("Counting ALL orphaned transactions for: {}", test_address);
+
+    println!("Counting ALL orphaned transactions for: {test_address}");
     println!("=============================================================\n");
-    
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
     let opts = Options::default();
     let db = DB::open_cf_for_read_only(
         &opts,
-        "data/blocks.db",
+        &db_path,
         vec!["transactions", "addr_index"],
         false
     )?;
@@ -28,7 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let addr_cf = db.cf_handle("addr_index").unwrap();
     
     // Get transaction list for this address
-    let addr_txs_key = format!("t{}", test_address);
+    let addr_txs_key = format!("t{test_address}");
     let txids = if let Some(data) = db.get_cf(addr_cf, addr_txs_key.as_bytes())? {
         let mut txids = Vec::new();
         for chunk in data.chunks(32) {
@@ -60,10 +63,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     
-    println!("Valid transactions (height >= 0): {}", valid_count);
-    println!("Orphaned transactions (height == -1): {}", orphan_count);
+    println!("Valid transactions (height >= 0): {valid_count}");
+    println!("Orphaned transactions (height == -1): {orphan_count}");
     println!("\nExpected from PIVX Core: 2445 transactions");
-    println!("Our valid count: {}", valid_count);
+    println!("Our valid count: {valid_count}");
     println!("Difference: {}", 2445 - valid_count);
     
     Ok(())

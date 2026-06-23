@@ -5,17 +5,14 @@
 
 use axum::{Json, Extension, http::StatusCode};
 use rocksdb::DB;
-use pivx_rpc_rs::PivxRpcClient;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
-use crate::config::get_global_config;
-use crate::parser::{get_script_type, deserialize_transaction_blocking};
+use crate::parser::deserialize_transaction_blocking;
 use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutput};
-use super::helpers::format_piv_amount;
 
 pub use axum::extract::Path as AxumPath;
 
@@ -28,7 +25,7 @@ pub async fn tx_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
-    let cache_key = format!("tx:{}", txid);
+    let cache_key = format!("tx:{txid}");
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
     
@@ -188,18 +185,95 @@ pub(crate) async fn build_transaction_from_db(
         }
         
         // Build vout (outputs)
+        //
+        // P2-D: per-output spent/unspent status. The authoritative live-UTXO
+        // source in this codebase is the addr_index 'a'+address set — a serialized
+        // list of (txid_bytes, vout) tuples where the txid is stored in canonical
+        // DISPLAY order (the same bytes hex(tx.txid) decodes to; see
+        // api/addresses.rs::compute_utxos, which trusts this exact set for /utxo).
+        // An output (txid, vout) is UNSPENT iff it appears in the 'a' set of one of
+        // its own addresses; if absent it has been spent. We mirror block-detail's
+        // Blockbook-ish `spent` field name (already present on this TxOutput as
+        // serde `spent`). spentTxId is intentionally omitted: there is no cheap
+        // forward output->spending-txid index (the utxo_undo 'S' index is keyed for
+        // reorg resurrection, not query), and that field is not on the shared
+        // TxOutput struct — a reverse scan would be too expensive per request.
+        //
+        // The txid in DISPLAY order, decoded once, matched against the 'a' set.
+        let txid_display_bytes = hex::decode(&tx.txid).unwrap_or_default();
+        let cf_addr_index = db_clone.cf_handle("addr_index");
+
+        // Synchronous probe of the 'a'+address unspent set (we are inside a
+        // spawn_blocking closure, so no .await). Returns Some(true) if this exact
+        // (txid, vout) is still unspent for `address`, Some(false) if the address
+        // is indexed but this output is absent (spent), None if the address has no
+        // 'a' entry at all (can't determine from this address).
+        let probe_unspent = |address: &str, vout_idx: u64| -> Option<bool> {
+            let cf = cf_addr_index.as_ref()?;
+            if txid_display_bytes.len() != 32 {
+                return None;
+            }
+            let mut key = vec![b'a'];
+            key.extend_from_slice(address.as_bytes());
+            let data = db_clone.get_cf(cf, &key).ok().flatten()?;
+            // Format: repeated [txid(32) + vout(8 LE)] — same as parser::deserialize_utxos.
+            if data.is_empty() || data.len() % 40 != 0 {
+                return None;
+            }
+            let mut found = false;
+            for chunk in data.chunks_exact(40) {
+                if chunk[0..32] == txid_display_bytes[..] {
+                    let v = u64::from_le_bytes(chunk[32..40].try_into().unwrap_or([0u8; 8]));
+                    if v == vout_idx {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            Some(found)
+        };
+
         let mut vout = Vec::new();
         let mut value_out: i64 = 0;
-        
+
         for (idx, output) in tx.outputs.iter().enumerate() {
             value_out += output.value;
+
+            // Determine spent status only for outputs that carry an address (the
+            // 'a' index is address-keyed). Unspendable outputs (OP_RETURN, empty
+            // scripts) can't be tracked — leave `spent` as None so the frontend
+            // degrades cleanly rather than mislabeling them.
+            let spent = if output.address.is_empty() {
+                None
+            } else {
+                // An output is unspent if it is still present in the 'a' set of
+                // ANY of its addresses; spent only if every indexed address agrees
+                // it is absent. If no address has an 'a' entry we leave it unknown.
+                let mut any_known = false;
+                let mut still_unspent = false;
+                for address in &output.address {
+                    if let Some(unspent) = probe_unspent(address, idx as u64) {
+                        any_known = true;
+                        if unspent {
+                            still_unspent = true;
+                            break;
+                        }
+                    }
+                }
+                if !any_known {
+                    None
+                } else {
+                    Some(!still_unspent)
+                }
+            };
+
             vout.push(TxOutput {
                 value: output.value.to_string(),
                 n: idx as u32,
                 hex: Some(hex::encode(&output.script_pubkey.script)),
                 addresses: if output.address.is_empty() { None } else { Some(output.address.clone()) },
                 is_address: Some(!output.address.is_empty()),
-                spent: None, // Not tracked in current implementation
+                spent,
             });
         }
         
@@ -256,7 +330,37 @@ pub(crate) async fn build_transaction_from_db(
         } else {
             0
         };
-        
+
+        // Sapling (shielded) detail for version >= 3 transactions. Mirrors the
+        // block-detail endpoint's mapping exactly so the tx page renders the same
+        // shielded card (counts, value balance, binding sig, spend/output crypto).
+        let sapling = tx.sapling_data.as_ref().map(|sap| {
+            let spends = sap.vshielded_spend.iter().map(|spend| crate::block_detail::SpendInfo {
+                cv: hex::encode(spend.cv),
+                anchor: hex::encode(spend.anchor),
+                nullifier: hex::encode(spend.nullifier),
+                rk: hex::encode(spend.rk),
+                zkproof: hex::encode(spend.zkproof),
+                spend_auth_sig: hex::encode(spend.spend_auth_sig),
+            }).collect();
+            let outputs = sap.vshielded_output.iter().map(|output| crate::block_detail::OutputInfo {
+                cv: hex::encode(output.cv),
+                cmu: hex::encode(output.cmu),
+                ephemeral_key: hex::encode(output.ephemeral_key),
+                enc_ciphertext: hex::encode(output.enc_ciphertext),
+                out_ciphertext: hex::encode(output.out_ciphertext),
+                zkproof: hex::encode(output.zkproof),
+            }).collect();
+            crate::block_detail::SaplingInfo {
+                value_balance: sap.value_balance as f64 / 100_000_000.0, // satoshis -> PIV
+                shielded_spend_count: sap.vshielded_spend.len() as u64,
+                shielded_output_count: sap.vshielded_output.len() as u64,
+                binding_sig: hex::encode(sap.binding_sig),
+                spends: Some(spends),
+                outputs: Some(outputs),
+            }
+        });
+
         Ok(Transaction {
             txid: tx.txid,
             version: Some(tx.version as i32),
@@ -273,6 +377,7 @@ pub(crate) async fn build_transaction_from_db(
             value_in: value_in.to_string(),
             fees: fees.to_string(),
             hex: hex::encode(&data[8..]),
+            sapling,
         })
     })
     .await
@@ -331,48 +436,39 @@ pub async fn send_tx_post_v2(
 async fn send_transaction_internal(
     tx_hex: String
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
-    let config = get_global_config();
-    let rpc_host = config.get::<String>("rpc.host");
-    let rpc_user = config.get::<String>("rpc.user");
-    let rpc_pass = config.get::<String>("rpc.pass");
+    // Validate input BEFORE touching the node: must be hex and within PIVX's
+    // 2 MB block size limit (4M hex chars). Previously arbitrary input was
+    // forwarded to the node on a freshly spawned OS thread per request —
+    // unbounded thread growth under load, leaked threads on timeout.
+    let tx_hex = tx_hex.trim().to_string();
+    if tx_hex.is_empty() || tx_hex.len() > 4_000_000 || tx_hex.len() % 2 != 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Invalid transaction hex length")),
+        ));
+    }
+    if !tx_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Transaction must be hex-encoded")),
+        ));
+    }
 
-    // Must use separate OS thread to avoid runtime nesting
-    let (tx_channel, rx) = std::sync::mpsc::channel();
-    let tx_hex_clone = tx_hex.clone();
-    
-    std::thread::spawn(move || {
-        let client = PivxRpcClient::new(
-            rpc_host.unwrap_or_else(|_| "127.0.0.1:9998".to_string()),
-            Some(rpc_user.unwrap_or_default()),
-            Some(rpc_pass.unwrap_or_default()),
-            3,    // Max retries
-            10,   // Connection timeout
-            1000, // Read/write timeout
-        );
-        let result = client.sendrawtransaction(&tx_hex_clone, Some(false));
-        let _ = tx_channel.send(result);
-    });
-
-    let result = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(BlockbookError::new("RPC timeout"))
-        ))?;
-
-    match result {
+    // Async RPC call with the shared client (15s hard timeout, no thread spawn)
+    match super::helpers::rpc_call_json("sendrawtransaction", serde_json::json!([tx_hex, false])).await {
         Ok(txid) => {
-            let response = SendTxResponse {
-                result: Some(txid),
-                error: None, 
-            };
-            Ok(Json(response))
-        },
-        Err(e) => {
-            Err((
-                StatusCode::BAD_REQUEST,
-                Json(BlockbookError::new(format!("Failed to send transaction: {}", e)))
-            ))
-        },
+            let txid_str = txid.as_str().map(|s| s.to_string()).unwrap_or_else(|| txid.to_string());
+            Ok(Json(SendTxResponse {
+                result: Some(txid_str),
+                error: None,
+            }))
+        }
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            // Node rejection reasons (e.g. "bad-txns-inputs-spent") are part of the
+            // Blockbook contract — wallets rely on them.
+            Json(BlockbookError::new(format!("Failed to send transaction: {e}"))),
+        )),
     }
 }
 

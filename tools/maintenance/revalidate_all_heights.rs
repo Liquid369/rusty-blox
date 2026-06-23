@@ -12,34 +12,29 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor, WriteBatch, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║     RE-VALIDATE ALL TRANSACTION HEIGHTS            ║");
     println!("╚════════════════════════════════════════════════════╝\n");
-    
+
     // 1. Open database
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "data/blocks.db".to_string());
-    
-    println!("📂 Opening database: {}", db_path);
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
+    println!("📂 Opening database: {db_path}");
     
     let mut opts = Options::default();
     opts.create_if_missing(false);
     
-    let cfs = vec![
-        ColumnFamilyDescriptor::new("default", Options::default()),
-        ColumnFamilyDescriptor::new("blocks", Options::default()),
-        ColumnFamilyDescriptor::new("transactions", Options::default()),
-        ColumnFamilyDescriptor::new("addr_index", Options::default()),
-        ColumnFamilyDescriptor::new("utxo", Options::default()),
-        ColumnFamilyDescriptor::new("chain_metadata", Options::default()),
-        ColumnFamilyDescriptor::new("pubkey", Options::default()),
-        ColumnFamilyDescriptor::new("chain_state", Options::default()),
-        ColumnFamilyDescriptor::new("utxo_undo", Options::default()),
-    ];
-    
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+    let cfs: Vec<ColumnFamilyDescriptor> = cf_names
+        .iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+        .collect();
+
     let db = Arc::new(DB::open_cf_descriptors(&opts, &db_path, cfs)?);
     
     println!("✅ Database opened\n");
@@ -48,17 +43,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📂 Reading PIVX Core block index...");
     
     let pivx_dir = std::env::var("HOME")
-        .map(|h| format!("{}/Library/Application Support/PIVX", h))
+        .map(|h| format!("{h}/Library/Application Support/PIVX"))
         .unwrap_or_else(|_| "/Users/liquid/Library/Application Support/PIVX".to_string());
     
-    let block_index_src = format!("{}/blocks/index", pivx_dir);
+    let block_index_src = format!("{pivx_dir}/blocks/index");
     let block_index_copy = "/tmp/pivx_block_index_revalidate";
     
     // Remove old copy
     std::fs::remove_dir_all(block_index_copy).ok();
     
     // Copy block index
-    println!("   Copying from: {}", block_index_src);
+    println!("   Copying from: {block_index_src}");
     let copy_result = std::process::Command::new("cp")
         .args(["-R", &block_index_src, block_index_copy])
         .output()?;
@@ -76,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let canonical_chain = match build_canonical_chain_from_leveldb(block_index_copy) {
         Ok(chain) => chain,
         Err(e) => {
-            eprintln!("❌ Failed to read block index: {}", e);
+            eprintln!("❌ Failed to read block index: {e}");
             return Err(e);
         }
     };
@@ -141,16 +136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             
             if scanned_b_entries % 100_000 == 0 {
-                println!("      Scanned {} 'B' entries ({} canonical txs found)...", 
-                         scanned_b_entries, canonical_txs);
+                println!("      Scanned {scanned_b_entries} 'B' entries ({canonical_txs} canonical txs found)...");
             }
         }
     }
     
     println!("\n   ✅ Block-tx index scan complete:");
-    println!("      Total 'B' entries: {}", scanned_b_entries);
-    println!("      Canonical txs: {}", canonical_txs);
-    println!("      Orphaned 'B' entries: {}", orphaned_b_entries);
+    println!("      Total 'B' entries: {scanned_b_entries}");
+    println!("      Canonical txs: {canonical_txs}");
+    println!("      Orphaned 'B' entries: {orphaned_b_entries}");
     println!();
     
     // 5. Now scan ALL 't' entries and fix heights
@@ -198,14 +192,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if updated % BATCH_SIZE == 0 {
                     db.write(batch)?;
                     batch = WriteBatch::default();
-                    println!("      Updated {} transactions ({} total scanned)...", updated, total_txs);
+                    println!("      Updated {updated} transactions ({total_txs} total scanned)...");
                 }
             } else {
                 already_correct += 1;
             }
             
             if total_txs % 500_000 == 0 {
-                println!("      Processed {} transactions ({} updated)...", total_txs, updated);
+                println!("      Processed {total_txs} transactions ({updated} updated)...");
             }
         }
     }
@@ -220,10 +214,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("╚════════════════════════════════════════════════════╝\n");
     
     println!("📊 Results:");
-    println!("   Total transactions: {}", total_txs);
-    println!("   Already correct: {}", already_correct);
-    println!("   Updated: {}", updated);
-    println!("   Newly marked as orphan: {}", marked_orphan);
+    println!("   Total transactions: {total_txs}");
+    println!("   Already correct: {already_correct}");
+    println!("   Updated: {updated}");
+    println!("   Newly marked as orphan: {marked_orphan}");
     println!("   Fixed (unorphaned): {}", updated - marked_orphan);
     println!();
     

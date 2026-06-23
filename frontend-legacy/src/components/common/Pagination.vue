@@ -138,9 +138,11 @@ const updatePageSize = (size) => {
   justify-content: space-between;
   gap: var(--space-4);
   padding: var(--space-4);
-  background: var(--bg-secondary);
-  border: 2px solid var(--border-secondary);
+  background: var(--glass-bg-subtle);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
   flex-wrap: wrap;
 }
 
@@ -148,6 +150,7 @@ const updatePageSize = (size) => {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
 }
 
 .pagination-controls {
@@ -170,23 +173,24 @@ const updatePageSize = (size) => {
 }
 
 .page-size-select {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.6);
   color: var(--text-primary);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
   font-size: var(--text-sm);
   cursor: pointer;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .page-size-select:hover {
   border-color: var(--border-accent);
 }
 
-.page-size-select:focus {
-  outline: 2px solid var(--border-accent);
+.page-size-select:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
   outline-offset: 2px;
+  box-shadow: var(--focus-ring-glow);
 }
 
 @media (max-width: 768px) {

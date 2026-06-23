@@ -4,13 +4,11 @@
 
 use axum::{Json, Extension, extract::Path as AxumPath, http::StatusCode};
 use pivx_rpc_rs::BudgetInfo as RpcBudgetInfo;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
+use super::helpers::rpc_call_json;
 
 use crate::cache::CacheManager;
-use crate::config::get_global_config;
 
 /// GET /api/v2/budgetinfo
 /// Returns budget proposal information from RPC.
@@ -36,48 +34,8 @@ pub async fn budget_info_v2(
 }
 
 async fn compute_budget_info() -> Result<Vec<RpcBudgetInfo>, Box<dyn std::error::Error + Send + Sync>> {
-    let config = get_global_config();
-    let rpc_host = config.get_string("rpc.host")
-        .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config.get_string("rpc.user")
-        .unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config.get_string("rpc.pass")
-        .unwrap_or_else(|_| "explorer_test_pass".to_string());
-    
-    let host_port = rpc_host.replace("http://", "").replace("https://", "");
-    
-    let mut stream = TcpStream::connect(&host_port)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
-    
-    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getbudgetinfo","params":[]}"#;
-    let auth_b64 = base64::encode(format!("{}:{}", rpc_user, rpc_pass));
-    
-    let request = format!(
-        "POST / HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Authorization: Basic {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {}",
-        host_port, auth_b64, json_body.len(), json_body
-    );
-    
-    stream.write_all(request.as_bytes())?;
-    
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    
-    let response_str = String::from_utf8_lossy(&response);
-    let pos = response_str.find("\r\n\r\n").ok_or("Invalid response")?;
-    let body = &response_str[pos + 4..].trim();
-    
-    let value: serde_json::Value = serde_json::from_str(body)?;
-    let result = value.get("result").ok_or("No result in response")?;
-    
-    Ok(serde_json::from_value(result.clone())?)
+    let result = rpc_call_json("getbudgetinfo", serde_json::json!([])).await?;
+    Ok(serde_json::from_value(result)?)
 }
 
 /// GET /api/v2/budgetvotes/{proposal}
@@ -88,7 +46,7 @@ pub async fn budget_votes_v2(
     AxumPath(proposal_name): AxumPath<String>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let cache_key = format!("budget:votes:{}", proposal_name);
+    let cache_key = format!("budget:votes:{proposal_name}");
     let proposal_clone = proposal_name.clone();
     
     let result = cache
@@ -108,48 +66,21 @@ pub async fn budget_votes_v2(
 }
 
 async fn compute_budget_votes(proposal_name: &str) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let config = get_global_config();
-    let rpc_host = config.get_string("rpc.host")
-        .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config.get_string("rpc.user")
-        .unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config.get_string("rpc.pass")
-        .unwrap_or_else(|_| "explorer_test_pass".to_string());
-    
-    let host_port = rpc_host.replace("http://", "").replace("https://", "");
-    
-    let mut stream = TcpStream::connect(&host_port)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
-    
-    let json_body = format!(r#"{{"jsonrpc":"1.0","id":"1","method":"getbudgetvotes","params":["{}"]}}"#, proposal_name);
-    let auth_b64 = base64::encode(format!("{}:{}", rpc_user, rpc_pass));
-    
-    let request = format!(
-        "POST / HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Authorization: Basic {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {}",
-        host_port, auth_b64, json_body.len(), json_body
-    );
-    
-    stream.write_all(request.as_bytes())?;
-    
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    
-    let response_str = String::from_utf8_lossy(&response);
-    let pos = response_str.find("\r\n\r\n").ok_or("Invalid response")?;
-    let body = &response_str[pos + 4..].trim();
-    
-    let value: serde_json::Value = serde_json::from_str(body)?;
-    let result = value.get("result").ok_or("No result in response")?.clone();
-    
-    Ok(result)
+    // params serialized via serde_json — no string interpolation (JSON-injection safe)
+    match rpc_call_json("getbudgetvotes", serde_json::json!([proposal_name])).await {
+        Ok(votes) => Ok(votes),
+        Err(e) => {
+            // P2-8: an unknown/empty proposal makes the node return an RPC error
+            // ("Unknown proposal name"). That is a 200-with-empty-array case, not a
+            // 500. Genuine RPC/transport failures still propagate as errors.
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("unknown proposal") || msg.contains("invalid proposal") {
+                Ok(serde_json::json!([]))
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// GET /api/v2/budgetprojection
@@ -176,46 +107,5 @@ pub async fn budget_projection_v2(
 }
 
 async fn compute_budget_projection() -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    let config = get_global_config();
-    let rpc_host = config.get_string("rpc.host")
-        .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config.get_string("rpc.user")
-        .unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config.get_string("rpc.pass")
-        .unwrap_or_else(|_| "explorer_test_pass".to_string());
-    
-    let host_port = rpc_host.replace("http://", "").replace("https://", "");
-    
-    let mut stream = TcpStream::connect(&host_port)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(15)))?;
-    
-    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getbudgetprojection","params":[]}"#;
-    let auth_b64 = base64::encode(format!("{}:{}", rpc_user, rpc_pass));
-    
-    let request = format!(
-        "POST / HTTP/1.1\r\n\
-         Host: {}\r\n\
-         Authorization: Basic {}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n\
-         {}",
-        host_port, auth_b64, json_body.len(), json_body
-    );
-    
-    stream.write_all(request.as_bytes())?;
-    
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-    
-    let response_str = String::from_utf8_lossy(&response);
-    let pos = response_str.find("\r\n\r\n").ok_or("Invalid response")?;
-    let body = &response_str[pos + 4..].trim();
-    
-    let value: serde_json::Value = serde_json::from_str(body)?;
-    let result = value.get("result").ok_or("No result in response")?.clone();
-    
-    Ok(result)
+    rpc_call_json("getbudgetprojection", serde_json::json!([])).await
 }

@@ -81,82 +81,96 @@ async fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
     }
 }
 
-async fn compress_pubkey(pub_key_bytes: &[u8]) -> Option<Vec<u8>> {
-    match pub_key_bytes.len() {
-        65 if pub_key_bytes[0] == 0x04 => {
-            let x = &pub_key_bytes[1..33];
-            let y = &pub_key_bytes[33..65];
-            let parity = if y[31] % 2 == 0 { 2 } else { 3 };
-            let mut compressed_key: Vec<u8> = vec![parity];
-            compressed_key.extend_from_slice(x);
-            Some(compressed_key)
-        }
-        33 if pub_key_bytes[0] == 0x02 || pub_key_bytes[0] == 0x03 => {
-            Some(pub_key_bytes.to_vec())
-        }
-        _ => None,
-    }
-}
-
 async fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
     const OP_CHECKSIG: u8 = 0xAC;
 
-    if script.last()? != &OP_CHECKSIG {
-        return None;
-    }
-
+    // P2PK: <PUSH33> <33-byte compressed key> OP_CHECKSIG  (35 bytes)
+    //       <PUSH65> <65-byte uncompressed key> OP_CHECKSIG (67 bytes)
     match script.len() {
-        67 => Some(&script[1..66]),
-        35 => Some(&script[1..34]),
+        67 if script[0] == 0x41
+            && script[66] == OP_CHECKSIG
+            && script[1] == 0x04 =>
+        {
+            Some(&script[1..66])
+        }
+        35 if script[0] == 0x21
+            && script[34] == OP_CHECKSIG
+            && (script[1] == 0x02 || script[1] == 0x03) =>
+        {
+            Some(&script[1..34])
+        }
         _ => None,
     }
 }
 
 async fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
-    const OP_DUP: u8 = 0x76;
-
-    if script.script.contains(&OP_DUP) {
-        return None;
-    }
-
     let pubkey = extract_pubkey_from_script(&script.script).await?;
 
-    let pubkey_compressed = compress_pubkey(pubkey).await?;
-    let pubkey_hash = compute_address_hash(&pubkey_compressed).await;
+    // PIVX Core (CPubKey::GetID): Hash160 over the pubkey bytes EXACTLY as they
+    // appear in the script — uncompressed keys are NOT compressed first.
+    let pubkey_hash = compute_address_hash(pubkey).await;
     let pubkey_addr = hash_address(&pubkey_hash, 30).await;
 
     Some(pubkey_addr)
 }
 
+/// Match a canonical P2CS (pay-to-cold-staking) script and extract both hashes.
+///
+/// PIVX Core (CScript::IsPayToColdStaking / MatchPayToColdStaking), 51 bytes:
+/// OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY[_LOF] 0x14 <staker20>
+/// OP_ELSE 0x14 <owner20> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+/// staker hash = bytes 6..26, owner hash = bytes 28..48 (fixed offsets).
 async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, String)> {
-    const HASH_LEN: usize = 20;
     const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
     const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
-    const OP_ELSE: u8 = 0x67;
 
-    let pos_checkcoldstakeverify = script
-        .script
-        .iter()
-        .position(|&x| x == OP_CHECKCOLDSTAKEVERIFY || x == OP_CHECKCOLDSTAKEVERIFY_LOF)?;
+    let s = &script.script;
+    if s.len() == 51
+        && s[0] == 0x76 // OP_DUP
+        && s[1] == 0xa9 // OP_HASH160
+        && s[2] == 0x7b // OP_ROT
+        && s[3] == 0x63 // OP_IF
+        && (s[4] == OP_CHECKCOLDSTAKEVERIFY || s[4] == OP_CHECKCOLDSTAKEVERIFY_LOF)
+        && s[5] == 0x14
+        && s[26] == 0x67 // OP_ELSE
+        && s[27] == 0x14
+        && s[48] == 0x68 // OP_ENDIF
+        && s[49] == 0x88 // OP_EQUALVERIFY
+        && s[50] == 0xac // OP_CHECKSIG
+    {
+        let staker_key_hash = &s[6..26];
+        let owner_key_hash = &s[28..48];
 
-    if script.script.len() < pos_checkcoldstakeverify + 1 + HASH_LEN {
-        return None;
+        let staker_address = hash_address(staker_key_hash, 63).await;
+        let owner_address = hash_address(owner_key_hash, 30).await;
+
+        return Some((staker_address, owner_address));
     }
+    None
+}
 
-    let staker_key_hash =
-        &script.script[(pos_checkcoldstakeverify + 1)..(pos_checkcoldstakeverify + 1 + HASH_LEN)];
-
-    let pos_else = script.script.iter().position(|&x| x == OP_ELSE)?;
-    if script.script.len() < pos_else + 1 + HASH_LEN {
-        return None;
+/// Match a PIVX exchange-address script (TX_EXCHANGEADDR), 26 bytes:
+/// OP_EXCHANGEADDR(0xe0) OP_DUP OP_HASH160 0x14 <keyhash20> OP_EQUALVERIFY OP_CHECKSIG
+/// Encoded with the 3-byte EXM base58 prefix [0x01, 0xb9, 0xa2].
+async fn scriptpubkey_to_exchange_address(script: &CScript) -> Option<String> {
+    let s = &script.script;
+    if s.len() == 26
+        && s[0] == 0xe0 // OP_EXCHANGEADDR
+        && s[1] == 0x76
+        && s[2] == 0xa9
+        && s[3] == 0x14
+        && s[24] == 0x88
+        && s[25] == 0xac
+    {
+        let key_hash = &s[4..24];
+        let mut data = Vec::with_capacity(27);
+        data.extend_from_slice(&[0x01, 0xb9, 0xa2]);
+        data.extend_from_slice(key_hash);
+        let checksum = sha256d(&data);
+        data.extend_from_slice(&checksum[0..4]);
+        return Some(bs58::encode(data).into_string());
     }
-
-    let owner_key_hash = &script.script[(pos_else + 1)..(pos_else + 1 + HASH_LEN)];
-
-    let staker_address = hash_address(staker_key_hash, 63).await;
-    let owner_address = hash_address(owner_key_hash, 30).await;
-
-    Some((staker_address, owner_address))
+    None
 }
 
 pub async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
@@ -164,57 +178,40 @@ pub async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
         return Some(AddressType::Nonstandard);
     }
 
-    // Define op_codes
-    const OP_DUP: u8 = 0x76;
-    const OP_HASH160: u8 = 0xa9;
-    const OP_EQUAL: u8 = 0x87;
-    const OP_EQUALVERIFY: u8 = 0x88;
-    const OP_CHECKSIG: u8 = 0xac;
-    const OP_CHECKCOLDSTAKEVERIFY_LOF: u8 = 0xd1;
-    const OP_CHECKCOLDSTAKEVERIFY: u8 = 0xd2;
+    // Structural matching, mirroring PIVX Core's Solver() — each script template is
+    // identified by exact layout (length + opcode positions), never by byte content
+    // heuristics (hash/pubkey bytes can contain any value, including opcode bytes).
 
-    // Check the first byte and script length
-    match script.script.as_slice() {
-        [OP_DUP, OP_HASH160, 0x14, .., OP_EQUALVERIFY, OP_CHECKSIG]
-            if script.script.len() == 25 =>
-        {
-            if let Some(address) = scriptpubkey_to_p2pkh_address(script).await {
-                Some(AddressType::P2PKH(address))
-            } else {
-                Some(AddressType::Nonstandard)
-            }
-        }
-        [OP_HASH160, 0x14, .., OP_EQUAL] if script.script.len() == 23 => {
-            if let Some(address) = scriptpubkey_to_p2sh_address(script).await {
-                Some(AddressType::P2SH(address))
-            } else {
-                Some(AddressType::Nonstandard)
-            }
-        }
-        [0xc1, ..] => Some(AddressType::ZerocoinMint),
-        [0xc2, ..] => Some(AddressType::ZerocoinSpend),
-        [0xc3, ..] => Some(AddressType::ZerocoinPublicSpend),
-        [.., OP_CHECKSIG]
-            if !script.script.contains(&OP_DUP)
-                && script.script.len() > 1
-                && !script.script.contains(&OP_CHECKCOLDSTAKEVERIFY)
-                && !script.script.contains(&OP_CHECKCOLDSTAKEVERIFY_LOF) =>
-        {
-            if let Some(pubkey) = scriptpubkey_to_p2pk(script).await {
-                Some(AddressType::P2PK(pubkey))
-            } else {
-                Some(AddressType::Nonstandard)
-            }
-        }
-        _ if script.script.contains(&OP_CHECKCOLDSTAKEVERIFY)
-            || script.script.contains(&OP_CHECKCOLDSTAKEVERIFY_LOF) =>
-        {
-            if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script).await {
-                Some(AddressType::Staking(staker_address, owner_address))
-            } else {
-                Some(AddressType::Nonstandard)
-            }
-        }
+    // P2PKH: OP_DUP OP_HASH160 0x14 <hash20> OP_EQUALVERIFY OP_CHECKSIG (25 bytes)
+    if let Some(address) = scriptpubkey_to_p2pkh_address(script).await {
+        return Some(AddressType::P2PKH(address));
+    }
+
+    // P2SH: OP_HASH160 0x14 <hash20> OP_EQUAL (23 bytes)
+    if let Some(address) = scriptpubkey_to_p2sh_address(script).await {
+        return Some(AddressType::P2SH(address));
+    }
+
+    // P2CS cold staking (51 bytes, canonical layout, 0xd1 or 0xd2)
+    if let Some((staker_address, owner_address)) = scriptpubkey_to_staking_address(script).await {
+        return Some(AddressType::Staking(staker_address, owner_address));
+    }
+
+    // Exchange address: OP_EXCHANGEADDR-prefixed P2PKH (26 bytes) → EXM base58
+    if let Some(address) = scriptpubkey_to_exchange_address(script).await {
+        return Some(AddressType::P2PKH(address));
+    }
+
+    // P2PK: <push><pubkey> OP_CHECKSIG (35 or 67 bytes)
+    if let Some(pubkey_addr) = scriptpubkey_to_p2pk(script).await {
+        return Some(AddressType::P2PK(pubkey_addr));
+    }
+
+    // Zerocoin markers
+    match script.script.first() {
+        Some(0xc1) => Some(AddressType::ZerocoinMint),
+        Some(0xc2) => Some(AddressType::ZerocoinSpend),
+        Some(0xc3) => Some(AddressType::ZerocoinPublicSpend),
         _ => Some(AddressType::Nonstandard),
     }
 }

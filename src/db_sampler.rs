@@ -10,17 +10,8 @@ use tokio::time::interval;
 use tracing::{info, warn};
 use crate::metrics;
 
-/// Column families to monitor
-const COLUMN_FAMILIES: &[&str] = &[
-    "blocks",
-    "transactions",
-    "addr_index",
-    "utxo",
-    "utxo_undo",
-    "chain_metadata",
-    "chain_state",
-    "pubkey",
-];
+/// Column families to monitor — the canonical DB CF set (single source of truth).
+use crate::COLUMN_FAMILIES;
 
 /// Background task that samples database size every N seconds
 /// 
@@ -94,10 +85,13 @@ mod tests {
     
     #[test]
     fn test_column_families_list() {
-        // Ensure we're tracking all known CFs
+        // Ensure we're tracking all known CFs (the canonical set incl. tail CFs).
         assert!(COLUMN_FAMILIES.contains(&"blocks"));
         assert!(COLUMN_FAMILIES.contains(&"transactions"));
         assert!(COLUMN_FAMILIES.contains(&"addr_index"));
-        assert_eq!(COLUMN_FAMILIES.len(), 8);
+        assert!(COLUMN_FAMILIES.contains(&"utxo_undo"));
+        assert!(COLUMN_FAMILIES.contains(&"tail_blocks"));
+        assert!(COLUMN_FAMILIES.contains(&"tail_meta"));
+        assert_eq!(COLUMN_FAMILIES.len(), 10);
     }
 }

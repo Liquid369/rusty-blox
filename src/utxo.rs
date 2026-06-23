@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use tracing::{info, warn, debug};
 
 /// Error type for chainstate parsing
 #[derive(Debug)]
@@ -37,9 +38,9 @@ impl From<std::io::Error> for ChainstateError {
 impl std::fmt::Display for ChainstateError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            ChainstateError::IoError(e) => write!(f, "IO error: {}", e),
-            ChainstateError::ParseError(s) => write!(f, "Parse error: {}", s),
-            ChainstateError::InvalidScript(s) => write!(f, "Invalid script: {}", s),
+            ChainstateError::IoError(e) => write!(f, "IO error: {e}"),
+            ChainstateError::ParseError(s) => write!(f, "Parse error: {s}"),
+            ChainstateError::InvalidScript(s) => write!(f, "Invalid script: {s}"),
         }
     }
 }
@@ -221,29 +222,27 @@ fn decompress_script(data: &[u8]) -> Result<Vec<u8>, ChainstateError> {
         
         // P2CS (cold stake): PIVX-specific
         // Format: 0x06 + 20 bytes staker + 20 bytes owner
-        // Script: OP_CHECKCOLDSTAKEVERIFY <20 staker> <20 owner> OP_DUP OP_HASH160 OP_ROT 
-        //         OP_IF OP_CHECKCOLDSTAKEVERIFY_LOF OP_ELSE OP_ROT OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+        // Canonical PIVX Core P2CS script (51 bytes):
+        // OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY 0x14 <staker20>
+        // OP_ELSE 0x14 <owner20> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
         0x06 => {
             if data.len() != 41 {
                 return Err(ChainstateError::InvalidScript(
                     format!("Invalid P2CS length: {} (expected 41)", data.len())
                 ));
             }
-            
-            // PIVX P2CS script layout (51 bytes total)
+
             let mut script = Vec::with_capacity(51);
-            script.push(0xD1); // OP_CHECKCOLDSTAKEVERIFY
-            script.push(0x14); // Push 20 bytes (staker)
-            script.extend_from_slice(&data[1..21]);
-            script.push(0x14); // Push 20 bytes (owner)
-            script.extend_from_slice(&data[21..41]);
             script.push(0x76); // OP_DUP
             script.push(0xA9); // OP_HASH160
             script.push(0x7B); // OP_ROT
             script.push(0x63); // OP_IF
-            script.push(0xD2); // OP_CHECKCOLDSTAKEVERIFY_LOF
+            script.push(0xD2); // OP_CHECKCOLDSTAKEVERIFY
+            script.push(0x14); // Push 20 bytes (staker)
+            script.extend_from_slice(&data[1..21]);
             script.push(0x67); // OP_ELSE
-            script.push(0x7B); // OP_ROT
+            script.push(0x14); // Push 20 bytes (owner)
+            script.extend_from_slice(&data[21..41]);
             script.push(0x68); // OP_ENDIF
             script.push(0x88); // OP_EQUALVERIFY
             script.push(0xAC); // OP_CHECKSIG
@@ -257,7 +256,7 @@ fn decompress_script(data: &[u8]) -> Result<Vec<u8>, ChainstateError> {
             
             if size > 10000 {
                 return Err(ChainstateError::InvalidScript(
-                    format!("Script too large: {} bytes", size)
+                    format!("Script too large: {size} bytes")
                 ));
             }
             
@@ -334,7 +333,7 @@ pub fn parse_ccoins(data: &[u8]) -> Result<CCoins, ChainstateError> {
             // Peek at first byte to determine script format
             if remaining.is_empty() {
                 return Err(ChainstateError::ParseError(
-                    format!("Unexpected end of data at output {}", bit_position)
+                    format!("Unexpected end of data at output {bit_position}")
                 ));
             }
             
@@ -343,7 +342,7 @@ pub fn parse_ccoins(data: &[u8]) -> Result<CCoins, ChainstateError> {
             // Determine how many bytes to read based on script type
             let script_bytes = match script_type {
                 0x00 | 0x01 => 21,  // P2PKH, P2SH: prefix + 20 bytes
-                0x02 | 0x03 | 0x04 | 0x05 => 33,  // P2PK: prefix + 32 bytes
+                0x02..=0x05 => 33,  // P2PK: prefix + 32 bytes
                 0x06 => 41,  // P2CS: prefix + 40 bytes
                 _ => {
                     // Uncompressed: varint(size) + data
@@ -415,13 +414,16 @@ pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String
                         }
                         None => {
                             no_address_count += 1;
-                            
-                            // Log non-standard scripts for investigation
+
+                            // Non-standard scripts (zerocoin mints, cold-stake/exchange
+                            // variants, OP_RETURN) are common and run once per chainstate
+                            // UTXO (~17M), so this is debug-only detail — the aggregate
+                            // `no_address` count is logged once in the summary below.
                             if output.amount > 0 {
-                                eprintln!("Warning: Could not extract address from script (amount: {} sats, txid prefix: {}...): {}",
-                                         output.amount,
-                                         &k_hex[..8],
-                                         hex::encode(&output.script_pubkey[..output.script_pubkey.len().min(20)]));
+                                debug!(amount_sats = output.amount,
+                                       txid_prefix = &k_hex[..8],
+                                       script = %hex::encode(&output.script_pubkey[..output.script_pubkey.len().min(20)]),
+                                       "Could not extract address from script");
                             }
                         }
                     }
@@ -429,23 +431,25 @@ pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String
             }
             Err(e) => {
                 parse_errors += 1;
-                
+
                 if parse_errors <= 10 {
-                    eprintln!("Failed to parse CCoins for key {}...: {}", &k_hex[..16], e);
+                    warn!(key_prefix = &k_hex[..16], error = %e, "Failed to parse CCoins entry");
                 }
             }
         }
     }
     
-    println!("\n📊 Chainstate Aggregation Results:");
-    println!("   Total entries processed:  {}", raw_map.len());
-    println!("   Total UTXOs decoded:      {}", total_utxos);
-    println!("   Addresses with balance:   {}", balances.len());
-    println!("   Parse errors:             {}", parse_errors);
-    println!("   Scripts without address:  {}", no_address_count);
-    
+    info!(
+        entries = raw_map.len(),
+        utxos = total_utxos,
+        addresses = balances.len(),
+        parse_errors = parse_errors,
+        no_address = no_address_count,
+        "Chainstate aggregation complete"
+    );
+
     if parse_errors > 0 {
-        eprintln!("\n⚠️  {} parse errors encountered (showing first 10)", parse_errors);
+        warn!(parse_errors = parse_errors, "Parse errors encountered (first 10 logged above)");
     }
     
     balances
@@ -457,21 +461,21 @@ mod tests {
     
     #[test]
     fn test_varint_single_byte() {
-        let data = vec![0x42];
+        let data = [0x42];
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 0x42);
     }
     
     #[test]
     fn test_varint_two_bytes() {
-        let data = vec![0xFD, 0xFF, 0xFF]; // 65535
+        let data = [0xFD, 0xFF, 0xFF]; // 65535
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 65535);
     }
     
     #[test]
     fn test_varint_four_bytes() {
-        let data = vec![0xFE, 0xFF, 0xFF, 0xFF, 0xFF]; // 4294967295
+        let data = [0xFE, 0xFF, 0xFF, 0xFF, 0xFF]; // 4294967295
         let mut cursor = Cursor::new(&data[..]);
         assert_eq!(read_varint(&mut cursor).unwrap(), 4294967295);
     }
@@ -483,10 +487,12 @@ mod tests {
     
     #[test]
     fn test_amount_decompression_small() {
-        // Test vectors from Bitcoin Core
+        // Real Bitcoin/PIVX Core CompressAmount round-trips:
+        // compress(1)=1, compress(2)=11, compress(10)=2, compress(3)=21
         assert_eq!(decompress_amount(1), 1);
-        assert_eq!(decompress_amount(2), 2);
-        assert_eq!(decompress_amount(10), 10);
+        assert_eq!(decompress_amount(11), 2);
+        assert_eq!(decompress_amount(21), 3);
+        assert_eq!(decompress_amount(2), 10);
     }
     
     #[test]
@@ -552,8 +558,17 @@ mod tests {
         
         let script = decompress_script(&compressed).unwrap();
         assert_eq!(script.len(), 51);
-        assert_eq!(script[0], 0xD1); // OP_CHECKCOLDSTAKEVERIFY
-        assert_eq!(script[1], 0x14); // Push 20 bytes (staker)
-        assert_eq!(script[22], 0x14); // Push 20 bytes (owner)
+        // Canonical PIVX Core P2CS layout
+        assert_eq!(script[0], 0x76); // OP_DUP
+        assert_eq!(script[1], 0xA9); // OP_HASH160
+        assert_eq!(script[2], 0x7B); // OP_ROT
+        assert_eq!(script[3], 0x63); // OP_IF
+        assert_eq!(script[4], 0xD2); // OP_CHECKCOLDSTAKEVERIFY
+        assert_eq!(script[5], 0x14); // Push 20 bytes (staker)
+        assert_eq!(script[26], 0x67); // OP_ELSE
+        assert_eq!(script[27], 0x14); // Push 20 bytes (owner)
+        assert_eq!(script[48], 0x68); // OP_ENDIF
+        assert_eq!(script[49], 0x88); // OP_EQUALVERIFY
+        assert_eq!(script[50], 0xAC); // OP_CHECKSIG
     }
 }

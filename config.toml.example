@@ -1,77 +1,139 @@
 # ========================================
 # RustyBlox Configuration Example
 # ========================================
-# Copy this file to config.toml and edit the values below
+# Copy this file to config.toml and edit the values below.
 
 [paths]
 # Database path for RocksDB storage
 db_path = "./data/blocks.db"
 
 # Directory containing PIVX blockchain files (blk*.dat)
-# Linux default: ~/.pivx/blocks
-# macOS default: ~/Library/Application Support/PIVX/blocks
-# Windows default: %APPDATA%\PIVX\blocks
-# Necessary because we will do copying of DB's from here
+# Linux:   ~/.pivx/blocks
+# macOS:   ~/Library/Application Support/PIVX/blocks
+# Windows: %APPDATA%\PIVX\blocks
 blk_dir = "/path/to/PIVX/blocks"
 
-# PIVX data directory (contains leveldb index)
-# Same path prefix as blk_dir
+# PIVX data directory (parent of blocks/, contains the LevelDB block index)
 pivx_data_dir = "/path/to/PIVX"
 
+# Where to copy PIVX Core's block-index LevelDB for safe read-only parsing while
+# the daemon is running (avoids read locks). Recreated as needed.
+block_index_copy_dir = "/tmp/pivx_block_index_current"
+
+# Where to copy PIVX Core's chainstate LevelDB (only used by the optional
+# chainstate-based UTXO verification path; see use_chainstate_for_utxos).
+chainstate_copy_dir = "/tmp/pivx_chainstate_current"
+
+# Directory the web server serves the built frontend from.
+# Default: frontend-legacy/dist (build with: cd frontend-legacy && npm run build)
+frontend_dist = "frontend-legacy/dist"
+
 [sync]
-# Fast sync mode: skip UTXO tracking during initial sync for 10-20x speedup
-# Recommended: true for initial sync, false for archival/full nodes
+# Resync mode: clear all databases and rebuild from scratch on the next start.
+resync = false
+
+# Start the sync service automatically on launch.
+# false = start the web server in read-only mode against the existing DB.
+auto_start = true
+
+# Fast sync: skip UTXO tracking during the initial sync for a large speedup.
+# Recommended: true (address data is built afterward by enrich_addresses).
 fast_sync = true
 
-# Automatically build address index after sync completes
-# This enables address lookup and balance queries
-# Recommended: true for block explorers
+# Build the address index from transactions after sync completes (enables address
+# lookups + balances). Recommended: true for an explorer.
 enrich_addresses = true
 
-# Use PIVX Core's chainstate for UTXO enrichment (RECOMMENDED!)
-# This uses chainstate LevelDB as the source of truth for current UTXOs
-# Ensures balances match PIVX Core exactly
-# If false, builds UTXOs by scanning all transactions (slower, may have discrepancies)
-use_chainstate_for_utxos = true
+# UTXO/balance source of truth. The default (false) = transaction-based enrichment
+# scans all transparent history and is what the explorer relies on. Setting this
+# true reads Core's chainstate, which only holds CURRENT unspent outputs (no
+# history) — useful for VERIFICATION, not as the primary source. Recommended: false.
+use_chainstate_for_utxos = false
 
-# Use PIVX Core's block index for transaction height resolution (RECOMMENDED!)
-# This reads Core's canonical chain to fix transaction heights BEFORE enrichment
-# Benefits: eliminates repair phase, marks orphans correctly, ~5 min overhead
-# If false, uses repair phase instead (scans transactions to rebuild heights)
+# Use PIVX Core's block index to resolve transaction heights before enrichment.
+# Eliminates the slow repair phase and marks orphans correctly. Recommended: true.
 use_block_index_for_heights = true
 
-# Build UTXO set during sync
-# Only used when fast_sync = false
-# Recommended: false unless you need UTXO tracking
-build_utxo = false
-
-# Parallel file processing: number of concurrent blk*.dat files to process
-# Higher = faster but more CPU/memory usage
-# Recommended: 4-8 for 4-8 core systems, up to 16 for high-end systems
+# Parallel blk*.dat parse workers. The parse is CPU-bound, so match your core
+# count for the fastest parse; lower it to leave CPU for other services.
 parallel_files = 8
 
-# Validate offset-based indexing (Pattern A) after sync
-# This runs the offset-based indexer in parallel with the scanner to verify
-# that reading blocks directly from file offsets works correctly
-# Recommended: false (enable only for testing/validation)
+# Address-enrichment parallelism (Pass 1 / Pass 2b). 1 = serial (default, lowest
+# RAM). 2..=4 = range-sharded across the txid keyspace (faster, more RAM; values
+# above 4 are clamped to 4). Raise only on a box with spare cores + RAM.
+enrich_parallel_shards = 1
+
+# Validate the offset-based block reader against the scanner after sync (writes
+# extra 'o' offset keys; must be set BEFORE the initial sync to take effect).
+# Recommended: false (testing/validation only).
 validate_offset_indexing = false
 
+# Live orphan discovery: tail Core's blk*.dat files to capture side-branch/stale
+# blocks the RPC tip-poll misses, into the private tail_blocks/tail_meta CFs.
+# Pure observer — makes ZERO canonical writes (see DESIGN-live-orphan-capture.md).
+# Opt-in; default false. When off, the two private CFs are created empty and unused.
+live_tail_blkfiles = false
+
+# Live daily-analytics updater: keep the analytics_tx_day:<date> blobs current as
+# the monitor connects blocks (incremental Lane I + window Lane R), instead of only
+# at full-enrich time. Opt-in; default false. Activates only AFTER a full enrich
+# sets the live-ready gate (a degraded restart rebuild keeps it dark, since its
+# join fields are zeroed). See DESIGN-live-analytics-update.md.
+live_analytics = false
+# Phase-0 shadow mode (default true): write shadow_tx_day:<date> blobs and leave
+# the real analytics_tx_day:<date> untouched, for diffing against a full enrich
+# before promoting. Set false to write the real blobs once validated.
+live_analytics_shadow = true
+# One-shot validator: if > 0, after the daily series is built, re-run Lane I/R over
+# this many recent days into the shadow keyspace and log a field-by-field diff vs
+# the full enrich (integer fields exact; avg_difficulty/coin_days within an epsilon;
+# new_addresses skipped). 0 = off. Run a FULL re-enrich first for a true join diff.
+live_analytics_shadow_validate_days = 0
+# Opt-in: auto-trigger a full re-enrich to re-green the live gate after a deep
+# reorg (default false — a full enrich is heavy, so default to logging + a manual
+# re-enrich). Only relevant when live_analytics = true.
+live_analytics_auto_reenrich = false
+
+[rocksdb]
+# Memtable RAM. db_write_buffer_size is a HARD global ceiling across ALL column
+# families; write_buffer_size x max_write_buffer_number is only the per-CF shape.
+write_buffer_size = 256              # MB per column family
+max_write_buffer_number = 4
+min_write_buffer_number_to_merge = 2
+db_write_buffer_size = 1024          # MB global memtable ceiling (0 = unlimited)
+block_cache_size = 512               # MB shared read cache
+
+# File + compaction tuning
+target_file_size_base = 256          # MB per SST file
+max_open_files = 5000
+level0_file_num_compaction_trigger = 8
+level0_slowdown_writes_trigger = 20
+level0_stop_writes_trigger = 36
+
+# Parallelism
+max_background_jobs = 8              # background compaction/flush threads
+max_subcompactions = 4
+
+# Compression + write concurrency
+compression_type = "lz4"            # none | snappy | zstd | lz4 | zlib
+enable_pipelined_write = true
+allow_concurrent_memtable_write = true
+enable_write_thread_adaptive_yield = true
+
 [rpc]
-# PIVX Core RPC connection settings
-# Must match your pivx.conf configuration
+# PIVX Core RPC connection (must match your pivx.conf).
 host = "http://127.0.0.1:51472"
 user = "your_rpc_username"
 pass = "your_secure_rpc_password"
 
 [server]
-# Web server bind address
-# Use 0.0.0.0 to allow external connections
-# Use 127.0.0.1 for localhost-only access
+# Web server bind address (0.0.0.0 = all interfaces, 127.0.0.1 = localhost only).
 host = "0.0.0.0"
-
-# Web server port for API and WebSocket
 port = 3005
 
-# Number of worker threads for the web server
-# Recommended: match your CPU core count
+# Allowed WebSocket origins, comma-separated (e.g. "https://explorer.example.com").
+# Leave empty to apply the default same-origin policy.
+ws_allowed_origins = ""
+
+# Web server worker threads (string).
 worker_threads = "4"

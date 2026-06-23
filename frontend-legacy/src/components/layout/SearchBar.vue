@@ -14,32 +14,51 @@
       @click="handleSearch"
       :disabled="!searchQuery.trim()"
     >
-      🔍
+      <Icon name="search" :size="16" />
     </button>
 
-    <!-- Search Suggestions (Recent History) -->
-    <div 
-      v-if="showSuggestions && settingsStore.searchHistory.length > 0" 
+    <!-- Suggestions dropdown: live typeahead preview + recent history -->
+    <div
+      v-if="showSuggestions && (typeahead || settingsStore.searchHistory.length > 0)"
       class="search-suggestions"
     >
-      <div class="suggestions-header">
-        <span>Recent Searches</span>
-        <button @click="clearHistory" class="clear-button">Clear</button>
-      </div>
-      <div
-        v-for="item in settingsStore.searchHistory"
-        :key="item"
-        class="suggestion-item"
-        @mousedown.prevent="selectSuggestion(item)"
-      >
-        {{ item }}
-      </div>
+      <!-- Typeahead preview (client-side classification, no backend call) -->
+      <template v-if="typeahead">
+        <div class="suggestions-header">
+          <span>Go to</span>
+        </div>
+        <div
+          class="suggestion-item typeahead-item"
+          @mousedown.prevent="handleSearch"
+        >
+          <Icon :name="typeahead.icon" :size="14" class="typeahead-icon" />
+          <span class="typeahead-label">{{ typeahead.label }}</span>
+          <code class="typeahead-value">{{ typeahead.value }}</code>
+        </div>
+      </template>
+
+      <!-- Recent Searches -->
+      <template v-if="settingsStore.searchHistory.length > 0">
+        <div class="suggestions-header">
+          <span>Recent Searches</span>
+          <button @click="clearHistory" class="clear-button">Clear</button>
+        </div>
+        <div
+          v-for="item in settingsStore.searchHistory"
+          :key="item"
+          class="suggestion-item"
+          @mousedown.prevent="selectSuggestion(item)"
+        >
+          {{ item }}
+        </div>
+      </template>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import Icon from '@/components/common/Icon.vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { searchService } from '@/services/searchService'
@@ -51,19 +70,47 @@ const searchQuery = ref('')
 const showSuggestions = ref(false)
 const isSearching = ref(false)
 
+// Debounced mirror of the input, classified client-side for a live "Go to" preview.
+// PIVX base58 addresses: D = P2PKH, S = cold-staking, 6 = P2SH, E = exchange (EXM).
+const debouncedQuery = ref('')
+let debounceTimer = null
+
+watch(searchQuery, (val) => {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => {
+    debouncedQuery.value = val.trim()
+  }, 200)
+})
+
+const classifyQuery = (q) => {
+  if (!q) return null
+  if (/^\d+$/.test(q)) {
+    return { icon: 'box', label: `Block #${q}`, value: q }
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(q)) {
+    return { icon: 'hash', label: 'Tx / Block hash', value: q }
+  }
+  if (/^[DS67E][1-9A-HJ-NP-Za-km-z]{25,40}$/.test(q)) {
+    return { icon: 'key', label: 'Address', value: q }
+  }
+  return null
+}
+
+const typeahead = computed(() => classifyQuery(debouncedQuery.value))
+
 const handleSearch = async () => {
   const query = searchQuery.value.trim()
   if (!query || isSearching.value) return
 
   isSearching.value = true
-  
+
   try {
     // Add to search history
     settingsStore.addToSearchHistory(query)
-    
+
     // Perform search
     const result = await searchService.search(query)
-    
+
     // Navigate based on result type
     if (result.type === 'Block') {
       router.push(`/block/${result.height}`)
@@ -71,22 +118,27 @@ const handleSearch = async () => {
       router.push(`/tx/${result.txid}`)
     } else if (result.type === 'Address') {
       router.push(`/address/${result.address}`)
+    } else if (result.type === 'XPub') {
+      router.push(`/xpub/${result.xpub}`)
+    } else if (result.type === 'NotFound' && classifyQuery(query)?.label === 'Address') {
+      // Address with no on-chain history (incl. cold-staking S-addresses) is
+      // reported NotFound by search but its address page still resolves.
+      router.push(`/address/${query}`)
     } else {
       // Unknown or not found - go to search results page
-      router.push({ 
-        name: 'SearchResults', 
+      router.push({
+        name: 'SearchResults',
         query: { q: query }
       })
     }
-    
+
     // Clear input
     searchQuery.value = ''
     showSuggestions.value = false
   } catch (error) {
-    console.error('Search error:', error)
     // Navigate to search results page with error
-    router.push({ 
-      name: 'SearchResults', 
+    router.push({
+      name: 'SearchResults',
       query: { q: query, error: 'true' }
     })
   } finally {
@@ -121,22 +173,29 @@ const hideSuggestions = () => {
   width: 100%;
   padding: var(--space-3) var(--space-4);
   padding-right: 48px;
-  background: linear-gradient(270deg, var(--purple-dark), var(--purple-darkest));
-  border: 0px solid var(--purple-darkest);
-  border-radius: var(--radius-lg);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.2);
+  border-radius: var(--radius-full);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
   color: var(--text-primary);
   font-size: var(--text-base);
   font-family: var(--font-mono);
-  transition: all var(--transition-fast);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.search-input:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.4);
 }
 
 .search-input:focus {
   outline: none;
-  background: var(--purple-darkest);
-  border-color: var(--purple-accent);
-  border: 1px solid var(--purple-accent);
-  color: var(--purple-accent);
-  box-shadow: 0px 0px 10px var(--purple-darkest);
+  background: rgba(var(--rgb-purple-darkest), 0.8);
+  border-color: var(--green-accent);
+  box-shadow: var(--glow-green);
 }
 
 .search-input::placeholder {
@@ -151,20 +210,25 @@ const hideSuggestions = () => {
   transform: translateY(-50%);
   width: 40px;
   height: 40px;
-  background: #110B1B00;
+  background: transparent;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   font-size: 18px;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), transform var(--transition-fast);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .search-button:hover:not(:disabled) {
-  background: var(--purple-accent);
+  background: rgba(var(--rgb-purple-accent), 0.35);
   transform: translateY(-50%) scale(1.05);
+}
+
+.search-button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .search-button:disabled {
@@ -177,10 +241,12 @@ const hideSuggestions = () => {
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  background: var(--bg-secondary);
-  border: 2px solid var(--border-primary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-lg), var(--glass-highlight);
   z-index: var(--z-dropdown);
   max-height: 300px;
   overflow-y: auto;
@@ -228,8 +294,36 @@ const hideSuggestions = () => {
 }
 
 .suggestion-item:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.typeahead-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.typeahead-icon {
+  flex-shrink: 0;
+  color: var(--text-accent);
+}
+
+.typeahead-label {
+  flex-shrink: 0;
+  color: var(--text-primary);
+  font-family: var(--font-primary);
+  font-weight: var(--weight-bold);
+}
+
+.typeahead-value {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
 }
 
 @media (max-width: 768px) {

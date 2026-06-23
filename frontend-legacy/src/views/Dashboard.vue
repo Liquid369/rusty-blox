@@ -1,415 +1,350 @@
 <template>
   <AppLayout>
     <div class="dashboard">
+      <!-- Page header: title + compact sync pill -->
       <div class="page-header">
         <div>
           <h1 class="page-title">PIVX Blockchain Explorer</h1>
           <p class="page-subtitle">Real-time network statistics and recent activity</p>
         </div>
-        <LiveIndicator 
-          :connected="wsStore.anyConnected" 
-          :connecting="!wsStore.anyConnected && !initialLoadComplete"
-          show-label 
-        />
+        <div class="header-status">
+          <SyncStatusPill
+            :healthy="syncHealthy"
+            :height="chainStore.networkHeight"
+            :sync-percentage="chainStore.syncPercentage"
+            :blocks-behind="chainStore.blocksBehind"
+            :loading="chainStore.loading && !initialLoadComplete"
+          />
+          <LiveIndicator
+            :connected="wsStore.anyConnected"
+            :connecting="!wsStore.anyConnected && !initialLoadComplete"
+            show-label
+          />
+        </div>
       </div>
 
-      <!-- Network Stats -->
-      <div class="stats-grid">
-        <StatCard
-          label="Network Height"
-          :value="formatNumber(chainStore.networkHeight)"
-          icon="📦"
-          :isLoading="chainStore.loading"
-        />
-        <StatCard
-          label="Indexed Height"
-          :value="formatNumber(chainStore.syncHeight)"
-          icon="💾"
-          :isLoading="chainStore.loading"
-        />
-        <StatCard
-          label="Sync Progress"
-          :value="formatPercentage(chainStore.syncPercentage) + '%'"
-          :subtitle="chainStore.synced ? 'Fully Synced' : 'Syncing...'"
-          :valueClass="chainStore.synced ? 'text-success' : 'text-warning'"
-          icon="🔄"
-          :isLoading="chainStore.loading"
-        />
-        <StatCard
-          label="Blocks Behind"
-          :value="formatNumber(chainStore.blocksBehind)"
-          :subtitle="chainStore.blocksBehind === 0 ? 'Up to date' : 'Catching up'"
-          :valueClass="chainStore.blocksBehind === 0 ? 'text-success' : 'text-warning'"
-          icon="⏱️"
-          :isLoading="chainStore.loading"
-        />
+      <!-- Prominent search -->
+      <div class="hero-search">
+        <SearchBar />
       </div>
 
-      <!-- Recent Blocks Section -->
-      <div class="content-sections">
-        <section class="section">
-          <div class="section-header">
-            <h2>Recent Blocks</h2>
-            <Button variant="ghost" size="sm" @click="$router.push('/blocks')">
-              View All →
-            </Button>
-          </div>
-          
-          <div v-if="blocksLoading" class="loading-state">
-            <SkeletonLoader variant="card" v-for="i in 5" :key="i" />
-          </div>
-          
-          <div v-else-if="blocksError" class="error-state">
-            <p>⚠️ Failed to load recent blocks</p>
-          </div>
-          
-          <div v-else-if="recentBlocks.length > 0" class="blocks-grid">
-            <TransitionGroup name="slide-in">
-              <BlockCard
-                v-for="block in recentBlocks"
-                :key="block.height"
-                :block="block"
-                :class="{ 'new-block': isNewBlock(block.height) }"
-                @click="navigateToBlock(block)"
-              />
-            </TransitionGroup>
-          </div>
-          
-          <div v-else class="empty-state">
-            <p>No blocks available</p>
-          </div>
-        </section>
+      <!-- Sync progress (only while catching up) -->
+      <SyncProgressCard
+        v-if="initialLoadComplete && !syncHealthy"
+        class="sync-progress"
+        :sync-height="chainStore.syncHeight"
+        :network-height="chainStore.networkHeight"
+        :sync-percentage="chainStore.syncPercentage"
+        :blocks-behind="chainStore.blocksBehind"
+      />
 
-        <!-- Recent Transactions Section -->
-        <section class="section">
-          <div class="section-header">
-            <h2>Recent Transactions</h2>
-          </div>
-          
-          <div v-if="txLoading" class="loading-state">
-            <SkeletonLoader variant="card" height="80px" v-for="i in 5" :key="i" />
-          </div>
-          
-          <div v-else-if="txError" class="error-state">
-            <p>⚠️ Failed to load recent transactions</p>
-          </div>
-          
-          <div v-else-if="recentTransactions.length > 0" class="transactions-list">
-            <TransitionGroup name="slide-in">
-              <TransactionRow
-                v-for="tx in recentTransactions"
-                :key="tx.txid"
-                :transaction="tx"
-                :class="{ 'new-tx': isNewTransaction(tx.txid) }"
-                @click="navigateToTransaction(tx)"
-              />
-            </TransitionGroup>
-          </div>
-          
-          <div v-else class="empty-state">
-            <p>No transactions available</p>
-          </div>
-        </section>
-      </div>
+      <!-- Block timeline -->
+      <section class="section">
+        <div class="section-header">
+          <h2>Blocks</h2>
+          <Button variant="ghost" size="sm" @click="$router.push('/blocks')">
+            View All →
+          </Button>
+        </div>
+        <BlockTimeline
+          :blocks="timelineBlocks"
+          :pending="mempoolInfo"
+          :loading="timelineLoading"
+          :error="timelineError"
+        />
+      </section>
+
+      <!-- KPI band -->
+      <section class="section">
+        <div class="section-header">
+          <h2>Network Overview</h2>
+          <Button variant="ghost" size="sm" @click="$router.push('/analytics')">
+            Analytics →
+          </Button>
+        </div>
+        <KpiBand />
+      </section>
+
+      <!-- Latest transactions feed -->
+      <section class="section">
+        <div class="section-header">
+          <h2>Latest Transactions</h2>
+        </div>
+
+        <div v-if="txLoading" class="loading-state">
+          <SkeletonLoader variant="card" height="80px" v-for="i in 5" :key="i" />
+        </div>
+
+        <div v-else-if="txError" class="error-state">
+          <p><Icon name="alert-triangle" :size="14" /> Failed to load recent transactions</p>
+        </div>
+
+        <div v-else-if="recentTransactions.length > 0" class="transactions-list">
+          <TransitionGroup name="slide-in">
+            <TransactionRow
+              v-for="tx in recentTransactions"
+              :key="tx.txid"
+              :transaction="tx"
+              :class="{ 'new-tx': isNewTransaction(tx.txid) }"
+              @click="navigateToTransaction(tx)"
+            />
+          </TransitionGroup>
+        </div>
+
+        <div v-else class="empty-state">
+          <p>No transactions available</p>
+        </div>
+      </section>
 
       <!-- Error Display -->
       <div v-if="chainStore.error" class="error-banner">
-        ⚠️ {{ chainStore.error }}
+        <Icon name="alert-triangle" :size="14" /> {{ chainStore.error }}
       </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import Icon from '@/components/common/Icon.vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
 import { useWebSocketStore } from '@/stores/websocketStore'
-import { formatNumber, formatPercentage } from '@/utils/formatters'
 import { detectTransactionType } from '@/utils/transactionHelpers'
-import { blockService } from '@/services/blockService'
+import api from '@/services/api'
 import { transactionService } from '@/services/transactionService'
 import AppLayout from '@/components/layout/AppLayout.vue'
-import StatCard from '@/components/common/StatCard.vue'
-import BlockCard from '@/components/common/BlockCard.vue'
+import SearchBar from '@/components/layout/SearchBar.vue'
+import SyncStatusPill from '@/components/dashboard/SyncStatusPill.vue'
+import SyncProgressCard from '@/components/dashboard/SyncProgressCard.vue'
+import BlockTimeline from '@/components/dashboard/BlockTimeline.vue'
+import KpiBand from '@/components/dashboard/KpiBand.vue'
 import TransactionRow from '@/components/common/TransactionRow.vue'
 import Button from '@/components/common/Button.vue'
 import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
 import LiveIndicator from '@/components/common/LiveIndicator.vue'
 
+const TIMELINE_SIZE = 8
+const POLL_INTERVAL_MS = 10000
+const FEED_SIZE = 8
+
 const router = useRouter()
 const chainStore = useChainStore()
 const wsStore = useWebSocketStore()
 
-// Recent blocks state
-const recentBlocks = ref([])
-const blocksLoading = ref(false)
-const blocksError = ref(false)
-
-// Recent transactions state
-const recentTransactions = ref([])
-const txLoading = ref(false)
-const txError = ref(false)
-
-// WebSocket state
 const initialLoadComplete = ref(false)
-const newBlockHeights = ref(new Set())
-const newTxIds = ref(new Set())
-const blockAnimationTimers = ref(new Map()) // Track timers for cleanup
-const txAnimationTimers = ref(new Map()) // Track timers for cleanup
-let unsubscribeBlock = null
-let unsubscribeTx = null
 
-// Track if block/tx is new (for animation)
-const isNewBlock = (height) => newBlockHeights.value.has(height)
-const isNewTransaction = (txid) => newTxIds.value.has(txid)
+// Considered "in sync" unless explicitly not synced or trailing by more than 5 blocks
+const syncHealthy = computed(() => {
+  return chainStore.synced && chainStore.blocksBehind <= 5
+})
 
-// Fetch recent blocks
-const fetchRecentBlocks = async () => {
-  blocksLoading.value = true
-  blocksError.value = false
-  try {
-    const result = await blockService.getRecentBlocks(5)
-    
-    // Check if any blocks failed to load
-    if (result.errors && result.errors.length > 0) {
-      console.warn(`⚠️ ${result.errors.length} blocks failed to load:`, result.errors)
-    }
-    
-    // Transform the blocks to match our component's expected format
-    recentBlocks.value = result.map(block => ({
-      ...block,
-      txCount: block.tx?.length || 0,
-      // Detect PoS based on block height (PIVX switched to PoS after block 259200)
-      isPoS: block.height > 259200
-      // Size is not in the basic API response, skip it
-    }))
-    
-    // Only set error state if ALL blocks failed
-    if (recentBlocks.value.length === 0) {
-      blocksError.value = true
-    }
-  } catch (error) {
-    console.error('Failed to fetch recent blocks:', error)
-    blocksError.value = true
-  } finally {
-    blocksLoading.value = false
+// ---------------------------------------------------------------------------
+// Block timeline state (latest blocks + pending mempool tile)
+// ---------------------------------------------------------------------------
+const timelineBlocks = ref([])
+const timelineLoading = ref(true)
+const timelineError = ref(false)
+const mempoolInfo = ref({ txCount: 0, bytes: 0 })
+let timelineRefreshing = false
+let queuedTipHeight = null
+
+/** Map a /api/v2/block-detail response to the tile model. */
+const mapBlockDetail = (data) => {
+  const txs = Array.isArray(data.tx) ? data.tx : []
+  const coinstake = txs.find((t) => t && t.tx_type === 'coinstake')
+  const stakerVin = coinstake?.vin?.[0]
+  return {
+    height: data.height,
+    hash: data.hash,
+    time: data.time,
+    txCount: txs.length,
+    size: data.size || 0,
+    staker: stakerVin?.address || stakerVin?.addresses?.[0] || null,
+    txids: txs.map((t) => t?.txid).filter(Boolean)
   }
 }
 
-// Fetch recent transactions from the latest blocks
+/** Fetch the latest TIMELINE_SIZE blocks in parallel, reusing already-loaded ones. */
+const refreshTimeline = async (tipHeight) => {
+  if (!tipHeight || tipHeight <= 0) return
+  if (timelineRefreshing) {
+    // Remember the newest requested tip; re-run once the current refresh ends
+    queuedTipHeight = Math.max(queuedTipHeight || 0, tipHeight)
+    return
+  }
+  timelineRefreshing = true
+  try {
+    const heights = []
+    for (let i = 0; i < TIMELINE_SIZE; i++) {
+      const h = tipHeight - i
+      if (h >= 0) heights.push(h)
+    }
+
+    const cache = new Map(timelineBlocks.value.map((b) => [b.height, b]))
+    const missing = heights.filter((h) => !cache.has(h))
+
+    const results = await Promise.allSettled(
+      missing.map((h) => api.get(`/api/v2/block-detail/${h}`))
+    )
+    results.forEach((res) => {
+      if (res.status === 'fulfilled' && res.value?.data?.height !== undefined) {
+        const block = mapBlockDetail(res.value.data)
+        cache.set(block.height, block)
+      }
+    })
+
+    const blocks = heights.map((h) => cache.get(h)).filter(Boolean)
+    timelineBlocks.value = blocks
+    timelineError.value = blocks.length === 0
+  } catch {
+    timelineError.value = timelineBlocks.value.length === 0
+  } finally {
+    timelineRefreshing = false
+    timelineLoading.value = false
+    if (queuedTipHeight && queuedTipHeight > tipHeight) {
+      const next = queuedTipHeight
+      queuedTipHeight = null
+      refreshTimeline(next)
+    } else {
+      queuedTipHeight = null
+    }
+  }
+}
+
+const fetchMempool = async () => {
+  try {
+    const response = await api.get('/api/v2/mempool')
+    const data = response.data || {}
+    mempoolInfo.value = {
+      txCount: data.size ?? (Array.isArray(data.transactions) ? data.transactions.length : 0),
+      bytes: data.bytes || 0
+    }
+  } catch {
+    // Keep last known mempool snapshot on error
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Latest transactions feed
+// ---------------------------------------------------------------------------
+const recentTransactions = ref([])
+const txLoading = ref(true)
+const txError = ref(false)
+const newTxIds = ref(new Set())
+const txAnimationTimers = new Map()
+
+const isNewTransaction = (txid) => newTxIds.value.has(txid)
+
+const markTransactionNew = (txid) => {
+  if (txAnimationTimers.has(txid)) clearTimeout(txAnimationTimers.get(txid))
+  newTxIds.value.add(txid)
+  const timer = setTimeout(() => {
+    newTxIds.value.delete(txid)
+    txAnimationTimers.delete(txid)
+  }, 2000)
+  txAnimationTimers.set(txid, timer)
+}
+
+const isValidFeedTx = (tx) => {
+  const height = tx.blockHeight || tx.height
+  return height !== -1 && height !== -2
+}
+
+/** Seed the feed from txids already fetched for the timeline (no extra block calls). */
 const fetchRecentTransactions = async () => {
   txLoading.value = true
   txError.value = false
   try {
-    // Get the 3 most recent blocks
-    const blocks = await blockService.getRecentBlocks(3)
-    
-    // Extract all transaction IDs from these blocks
-    const allTxIds = blocks.flatMap(block => block.tx || [])
-    
-    // Fetch transaction details for the first 10 txids
-    const txidsToFetch = allTxIds.slice(0, 10)
-    const transactions = await transactionService.getTransactions(txidsToFetch)
-    
-    // Detect transaction types and filter out invalid heights (-1 orphaned, -2 unresolved)
+    const txids = timelineBlocks.value.flatMap((b) => b.txids || []).slice(0, FEED_SIZE)
+    const transactions = await transactionService.getTransactions(txids)
     recentTransactions.value = transactions
-      .filter(tx => {
-        const height = tx.blockHeight || tx.height
-        return height !== -1 && height !== -2
-      })
-      .map(tx => ({
-        ...tx,
-        type: detectTransactionType(tx)
-      }))
-  } catch (error) {
-    console.error('Failed to fetch recent transactions:', error)
+      .filter(isValidFeedTx)
+      .map((tx) => ({ ...tx, type: detectTransactionType(tx) }))
+    txError.value = txids.length > 0 && recentTransactions.value.length === 0
+  } catch {
     txError.value = true
   } finally {
     txLoading.value = false
   }
 }
 
-// Handle new block from WebSocket
-const handleNewBlock = async (blockEvent) => {
-  console.log('New block received:', blockEvent)
-  
-  // Cancel existing timer for this height (prevents duplicates)
-  if (blockAnimationTimers.value.has(blockEvent.height)) {
-    clearTimeout(blockAnimationTimers.value.get(blockEvent.height))
-  }
-  
-  // Enforce size limit to prevent unbounded growth
-  if (newBlockHeights.value.size > 100) {
-    console.warn('⚠️ Block animation set exceeded 100 entries, clearing old entries')
-    // Clear oldest entries (keep newest 50)
-    const entries = Array.from(newBlockHeights.value)
-    entries.slice(0, entries.length - 50).forEach(h => {
-      newBlockHeights.value.delete(h)
-      if (blockAnimationTimers.value.has(h)) {
-        clearTimeout(blockAnimationTimers.value.get(h))
-        blockAnimationTimers.value.delete(h)
-      }
-    })
-  }
-  
-  // Mark as new for animation
-  newBlockHeights.value.add(blockEvent.height)
-  
-  const timer = setTimeout(() => {
-    newBlockHeights.value.delete(blockEvent.height)
-    blockAnimationTimers.value.delete(blockEvent.height)
-  }, 2000)
-  
-  blockAnimationTimers.value.set(blockEvent.height, timer)
-  
-  // Fetch the full block details
-  try {
-    const fullBlock = await blockService.getBlock(blockEvent.height)
-    const formattedBlock = {
-      ...fullBlock,
-      txCount: fullBlock.tx?.length || 0
-    }
-    
-    // Add to the beginning of the list and keep only 5
-    recentBlocks.value = [formattedBlock, ...recentBlocks.value].slice(0, 5)
-    
-    // Update chain height
-    await chainStore.fetchChainState()
-  } catch (error) {
-    console.error('Failed to fetch new block details:', error)
-    // Immediate cleanup on error
-    newBlockHeights.value.delete(blockEvent.height)
-    if (blockAnimationTimers.value.has(blockEvent.height)) {
-      clearTimeout(blockAnimationTimers.value.get(blockEvent.height))
-      blockAnimationTimers.value.delete(blockEvent.height)
-    }
-  }
-}
-
-// Handle new transaction from WebSocket
 const handleNewTransaction = async (txEvent) => {
-  console.log('New transaction received:', txEvent)
-  
-  // Cancel existing timer for this txid (prevents duplicates)
-  if (txAnimationTimers.value.has(txEvent.txid)) {
-    clearTimeout(txAnimationTimers.value.get(txEvent.txid))
-  }
-  
-  // Enforce size limit to prevent unbounded growth
-  if (newTxIds.value.size > 100) {
-    console.warn('⚠️ Transaction animation set exceeded 100 entries, clearing old entries')
-    // Clear oldest entries (keep newest 50)
-    const entries = Array.from(newTxIds.value)
-    entries.slice(0, entries.length - 50).forEach(txid => {
-      newTxIds.value.delete(txid)
-      if (txAnimationTimers.value.has(txid)) {
-        clearTimeout(txAnimationTimers.value.get(txid))
-        txAnimationTimers.value.delete(txid)
-      }
-    })
-  }
-  
-  // Mark as new for animation
-  newTxIds.value.add(txEvent.txid)
-  
-  const timer = setTimeout(() => {
-    newTxIds.value.delete(txEvent.txid)
-    txAnimationTimers.value.delete(txEvent.txid)
-  }, 2000)
-  
-  txAnimationTimers.value.set(txEvent.txid, timer)
-  
-  // Fetch the full transaction details
   try {
     const fullTx = await transactionService.getTransaction(txEvent.txid)
-    
-    // Filter out invalid heights (-1 orphaned, -2 unresolved)
-    const height = fullTx.blockHeight || fullTx.height
-    if (height === -1 || height === -2) {
-      // Cleanup animation for invalid transactions
-      newTxIds.value.delete(txEvent.txid)
-      if (txAnimationTimers.value.has(txEvent.txid)) {
-        clearTimeout(txAnimationTimers.value.get(txEvent.txid))
-        txAnimationTimers.value.delete(txEvent.txid)
-      }
-      return // Don't add orphaned or unresolved transactions
-    }
-    
-    const formattedTx = {
-      ...fullTx,
-      type: detectTransactionType(fullTx)
-    }
-    
-    // Add to the beginning of the list and keep only 10
-    recentTransactions.value = [formattedTx, ...recentTransactions.value].slice(0, 10)
-  } catch (error) {
-    console.error('Failed to fetch new transaction details:', error)
-    // Immediate cleanup on error
-    newTxIds.value.delete(txEvent.txid)
-    if (txAnimationTimers.value.has(txEvent.txid)) {
-      clearTimeout(txAnimationTimers.value.get(txEvent.txid))
-      txAnimationTimers.value.delete(txEvent.txid)
-    }
+    if (!isValidFeedTx(fullTx)) return
+    markTransactionNew(txEvent.txid)
+    recentTransactions.value = [
+      { ...fullTx, type: detectTransactionType(fullTx) },
+      ...recentTransactions.value.filter((t) => t.txid !== txEvent.txid)
+    ].slice(0, FEED_SIZE)
+  } catch {
+    // Skip transactions that fail to resolve
   }
 }
 
+// ---------------------------------------------------------------------------
+// Polling + WebSocket wiring
+// ---------------------------------------------------------------------------
+let pollTimer = null
+let unsubscribeBlock = null
+let unsubscribeTx = null
+
+// Any networkHeight change (poll or WebSocket-triggered) refreshes the strip
+watch(
+  () => chainStore.networkHeight,
+  (height, oldHeight) => {
+    if (height > 0 && height !== oldHeight && initialLoadComplete.value) {
+      refreshTimeline(height)
+    }
+  }
+)
+
+// Reorg: drop cached blocks and rebuild everything
+watch(
+  () => chainStore.reorgDetected,
+  (detected) => {
+    if (!detected) return
+    timelineBlocks.value = []
+    timelineLoading.value = true
+    newTxIds.value.clear()
+    refreshTimeline(chainStore.networkHeight).then(fetchRecentTransactions)
+  }
+)
+
 onMounted(async () => {
-  // Fetch initial data
   await chainStore.fetchChainState()
-  await Promise.all([
-    fetchRecentBlocks(),
-    fetchRecentTransactions()
-  ])
-  
+  await Promise.all([refreshTimeline(chainStore.networkHeight), fetchMempool()])
   initialLoadComplete.value = true
-  
-  // Connect to WebSocket and subscribe to events
+
+  // Feed seeds from the timeline's tx data
+  fetchRecentTransactions()
+
+  // Poll status + mempool every 10s; the height watcher refreshes the strip
+  pollTimer = setInterval(() => {
+    chainStore.fetchChainState()
+    fetchMempool()
+  }, POLL_INTERVAL_MS)
+
+  // WebSocket push for instant updates between polls
   wsStore.connectBlocks()
   wsStore.connectTransactions()
-  
-  unsubscribeBlock = wsStore.onNewBlock(handleNewBlock)
+  unsubscribeBlock = wsStore.onNewBlock(() => {
+    chainStore.fetchChainState()
+    fetchMempool()
+  })
   unsubscribeTx = wsStore.onNewTransaction(handleNewTransaction)
 })
 
-// Watch for reorg detection and refetch data
-watch(() => chainStore.reorgDetected, (detected) => {
-  if (detected) {
-    console.log('🔄 Reorg detected - clearing cache and refetching data')
-    // Clear cached data
-    recentBlocks.value = []
-    recentTransactions.value = []
-    newBlockHeights.value.clear()
-    newTxIds.value.clear()
-    
-    // Refetch all data
-    Promise.all([
-      fetchRecentBlocks(),
-      fetchRecentTransactions()
-    ])
-  }
-})
-
 onUnmounted(() => {
-  // Clean up WebSocket subscriptions
+  if (pollTimer) clearInterval(pollTimer)
   if (unsubscribeBlock) unsubscribeBlock()
   if (unsubscribeTx) unsubscribeTx()
-  
-  // Clear all animation timers to prevent memory leaks
-  blockAnimationTimers.value.forEach(clearTimeout)
-  blockAnimationTimers.value.clear()
-  txAnimationTimers.value.forEach(clearTimeout)
-  txAnimationTimers.value.clear()
-  
-  // Clear animation sets
-  newBlockHeights.value.clear()
+
+  txAnimationTimers.forEach(clearTimeout)
+  txAnimationTimers.clear()
   newTxIds.value.clear()
 })
-
-// Navigation handlers
-const navigateToBlock = (block) => {
-  router.push(`/block/${block.height}`)
-}
 
 const navigateToTransaction = (tx) => {
   router.push(`/tx/${tx.txid}`)
@@ -419,13 +354,14 @@ const navigateToTransaction = (tx) => {
 <style scoped>
 .dashboard {
   padding: var(--space-6) 0;
+  display: grid;
+  gap: var(--space-8);
 }
 
 .page-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: var(--space-8);
   gap: var(--space-4);
 }
 
@@ -439,17 +375,19 @@ const navigateToTransaction = (tx) => {
   color: var(--text-secondary);
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+.header-status {
+  display: flex;
+  align-items: center;
   gap: var(--space-4);
-  margin-bottom: var(--space-8);
+  flex-shrink: 0;
 }
 
-.content-sections {
-  display: grid;
-  gap: var(--space-8);
-  margin-top: var(--space-8);
+.hero-search {
+  max-width: 640px;
+}
+
+.sync-progress {
+  margin-top: calc(-1 * var(--space-4));
 }
 
 .section {
@@ -466,12 +404,6 @@ const navigateToTransaction = (tx) => {
 .section-header h2 {
   margin: 0;
   color: var(--text-primary);
-}
-
-.blocks-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: var(--space-4);
 }
 
 .transactions-list {
@@ -499,17 +431,16 @@ const navigateToTransaction = (tx) => {
   border: 1px solid var(--danger);
   border-radius: var(--radius-md);
   padding: var(--space-4);
-  margin-top: var(--space-4);
   color: var(--text-primary);
 }
 
-/* Slide-in animation for new blocks/transactions */
+/* Slide-in animation for new transactions */
 .slide-in-enter-active {
   animation: slideInFromTop 0.5s ease-out;
 }
 
 .slide-in-leave-active {
-  animation: slideOutToBottom 0.3s ease-in;
+  display: none;
 }
 
 @keyframes slideInFromTop {
@@ -523,49 +454,38 @@ const navigateToTransaction = (tx) => {
   }
 }
 
-@keyframes slideOutToBottom {
-  from {
-    opacity: 1;
-    transform: translateY(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-}
-
 /* Highlight new items with a glow */
-.new-block,
 .new-tx {
   animation: glow 2s ease-in-out;
 }
 
 @keyframes glow {
   0%, 100% {
-    box-shadow: 0 0 0 rgba(89, 252, 179, 0);
+    box-shadow: 0 0 0 rgba(179, 255, 120, 0);
   }
   50% {
-    box-shadow: 0 0 20px rgba(89, 252, 179, 0.5);
+    box-shadow: 0 0 20px rgba(179, 255, 120, 0.5);
   }
 }
 
 /* Mobile responsiveness */
 @media (max-width: 768px) {
+  .dashboard {
+    gap: var(--space-6);
+  }
+
   .page-header {
     flex-direction: column;
     align-items: flex-start;
   }
-  
-  .page-title {
-    text-align: left;
-  }
-  
-  .page-subtitle {
-    text-align: left;
+
+  .header-status {
+    flex-direction: row;
+    flex-wrap: wrap;
   }
 
-  .stats-grid {
-    grid-template-columns: 1fr;
+  .hero-search {
+    max-width: 100%;
   }
 }
 </style>

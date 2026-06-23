@@ -1,14 +1,14 @@
 <template>
   <div class="supply-analytics">
     <div class="controls">
-      <TimeRangeSelector v-model="timeRange" />
       <Button variant="ghost" size="sm" @click="exportData">
-        💾 Export
+        <Icon name="download" :size="14" /> Export
       </Button>
     </div>
 
-    <!-- Money Supply Over Time -->
+    <!-- Money Supply Over Time (only when the API provides historical data) -->
     <BaseChart
+      v-if="historicalData.length > 0"
       title="Money Supply Over Time"
       :option="moneySupplyOption"
       :loading="loading"
@@ -16,25 +16,20 @@
       height="400px"
     />
 
-    <!-- Transparent vs Shielded Split -->
-    <BaseChart
-      title="Transparent vs Shielded Supply"
-      :option="supplyTypeOption"
-      :loading="loading"
-      :error="error"
-      height="400px"
-    />
-
-    <!-- Supply Distribution -->
+    <!-- Supply composition: a stacked area once a historical series exists,
+         otherwise one honest proportion bar for the current snapshot. (The old
+         two-bars-on-one-date chart read as a fake trend and duplicated both the
+         distribution pie and the metrics card — all three showed the same pair
+         of numbers.) -->
     <div class="chart-grid">
       <BaseChart
-        title="Current Supply Distribution"
-        :option="distributionOption"
+        title="Supply Composition"
+        :option="compositionOption"
         :loading="loading"
         :error="error"
-        height="350px"
+        height="240px"
       />
-      
+
       <Card class="stats-card">
         <h3>Supply Metrics</h3>
         <div v-if="loading" class="loading-state">Loading...</div>
@@ -64,16 +59,16 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import Icon from '@/components/common/Icon.vue'
+import { ref, computed, onMounted } from 'vue'
 import BaseChart from '@/components/charts/BaseChart.vue'
-import TimeRangeSelector from '@/components/charts/TimeRangeSelector.vue'
 import Button from '@/components/common/Button.vue'
 import Card from '@/components/common/Card.vue'
 import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
 
-const { getLineChartOption, getPieChartOption } = useChartOptions()
+const { getLineChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
 
 const timeRange = ref('30d')
@@ -84,19 +79,13 @@ const historicalData = ref([])
 
 const shieldedPercentage = computed(() => {
   if (!supplyData.value) return 0
-  const total = supplyData.value.totalSupply
-  const shielded = supplyData.value.shielded
-  return total > 0 ? (shielded / total) * 100 : 0
+  // Provided directly by the API — do not recompute
+  return supplyData.value.shieldAdoption
 })
 
-// Money Supply Chart Option
+// Money Supply Chart Option (chart is hidden in template when no historical data)
 const moneySupplyOption = computed(() => {
   if (!historicalData.value || historicalData.value.length === 0) {
-    // Show current value as a single point if no historical data
-    if (supplyData.value) {
-      const today = new Date().toISOString().split('T')[0]
-      return getLineChartOption([today], [supplyData.value.totalSupply], 'Total Supply (PIV)')
-    }
     return getLineChartOption([], [], 'Total Supply')
   }
 
@@ -106,129 +95,120 @@ const moneySupplyOption = computed(() => {
   return getLineChartOption(dates, values, 'Total Supply (PIV)')
 })
 
-// Transparent vs Shielded Chart Option
-const supplyTypeOption = computed(() => {
-  if (!historicalData.value || historicalData.value.length === 0) {
-    // Show current values as single points if no historical data
-    if (supplyData.value) {
-      const today = new Date().toISOString().split('T')[0]
-      return {
-        tooltip: {
-          trigger: 'axis',
-          backgroundColor: 'rgba(17, 24, 39, 0.95)',
-          borderColor: '#374151',
-          textStyle: { color: '#E5E7EB' }
-        },
-        legend: {
-          data: ['Transparent', 'Shielded'],
-          textStyle: { color: '#9CA3AF' }
-        },
-        grid: {
-          left: '3%',
-          right: '4%',
-          bottom: '3%',
-          top: '15%',
-          containLabel: true
-        },
-        xAxis: {
-          type: 'category',
-          data: [today],
-          axisLine: { lineStyle: { color: '#374151' } },
-          axisLabel: { color: '#9CA3AF' }
-        },
-        yAxis: {
-          type: 'value',
-          axisLine: { lineStyle: { color: '#374151' } },
-          axisLabel: { color: '#9CA3AF' },
-          splitLine: { lineStyle: { color: '#374151', type: 'dashed' } }
-        },
-        series: [
-          {
-            name: 'Transparent',
-            type: 'bar',
-            itemStyle: { color: '#59FCB3' },
-            data: [supplyData.value.transparent]
-          },
-          {
-            name: 'Shielded',
-            type: 'bar',
-            itemStyle: { color: '#662D91' },
-            data: [supplyData.value.shielded]
-          }
-        ]
-      }
-    }
+// Supply composition. A stacked area over time once the API returns a historical
+// series; until then a single proportion bar for the current snapshot — honest
+// for one data point, where two vertical bars only implied a trend that isn't
+// there. Brand greens for transparent, brand purples for shielded.
+const compositionOption = computed(() => {
+  // Historical series (future-proof) — stacked area over time.
+  if (historicalData.value && historicalData.value.length > 0) {
+    const dates = historicalData.value.map(d => d.date)
     return {
-      ...getLineChartOption([], [], 'Transparent'),
-      series: []
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: 'rgba(17, 11, 27, 0.92)',
+        borderColor: '#642D8F',
+        textStyle: { color: '#FFFFFF' }
+      },
+      legend: { data: ['Transparent', 'Shielded'], textStyle: { color: '#9B93A8' }, bottom: 0 },
+      grid: { left: '3%', right: '4%', bottom: '14%', top: '8%', containLabel: true },
+      xAxis: {
+        type: 'category',
+        data: dates,
+        axisLine: { lineStyle: { color: '#642D8F' } },
+        axisLabel: { color: '#9B93A8' }
+      },
+      yAxis: {
+        type: 'value',
+        axisLine: { lineStyle: { color: '#642D8F' } },
+        axisLabel: { color: '#9B93A8' },
+        splitLine: { lineStyle: { color: 'rgba(100, 45, 143, 0.45)', type: 'dashed' } }
+      },
+      series: [
+        {
+          name: 'Transparent',
+          type: 'line',
+          stack: 'Total',
+          smooth: true,
+          showSymbol: false,
+          areaStyle: { color: 'rgba(179, 255, 120, 0.25)' },
+          lineStyle: { color: '#B3FF78' },
+          data: historicalData.value.map(d => d.transparent)
+        },
+        {
+          name: 'Shielded',
+          type: 'line',
+          stack: 'Total',
+          smooth: true,
+          showSymbol: false,
+          areaStyle: { color: 'rgba(179, 89, 252, 0.18)' },
+          lineStyle: { color: '#B359FC' },
+          data: historicalData.value.map(d => d.shielded)
+        }
+      ]
     }
   }
 
-  const dates = historicalData.value.map(d => d.date)
+  // Single snapshot — one horizontal proportion bar (transparent vs shielded).
+  if (!supplyData.value) return { series: [] }
+  const t = supplyData.value.transparent
+  const s = supplyData.value.shielded
+  const total = t + s
+  const pct = (v) => (total > 0 ? (v / total) * 100 : 0)
 
   return {
+    grid: { left: 12, right: 12, top: 22, bottom: 48 },
     tooltip: {
-      trigger: 'axis',
-      backgroundColor: 'rgba(17, 24, 39, 0.95)',
-      borderColor: '#374151',
-      textStyle: { color: '#E5E7EB' }
+      trigger: 'item',
+      backgroundColor: 'rgba(17, 11, 27, 0.92)',
+      borderColor: '#642D8F',
+      textStyle: { color: '#FFFFFF' },
+      formatter: (p) => `${p.marker} ${p.seriesName}<br/><b>${formatNumber(p.value)} PIV</b> · ${pct(p.value).toFixed(2)}%`
     },
     legend: {
+      bottom: 0,
+      icon: 'roundRect',
+      itemWidth: 12,
+      itemHeight: 12,
       data: ['Transparent', 'Shielded'],
-      textStyle: { color: '#9CA3AF' }
+      textStyle: { color: '#C9C2D6' },
+      formatter: (name) => `${name}  ${pct(name === 'Transparent' ? t : s).toFixed(2)}%`
     },
-    grid: {
-      left: '3%',
-      right: '4%',
-      bottom: '3%',
-      top: '15%',
-      containLabel: true
-    },
-    xAxis: {
-      type: 'category',
-      data: dates,
-      axisLine: { lineStyle: { color: '#374151' } },
-      axisLabel: { color: '#9CA3AF' }
-    },
-    yAxis: {
-      type: 'value',
-      axisLine: { lineStyle: { color: '#374151' } },
-      axisLabel: { color: '#9CA3AF' },
-      splitLine: { lineStyle: { color: '#374151', type: 'dashed' } }
-    },
+    xAxis: { type: 'value', max: total, show: false },
+    yAxis: { type: 'category', data: ['supply'], show: false },
     series: [
       {
         name: 'Transparent',
-        type: 'line',
-        stack: 'Total',
-        areaStyle: { color: 'rgba(89, 252, 179, 0.3)' },
-        lineStyle: { color: '#59FCB3' },
-        data: historicalData.value.map(d => d.transparent)
+        type: 'bar',
+        stack: 'supply',
+        barWidth: 64,
+        itemStyle: {
+          borderRadius: [10, 0, 0, 10],
+          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#9BE85C' }, { offset: 1, color: '#B3FF78' }] }
+        },
+        label: {
+          show: true,
+          position: 'insideLeft',
+          color: '#0c0717',
+          fontWeight: 'bold',
+          fontSize: 14,
+          formatter: () => `${pct(t).toFixed(2)}%`
+        },
+        data: [t]
       },
       {
         name: 'Shielded',
-        type: 'line',
-        stack: 'Total',
-        areaStyle: { color: 'rgba(102, 45, 145, 0.3)' },
-        lineStyle: { color: '#662D91' },
-        data: historicalData.value.map(d => d.shielded)
+        type: 'bar',
+        stack: 'supply',
+        barWidth: 64,
+        itemStyle: {
+          borderRadius: [0, 10, 10, 0],
+          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#8B3FE0' }, { offset: 1, color: '#B359FC' }] }
+        },
+        data: [s]
       }
     ]
   }
-})
-
-// Distribution Pie Chart Option
-const distributionOption = computed(() => {
-  if (!supplyData.value) {
-    return getPieChartOption([], 'Supply Distribution')
-  }
-
-  const data = [
-    { value: supplyData.value.transparent, name: 'Transparent' },
-    { value: supplyData.value.shielded, name: 'Shielded' }
-  ]
-
-  return getPieChartOption(data, 'Current Supply Distribution')
 })
 
 const fetchData = async () => {
@@ -237,8 +217,7 @@ const fetchData = async () => {
 
   try {
     const data = await analyticsService.getSupplyAnalytics(timeRange.value)
-    console.log('Supply Analytics API Response:', data)
-    
+
     if (data && data.current) {
       // Parse API response (snake_case with string PIV amounts)
       supplyData.value = {
@@ -247,9 +226,7 @@ const fetchData = async () => {
         shielded: parseFloat(data.current.shielded_supply) || 0,
         shieldAdoption: data.current.shield_adoption_percentage || 0
       }
-      
-      console.log('Parsed Supply Data:', supplyData.value)
-      
+
       // Parse historical data if available
       if (data.historical && data.historical.length > 0) {
         historicalData.value = data.historical.map(point => ({
@@ -266,7 +243,6 @@ const fetchData = async () => {
       throw new Error('Invalid API response')
     }
   } catch (err) {
-    console.error('Failed to fetch supply analytics:', err)
     error.value = 'Failed to load supply data from API.'
     // Set empty data on error
     supplyData.value = null
@@ -291,10 +267,6 @@ const exportData = () => {
   }
 }
 
-watch(timeRange, () => {
-  fetchData()
-})
-
 onMounted(() => {
   fetchData()
 })
@@ -308,7 +280,7 @@ onMounted(() => {
 
 .controls {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-3);

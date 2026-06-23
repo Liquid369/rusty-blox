@@ -91,7 +91,7 @@ const handleClick = () => {
   right: 0;
   width: 100%;
   height: 100%;
-  background: linear-gradient(135deg, transparent 0%, rgba(89, 252, 179, 0.05) 100%);
+  background: linear-gradient(135deg, transparent 0%, rgba(179, 255, 120, 0.05) 100%);
   opacity: 0;
   transition: opacity var(--transition-base);
   pointer-events: none;
@@ -114,7 +114,7 @@ const handleClick = () => {
   align-items: center;
   gap: var(--space-3);
   padding-bottom: var(--space-4);
-  border-bottom: 2px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-secondary);
 }
 
 .block-label {
@@ -130,7 +130,8 @@ const handleClick = () => {
   font-weight: var(--weight-extrabold);
   color: var(--pivx-accent);
   font-family: var(--font-mono);
-  text-shadow: 0 0 10px rgba(89, 252, 179, 0.3);
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 10px rgba(179, 255, 120, 0.3);
 }
 
 .block-info {
@@ -177,7 +178,7 @@ const handleClick = () => {
 
 .block-type {
   padding-top: var(--space-4);
-  border-top: 2px solid var(--border-subtle);
+  border-top: 1px solid var(--border-secondary);
   display: flex;
   justify-content: flex-end;
 }

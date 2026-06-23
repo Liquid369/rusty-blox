@@ -12,7 +12,7 @@
       </div>
 
       <div v-else-if="error" class="error">
-        <EmptyState icon="⚠️" title="Failed to Load Masternode" :message="error">
+        <EmptyState icon="alert-triangle" title="Failed to Load Masternode" :message="error">
           <template #action>
             <Button @click="fetchMasternode">Try Again</Button>
           </template>
@@ -20,7 +20,7 @@
       </div>
 
       <div v-else-if="!mn" class="error">
-        <EmptyState icon="🔍" title="Masternode Not Found" message="The requested masternode was not found in the current list." />
+        <EmptyState icon="search" title="Masternode Not Found" message="The requested masternode was not found in the current list." />
       </div>
 
       <div v-else class="content">

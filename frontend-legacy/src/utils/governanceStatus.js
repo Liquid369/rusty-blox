@@ -14,7 +14,7 @@
  * 
  * 2. BUDGET CYCLE:
  *    - Superblock pays out once per month (~43,200 blocks)
- *    - Maximum monthly budget: 432,000 PIV
+ *    - Maximum monthly budget: 432,000 PIV current era (was 43,200 historically)
  *    - Proposals are sorted by net votes (descending)
  *    - Top proposals funded until budget exhausted
  * 
@@ -39,7 +39,7 @@
  *   - IsValid = true
  *   - Net votes >= 10% threshold
  *   - NOT completed (current height < BlockEnd)
- *   - Fits within 432,000 PIV budget (by vote rank)
+ *   - Fits within the monthly budget cap (by vote rank)
  * 
  * PASSING_UNFUNDED - Proposal meets voting threshold but WON'T be funded
  *   - IsValid = true
@@ -64,7 +64,8 @@
 // PIVX Constants
 export const PIVX_GOVERNANCE = {
   // Maximum monthly budget allocated to proposals (in PIV)
-  MAX_MONTHLY_BUDGET: 432000,
+  // Treasury accrual per block * 43,200 blocks per cycle (current era: 432,000 PIV)
+  MAX_MONTHLY_BUDGET: 432000, // current era (was 43,200 in the 1-PIV/block treasury era)
   
   // Passing threshold: 10% of enabled masternodes
   PASSING_THRESHOLD_PERCENT: 0.10,
@@ -123,7 +124,7 @@ export function meetsVotingThreshold(proposal, passingThreshold) {
  * PIVX Core algorithm:
  * 1. Filter to proposals meeting voting threshold AND with remaining payments
  * 2. Sort by net votes (descending) - highest votes win
- * 3. Allocate budget in order until 432,000 PIV cap reached
+ * 3. Allocate budget in order until 43,200 PIV cap reached
  * 
  * @param {Array} proposals - All proposals
  * @param {number} passingThreshold - Minimum net votes required

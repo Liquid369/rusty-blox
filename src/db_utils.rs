@@ -1,9 +1,30 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use rocksdb::{DB, WriteBatch};
+use rocksdb::{DB, WriteBatch, WriteOptions};
 
 pub const IN_PROGRESS: &str = "in-progress";
+
+/// Build a `WriteOptions` configured for bulk-ingest writes.
+///
+/// During the INITIAL full reindex the entire database is reconstructible from
+/// PIVX Core's `.blk` files + LevelDB block index, so the RocksDB WAL is pure
+/// fsync overhead on the hot write path. Disabling it makes bulk writes land in
+/// the memtable without a per-batch WAL append/sync.
+///
+/// SAFETY: only ever call this on the initial bulk-sync path. The live / RPC
+/// catch-up path MUST keep the WAL (a crash there must be recoverable), so it
+/// uses `WriteOptions::default()` (WAL on). After the bulk phase completes the
+/// caller flushes all memtables to disk so a later crash starts from a durable
+/// state even though no WAL was written.
+///
+/// This only changes durability/commit granularity — it does NOT change any
+/// key/value bytes, so the resulting DB is byte-identical to a WAL-on sync.
+pub fn bulk_write_options() -> WriteOptions {
+    let mut wo = WriteOptions::new();
+    wo.disable_wal(true);
+    wo
+}
 pub const COMPLETED: &str = "completed";
 pub const INCOMPLETE: &str = "incomplete";
 
@@ -17,7 +38,7 @@ pub fn load_processed_files_from_db(db: &DB) -> Result<HashMap<PathBuf, String>,
         let (key, value) = result.map_err(|e| e.to_string())?;
         let key_path = PathBuf::from(String::from_utf8_lossy(&key).into_owned());
         let state = String::from_utf8(value.to_vec())
-            .map_err(|e| format!("Error converting value to String: {}", e))?;
+            .map_err(|e| format!("Error converting value to String: {e}"))?;
         file_states.insert(key_path, state);
     }
 
@@ -103,7 +124,7 @@ pub async fn db_get_blocking(db: Arc<DB>, key: &[u8]) -> Result<Option<Vec<u8>>,
         db.get(&key).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_put_blocking(db: Arc<DB>, key: &[u8], value: &[u8]) -> Result<(), String> {
@@ -113,7 +134,7 @@ pub async fn db_put_blocking(db: Arc<DB>, key: &[u8], value: &[u8]) -> Result<()
         db.put(&key, &value).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_delete_blocking(db: Arc<DB>, key: &[u8]) -> Result<(), String> {
@@ -122,14 +143,20 @@ pub async fn db_delete_blocking(db: Arc<DB>, key: &[u8]) -> Result<(), String> {
         db.delete(&key).map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Batch write multiple key-value pairs to a column family in a single atomic operation
+///
+/// `bulk` selects the durability mode: on the initial full-reindex path pass
+/// `true` to disable the WAL (the DB is fully reconstructible, so the WAL is
+/// pure fsync overhead); on the live/RPC catch-up path pass `false` so writes
+/// remain WAL-recoverable. Either way the key/value bytes written are identical.
 pub async fn batch_put_cf(
     db: Arc<DB>,
     cf_name: &str,
     batch_items: Vec<(Vec<u8>, Vec<u8>)>,
+    bulk: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cf_name = cf_name.to_string();
     tokio::task::spawn_blocking(move || {
@@ -138,8 +165,12 @@ pub async fn batch_put_cf(
         for (key, value) in batch_items {
             batch.put_cf(&cf, key, value);
         }
-        db.write(batch)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        let result = if bulk {
+            db.write_opt(batch, &bulk_write_options())
+        } else {
+            db.write(batch)
+        };
+        result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     })
     .await
     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?

@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  # Rusty-Blox Backend API (Production)
+  rustyblox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rustyblox-api-prod
+    ports:
+      # Localhost-only: the public path is nginx (frontend container) proxying
+      # /api and /ws over the docker network. Publishing the raw API would also
+      # expose /metrics and unproxied endpoints to the world.
+      - "127.0.0.1:3005:3005"
+    volumes:
+      - /var/rustyblox/data:/data
+      - /etc/rustyblox/config.toml:/app/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=0
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/api/v2/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - rustyblox-network
+
+  # Frontend (Production)
+  frontend:
+    build:
+      context: ./frontend-legacy
+      dockerfile: Dockerfile
+    container_name: rustyblox-frontend-prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - rustyblox
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - rustyblox-network
+
+  # Prometheus (Production)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rustyblox-prometheus-prod
+    ports:
+      - "127.0.0.1:9090:9090"  # Only localhost access
+    volumes:
+      - /etc/rustyblox/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data-prod:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - rustyblox-network
+
+  # Grafana (Production)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rustyblox-grafana-prod
+    ports:
+      - "127.0.0.1:3000:3000"  # Only localhost access
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=https://monitoring.yourdomain.com
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - /etc/rustyblox/grafana:/etc/grafana/provisioning:ro
+      - grafana-data-prod:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+    networks:
+      - rustyblox-network
+
+volumes:
+  prometheus-data-prod:
+    driver: local
+  grafana-data-prod:
+    driver: local
+
+networks:
+  rustyblox-network:
+    driver: bridge

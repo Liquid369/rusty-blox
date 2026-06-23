@@ -1,13 +1,14 @@
 /// Clear height resolution flags to force re-validation
-/// 
+///
 /// This will cause the next rustyblox startup to re-validate all transaction heights
 
 use rocksdb::{DB, Options, ColumnFamilyDescriptor};
+use rustyblox::config::{load_config, get_db_path};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "./data/blocks.db".to_string());
-    
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
     println!("📂 Opening database: {}", db_path);
     
     let mut opts = Options::default();

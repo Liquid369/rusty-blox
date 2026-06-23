@@ -43,11 +43,17 @@ const handleClick = (event) => {
 
 <style scoped>
 .card {
-  background: linear-gradient(180deg, #B359FC80, #B359FC10);
-  border: 2px solid var(--purple-main);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+  box-shadow: var(--shadow-sm), var(--glass-highlight);
   overflow: hidden;
-  transition: all var(--transition-base);
+  transition:
+    transform var(--transition-base),
+    border-color var(--transition-base),
+    box-shadow var(--transition-base);
   position: relative;
 }
 
@@ -57,9 +63,11 @@ const handleClick = (event) => {
   top: 0;
   left: 0;
   right: 0;
-  height: 3px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(var(--rgb-purple-accent), 0.6), transparent);
   opacity: 0;
   transition: opacity var(--transition-base);
+  pointer-events: none;
 }
 
 .card:hover::before {
@@ -67,10 +75,8 @@ const handleClick = (event) => {
 }
 
 .card-hover:hover {
-  border-color: var(--purple-accent);
-  box-shadow: 
-    0 8px 16px #110B1B50,
-    0 0 20px #110B1B20;
+  border-color: var(--glass-border-hover);
+  box-shadow: var(--shadow-md), var(--glow-purple), var(--glass-highlight);
   transform: translateY(-2px);
 }
 
@@ -79,23 +85,26 @@ const handleClick = (event) => {
 }
 
 .card-clickable:hover {
-  transform: translateY(-4px);
-  box-shadow: 
-    0 12px 24px rgba(0, 0, 0, 0.5),
-    0 0 30px rgba(89, 252, 179, 0.2);
-  border-color: var(--purple-accent);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-lg), var(--glow-purple), var(--glass-highlight);
+  border-color: var(--glass-border-hover);
 }
 
 .card-clickable:active {
-  transform: translateY(-2px);
+  transform: translateY(-1px);
+}
+
+.card-clickable:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .card-header {
   padding: var(--space-5) var(--space-6);
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--glass-border);
   font-weight: var(--weight-bold);
   font-size: var(--text-lg);
-  background: rgba(102, 45, 145, 0.1);
+  background: rgba(var(--rgb-purple-main), 0.16);
   position: relative;
 }
 
@@ -106,7 +115,7 @@ const handleClick = (event) => {
 .card-footer {
   padding: var(--space-4) var(--space-6);
   border-top: 1px solid var(--border-subtle);
-  background: #2a1b4280;
+  background: rgba(var(--rgb-purple-darkest), 0.4);
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }

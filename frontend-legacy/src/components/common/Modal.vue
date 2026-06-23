@@ -47,24 +47,33 @@ const close = () => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(var(--rgb-purple-darkest), 0.75);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  z-index: var(--z-modal);
   padding: var(--space-4);
 }
 
 .modal-container {
-  background: var(--card-bg);
+  background: linear-gradient(
+    180deg,
+    rgba(var(--rgb-purple-mid), 0.5) 0%,
+    rgba(var(--rgb-purple-dark), 0.92) 100%
+  );
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
+  backdrop-filter: blur(var(--blur-lg));
+  -webkit-backdrop-filter: blur(var(--blur-lg));
   max-width: 600px;
   width: 100%;
   max-height: 90vh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-xl), var(--glass-highlight);
 }
 
 .modal-header {
@@ -72,7 +81,7 @@ const close = () => {
   justify-content: space-between;
   align-items: center;
   padding: var(--space-6);
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .modal-header h3 {
@@ -98,8 +107,13 @@ const close = () => {
 }
 
 .close-button:hover {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.close-button:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .modal-content {
@@ -110,7 +124,7 @@ const close = () => {
 
 .modal-footer {
   padding: var(--space-6);
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border-subtle);
   display: flex;
   gap: var(--space-3);
   justify-content: flex-end;

@@ -31,32 +31,30 @@ pub use search::*;
 pub use analytics::*;
 pub use price::*;
 
-// Keep root and api handlers for backward compatibility
+// Degraded "/" fallback. main.rs only routes here when the SPA ServeDir did
+// NOT find `{paths.frontend_dist}/index.html` at startup, so we re-read the SAME
+// configured build path at request time (it may have been built after launch)
+// and serve nothing else. We deliberately do not probe other directories
+// (e.g. an older frontend-vue/dist): silently serving a stale UI from a
+// different build masks a missing/mislocated dist and ships the wrong frontend.
 pub async fn root_handler() -> axum::response::Html<String> {
-    // Try multiple frontend locations in priority order:
-    // 1. Production build (frontend-vue/dist)
-    // 2. Legacy frontend (frontend or frontend-legacy)
-    let frontend_paths = [
-        "frontend-vue/dist/index.html",
-        "frontend/index.html",
-        "frontend-legacy/index.html",
-    ];
-    
-    for path in &frontend_paths {
-        if let Ok(html) = std::fs::read_to_string(path) {
-            return axum::response::Html(html);
-        }
+    let frontend_dist = crate::config::get_global_config()
+        .get_string("paths.frontend_dist")
+        .unwrap_or_else(|_| "frontend-legacy/dist".to_string());
+    let index_path = std::path::Path::new(&frontend_dist).join("index.html");
+
+    if let Ok(html) = std::fs::read_to_string(&index_path) {
+        return axum::response::Html(html);
     }
-    
-    axum::response::Html(
+
+    axum::response::Html(format!(
         r#"<h1>Error: Frontend not found</h1>
-<p>Please ensure one of the following exists:</p>
-<ul>
-  <li><code>frontend-vue/dist/index.html</code> (production build: <code>cd frontend-vue && npm run build</code>)</li>
-  <li><code>frontend/index.html</code> (legacy frontend)</li>
-</ul>
-<p>For development, run the Vue frontend separately: <code>cd frontend-vue && npm run dev</code></p>"#.to_string()
-    )
+<p>No production build at <code>{}</code>.</p>
+<p>Build it and restart the service from the repository root (so the relative
+path resolves), or set <code>paths.frontend_dist</code> to an absolute path:</p>
+<pre>cd frontend-legacy &amp;&amp; npm ci &amp;&amp; npm run build</pre>"#,
+        index_path.display()
+    ))
 }
 
 pub async fn api_handler() -> &'static str {

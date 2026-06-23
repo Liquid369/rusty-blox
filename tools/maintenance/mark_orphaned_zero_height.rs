@@ -4,6 +4,7 @@
 /// and never made it into the canonical chain. They should be excluded from UTXO sets.
 
 use rocksdb::{DB, WriteBatch, Options, ColumnFamilyDescriptor, IteratorMode};
+use rustyblox::config::{load_config, get_db_path};
 use std::sync::Arc;
 use std::collections::HashMap;
 
@@ -12,23 +13,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║     MARK ORPHANED TRANSACTIONS (HEIGHT=0)          ║");
     println!("╚════════════════════════════════════════════════════╝\n");
-    
-    let db_path = "data/pivx";
-    println!("📂 Opening database: {}", db_path);
+
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+    println!("📂 Opening database: {db_path}");
     
     let opts = Options::default();
-    let cfs = vec![
-        ColumnFamilyDescriptor::new("default", Options::default()),
-        ColumnFamilyDescriptor::new("blocks", Options::default()),
-        ColumnFamilyDescriptor::new("transactions", Options::default()),
-        ColumnFamilyDescriptor::new("chain_metadata", Options::default()),
-        ColumnFamilyDescriptor::new("chain_state", Options::default()),
-        ColumnFamilyDescriptor::new("addr_index", Options::default()),
-        ColumnFamilyDescriptor::new("utxo", Options::default()),
-        ColumnFamilyDescriptor::new("utxo_undo", Options::default()),
-    ];
-    
-    let db = Arc::new(DB::open_cf_descriptors(&opts, db_path, cfs)?);
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+    let cfs: Vec<ColumnFamilyDescriptor> = cf_names
+        .iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+        .collect();
+
+    let db = Arc::new(DB::open_cf_descriptors(&opts, &db_path, cfs)?);
     println!("✅ Database opened\n");
     
     // Step 1: Build canonical chain txid set from 'B' index
@@ -97,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     
                     if tx_scanned % 500_000 == 0 {
-                        println!("   Scanned {} transactions...", tx_scanned);
+                        println!("   Scanned {tx_scanned} transactions...");
                     }
                 }
             }
@@ -175,8 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     println!("\n✅ COMPLETE!");
-    println!("   Fixed {} canonical transactions with correct heights", canonical_count);
-    println!("   Marked {} transactions as orphaned (height=-1)", orphaned_count);
+    println!("   Fixed {canonical_count} canonical transactions with correct heights");
+    println!("   Marked {orphaned_count} transactions as orphaned (height=-1)");
     println!("\n💡 Orphaned transactions are now excluded from:");
     println!("   - UTXO sets (no more 0-confirmation UTXOs)");
     println!("   - Address balances");

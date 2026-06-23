@@ -49,12 +49,15 @@ const statusText = computed(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  transition: background-color 0.3s ease;
+  transition: background-color var(--transition-slow), box-shadow var(--transition-slow);
 }
 
-/* Connected state - green with pulse */
+/* Connected state - green with pulse + glow */
 .status-connected .indicator-dot {
   background-color: var(--success);
+  box-shadow:
+    0 0 0 3px rgba(var(--rgb-green-accent), 0.15),
+    0 0 10px rgba(var(--rgb-green-accent), 0.5);
   animation: pulse 2s ease-in-out infinite;
 }
 
@@ -65,6 +68,7 @@ const statusText = computed(() => {
 /* Connecting state - yellow with pulse */
 .status-connecting .indicator-dot {
   background-color: var(--warning);
+  box-shadow: 0 0 8px rgba(246, 255, 120, 0.4);
   animation: pulse 1s ease-in-out infinite;
 }
 

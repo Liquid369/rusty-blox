@@ -17,6 +17,7 @@ use crate::types::AppState;
 use crate::batch_writer::BatchWriter;
 use crate::transactions::process_transaction;
 use crate::config::get_global_config;
+use tracing::{info, warn, debug};
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network magic
 const TX_BATCH_SIZE: usize = 10000;
@@ -32,7 +33,7 @@ async fn index_block_by_offset(
     _state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Construct blk file path
-    let filename = format!("blk{:05}.dat", file_num);
+    let filename = format!("blk{file_num:05}.dat");
     let mut path = blk_dir.clone();
     path.push(filename);
 
@@ -71,7 +72,7 @@ async fn index_block_by_offset(
     let parsed_header = parse_block_header_sync(&header_buffer, header_size)?;
     
     // Verify block hash matches what we expect from LevelDB
-    if &parsed_header.block_hash != block_hash {
+    if parsed_header.block_hash != block_hash {
         return Err(format!("Block hash mismatch at {}:{} - expected {}, got {}", 
             path.display(), data_pos,
             hex::encode(block_hash),
@@ -119,8 +120,8 @@ async fn index_block_by_offset(
             tx_batch.flush().await?;
         }
         Err(e) => {
-            eprintln!("⚠️  Error processing transactions for block {} at height {}: {}", 
-                hex::encode(block_hash), height, e);
+            warn!(block = %hex::encode(block_hash), height = height, error = %e,
+                  "Error processing transactions for block");
             // Flush what we have and continue
             tx_batch.flush().await?;
         }
@@ -182,9 +183,7 @@ pub async fn index_canonical_blocks_by_offset(
     db: Arc<DB>,
     state: AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n╔════════════════════════════════════════════════════╗");
-    println!("║    PATTERN A: OFFSET-BASED BLOCK INDEXING         ║");
-    println!("╚════════════════════════════════════════════════════╝\n");
+    info!("Pattern A: offset-based block indexing starting");
     
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
@@ -196,13 +195,12 @@ pub async fn index_canonical_blocks_by_offset(
     let sync_height = match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into()?),
         None => {
-            println!("⚠️  No sync_height found - canonical chain not loaded yet");
+            warn!("No sync_height found - canonical chain not loaded yet");
             return Ok(());
         }
     };
-    
-    println!("📊 Canonical chain height: {}", sync_height);
-    println!("📁 Block directory: {}", blk_dir.display());
+
+    info!(height = sync_height, blk_dir = %blk_dir.display(), "Canonical chain status");
     
     // Count how many blocks have offset mappings
     let mut blocks_with_offsets = 0;
@@ -215,7 +213,7 @@ pub async fn index_canonical_blocks_by_offset(
         let display_hash = match db.get_cf(&cf_metadata, height_bytes)? {
             Some(h) => h,
             None => {
-                eprintln!("⚠️  No block hash for height {}", height);
+                warn!(height = height, "No block hash found for height");
                 continue;
             }
         };
@@ -234,19 +232,17 @@ pub async fn index_canonical_blocks_by_offset(
             blocks_without_offsets += 1;
         }
     }
-    
-    println!("📊 Offset mapping coverage:");
-    println!("   {} blocks WITH offsets (can use Pattern A)", blocks_with_offsets);
-    println!("   {} blocks WITHOUT offsets (need fallback)", blocks_without_offsets);
-    
+
+    info!(with_offsets = blocks_with_offsets, without_offsets = blocks_without_offsets,
+          "Offset mapping coverage");
+
     if blocks_with_offsets == 0 {
-        println!("\n⚠️  No offset mappings found!");
-        println!("   Run sync again to generate offset mappings from LevelDB.");
+        warn!("No offset mappings found - run sync again to generate offset mappings from LevelDB");
         return Ok(());
     }
-    
+
     // Process blocks with offsets
-    println!("\n🚀 Starting offset-based indexing for {} blocks...\n", blocks_with_offsets);
+    info!(blocks = blocks_with_offsets, "Starting offset-based indexing");
     
     let config = get_global_config();
     let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(4) as usize;
@@ -276,7 +272,7 @@ pub async fn index_canonical_blocks_by_offset(
         };
         
         if offset_data.len() != 12 {
-            eprintln!("⚠️  Invalid offset data for height {}", height);
+            warn!(height = height, "Invalid offset data length");
             continue;
         }
         
@@ -292,7 +288,7 @@ pub async fn index_canonical_blocks_by_offset(
         tasks.push((height, internal_hash, file_num, data_pos));
     }
     
-    println!("📦 Processing {} blocks with {} workers...\n", tasks.len(), max_concurrent);
+    info!(blocks = tasks.len(), workers = max_concurrent, "Processing blocks with offset indexer");
     
     let total_tasks = tasks.len();
     let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -319,12 +315,13 @@ pub async fn index_canonical_blocks_by_offset(
                 let count = processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 
                 if count % 10000 == 0 {
-                    println!("  ✅ Processed {}/{} blocks ({:.1}%)", 
-                        count, total_tasks, (count as f64 / total_tasks as f64) * 100.0);
+                    debug!(count = count, total = total_tasks,
+                           progress_pct = format!("{:.1}", (count as f64 / total_tasks as f64) * 100.0),
+                           "Offset indexing progress");
                 }
-                
+
                 if let Err(e) = result {
-                    eprintln!("❌ Failed to index block at height {}: {}", height, e);
+                    warn!(height = height, error = %e, "Failed to index block");
                 }
             }
         })
@@ -333,9 +330,8 @@ pub async fn index_canonical_blocks_by_offset(
         .await;
     
     let final_count = processed.load(std::sync::atomic::Ordering::Relaxed);
-    
-    println!("\n✅ Pattern A indexing complete!");
-    println!("   Successfully processed {} blocks", final_count);
+
+    info!(blocks = final_count, "Pattern A offset indexing complete");
     
     Ok(())
 }

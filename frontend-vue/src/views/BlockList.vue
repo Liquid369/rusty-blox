@@ -24,41 +24,22 @@
           </UiCard>
         </div>
 
-        <div class="pagination" v-if="totalPages > 1">
-          <UiButton 
-            :disabled="currentPage === 1" 
-            @click="goToPage(currentPage - 1)"
-          >
-            ← Previous
-          </UiButton>
-          <span class="page-info">Page {{ currentPage }} of {{ totalPages }}</span>
-          <UiButton 
-            :disabled="currentPage === totalPages" 
-            @click="goToPage(currentPage + 1)"
-          >
-            Next →
-          </UiButton>
-        </div>
       </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { blockService } from '@/services'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import UiCard from '@/components/common/UiCard.vue'
-import UiButton from '@/components/common/UiButton.vue'
 
 const router = useRouter()
-const route = useRoute()
 
 const loading = ref(true)
 const blocks = ref([])
-const currentPage = ref(1)
-const totalPages = ref(1)
 const itemsPerPage = 25
 
 const formatDate = (timestamp) => {
@@ -73,20 +54,12 @@ const goToBlock = (height) => {
   router.push(`/block/${height}`)
 }
 
-const goToPage = (page) => {
-  router.push({ query: { page } })
-}
-
-const loadBlocks = async (page = 1) => {
+const loadBlocks = async () => {
   loading.value = true
   try {
     const data = await blockService.getRecentBlocks(itemsPerPage)
-    console.log('Block list data:', data)
     // API returns array directly
     blocks.value = Array.isArray(data) ? data : []
-    // TODO: API doesn't provide pagination info yet
-    totalPages.value = 1
-    currentPage.value = page
   } catch (error) {
     console.error('Failed to load blocks:', error)
   } finally {
@@ -94,14 +67,8 @@ const loadBlocks = async (page = 1) => {
   }
 }
 
-watch(() => route.query.page, (newPage) => {
-  const page = parseInt(newPage) || 1
-  loadBlocks(page)
-}, { immediate: true })
-
 onMounted(() => {
-  const page = parseInt(route.query.page) || 1
-  loadBlocks(page)
+  loadBlocks()
 })
 </script>
 
@@ -155,18 +122,6 @@ onMounted(() => {
 
 .block-time {
   color: var(--text-secondary);
-}
-
-.pagination {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-.page-info {
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
 }
 
 @media (max-width: 768px) {

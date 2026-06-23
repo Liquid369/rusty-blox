@@ -417,12 +417,12 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
                     // assign to unknown coinbase bucket
                     let key_snip = hex::encode(script.iter().take(6).cloned().collect::<Vec<u8>>());
                     if is_coinbase_output {
-                        let key = format!("UNKNOWN_COINBASE_{}", key_snip);
+                        let key = format!("UNKNOWN_COINBASE_{key_snip}");
                         let entry = coinbase_balances.entry(key).or_insert(0);
                         *entry = entry.saturating_add(amount);
                     }
                     if opts.include_unknown {
-                        let key = format!("UNKNOWN_{}", key_snip);
+                        let key = format!("UNKNOWN_{key_snip}");
                         let entry = balances.entry(key).or_insert(0);
                         *entry = entry.saturating_add(amount);
                     }
@@ -463,265 +463,171 @@ mod tests {
         assert!(decompress_amount(1000) > decompress_amount(10));
     }
 
+    // ---- PIVX CCoins fixture builders (match parse_coins_value's format) ----
+
+    /// Minimal CompactSize encoder.
+    fn compact(n: u64) -> Vec<u8> {
+        if n < 253 {
+            vec![n as u8]
+        } else if n <= 0xffff {
+            let mut v = vec![0xfd];
+            v.extend_from_slice(&(n as u16).to_le_bytes());
+            v
+        } else {
+            let mut v = vec![0xfe];
+            v.extend_from_slice(&(n as u32).to_le_bytes());
+            v
+        }
+    }
+
+    /// On-disk compressed-script field for a SPECIAL script: nsize == the type
+    /// code (0=P2PKH, 1=P2SH, 2..=5=P2PK) followed by its 20- or 32-byte payload.
+    fn special_script(type_code: u8, payload: &[u8]) -> Vec<u8> {
+        let mut v = vec![type_code];
+        v.extend_from_slice(payload);
+        v
+    }
+
+    /// On-disk field for a FULL (non-special) script: nsize == script.len() + 6,
+    /// then the raw script bytes.
+    fn full_script(script: &[u8]) -> Vec<u8> {
+        let mut v = compact(script.len() as u64 + 6);
+        v.extend_from_slice(script);
+        v
+    }
+
+    /// Build a CCoins raw value in PIVX encoding:
+    ///   code = height*4 + coinbase*2 + coinstake*1, a mask with each `vout` bit
+    ///   set, then per-output `compact(amt) ++ script_field` in ascending vout.
+    fn coins(height: u32, coinbase: bool, coinstake: bool, outs: &[(usize, u64, Vec<u8>)]) -> Vec<u8> {
+        let code = height as u64 * 4 + u64::from(coinbase) * 2 + u64::from(coinstake);
+        let max_vout = outs.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
+        let mask_len = max_vout / 8 + 1;
+        let mut mask = vec![0u8; mask_len];
+        for (v, _, _) in outs {
+            mask[v / 8] |= 1 << (v % 8);
+        }
+        let mut raw = compact(code);
+        raw.extend(compact(mask_len as u64));
+        raw.extend_from_slice(&mask);
+        let mut sorted: Vec<&(usize, u64, Vec<u8>)> = outs.iter().collect();
+        sorted.sort_by_key(|(v, _, _)| *v);
+        for (_, amt, field) in sorted {
+            raw.extend(compact(*amt));
+            raw.extend_from_slice(field);
+        }
+        raw
+    }
+
     #[test]
     fn test_parse_coins_value_simple_p2pkh() {
-        // Build a minimal CCoins raw value:
-        // header = height*2 + is_coinbase -> height=100 => header=200
-        let header: u8 = 200u8; // fits in one-byte compact size
-        // mask length = 1
-        let mask_len: u8 = 1u8;
-        // mask byte: bit0 set -> vout 0 present
-        let mask_byte: u8 = 0x01;
-        // amt_compact = 1 -> decompress to 1
-        let amt_compact: u8 = 1u8;
-        // script: compressed P2PKH: 0x00 + 20 bytes of 0x11
-        let mut script_comp: Vec<u8> = Vec::with_capacity(21);
-        script_comp.push(0x00);
-        script_comp.extend_from_slice(&[0x11u8; 20]);
-
-        let script_len: u8 = script_comp.len() as u8; // 21
-
-        // assemble raw bytes
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
+        let raw = coins(100, false, false, &[(0, 1, special_script(0x00, &[0x11u8; 20]))]);
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.height, 100);
         assert!(!parsed.is_coinbase);
         assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
-    assert_eq!(*vout, 0usize);
-    assert_eq!(*amount, 1u64);
-    // decompress_script should produce a 25-byte P2PKH script (direct check)
-    let decomp = decompress_script(&script_comp);
+        let (vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
+        assert_eq!(*vout, 0usize);
+        assert_eq!(*amount, 1u64);
+        // P2PKH decompresses to a 25-byte OP_DUP OP_HASH160 ... script.
+        let decomp = decompress_script(&special_script(0x00, &[0x11u8; 20]));
         assert_eq!(decomp.len(), 25);
-        // check OP_DUP OP_HASH160 at start
         assert_eq!(decomp[0], 0x76);
         assert_eq!(decomp[1], 0xa9);
     }
 
     #[test]
     fn test_parse_coins_value_multi_byte_mask() {
-        // header = height*2 + is_coinbase -> height=300 => header=600
-        // We'll construct the compact-size encoded header manually.
-        // CompactSize: 600 -> 0xfd <u16 little-endian>
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(0xfdu8);
-        raw.extend_from_slice(&600u16.to_le_bytes());
-
-        // mask length = 2 bytes
-        raw.push(0x02u8);
-        // mask bytes: first byte 0x00, second byte 0x04 (bit 2 set -> vout index 8 + 2 = 10)
-        raw.push(0x00u8);
-        raw.push(0x04u8);
-
-        // amt_compact for that vout = 1
-        raw.push(0x01u8);
-        // script_comp: compressed P2PKH 0x00 + 20 bytes of 0x22
-        let mut script_comp: Vec<u8> = Vec::with_capacity(21);
-        script_comp.push(0x00);
-        script_comp.extend_from_slice(&[0x22u8; 20]);
-        // script_len
-        raw.push(script_comp.len() as u8);
-        raw.extend_from_slice(&script_comp);
-
+        // vout 10 -> mask byte 1, bit 2 (a 2-byte mask).
+        let raw = coins(300, false, false, &[(10, 1, special_script(0x00, &[0x22u8; 20]))]);
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.height, 300);
         assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
+        let (vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
         assert_eq!(*vout, 10usize);
         assert_eq!(*amount, 1u64);
     }
 
     #[test]
     fn test_parse_coins_value_p2sh() {
-        // header = height 50 -> header=100
-        let header: u8 = 100u8;
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 5u8; // arbitrary
-        // script: compressed P2SH: 0x01 + 20 bytes of 0x33
-        let mut script_comp: Vec<u8> = Vec::with_capacity(21);
-        script_comp.push(0x01);
-        script_comp.extend_from_slice(&[0x33u8; 20]);
-        let script_len: u8 = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
+        let raw = coins(50, false, false, &[(0, 5, special_script(0x01, &[0x33u8; 20]))]);
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
-        // P2SH decompressed script should start with OP_HASH160 (0xa9)
+        let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
+        // P2SH: OP_HASH160 (0xa9) ... OP_EQUAL (0x87)
         assert_eq!(script[0], 0xa9);
-        // and end with OP_EQUAL (0x87)
-        assert_eq!(script[script.len()-1], 0x87);
+        assert_eq!(script[script.len() - 1], 0x87);
     }
 
     #[test]
     fn test_parse_coins_value_p2pk_compressed() {
-        // header = height 10 -> header=20
-        let header: u8 = 20u8;
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 2u8; // arbitrary
-        // script: compressed P2PK: 0x02 + 32 bytes of 0x44
-        let mut script_comp: Vec<u8> = Vec::with_capacity(33);
-        script_comp.push(0x02);
-        script_comp.extend_from_slice(&[0x44u8; 32]);
-        let script_len: u8 = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
+        let raw = coins(10, false, false, &[(0, 2, special_script(0x02, &[0x44u8; 32]))]);
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
-        // compressed P2PK decompressed script should start with push opcode 0x21
+        let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
+        // Compressed P2PK decompresses to PUSH33 (0x21) <type 0x02> <32-byte key> ...
         assert_eq!(script[0], 0x21);
-        // next byte should be the compression flag 0x02
         assert_eq!(script[1], 0x02);
     }
 
     #[test]
     fn test_parse_coins_value_zero_amount_present() {
-        // header = height 5 -> header=10
-        let header: u8 = 10u8;
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 0u8; // represents zero amount
-        // script: compressed P2PKH: 0x00 + 20 bytes of 0x55
-        let mut script_comp: Vec<u8> = Vec::with_capacity(21);
-        script_comp.push(0x00);
-        script_comp.extend_from_slice(&[0x55u8; 20]);
-        let script_len: u8 = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
+        let raw = coins(5, false, false, &[(0, 0, special_script(0x00, &[0x55u8; 20]))]);
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (_vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
+        let (_vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
         assert_eq!(*amount, 0u64);
     }
 
     #[test]
     fn test_parse_coins_value_multiple_vouts() {
-        // header = height 7 -> header=14
-        let header: u8 = 14u8;
-        let mask_len: u8 = 1u8;
-        // bits 0 and 3 set => 0b00001001 = 0x09
-        let mask_byte: u8 = 0x09;
-        // For vout 0: amt_compact=1, script_comp A
-        let amt0: u8 = 1u8;
-        let mut script_comp0: Vec<u8> = Vec::with_capacity(21);
-        script_comp0.push(0x00);
-        script_comp0.extend_from_slice(&[0x66u8; 20]);
-        // For vout 3: amt_compact=3, script_comp B
-        let amt3: u8 = 3u8;
-        let mut script_comp3: Vec<u8> = Vec::with_capacity(21);
-        script_comp3.push(0x00);
-        script_comp3.extend_from_slice(&[0x77u8; 20]);
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        // vout 0
-        raw.push(amt0);
-        raw.push(script_comp0.len() as u8);
-        raw.extend_from_slice(&script_comp0);
-        // vout 3
-        raw.push(amt3);
-        raw.push(script_comp3.len() as u8);
-        raw.extend_from_slice(&script_comp3);
+        // vouts 0 and 3 set in a single mask byte.
+        let raw = coins(
+            7,
+            false,
+            false,
+            &[
+                (0, 1, special_script(0x00, &[0x66u8; 20])),
+                (3, 3, special_script(0x00, &[0x77u8; 20])),
+            ],
+        );
 
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         // ensure amounts match the CompressAmount decompression
         assert_eq!(parsed.unspent_outputs.len(), 2);
-    let (v0, a0, _s0, _k0, _addrs0) = &parsed.unspent_outputs[0];
-    let (v1, a1, _s1, _k1, _addrs1) = &parsed.unspent_outputs[1];
+        let (v0, a0, _s0, _k0, _addrs0) = &parsed.unspent_outputs[0];
+        let (v1, a1, _s1, _k1, _addrs1) = &parsed.unspent_outputs[1];
         assert_eq!(*v0, 0usize);
         assert_eq!(*a0, 1u64);
         assert_eq!(*v1, 3usize);
-        assert_eq!(*a1, decompress_amount(amt3 as u64));
+        assert_eq!(*a1, decompress_amount(3));
     }
 
     #[test]
     fn test_parse_coins_value_coldstake_detection() {
-        // header = height 20 -> header=40
-        let header: u8 = 40u8;
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 10u8;
-
-        // Construct a cold-stake-like script containing OP_CHECKCOLDSTAKEVERIFY (0xd2) and OP_ELSE (0x67)
-        let mut script_comp: Vec<u8> = Vec::new();
-        script_comp.extend_from_slice(&[0x76, 0xa9]); // leading opcodes
-        script_comp.push(0xd2); // OP_CHECKCOLDSTAKEVERIFY
-        script_comp.extend_from_slice(&[0x11u8; 20]); // staker hash
-        script_comp.push(0x67); // OP_ELSE
-        script_comp.extend_from_slice(&[0x22u8; 20]); // owner hash
-        script_comp.extend_from_slice(&[0x88, 0xac]); // end ops
-
-        let script_len = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
-    let parsed = parse_coins_value(&raw).expect("parse should succeed");
-    assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
-        assert!(matches!(kind, OutputKind::ColdStake{..}));
+        // Canonical 51-byte P2CS script (see scriptpubkey_to_staking_address):
+        // OP_DUP OP_HASH160 OP_ROT OP_IF OP_CHECKCOLDSTAKEVERIFY 0x14 <staker20>
+        // OP_ELSE 0x14 <owner20> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG.
+        let mut cs: Vec<u8> = vec![0x76, 0xa9, 0x7b, 0x63, 0xd2, 0x14];
+        cs.extend_from_slice(&[0x11u8; 20]); // staker hash
+        cs.push(0x67); // OP_ELSE
+        cs.push(0x14);
+        cs.extend_from_slice(&[0x22u8; 20]); // owner hash
+        cs.extend_from_slice(&[0x68, 0x88, 0xac]); // OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
+        let raw = coins(20, false, false, &[(0, 10, full_script(&cs))]);
+        let parsed = parse_coins_value(&raw).expect("parse should succeed");
+        assert_eq!(parsed.unspent_outputs.len(), 1);
+        let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
+        assert!(matches!(kind, OutputKind::ColdStake { .. }));
     }
 
     #[test]
     fn test_parse_coins_value_zerocoin_detection() {
-        // header = height 2 -> header=4
-        let header: u8 = 4u8;
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 1u8;
-        // script_comp starting with 0xc1 should map to ZerocoinMint
-        let script_comp: Vec<u8> = vec![0xc1u8, 0x00, 0x01];
-        let script_len = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
-    let parsed = parse_coins_value(&raw).expect("parse should succeed");
-    assert_eq!(parsed.unspent_outputs.len(), 1);
-    let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
+        // 0xc1 = OP_ZEROCOINMINT.
+        let raw = coins(2, false, false, &[(0, 1, full_script(&[0xc1u8, 0x00, 0x01]))]);
+        let parsed = parse_coins_value(&raw).expect("parse should succeed");
+        assert_eq!(parsed.unspent_outputs.len(), 1);
+        let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
         match kind {
             OutputKind::Zerocoin(sub) => assert_eq!(sub, "mint"),
             _ => panic!("expected Zerocoin kind"),
@@ -730,28 +636,11 @@ mod tests {
 
     #[test]
     fn test_parse_coins_value_coinbase_flag() {
-        // header = height 1 -> header=2 where is_coinbase bit set
-        // CompactSize header 2 indicates height=1 and not coinbase; to indicate coinbase we set header = height*2+1
-        let header: u8 = 3u8; // height=1, is_coinbase=true -> 1*2 + 1 = 3
-        let mask_len: u8 = 1u8;
-        let mask_byte: u8 = 0x01; // vout 0
-        let amt_compact: u8 = 7u8;
-        let mut script_comp: Vec<u8> = Vec::with_capacity(21);
-        script_comp.push(0x00);
-        script_comp.extend_from_slice(&[0x11u8; 20]);
-        let script_len: u8 = script_comp.len() as u8;
-
-        let mut raw: Vec<u8> = Vec::new();
-        raw.push(header);
-        raw.push(mask_len);
-        raw.push(mask_byte);
-        raw.push(amt_compact);
-        raw.push(script_len);
-        raw.extend_from_slice(&script_comp);
-
-    let parsed = parse_coins_value(&raw).expect("parse should succeed");
-    assert!(parsed.is_coinbase);
-    let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
+        // code = height*4 + 2 sets the coinbase bit.
+        let raw = coins(1, true, false, &[(0, 7, special_script(0x00, &[0x11u8; 20]))]);
+        let parsed = parse_coins_value(&raw).expect("parse should succeed");
+        assert!(parsed.is_coinbase);
+        let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
         assert!(matches!(kind, OutputKind::Coinbase));
     }
 }

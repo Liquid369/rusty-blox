@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["Liquid369"]
 edition = "2021"
 
+[features]
+# Opt-in extra address-index diagnostics (e.g. logging skipped duplicate UTXOs
+# during reorg/reindex). Off by default; enable with --features debug-address-index.
+debug-address-index = []
+
 [[bin]]
 name = "rustyblox"
 path = "src/main.rs"
@@ -24,6 +29,14 @@ path = "tools/diagnostics/count_orphans.rs"
 [[bin]]
 name = "inspect-leveldb"
 path = "tools/diagnostics/inspect_leveldb.rs"
+
+[[bin]]
+name = "db-query"
+path = "tools/diagnostics/db_query.rs"
+
+[[bin]]
+name = "live-debug"
+path = "tools/diagnostics/live_debug.rs"
 
 # Essential maintenance tools
 [[bin]]
@@ -68,9 +81,32 @@ path = "tools/maintenance/validate_all_tx_heights.rs"
 # Chainstate import and verification
 [[bin]]
 name = "import-chainstate"
-path = "src/bin/import-chainstate.rs"
+path = "tools/maintenance/import_chainstate.rs"
+
+# chain_state marker admin (get/set/clear e.g. address_index_complete)
+[[bin]]
+name = "db-marker"
+path = "tools/maintenance/db_marker.rs"
+
+# Live daily-analytics ops: rebuild the persistent orphan index
+[[bin]]
+name = "build-orphan-index"
+path = "tools/maintenance/build_orphan_index.rs"
+
+# Live daily-analytics ops: reset the live watermark + rebuild recent days
+[[bin]]
+name = "reset-live-watermark"
+path = "tools/maintenance/reset_live_watermark.rs"
 
 [dependencies]
+# jemalloc global allocator: returns freed memory to the OS far more aggressively
+# than the system allocator (the macOS default retained the per-tx deserialization
+# churn, inflating enrichment RSS). Set as #[global_allocator] in each binary root.
+tikv-jemallocator = "=0.6.0"
+# Direct handle to jemalloc's mallctl (already in the lock via jemallocator) so
+# the sync can force an arena purge at the parse->enrich phase boundary, handing
+# freed-but-retained parse/resolve pages back to the OS.
+tikv-jemalloc-sys = "=0.6.0"
 hex = "0.4.3"
 rocksdb = "0.21.0"
 byteorder = "1.3"
@@ -90,7 +126,7 @@ tokio = { version = "1.0", features = ["full"] }
 once_cell = "1.8.0"
 lazy_static = "1.4.0"
 axum = { version = "0.8.4", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "timeout", "fs"] }
 futures = "0.3"
 tokio-stream = "0.1.15"
 tokio-util = { version = "0.7", features = ["io"] }

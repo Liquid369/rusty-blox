@@ -9,6 +9,7 @@ use axum::{
     Json,
 };
 use tracing::warn;
+use crate::emission::era_block_reward;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockDetail {
@@ -24,6 +25,9 @@ pub struct BlockDetail {
     pub difficulty: f64,
     pub previousblockhash: Option<String>,
     pub nextblockhash: Option<String>,
+    /// Block subsidy minted at this height (PIV), from the deterministic
+    /// emission schedule — always correct regardless of input resolution.
+    pub reward: f64,
     pub tx: Vec<TransactionSummary>,
 }
 
@@ -236,9 +240,10 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
         difficulty: header.difficulty,
         previousblockhash,
         nextblockhash,
+        reward: era_block_reward(height) as f64 / 100_000_000.0,
         tx: transactions,
     };
-    
+
     Ok(Json(block_detail))
 }
 
@@ -280,7 +285,7 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
         data[72..76].try_into()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     );
-    let bits = format!("{:08x}", bits_value);
+    let bits = format!("{bits_value:08x}");
     
     // Parse nonce (4 bytes at offset 76)
     let nonce = u32::from_le_bytes(
@@ -302,14 +307,14 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
 }
 
 fn bits_to_difficulty(bits: u32) -> f64 {
+    // difficulty = difficulty-1 target / current target, NOT the raw target.
+    // The old version returned the raw target (~1e63) instead of difficulty.
     let exponent = (bits >> 24) as i32;
     let mantissa = (bits & 0x00ffffff) as f64;
-    
-    if exponent <= 3 {
-        mantissa / 256_f64.powi(3 - exponent)
-    } else {
-        mantissa * 256_f64.powi(exponent - 3)
+    if mantissa == 0.0 {
+        return 0.0;
     }
+    (65535.0 * 256_f64.powi(0x1d - 3)) / (mantissa * 256_f64.powi(exponent - 3))
 }
 
 fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSummary>, StatusCode> {
@@ -355,7 +360,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
-                                enrich_transaction_inputs(db, cf_transactions, &mut tx);
+                                enrich_transaction_inputs(db, cf_transactions, &mut tx, height);
                                 transactions.push(tx);
                             } else {
                                 warn!(txid = %txid_str, "Failed to parse transaction");
@@ -375,7 +380,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
     Ok(transactions)
 }
 
-fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary) {
+fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary, height: i32) {
     
     
     for input in &mut tx.vin {
@@ -444,18 +449,34 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
     // Calculate fees and rewards based on transaction type
     if let Some(ref tx_type) = tx.tx_type {
         if tx_type == "coinstake" {
-            // Coinstake: reward is output - input (stake reward)
-            tx.reward = Some(tx.value_out - tx.value_in);
+            // Coinstake reward = newly minted = outputs - inputs. That formula
+            // is only valid when EVERY input value resolved: a zerocoin-stake
+            // (zPoS) input is a serial number with no UTXO prevout, so its value
+            // is unresolvable and out-in would report principal+reward (e.g.
+            // 5005 instead of 5). When any input is unresolved, fall back to the
+            // deterministic emission subsidy. (zPoS predates budget payouts, so
+            // the subsidy is the exact minted amount there.)
+            let any_input_unresolved = tx.vin.iter().any(|i| i.value.is_none());
+            let reward = if !tx.vin.is_empty() && !any_input_unresolved {
+                tx.value_out - tx.value_in
+            } else {
+                era_block_reward(height) as f64 / 100_000_000.0
+            };
+            tx.reward = Some(reward);
             tx.fees = 0.0;
         } else if tx_type == "coinbase" {
             // Coinbase: reward already set to value_out in parse_transaction_binary
             tx.fees = 0.0;
         }
     } else {
-        // Normal transaction: calculate fees
+        // Normal transaction fee = transparent_in + valueBalance - transparent_out.
+        // Sapling value moves via valueBalance (PIV; 0 for transparent txs);
+        // ignoring it booked the entire shielded amount as fee. Clamp to a sane
+        // range to reject any residual mis-join.
         if tx.value_in > 0.0 {
-            let calculated_fee = tx.value_in - tx.value_out;
-            tx.fees = if calculated_fee < 0.0 { 0.0 } else { calculated_fee };
+            let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
+            let calculated_fee = tx.value_in + value_balance - tx.value_out;
+            tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) { 0.0 } else { calculated_fee };
         } else {
             tx.fees = 0.0;
         }
@@ -551,7 +572,7 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
     // because the output includes staking rewards. We should report 0 fee for these.
     // For regular transactions and coinbase, calculate normally.
     let has_coinbase_input = vin.iter().any(|i| i.coinbase.is_some());
-    let first_output_empty = vout.first().map_or(false, |o| o.value == 0.0 && o.addresses.is_empty());
+    let first_output_empty = vout.first().is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
     
     let (tx_type, reward, fees) = if has_coinbase_input {
         if first_output_empty && vout.len() > 1 {
@@ -654,8 +675,8 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
     // - Coinbase: first input has coinbase data, first output has value (standard mining reward)
     // - Coinstake: first output is empty (0 value, 0-length script), has regular inputs
     // - Normal: regular transaction
-    let has_coinbase_input = vin.first().map_or(false, |i| i.coinbase.is_some());
-    let first_output_empty = vout.first().map_or(false, |o| 
+    let has_coinbase_input = vin.first().is_some_and(|i| i.coinbase.is_some());
+    let first_output_empty = vout.first().is_some_and(|o| 
         o.value == 0.0 && o.addresses.is_empty()
     );
     

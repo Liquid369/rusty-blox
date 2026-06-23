@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::cache::CacheManager;
 use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
 use crate::parser::{deserialize_utxos, deserialize_transaction, deserialize_transaction_blocking};
-use crate::maturity::{filter_spendable_utxos, get_current_height};
+use crate::maturity::get_current_height;
 use super::types::{AddressInfo, AddressQuery, XPubInfo, UTXO, UtxoQuery};
 use super::transactions::{fetch_transactions_batch};
 
@@ -25,17 +25,141 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
     format!("{}...{}", &xpub[..8], &xpub[xpub.len()-4..])
 }
 
+/// P2-B: validate a PIVX transparent address before treating it as a real
+/// account. The prior handlers accepted any string, so a one-char typo of a
+/// real address returned HTTP 200 with balance:0 (a fake zero account) — the
+/// reference Blockbook returns 400 on a checksum mismatch, and `/search`
+/// already NotFounds the same string.
+///
+/// We validate the base58check CHECKSUM (class-agnostic) rather than enumerate
+/// version bytes: `bs58::decode(addr).with_check(None)` recomputes the 4-byte
+/// double-SHA256 checksum and fails on any typo, regardless of address class.
+/// A flipped character almost always breaks the checksum, so this catches the
+/// bug without risking rejection of a valid address.
+///
+/// Accepted decoded-payload lengths (checksum already stripped by with_check):
+///   - 21 bytes = 1-byte version + 20-byte hash160. Covers every standard
+///     class: D (P2PKH v30), S (cold-staking staker v63), 6/7 (P2SH v13),
+///     E (single-byte exchange variants).
+///   - 23 bytes = 3-byte EXM prefix [0x01,0xb9,0xa2] + 20-byte hash160. Covers
+///     EXM exchange addresses (OP_EXCHANGEADDR 0xe0), which are 36 chars and
+///     use a 3-byte prefix (see encode_pivx_exchange_address in parser.rs).
+///
+/// This deliberately does NOT hard-code a single version byte (that would
+/// exclude S/6/7/E). The checksum + sane-length test is the whole guard.
+///
+/// Implementation note: we decode raw base58 and verify the trailing 4-byte
+/// double-SHA256 checksum by hand (the same computation bs58's `with_check`
+/// performs) because the `bs58` crate is pulled in without its `check`
+/// feature. `Sha256` is already a top-level dependency (see parser.rs).
+pub(crate) fn is_valid_address(addr: &str) -> bool {
+    match decode_base58check(addr) {
+        // 21 = version(1) + hash160(20); 23 = EXM prefix(3) + hash160(20).
+        Some(payload) => payload.len() == 21 || payload.len() == 23,
+        None => false,
+    }
+}
+
+/// Decode a base58check string and verify its 4-byte double-SHA256 checksum.
+/// Returns the version+payload bytes (checksum stripped) on success, or None
+/// if the base58 is malformed, too short to hold a checksum, or the checksum
+/// does not match. Class-agnostic: works for every address class and xpubs.
+fn decode_base58check(s: &str) -> Option<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+
+    let raw = bs58::decode(s).into_vec().ok()?;
+    // Need at least the 4 checksum bytes (plus some payload).
+    if raw.len() <= 4 {
+        return None;
+    }
+    let (payload, checksum) = raw.split_at(raw.len() - 4);
+    let first = Sha256::digest(payload);
+    let second = Sha256::digest(&first);
+    if second[..4] == checksum[..] {
+        Some(payload.to_vec())
+    } else {
+        None
+    }
+}
+
+/// P2-B: cheap plausibility check for a BIP32 extended public key, used to
+/// reject typo/garbage input at the top of `xpub_v2` before the derivation
+/// scan. PIVX reuses Bitcoin's xpub version bytes (0x0488B21E -> "xpub"), so a
+/// real account-level key must start with "xpub" and decode as base58check to
+/// the standard 78-byte serialization (4 version + 1 depth + 4 fingerprint +
+/// 4 child + 32 chain code + 33 pubkey). `with_check(None)` validates the same
+/// 4-byte double-SHA256 checksum used by addresses, so a one-char typo fails.
+/// `compute_xpub_info` remains the authoritative parser (depth, key validity).
+pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
+    if !xpub.starts_with("xpub") {
+        return false;
+    }
+    match decode_base58check(xpub) {
+        // 78 = 4 version + 1 depth + 4 parent fingerprint + 4 child number
+        //      + 32 chain code + 33 compressed pubkey.
+        Some(payload) => payload.len() == 78,
+        None => false,
+    }
+}
+
+/// Per-request work cap for compute_address_info's full-history loops (P1-3).
+/// Addresses with more than this many txs skip the O(history) recompute/sort and
+/// serve the persisted 'r'/'s' aggregates instead. Configurable via
+/// RUSTYBLOX_ADDR_MAX_TX_SCAN; defaults to 50_000 (well above any normal address).
+fn address_recompute_cap() -> usize {
+    std::env::var("RUSTYBLOX_ADDR_MAX_TX_SCAN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50_000)
+}
+
+/// Read the exact persisted per-address totals written by the enrichment phase:
+/// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
+/// Returns (total_received, total_sent); missing keys read as 0.
+async fn read_address_totals(db: &Arc<DB>, address: &str) -> (i64, i64) {
+    let r_key = format!("r{address}").into_bytes();
+    let s_key = format!("s{address}").into_bytes();
+    let db_clone = Arc::clone(db);
+
+    tokio::task::spawn_blocking(move || -> (i64, i64) {
+        let read_i64 = |key: &[u8]| -> i64 {
+            db_clone
+                .cf_handle("addr_index")
+                .and_then(|cf| db_clone.get_cf(&cf, key).ok().flatten())
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+                .map(i64::from_le_bytes)
+                .unwrap_or(0)
+        };
+        (read_i64(&r_key), read_i64(&s_key))
+    })
+    .await
+    .unwrap_or((0, 0))
+}
+
 /// GET /api/v2/address/{address}
 /// Returns address balance, transactions, and history.
-/// 
+///
 /// **CACHED**: 30 second TTL (balances change with new blocks)
 /// Note: Complex endpoint, cache provides ~30% improvement
 pub async fn addr_v2(
-    AxumPath(address): AxumPath<String>, 
+    AxumPath(address): AxumPath<String>,
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Json<AddressInfo> {
+) -> Result<Json<AddressInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: reject invalid/mistyped addresses with 400 instead of serving a
+    // fake zero account (HTTP 200, balance:0). Matches Blockbook and the
+    // existing /search behaviour for the same string.
+    if !is_valid_address(&address) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(format!(
+                "Invalid address '{address}': checksum mismatch"
+            ))),
+        ));
+    }
+
     let cache_key = format!("addr:{}:{}:{}", address, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
@@ -52,10 +176,12 @@ pub async fn addr_v2(
         .await;
     
     match result {
-        Ok(info) => Json(info),
+        Ok(info) => Ok(Json(info)),
         Err(_) => {
-            // Fallback: return empty address info
-            Json(AddressInfo {
+            // Fallback: return empty address info. The address has already
+            // passed checksum validation above, so this is a transient DB/compute
+            // error for a real address — not the P2-B fake-zero-account case.
+            Ok(Json(AddressInfo {
                 page: Some(params.page),
                 total_pages: Some(1),
                 items_on_page: Some(params.page_size),
@@ -68,7 +194,7 @@ pub async fn addr_v2(
                 txs: 0,
                 txids: Some(vec![]),
                 transactions: None,
-            })
+            }))
         }
     }
 }
@@ -78,7 +204,7 @@ async fn compute_address_info(
     address: &str,
     params: &AddressQuery,
 ) -> Result<AddressInfo, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("a{}", address);
+    let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     
@@ -94,7 +220,7 @@ async fn compute_address_info(
     let unspent_utxos = deserialize_utxos(&result).await;
     
     // Get transaction list
-    let tx_list_key = format!("t{}", address);
+    let tx_list_key = format!("t{address}");
     let tx_list_key_bytes = tx_list_key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     
@@ -111,15 +237,13 @@ async fn compute_address_info(
         .map(|chunk| chunk.to_vec())
         .collect();
     
-    let current_height = get_current_height(db).unwrap_or(0);
-    let spendable_utxos = filter_spendable_utxos(
-        unspent_utxos.clone(),
-        Arc::clone(db),
-        current_height,
-    ).await;
-    
+    // Blockbook parity: balance INCLUDES immature coinbase/coinstake outputs.
+    // (Maturity filtering here made balances diverge from the reference explorer
+    // by every coinstake output under 100 confirmations.)
+    let spendable_utxos = unspent_utxos.clone();
+
     let mut balance: i64 = 0;
-    
+
     for (txid_hash, output_index) in &spendable_utxos {
         let mut key = vec![b't'];
         key.extend(txid_hash);
@@ -152,85 +276,116 @@ async fn compute_address_info(
         }
     }
     
-    let mut total_received: i64 = 0;
-    for txid_internal in &all_txids {
-        let mut key = vec![b't'];
-        key.extend(txid_internal);
-        let key_clone = key.clone();
-        let db_clone = Arc::clone(db);
-        let address_clone = address.to_string();
-        
-        let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-            let cf_transactions = db_clone.cf_handle("transactions")?;
-            db_clone.get_cf(&cf_transactions, &key_clone).ok()?
-        })
-        .await
-        .ok()
-        .flatten();
-        
-        if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
-                // Skip orphaned and unresolved transactions
-                let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
-                    continue;
-                }
-                let tx_data_len = tx_data.len() - 8;
-                if tx_data_len > 0 {
-                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                
-                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                        for output in &tx.outputs {
-                            if output.address.contains(&address_clone) {
-                                total_received += output.value;
+    // P1-3 interim DoS cap: compute_address_info does full-history loops (the
+    // total_received recompute below and the per-txid height-sort further down).
+    // On a huge address (e.g. 325k txs) those scans cost ~11-21s each and a
+    // handful of concurrent requests saturate the blocking pool to HTTP 408.
+    // The full fix is persisted per-address aggregates (fast-follow); for now we
+    // bound worst-case work per request: above address_recompute_cap() we DO NOT
+    // do the unbounded recompute/sort. The balance loop above is already bounded by the
+    // unspent UTXO count and matches the reference explorer, so it always runs.
+    //
+    // The enrichment phase already persists exact per-address totals under
+    // 'r'+address (totalReceived) and 's'+address (totalSent) as i64 LE, so the
+    // capped path stays EXACT rather than approximate — it just trades the
+    // O(history) scan for two point lookups.
+    let recompute_cap = address_recompute_cap();
+    let over_cap = all_txids.len() > recompute_cap;
+
+    let (total_received, total_sent) = if over_cap {
+        read_address_totals(db, address).await
+    } else {
+        let mut total_received: i64 = 0;
+        for txid_internal in &all_txids {
+            let mut key = vec![b't'];
+            key.extend(txid_internal);
+            let key_clone = key.clone();
+            let db_clone = Arc::clone(db);
+            let address_clone = address.to_string();
+
+            let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+                let cf_transactions = db_clone.cf_handle("transactions")?;
+                db_clone.get_cf(&cf_transactions, &key_clone).ok()?
+            })
+            .await
+            .ok()
+            .flatten();
+
+            if let Some(tx_data) = tx_data {
+                if tx_data.len() >= 8 {
+                    // Filter hardening: only skip genuinely orphaned (-1) txs. A
+                    // transient HEIGHT_UNRESOLVED read must not drop a tx that the
+                    // 't' index attributes to this address — that would diverge
+                    // total_received from the (no-filter) balance loop. On the clean
+                    // DB nothing reads orphan/unresolved, so this is unchanged.
+                    let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                    if block_height == HEIGHT_ORPHAN {
+                        continue;
+                    }
+                    let tx_data_len = tx_data.len() - 8;
+                    if tx_data_len > 0 {
+                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
+                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
+
+                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
+                            for output in &tx.outputs {
+                                if output.address.contains(&address_clone) {
+                                    total_received += output.value;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
+        (total_received, total_received - balance)
+    };
     
-    let total_sent = total_received - balance;
-    
+    // P1-1: the stored 't'-index bytes are ALREADY canonical display order
+    // (parser.rs hash_txid reverses to display, and the tx CF is keyed by
+    // 't' + display bytes). Emit them directly — the prior extra .reverse()
+    // flipped txids to a non-canonical order that the node, duddino, and every
+    // other explorer reject (broke Blockbook compat on /address.txids[]).
     let unique_txids: Vec<String> = all_txids.iter()
-        .map(|txid_internal| {
-            let mut txid_display = txid_internal.clone();
-            txid_display.reverse();
-            hex::encode(&txid_display)
-        })
+        .map(hex::encode)
         .collect();
-    
-    // Sort transactions by block height (descending = newest first)
-    let mut txid_heights: Vec<(String, i32)> = Vec::new();
-    for txid in &unique_txids {
-        if let Ok(txid_bytes) = hex::decode(txid) {
-            // Reverse to internal format for database lookup
-            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-            let mut key = vec![b't'];
-            key.extend(&txid_internal);
-            let db_clone = db.clone();
-            let height = tokio::task::spawn_blocking(move || -> i32 {
-                if let Some(cf) = db_clone.cf_handle("transactions") {
-                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
-                        if tx_data.len() >= 8 {
-                            return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+
+    // Sort transactions by block height (descending = newest first).
+    // P1-3 cap: the per-txid height fetch is the second full-history scan, so for
+    // over-cap addresses we skip it and serve the stored 't'-index order (txid
+    // sorted, from enrichment) — bounded work instead of O(history) DB reads.
+    let all_txids: Vec<String> = if over_cap {
+        unique_txids
+    } else {
+        let mut txid_heights: Vec<(String, i32)> = Vec::new();
+        for txid in &unique_txids {
+            if let Ok(txid_bytes) = hex::decode(txid) {
+                // tx CF is keyed by 't' + canonical display-order bytes, so use
+                // the decoded txid directly (the prior reverse made the key miss).
+                let mut key = vec![b't'];
+                key.extend(&txid_bytes);
+                let db_clone = db.clone();
+                let height = tokio::task::spawn_blocking(move || -> i32 {
+                    if let Some(cf) = db_clone.cf_handle("transactions") {
+                        if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
+                            if tx_data.len() >= 8 {
+                                return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                            }
                         }
                     }
-                }
-                0
-            })
-            .await
-            .unwrap_or(0);
-            txid_heights.push((txid.clone(), height));
+                    0
+                })
+                .await
+                .unwrap_or(0);
+                txid_heights.push((txid.clone(), height));
+            }
         }
-    }
-    
-    // Sort by height descending (newest first = highest block)
-    txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
-    let all_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
+
+        // Sort by height descending (newest first = highest block)
+        txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+        txid_heights.into_iter().map(|(txid, _)| txid).collect()
+    };
     
     // === PAGINATION LOGIC ===
     // Validate and clamp parameters
@@ -246,8 +401,8 @@ async fn compute_address_info(
     };
     
     // Calculate pagination indices
-    let start_idx = ((page - 1) * page_size) as usize;
-    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
+    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
     
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
@@ -304,6 +459,23 @@ pub async fn xpub_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<XPubInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: cheaply reject obviously-not-an-xpub input up front (before the
+    // cache/derivation machinery) so a typo/garbage string gets a 400 rather
+    // than entering the scan. PIVX reuses Bitcoin's xpub version bytes
+    // (0x0488B21E -> "xpub" prefix; see compute_xpub_info note), so a real
+    // account-level xpub must start with "xpub" and be valid base58check.
+    // compute_xpub_info still does the authoritative ExtendedPubKey parse +
+    // depth check; this is just an early, class-correct guard.
+    if !is_valid_xpub(&xpub_str) {
+        warn!(xpub = %redact_xpub(&xpub_str), "rejected invalid xpub (P2-B)");
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(
+                "Invalid xpub: not a valid base58check BIP32 extended public key",
+            )),
+        ));
+    }
+
     let cache_key = format!("xpub:{}:{}:{}", xpub_str, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let xpub_clone = xpub_str.clone();
@@ -342,7 +514,7 @@ async fn compute_xpub_info(
     
     // Parse and validate the xpub
     let xpub = ExtendedPubKey::from_str(xpub_str)
-        .map_err(|e| format!("Invalid xpub format: {}. Please provide a valid BIP32 extended public key.", e))?;
+        .map_err(|e| format!("Invalid xpub format: {e}. Please provide a valid BIP32 extended public key."))?;
     
     // Validate xpub is at correct depth (account level = 3 for m/44'/119'/account')
     if xpub.depth != 3 {
@@ -459,7 +631,7 @@ pub(crate) fn derive_address(
     
     // Construct full derivation path
     let account = xpub_depth.saturating_sub(3);
-    let path = format!("m/44'/119'/{}'/{}/{}", account, chain, index);
+    let path = format!("m/44'/119'/{account}'/{chain}/{index}");
     
     Ok((address, path))
 }
@@ -470,11 +642,11 @@ async fn check_address_activity(
     address: &str,
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     // Check UTXO key: 'a' + address
-    let utxo_key = format!("a{}", address);
+    let utxo_key = format!("a{address}");
     let utxo_key_bytes = utxo_key.as_bytes().to_vec();
     
     // Check transaction list key: 't' + address
-    let tx_key = format!("t{}", address);
+    let tx_key = format!("t{address}");
     let tx_key_bytes = tx_key.as_bytes().to_vec();
     
     let db_clone = db.clone();
@@ -517,19 +689,19 @@ async fn aggregate_xpub_data(
     let mut used_addresses: Vec<(String, String, usize, i64, i64, i64)> = Vec::new();
     
     // Get current chain height for maturity checks
-    let current_height = get_current_height(db).unwrap_or(0);
+    let _current_height = get_current_height(db).unwrap_or(0);
     
     // PERFORMANCE OPTIMIZATION: Batch all address lookups into single multi_get_cf call
     // This replaces N sequential queries with 1 batched query (10-50x faster)
     
     // Build batch of UTXO keys ("a" + address)
     let utxo_keys: Vec<Vec<u8>> = all_addresses.iter()
-        .map(|(addr, _)| format!("a{}", addr).into_bytes())
+        .map(|(addr, _)| format!("a{addr}").into_bytes())
         .collect();
     
     // Build batch of transaction list keys ("t" + address)
     let tx_list_keys: Vec<Vec<u8>> = all_addresses.iter()
-        .map(|(addr, _)| format!("t{}", addr).into_bytes())
+        .map(|(addr, _)| format!("t{addr}").into_bytes())
         .collect();
     
     let db_clone = db.clone();
@@ -562,24 +734,19 @@ async fn aggregate_xpub_data(
         Ok((utxo_results, tx_list_results))
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {e}"))?
     .map_err(|e| e.to_string())?;
     
     // Process each address with pre-fetched data
     for (idx, (address, path)) in all_addresses.iter().enumerate() {
         let utxo_data = utxo_results.get(idx)
-            .and_then(|opt| opt.as_ref())
-            .map(|v| v.clone())
+            .and_then(|opt| opt.as_ref()).cloned()
             .unwrap_or_default();
         
         let utxos = deserialize_utxos(&utxo_data).await;
         
-        // Filter for spendable UTXOs (maturity rules)
-        let spendable_utxos = filter_spendable_utxos(
-            utxos.clone(),
-            db.clone(),
-            current_height,
-        ).await;
+        // Blockbook parity: include immature outputs in xpub balances
+        let spendable_utxos = utxos.clone();
         
         // Calculate balance for this address
         let mut address_balance: i64 = 0;
@@ -596,7 +763,7 @@ async fn aggregate_xpub_data(
                     .map_err(|e| e.to_string())
             })
             .await
-            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Task join error: {e}"))?
             .map_err(|e| e.to_string())?;
             
             if let Some(tx_data) = tx_data {
@@ -619,8 +786,7 @@ async fn aggregate_xpub_data(
         
         // Get transaction list from pre-fetched batch data
         let tx_list_data = tx_list_results.get(idx)
-            .and_then(|opt| opt.as_ref())
-            .map(|v| v.clone())
+            .and_then(|opt| opt.as_ref()).cloned()
             .unwrap_or_default();
         
         // Parse transaction list (32 bytes per txid)
@@ -645,7 +811,7 @@ async fn aggregate_xpub_data(
                     .map_err(|e| e.to_string())
             })
             .await
-            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Task join error: {e}"))?
             .map_err(|e| e.to_string())?;
             
             if let Some(tx_data) = tx_data {
@@ -700,10 +866,11 @@ async fn aggregate_xpub_data(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
-            // Reverse to internal format for database lookup
-            let txid_internal: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
+            // tx CF is keyed by 't' + canonical display-order bytes, so use the
+            // decoded txid directly. The prior reverse made every key miss, so
+            // xpub tx heights silently read 0 and the list was effectively unsorted.
             let mut key = vec![b't'];
-            key.extend(&txid_internal);
+            key.extend(&txid_bytes);
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
@@ -739,8 +906,8 @@ async fn aggregate_xpub_data(
     };
     
     // Calculate pagination indices
-    let start_idx = ((page - 1) * page_size) as usize;
-    let end_idx = (start_idx + page_size as usize).min(total_tx_count);
+    let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
+    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
     
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
@@ -845,13 +1012,13 @@ async fn aggregate_xpub_data(
         
         // Apply pagination to tokens array
         let total_tokens = filtered_addresses.len() as u32;
-        let tokens_page = params.tokens_page;
-        let tokens_page_size = params.tokens_page_size;
+        let tokens_page = params.tokens_page.max(1);
+        let tokens_page_size = params.tokens_page_size.clamp(1, 1000);
         let total_tokens_pages = ((total_tokens as f64) / (tokens_page_size as f64)).ceil() as u32;
         let total_tokens_pages = if total_tokens_pages == 0 { 1 } else { total_tokens_pages };
-        
-        let start_idx = ((tokens_page - 1) * tokens_page_size) as usize;
-        let end_idx = (start_idx + tokens_page_size as usize).min(filtered_addresses.len());
+
+        let start_idx = (tokens_page as usize - 1).saturating_mul(tokens_page_size as usize);
+        let end_idx = start_idx.saturating_add(tokens_page_size as usize).min(filtered_addresses.len());
         
         let paginated_tokens: Vec<_> = if start_idx < filtered_addresses.len() {
             filtered_addresses[start_idx..end_idx].to_vec()
@@ -879,7 +1046,7 @@ async fn aggregate_xpub_data(
     let total_transfers: usize = used_addresses.iter().map(|(_, _, tx_count, _, _, _)| tx_count).sum();
     
     Ok(XPubInfo {
-        page: page,
+        page,
         total_pages,
         items_on_page: actual_items as u32,  // Actual count, not pageSize
         address: xpub_str.to_string(),
@@ -908,11 +1075,22 @@ pub async fn utxo_v2(
     Query(query): Query<UtxoQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Json<Vec<UTXO>> {
+) -> Result<Json<Vec<UTXO>>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // P2-B: reject invalid/mistyped addresses with 400 instead of serving an
+    // empty UTXO list (HTTP 200, []) for a non-existent/typo'd account.
+    if !is_valid_address(&address) {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new(format!(
+                "Invalid address '{address}': checksum mismatch"
+            ))),
+        ));
+    }
+
     let cache_key = format!("utxo:{}:{}", address, query.confirmed);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
-    
+
     let result = cache
         .get_or_compute(
             &cache_key,
@@ -922,10 +1100,10 @@ pub async fn utxo_v2(
             }
         )
         .await;
-    
+
     match result {
-        Ok(utxos) => Json(utxos),
-        Err(_) => Json(vec![]),
+        Ok(utxos) => Ok(Json(utxos)),
+        Err(_) => Ok(Json(vec![])),
     }
 }
 
@@ -933,7 +1111,7 @@ async fn compute_utxos(
     db: &Arc<DB>,
     address: &str,
 ) -> Result<Vec<UTXO>, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("a{}", address);
+    let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
     
@@ -948,22 +1126,25 @@ async fn compute_utxos(
     
     let unspent_utxos = deserialize_utxos(&result).await;
     let current_height = get_current_height(db).unwrap_or(0);
-    let spendable_utxos = filter_spendable_utxos(
-        unspent_utxos.clone(),
-        Arc::clone(db),
-        current_height,
-    ).await;
+    // Blockbook parity: the UTXO list includes immature coinbase/coinstake outputs
+    // (Blockbook flags them rather than hiding them; wallets handle maturity).
+    let spendable_utxos = unspent_utxos.clone();
     
     let mut utxo_list = Vec::new();
     
     for (txid_hash, vout) in &spendable_utxos {
-        // txid_hash is already in display order (per tx_keys.rs format), no reversal needed
+        // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
+        // (the same bytes that key the tx CF below), so emit them directly. The
+        // earlier .reverse() produced a non-canonical txid that the node,
+        // duddino, wallets, and every other explorer reject.
         let txid_display = hex::encode(txid_hash);
-        
-        // Look up transaction to get value, confirmations, and other details
+
+        // Look up transaction to get value, confirmations, and other details.
+        // The tx CF key uses internal (non-reversed) txid bytes, i.e. txid_hash
+        // as stored in the 'a' unspent set.
         let mut tx_key = vec![b't'];
         tx_key.extend_from_slice(txid_hash);
-        
+
         let db_clone = Arc::clone(db);
         let tx_key_clone = tx_key.clone();
         let tx_data_opt = tokio::task::spawn_blocking(move || {
@@ -973,13 +1154,19 @@ async fn compute_utxos(
                 None
             }
         }).await.ok().flatten();
-        
+
         if let Some(tx_data) = tx_data_opt {
             if tx_data.len() >= 8 {
                 let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                
-                // Skip orphaned and unresolved transactions
-                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
+
+                // Filter hardening: a UTXO present in the 'a' unspent set is
+                // canonical by construction (the balance loop trusts it with no
+                // height filter). Only drop entries with a definitive orphan
+                // determination (-1); a transient HEIGHT_UNRESOLVED read must NOT
+                // silently drop a canonical UTXO (that under-reported /utxo 98%
+                // on a degraded DB). On the clean DB nothing is orphan/unresolved,
+                // so the set is unchanged.
+                if block_height == HEIGHT_ORPHAN {
                     continue;
                 }
                 
@@ -1030,4 +1217,51 @@ async fn compute_utxos(
     utxo_list.sort_by(|a, b| a.confirmations.cmp(&b.confirmations));
     
     Ok(utxo_list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_valid_address, is_valid_xpub};
+
+    /// P2-B: every real PIVX transparent address class must pass validation.
+    /// Asymmetric risk — a validator that rejects a VALID address is worse than
+    /// the original fake-zero-account bug, so these MUST stay true.
+    #[test]
+    fn is_valid_address_accepts_all_real_classes() {
+        // D = standard P2PKH (version 30)
+        assert!(is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "D/P2PKH must be valid");
+        // S = cold-staking staker (version 63)
+        assert!(is_valid_address("SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy"), "S/cold-staking must be valid");
+        // 6 = P2SH (version 13)
+        assert!(is_valid_address("6EPs1STNZh4rxbsgP93Zu4BeHF5n9dtECo"), "6/P2SH must be valid");
+        // EXM = exchange address (3-byte prefix, OP_EXCHANGEADDR 0xe0, 36 chars)
+        assert!(is_valid_address("EXMBfGoMQMNiHTNsrs8SdrsBotUButbb1SP1"), "EXM/exchange must be valid");
+    }
+
+    /// A one-char typo of a real address must be rejected (checksum mismatch) —
+    /// this is the P2-B bug: previously returned HTTP 200 balance:0.
+    #[test]
+    fn is_valid_address_rejects_typos_and_garbage() {
+        // Flip the last char of the D address: r5 -> r6 (breaks the checksum).
+        assert!(!is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr6"), "typo'd address must be invalid");
+        // Empty / clearly-not-an-address input.
+        assert!(!is_valid_address(""), "empty must be invalid");
+        assert!(!is_valid_address("not an address"), "garbage must be invalid");
+        // Valid base58check but wrong payload length (1-byte version + 19-byte
+        // hash = 20-byte payload) must still be rejected.
+        assert!(!is_valid_address("11GsChQR2U32pvwJcDNPoYHhGcnz5Rv"), "short payload must be invalid");
+    }
+
+    /// xpub guard: accepts a real BIP32 xpub, rejects typos/non-xpub input.
+    #[test]
+    fn is_valid_xpub_basic() {
+        // A standard BIP32 mainnet xpub (Bitcoin/PIVX share 0x0488B21E).
+        let good = "xpub661MyMwAqRbcEYSGagKuFUqExQV8d2eizDP5SamP9TcLeqAk9JsrNexcG6RbwEy38PSSahG1iVxeqWMJEq3YFHbfEaayHjyFJnJ6DS2h49t";
+        assert!(is_valid_xpub(good), "real xpub must be valid");
+        // Flip the last char -> checksum mismatch (payload length still 78).
+        let bad = "xpub661MyMwAqRbcEYSGagKuFUqExQV8d2eizDP5SamP9TcLeqAk9JsrNexcG6RbwEy38PSSahG1iVxeqWMJEq3YFHbfEaayHjyFJnJ6DS2h49A";
+        assert!(!is_valid_xpub(bad), "typo'd xpub must be invalid");
+        // A transparent address is not an xpub.
+        assert!(!is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "address is not an xpub");
+    }
 }

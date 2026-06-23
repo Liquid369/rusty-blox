@@ -193,6 +193,10 @@ pub struct Transaction {
     pub value_in: String,
     pub fees: String,
     pub hex: String,
+    /// Sapling (shielded) detail for version >= 3 transactions. Same shape the
+    /// block-detail endpoint emits; omitted entirely for transparent txs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sapling: Option<crate::block_detail::SaplingInfo>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -317,7 +321,7 @@ where
         Some(s) if s == "-Infinity" => Ok(Some(0)), // Treat -Infinity as 0 (from beginning)
         Some(s) => s.parse::<u32>()
             .map(Some)
-            .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {}", s))),
+            .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {s}"))),
     }
 }
 

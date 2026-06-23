@@ -3,7 +3,7 @@
     <!-- Reorg warning banner -->
     <div v-if="chainStore.reorgDetected" class="reorg-banner">
       <div class="reorg-content">
-        <span class="reorg-icon">⚠️</span>
+        <span class="reorg-icon"><Icon name="alert-triangle" :size="20" /></span>
         <div class="reorg-text">
           <strong>Chain Reorganization Detected</strong>
           <span class="reorg-details">
@@ -11,14 +11,14 @@
             - Data is being refreshed
           </span>
         </div>
-        <button @click="chainStore.clearReorgFlag" class="reorg-dismiss">✕</button>
+        <button @click="chainStore.clearReorgFlag" class="reorg-dismiss"><Icon name="x" :size="16" /></button>
       </div>
     </div>
     
     <!-- WebSocket reconnect failure banner -->
     <div v-if="wsStore.anyReconnectFailed" class="ws-error-banner">
       <div class="ws-error-content">
-        <span class="ws-error-icon">⚠️</span>
+        <span class="ws-error-icon"><Icon name="alert-triangle" :size="20" /></span>
         <div class="ws-error-text">
           <strong>Unable to Connect to Live Updates</strong>
           <span class="ws-error-details">
@@ -33,6 +33,7 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { onMounted, onUnmounted } from 'vue'
 import { useChainStore } from '@/stores/chainStore'
 import { useWebSocketStore } from '@/stores/websocketStore'
@@ -203,8 +204,13 @@ onUnmounted(() => {
 
 .ws-error-retry:hover {
   background: #E61414;
-  border: 1px solid var(--pivx-danger);
-  transform: translateY(0px);
-  box-shadow: 0 2px 8px #4B0606;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.ws-error-retry:focus-visible,
+.reorg-dismiss:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
 }
 </style>

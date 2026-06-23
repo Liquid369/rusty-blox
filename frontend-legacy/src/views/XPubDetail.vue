@@ -15,7 +15,7 @@
           <div class="xpub-value">
             <code class="xpub-text">{{ xpub }}</code>
             <Button variant="ghost" size="sm" @click="copyToClipboard" title="Copy XPub">
-              📋 Copy
+              <Icon name="clipboard" :size="14" /> Copy
             </Button>
           </div>
         </div>
@@ -31,7 +31,7 @@
       <div v-else-if="error" class="error-container">
         <Card>
           <div class="error-content">
-            <p class="error-icon">⚠️</p>
+            <p class="error-icon"><Icon name="alert-triangle" :size="32" /></p>
             <h2>Invalid XPub</h2>
             <p>{{ error }}</p>
             <Button @click="$router.push('/')">Back to Dashboard</Button>
@@ -47,30 +47,30 @@
             label="Balance"
             :value="formatPIV(xpubData.balance, 2)"
             suffix="PIV"
-            icon="💰"
+            icon="coins"
             variant="primary"
           />
           <StatCard
             label="Total Received"
             :value="formatPIV(xpubData.totalReceived, 2)"
             suffix="PIV"
-            icon="📥"
+            icon="arrow-down-left"
           />
           <StatCard
             label="Total Sent"
             :value="formatPIV(xpubData.totalSent, 2)"
             suffix="PIV"
-            icon="📤"
+            icon="arrow-up-right"
           />
           <StatCard
             label="Total Transfers"
             :value="formatNumber(xpubData.txs)"
-            icon="📊"
+            icon="chart-bar"
           />
           <StatCard
             label="Used Addresses"
             :value="formatNumber(xpubData.usedTokens || 0)"
-            icon="🔑"
+            icon="key"
           />
         </div>
 
@@ -129,7 +129,7 @@
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="🔑"
+              icon="key"
               title="No Addresses"
               message="No addresses match the selected filter."
             />
@@ -162,13 +162,14 @@
               v-for="tx in paginatedTransactions"
               :key="tx.txid"
               :transaction="tx"
+              :viewed-addresses="xpubAddresses"
               @click="navigateToTransaction(tx)"
             />
           </div>
 
           <div v-else class="empty-state">
             <EmptyState
-              icon="📭"
+              icon="inbox"
               title="No Transactions"
               message="This xpub has no transaction history."
             />
@@ -185,67 +186,14 @@
           />
         </div>
 
-        <!-- Debug Tab -->
-        <div v-if="activeTab === 'debug'" class="tab-content">
-          <div class="section-header">
-            <h2>API Response (Debug)</h2>
-            <div class="debug-actions">
-              <Button variant="ghost" size="sm" @click="refreshData">
-                🔄 Refresh
-              </Button>
-              <Button variant="ghost" size="sm" @click="copyDebugData">
-                📋 Copy JSON
-              </Button>
-            </div>
-          </div>
-
-          <Card>
-            <pre class="debug-json">{{ JSON.stringify(xpubData, null, 2) }}</pre>
-          </Card>
-
-          <div class="comparison-section">
-            <h3>Blockbook Comparison</h3>
-            <div class="comparison-grid">
-              <div class="comparison-item">
-                <label>Balance Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.balance) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Total Received Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.totalReceived) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Total Sent Match:</label>
-                <span :class="{ 'match-ok': true }">✅ {{ formatPIV(xpubData.totalSent) }} PIV</span>
-              </div>
-              <div class="comparison-item">
-                <label>Transfers Count:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.txs }} transfers</span>
-              </div>
-              <div class="comparison-item">
-                <label>Used Addresses:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.usedTokens }} addresses</span>
-              </div>
-              <div class="comparison-item">
-                <label>Unique Transactions:</label>
-                <span :class="{ 'match-ok': true }">{{ xpubData.txids?.length || 0 }} txids</span>
-              </div>
-            </div>
-
-            <div class="api-info">
-              <p><strong>API Endpoint:</strong> <code>/api/v2/xpub/{{ redactedXpub }}?details={{ detailsMode }}</code></p>
-              <p><strong>Cache Status:</strong> 30s TTL</p>
-              <p><strong>Note:</strong> 'txs' field = total transfers (sum of per-address tx counts), not unique transactions</p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </AppLayout>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import Icon from '@/components/common/Icon.vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
@@ -284,22 +232,24 @@ const loadingTransactions = ref(false)
 
 // Tabs configuration
 const tabs = [
-  { value: 'addresses', label: 'Addresses', icon: '🔑' },
-  { value: 'transactions', label: 'Transactions', icon: '📊' },
-  { value: 'debug', label: 'Debug', icon: '🔧' }
+  { value: 'addresses', label: 'Addresses', icon: 'key' },
+  { value: 'transactions', label: 'Transactions', icon: 'chart-bar' }
 ]
 
 // Computed
-const redactedXpub = computed(() => {
-  if (!xpub.value) return ''
-  const x = xpub.value
-  return `${x.slice(0, 8)}...${x.slice(-4)}`
-})
-
 const usedAddresses = computed(() => {
   if (!xpubData.value?.tokens) return []
   return xpubData.value.tokens
 })
+
+// The set of derived address strings this xpub owns (token.name is the address,
+// as used by the Addresses tab). Passed to TransactionRow so per-tx net deltas
+// are computed across all of the xpub's addresses, not a single one.
+const xpubAddresses = computed(() =>
+  usedAddresses.value
+    .map(t => t.name)
+    .filter(name => typeof name === 'string' && name.length > 0)
+)
 
 const displayedAddresses = computed(() => {
   const addrs = usedAddresses.value
@@ -364,7 +314,6 @@ async function fetchXPubData() {
     }
   } catch (err) {
     error.value = err.message
-    console.error('Error fetching xpub:', err)
   } finally {
     loading.value = false
   }
@@ -388,7 +337,7 @@ async function fetchTransactions() {
       }
     }
   } catch (err) {
-    console.error('Error fetching transactions:', err)
+    // Non-fatal: transactions tab simply shows its empty state.
   } finally {
     loadingTransactions.value = false
   }
@@ -396,14 +345,6 @@ async function fetchTransactions() {
 
 function copyToClipboard() {
   navigator.clipboard.writeText(xpub.value)
-}
-
-function copyDebugData() {
-  navigator.clipboard.writeText(JSON.stringify(xpubData.value, null, 2))
-}
-
-function refreshData() {
-  fetchXPubData()
 }
 
 function navigateToTransaction(tx) {
@@ -432,10 +373,14 @@ watch(addressFilter, async (newFilter) => {
   }
 })
 
-// Lifecycle
-onMounted(() => {
+// Refetch when navigating between xpubs. The router reuses this component
+// instance for /xpub/:xpub, so onMounted alone would leave /xpub/A's data on
+// screen after navigating straight to /xpub/B.
+watch(() => route.params.xpub, (newXpub) => {
+  if (!newXpub) return
+  xpub.value = newXpub
   fetchXPubData()
-})
+}, { immediate: true })
 </script>
 
 <style scoped>
@@ -450,7 +395,7 @@ onMounted(() => {
   align-items: center;
   gap: var(--space-2);
   margin-bottom: var(--space-4);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
   color: var(--text-secondary);
 }
 
@@ -480,7 +425,8 @@ onMounted(() => {
 }
 
 .header-content h1 {
-  font-size: 1.5rem;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
   margin-bottom: var(--space-4);
   color: var(--text-primary);
 }
@@ -493,8 +439,8 @@ onMounted(() => {
 }
 
 .xpub-text {
-  font-family: 'Courier New', monospace;
-  font-size: 0.9rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   background: var(--surface-primary);
   padding: var(--space-3);
   border-radius: var(--radius-md);
@@ -504,11 +450,23 @@ onMounted(() => {
   min-width: 300px;
 }
 
+/* 5 tiles: one row of 5 at desktop; below, Balance spans the row and the
+   remaining 4 form a 2x2 — no dangling 4+1 wrap */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
+}
+
+@media (max-width: 1200px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stats-grid > :first-child {
+    grid-column: 1 / -1;
+  }
 }
 
 .xpub-tabs {
@@ -534,11 +492,12 @@ onMounted(() => {
 }
 
 .section-header h2 {
-  font-size: 1.25rem;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
   color: var(--text-primary);
 }
 
-.filters, .debug-actions {
+.filters {
   display: flex;
   gap: var(--space-2);
   align-items: center;
@@ -550,7 +509,17 @@ onMounted(() => {
   border: 1px solid var(--border-primary);
   background: var(--surface-secondary);
   color: var(--text-primary);
-  font-size: 0.875rem;
+  font-size: var(--text-sm);
+  transition: border-color var(--transition-fast);
+}
+
+.filter-select:hover {
+  border-color: var(--accent-primary);
+}
+
+.filter-select:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .addresses-table, .transactions-list {
@@ -560,33 +529,52 @@ onMounted(() => {
   border: 1px solid var(--border-primary);
 }
 
+.addresses-table {
+  overflow-x: auto;
+}
+
 .addresses-table table {
   width: 100%;
   border-collapse: collapse;
 }
 
 .addresses-table th {
-  background: var(--surface-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
   padding: var(--space-3);
   text-align: left;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text-secondary);
-  font-size: 0.875rem;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
   border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.addresses-table th:nth-child(n+3),
+.addresses-table td:nth-child(n+3) {
+  text-align: right;
 }
 
 .addresses-table td {
   padding: var(--space-3);
-  border-bottom: 1px solid var(--border-primary);
+  border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .addresses-table tr:last-child td {
   border-bottom: none;
 }
 
-.addresses-table tr:hover {
-  background: var(--surface-tertiary);
+.addresses-table tbody tr {
+  transition: background-color var(--transition-fast);
+}
+
+.addresses-table tbody tr:hover {
+  background: var(--bg-hover);
 }
 
 .address-link {
@@ -599,8 +587,9 @@ onMounted(() => {
 }
 
 .amount {
-  font-family: 'Courier New', monospace;
-  font-weight: 500;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
 }
 
 .loading-container, .error-container {
@@ -639,81 +628,6 @@ onMounted(() => {
   gap: var(--space-3);
 }
 
-.debug-json {
-  background: var(--surface-primary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-  font-family: 'Courier New', monospace;
-  font-size: 0.875rem;
-  line-height: 1.6;
-  color: var(--text-primary);
-  max-height: 600px;
-  overflow-y: auto;
-}
-
-.comparison-section {
-  margin-top: var(--space-6);
-}
-
-.comparison-section h3 {
-  font-size: 1.125rem;
-  margin-bottom: var(--space-4);
-  color: var(--text-primary);
-}
-
-.comparison-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--space-4);
-  margin-bottom: var(--space-4);
-}
-
-.comparison-item {
-  background: var(--surface-secondary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-primary);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.comparison-item label {
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.comparison-item span {
-  font-family: 'Courier New', monospace;
-  font-weight: 600;
-}
-
-.match-ok {
-  color: var(--success);
-}
-
-.api-info {
-  background: var(--surface-tertiary);
-  padding: var(--space-4);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-primary);
-}
-
-.api-info p {
-  margin-bottom: var(--space-2);
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-}
-
-.api-info code {
-  background: var(--surface-primary);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-family: 'Courier New', monospace;
-  color: var(--accent-primary);
-}
-
 @media (max-width: 768px) {
   .xpub-detail {
     padding: var(--space-4);
@@ -730,10 +644,6 @@ onMounted(() => {
 
   .addresses-table {
     overflow-x: auto;
-  }
-
-  .comparison-grid {
-    grid-template-columns: 1fr;
   }
 }
 </style>

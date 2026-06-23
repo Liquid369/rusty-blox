@@ -4,36 +4,41 @@
 
 use std::sync::Arc;
 use rocksdb::{DB, Options, ColumnFamilyDescriptor};
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::enrich_addresses::enrich_all_addresses;
+use rustyblox::telemetry::{TelemetryConfig, init_tracing};
+
+// jemalloc (see src/main.rs) — the #[global_allocator] must be set in each binary
+// root. This is the binary that runs enrichment in isolation for measurement.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The harness has no tracing subscriber otherwise, so enrich_all_addresses'
+    // info! lines (ENRICH_TIMING + cache/db metrics) are dropped. Honors RUST_LOG.
+    let _ = init_tracing(TelemetryConfig::default());
     println!("\n╔════════════════════════════════════════════════════╗");
     println!("║      REBUILD ADDRESS INDEX WITH UTXO TRACKING      ║");
     println!("╚════════════════════════════════════════════════════╝\n");
 
-    let db_path = std::env::var("DB_PATH")
-        .unwrap_or_else(|_| "data/blocks.db".to_string());
-    
-    println!("📂 Opening database: {}", db_path);
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
+
+    println!("📂 Opening database: {db_path}");
     
     // Open database with all column families
     let mut opts = Options::default();
     opts.create_if_missing(false);
     opts.create_missing_column_families(false);
     
-    let cfs = vec![
-        ColumnFamilyDescriptor::new("default", Options::default()),
-        ColumnFamilyDescriptor::new("blocks", Options::default()),
-        ColumnFamilyDescriptor::new("transactions", Options::default()),
-        ColumnFamilyDescriptor::new("addr_index", Options::default()),
-        ColumnFamilyDescriptor::new("utxo", Options::default()),
-        ColumnFamilyDescriptor::new("chain_metadata", Options::default()),
-        ColumnFamilyDescriptor::new("pubkey", Options::default()),
-        ColumnFamilyDescriptor::new("chain_state", Options::default()),
-        ColumnFamilyDescriptor::new("utxo_undo", Options::default()),
-    ];
-    
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+    let cfs: Vec<ColumnFamilyDescriptor> = cf_names
+        .iter()
+        .map(|name| ColumnFamilyDescriptor::new(name, Options::default()))
+        .collect();
+
     let db = Arc::new(DB::open_cf_descriptors(&opts, &db_path, cfs)?);
     
     println!("✅ Database opened successfully\n");
@@ -52,11 +57,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         delete_count += 1;
         
         if delete_count % 100000 == 0 {
-            println!("   Deleted {} address entries...", delete_count);
+            println!("   Deleted {delete_count} address entries...");
         }
     }
     
-    println!("   ✅ Deleted {} old address index entries\n", delete_count);
+    println!("   ✅ Deleted {delete_count} old address index entries\n");
     
     // Step 2: Rebuild with proper UTXO tracking
     println!("🔨 Step 2: Rebuilding address index with UTXO tracking...");

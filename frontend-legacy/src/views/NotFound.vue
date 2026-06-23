@@ -27,7 +27,11 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 .error-code {
   font-size: 120px;
   font-weight: var(--weight-extrabold);
-  color: var(--pivx-purple-primary);
+  color: var(--purple-accent);
+  background: linear-gradient(135deg, var(--purple-accent), var(--pivx-purple-primary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
   line-height: 1;
   margin-bottom: var(--space-4);
 }
@@ -44,14 +48,17 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 .home-link {
   display: inline-block;
   padding: var(--space-3) var(--space-6);
-  background: var(--pivx-purple-primary);
+  background: linear-gradient(180deg, var(--pivx-purple-light), var(--pivx-purple-primary));
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.45);
   color: white;
   border-radius: var(--radius-md);
   font-weight: var(--weight-bold);
-  transition: background var(--transition-fast);
+  transition: box-shadow var(--transition-fast), transform var(--transition-fast);
 }
 
 .home-link:hover {
-  background: var(--pivx-purple-dark);
+  color: white;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm), var(--glow-purple);
 }
 </style>

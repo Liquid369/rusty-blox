@@ -8,7 +8,7 @@
 /// - Standard histogram buckets
 
 use prometheus::{
-    Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Histogram, HistogramVec,
+    Registry, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, HistogramVec,
     HistogramOpts, Opts, Encoder, TextEncoder,
 };
 use lazy_static::lazy_static;
@@ -468,6 +468,12 @@ pub struct Timer {
     start: Instant,
 }
 
+impl Default for Timer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Timer {
     pub fn new() -> Self {
         Self {
@@ -640,19 +646,19 @@ pub fn save_metrics_to_db(db: &std::sync::Arc<rocksdb::DB>) -> Result<(), Box<dy
     
     // Save TOTAL_ADDRESSES_INDEXED
     let address_count = TOTAL_ADDRESSES_INDEXED.get() as u64;
-    db.put_cf(&cf_state, b"metric_total_addresses", &address_count.to_le_bytes())?;
+    db.put_cf(&cf_state, b"metric_total_addresses", address_count.to_le_bytes())?;
     
     // Save TOTAL_UTXOS_TRACKED
     let utxo_count = TOTAL_UTXOS_TRACKED.get() as u64;
-    db.put_cf(&cf_state, b"metric_total_utxos", &utxo_count.to_le_bytes())?;
+    db.put_cf(&cf_state, b"metric_total_utxos", utxo_count.to_le_bytes())?;
     
     // Save SAPLING_TRANSACTIONS_COUNT (gauge)
     let sapling_count = SAPLING_TRANSACTIONS_COUNT.get() as u64;
-    db.put_cf(&cf_state, b"metric_sapling_count", &sapling_count.to_le_bytes())?;
+    db.put_cf(&cf_state, b"metric_sapling_count", sapling_count.to_le_bytes())?;
     
     // Save SAPLING_TRANSACTIONS_TOTAL (counter)
-    let sapling_total = SAPLING_TRANSACTIONS_TOTAL.get() as u64;
-    db.put_cf(&cf_state, b"metric_sapling_total", &sapling_total.to_le_bytes())?;
+    let sapling_total = SAPLING_TRANSACTIONS_TOTAL.get();
+    db.put_cf(&cf_state, b"metric_sapling_total", sapling_total.to_le_bytes())?;
     
     Ok(())
 }
@@ -708,17 +714,25 @@ pub fn load_metrics_from_db(db: &std::sync::Arc<rocksdb::DB>) -> Result<(), Box<
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use std::sync::Once;
+
+    // init_metrics() registers into the process-global REGISTRY, which can only
+    // happen once; all tests share one process, so guard it with Once (the first
+    // call still validates that registration succeeds).
+    fn ensure_init() {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| init_metrics().expect("metrics init should succeed"));
+    }
+
     #[test]
     fn test_init_metrics() {
-        // Should not panic
-        init_metrics().unwrap();
+        ensure_init();
     }
-    
+
     #[test]
     fn test_gather_metrics() {
-        init_metrics().unwrap();
-        
+        ensure_init();
+
         // Increment some metrics
         increment_blocks_processed("test", 100);
         set_chain_tip_height("rpc", 1000);

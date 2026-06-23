@@ -37,7 +37,15 @@ pub enum SearchResult {
 fn detect_query_type(query: &str) -> QueryType {
     // Remove whitespace
     let q = query.trim();
-    
+
+    // Empty/whitespace-only query is not a valid search of any kind.
+    // (Guards against `"".chars().all(..)` classifying the empty string as a
+    // BlockHeight via vacuous truth, which then fails `"".parse::<i32>()` and
+    // surfaced as an HTTP 500 — P3-4.)
+    if q.is_empty() {
+        return QueryType::Unknown;
+    }
+
     // Numeric = block height
     if q.chars().all(|c| c.is_numeric()) {
         return QueryType::BlockHeight;
@@ -53,8 +61,13 @@ fn detect_query_type(query: &str) -> QueryType {
         return QueryType::XPub;
     }
     
-    // Starts with D = PIVX address
-    if q.starts_with('D') && q.len() >= 26 && q.len() <= 35 {
+    // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
+    // 6/7 (P2SH), E (exchange/EXM). Most are ~26-35 chars, but EXM exchange
+    // addresses are 36 — the old <=35 cap made them unsearchable. Upper bound
+    // is generous (<=40) for headroom; a false positive just falls through to
+    // NotFound in search_address, so over-inclusion is safe.
+    if matches!(q.chars().next(), Some('D') | Some('S') | Some('6') | Some('7') | Some('E'))
+        && q.len() >= 26 && q.len() <= 40 {
         return QueryType::Address;
     }
     
@@ -71,8 +84,18 @@ enum QueryType {
 
 /// Universal search
 pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    // Trim and validate up front: an empty/whitespace-only query is not found
+    // rather than a 500. Downstream lookups receive the trimmed query so a query
+    // like " 123" parses correctly instead of erroring (P3-4).
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(SearchResult::NotFound {
+            query: String::new(),
+        });
+    }
+
     let query_type = detect_query_type(query);
-    
+
     match query_type {
         QueryType::BlockHeight => search_block_by_height(db, query),
         QueryType::HashOrTxid => search_hash_or_txid(db, query),
@@ -86,7 +109,14 @@ pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::er
 
 /// Search for block by height
 fn search_block_by_height(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    let height: i32 = query.parse()?;
+    // Parse defensively: a long numeric query (satoshi amount, large id, or a
+    // mistyped height beyond i32::MAX) overflows i32. Previously `?` bubbled the
+    // ParseIntError into a 500 + an error-level log on every such search; treat
+    // an unparseable/out-of-range height as a normal NotFound instead.
+    let height: i32 = match query.parse() {
+        Ok(h) => h,
+        Err(_) => return Ok(SearchResult::NotFound { query: query.to_string() }),
+    };
     
     let cf_metadata = db.cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
@@ -139,26 +169,22 @@ fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dy
         });
     }
     
-    // Method 2: Fallback - iterate through height -> hash mappings (for old blocks)
-    // This searches all numeric keys (heights) to find matching hash
-    let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
-    
-    for item in iter {
-        if let Ok((key, value)) = item {
-            // Skip non-numeric keys (like 'h' prefix keys)
-            if key.len() == 4 && key[0] != b'h' {
-                // This is a height key (4 bytes little-endian)
-                if value.as_ref() == hash_bytes.as_slice() {
-                    let height = i32::from_le_bytes(key.as_ref().try_into()?);
-                    return Ok(SearchResult::Block {
-                        height,
-                        hash: hash.to_string(),
-                    });
-                }
-            }
-        }
+    // Method 2: some writers key 'h' entries by internal (reversed) byte order —
+    // try the reversed form before giving up. (The old fallback here iterated the
+    // ENTIRE chain_metadata CF on every miss: any unknown 64-hex query forced a
+    // full-database scan — a trivial unauthenticated DoS. Point lookups only.)
+    let hash_reversed: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
+    let mut key_rev = vec![b'h'];
+    key_rev.extend_from_slice(&hash_reversed);
+
+    if let Some(height_bytes) = db.get_cf(&cf_metadata, &key_rev)? {
+        let height = i32::from_le_bytes(height_bytes.as_slice().try_into()?);
+        return Ok(SearchResult::Block {
+            height,
+            hash: hash.to_string(),
+        });
     }
-    
+
     Ok(SearchResult::NotFound {
         query: hash.to_string(),
     })

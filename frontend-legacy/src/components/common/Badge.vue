@@ -30,72 +30,75 @@ defineProps({
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-1);
   font-family: var(--font-primary);
   font-weight: var(--weight-bold);
-  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--radius-full);
   white-space: nowrap;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--tracking-wide);
+  transition: border-color var(--transition-fast);
 }
 
 /* Sizes */
 .badge-sm {
   padding: 2px var(--space-2);
-  font-size: 10px;
+  font-size: 0.625rem;
   line-height: 1.4;
 }
 
 .badge-md {
-  padding: 4px var(--space-3);
-  font-size: 11px;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-2xs);
   line-height: 1.4;
 }
 
 .badge-lg {
-  padding: 6px var(--space-4);
-  font-size: 12px;
+  padding: var(--space-2) var(--space-4);
+  font-size: var(--text-xs);
   line-height: 1.4;
 }
 
 /* Default Variant */
 .badge-default {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-mid), 0.4);
   color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-secondary);
 }
 
-/* Success Variant */
+/* Success Variant - brand green */
 .badge-success {
-  background: rgba(34, 197, 94, 0.15);
-  color: #4ade80;
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: rgba(var(--rgb-green-accent), 0.12);
+  color: var(--green-accent);
+  border: 1px solid rgba(var(--rgb-green-accent), 0.35);
 }
 
 /* Warning Variant */
 .badge-warning {
-  background: rgba(251, 191, 36, 0.15);
-  color: #fbbf24;
-  border: 1px solid rgba(251, 191, 36, 0.3);
+  background: rgba(246, 255, 120, 0.1);
+  color: var(--warning);
+  border: 1px solid rgba(246, 255, 120, 0.3);
 }
 
 /* Danger Variant */
 .badge-danger {
   background: rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--danger-text);
+  border: 1px solid rgba(239, 68, 68, 0.35);
 }
 
-/* Info Variant */
+/* Info Variant - brand purple */
 .badge-info {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgba(var(--rgb-purple-accent), 0.14);
+  color: #CD97F7;
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.4);
 }
 
 /* Accent Variant */
 .badge-accent {
-  background: rgba(89, 252, 179, 0.15);
+  background: rgba(var(--rgb-green-accent), 0.12);
   color: var(--pivx-accent);
-  border: 1px solid rgba(89, 252, 179, 0.3);
+  border: 1px solid rgba(var(--rgb-green-accent), 0.35);
 }
 </style>

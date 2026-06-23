@@ -26,6 +26,70 @@ pub struct ChainTip {
     pub hash: String,
 }
 
+/// Hourly network snapshot (Tier-3 forward-only analytics series).
+/// Stored as a bincode Vec under chain_state key `analytics_snapshots`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HourlySnapshot {
+    pub ts: u64,
+    pub mempool_txs: u64,
+    pub mempool_bytes: u64,
+    pub masternode_count: u64,
+    pub shield_supply_piv: f64,
+    pub transparent_supply_piv: f64,
+}
+
+/// Retain one year of hourly snapshots.
+const SNAPSHOT_CAP: usize = 8760;
+
+/// Hour (unix ts / 3600) of the last persisted snapshot, so restarts don't
+/// double-write within the same hour. 0 when no series exists yet.
+fn read_last_snapshot_hour(db: &Arc<DB>) -> u64 {
+    db.cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"analytics_snapshots").ok().flatten())
+        .and_then(|b| bincode::deserialize::<Vec<HourlySnapshot>>(&b).ok())
+        .and_then(|v| v.last().map(|s| s.ts / 3600))
+        .unwrap_or(0)
+}
+
+/// Collect and append one hourly snapshot (mempool, masternodes, supply) to
+/// the chain_state `analytics_snapshots` series (load-append-store, capped).
+async fn write_hourly_snapshot(
+    db: &Arc<DB>,
+    ts: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::api::helpers::rpc_call_json;
+
+    let mempool = rpc_call_json("getmempoolinfo", serde_json::json!([])).await?;
+    let mn = rpc_call_json("getmasternodecount", serde_json::json!([])).await?;
+    let supply = rpc_call_json("getsupplyinfo", serde_json::json!([false])).await?;
+
+    let snapshot = HourlySnapshot {
+        ts,
+        mempool_txs: mempool.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+        mempool_bytes: mempool.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+        masternode_count: mn.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
+        shield_supply_piv: supply.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        transparent_supply_piv: supply
+            .get("transparentsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+    };
+
+    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    // Load-append-store; an unreadable (old-schema) blob restarts the series.
+    let mut series: Vec<HourlySnapshot> = db
+        .get_cf(&cf_state, b"analytics_snapshots")?
+        .and_then(|b| bincode::deserialize(&b).ok())
+        .unwrap_or_default();
+    series.push(snapshot);
+    if series.len() > SNAPSHOT_CAP {
+        let excess = series.len() - SNAPSHOT_CAP;
+        series.drain(0..excess);
+    }
+    db.put_cf(&cf_state, b"analytics_snapshots", bincode::serialize(&series)?)?;
+    Ok(())
+}
+
 /// Structure to hold fetched block data for two-phase processing
 #[derive(Debug, Clone)]
 struct FetchedBlock {
@@ -34,42 +98,36 @@ struct FetchedBlock {
     json_result: Value,
 }
 
-/// Get current chain tip from RPC node
-fn get_rpc_chain_tip(
-    rpc_client: &Arc<PivxRpcClient>,
-) -> Result<ChainTip, Box<dyn std::error::Error>> {
+/// Get current chain tip from RPC node.
+///
+/// Fully async via the shared `rpc_call_json` helper — no more detached
+/// `std::thread::spawn` + `recv_timeout` (which leaked an OS thread on every
+/// node timeout). The helper carries its own hard HTTP timeout.
+async fn get_rpc_chain_tip() -> Result<ChainTip, Box<dyn std::error::Error + Send + Sync>> {
+    use crate::api::helpers::rpc_call_json;
+
     let timer = metrics::Timer::new();
-    
-    // Get block count (height) - must use separate thread
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockcount();
-        let _ = tx.send(result);
-    });
-    let height_i64 = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
+    let height_i64 = rpc_call_json("getblockcount", serde_json::json!([]))
+        .await?
+        .as_i64()
+        .ok_or("getblockcount returned non-integer")?;
     let height = height_i64 as i32;
-    
+
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockcount"])
         .observe(timer.elapsed_secs());
-    
-    // Get block hash at this height - must use separate thread
+
     let timer2 = metrics::Timer::new();
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockhash(height as i64);
-        let _ = tx.send(result);
-    });
-    let hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
-    
+    let hash = rpc_call_json("getblockhash", serde_json::json!([height as i64]))
+        .await?
+        .as_str()
+        .ok_or("getblockhash returned non-string")?
+        .to_string();
+
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblockhash"])
         .observe(timer2.elapsed_secs());
-    
+
     Ok(ChainTip {
         height,
         hash,
@@ -125,40 +183,29 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
 async fn fetch_block_data(
     height: i32,
 ) -> Result<FetchedBlock, Box<dyn std::error::Error>> {
+    use crate::api::helpers::rpc_call_json;
+
     let config = get_global_config();
     let url = config.get_string("rpc.host")?;
     let user = config.get_string("rpc.user")?;
     let pass = config.get_string("rpc.pass")?;
-    
+
     let client = reqwest::Client::new();
-    
-    // Get block hash at this height - must use separate thread
-    let (tx, rx) = std::sync::mpsc::channel();
-    let rpc_host = url.clone();
-    let rpc_user = user.clone();
-    let rpc_pass = pass.clone();
-    let height_i64 = height as i64;
-    
-    std::thread::spawn(move || {
-        let timer = metrics::Timer::new();
-        let client = PivxRpcClient::new(
-            rpc_host,
-            Some(rpc_user),
-            Some(rpc_pass),
-            3,
-            10,
-            30000,
-        );
-        let result = client.getblockhash(height_i64);
-        metrics::RPC_CALL_DURATION
-            .with_label_values(&["getblockhash"])
-            .observe(timer.elapsed_secs());
-        let _ = tx.send(result);
-    });
-    
-    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout getting block hash")??;
-    
+
+    // Get block hash at this height. Async helper (carries its own timeout)
+    // instead of a detached thread::spawn + recv_timeout that leaked a thread
+    // on every node timeout.
+    let timer = metrics::Timer::new();
+    let block_hash = rpc_call_json("getblockhash", serde_json::json!([height as i64]))
+        .await
+        .map_err(|e| format!("RPC error getting block hash: {e}"))?
+        .as_str()
+        .ok_or("getblockhash returned non-string")?
+        .to_string();
+    metrics::RPC_CALL_DURATION
+        .with_label_values(&["getblockhash"])
+        .observe(timer.elapsed_secs());
+
     // Fetch block with full transaction data (verbosity=2)
     let timer = metrics::Timer::new();
     let response = client
@@ -246,7 +293,9 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
 ///   is done via HashSet lookup instead of on-demand RPC fetching. This ensures
 ///   100% accurate spend detection matching the initial sync two-pass algorithm.
 async fn index_block_from_rpc(
-    rpc_client: &Arc<PivxRpcClient>,
+    // Block hashes now come from the async `rpc_call_json` helper (no thread
+    // leak); the blocking client is no longer needed here.
+    _rpc_client: &Arc<PivxRpcClient>,
     height: i32,
     db: &Arc<DB>,
     broadcaster: &Option<Arc<EventBroadcaster>>,
@@ -275,16 +324,19 @@ async fn index_block_from_rpc(
         Some(enrich_height) => height > enrich_height,  // Only for NEW blocks
     };
     
-    // Get block hash at this height - must use separate thread
-    let client = Arc::clone(rpc_client);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = client.getblockhash(height as i64);
-        let _ = tx.send(result);
-    });
-    let block_hash = rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "RPC timeout")??;
-    
+    // Get block hash at this height. Async helper (carries its own timeout)
+    // instead of a detached thread::spawn + recv_timeout that leaked a thread
+    // on every node timeout.
+    let block_hash = crate::api::helpers::rpc_call_json(
+        "getblockhash",
+        serde_json::json!([height as i64]),
+    )
+    .await
+    .map_err(|e| format!("RPC error getting block hash: {e}"))?
+    .as_str()
+    .ok_or("getblockhash returned non-string")?
+    .to_string();
+
     // CRITICAL FIX: Atomic check-and-reserve to prevent race conditions
     // Step 1: Check if already indexed OR being processed
     let mut height_hash_key = vec![b'H'];
@@ -301,9 +353,7 @@ async fn index_block_from_rpc(
             return Ok(());
         } else {
             // Different block at same height - REORG detected!
-            eprintln!("⚠️  REORG detected at height {}", height);
-            eprintln!("   Expected: {}", existing_hash_str);
-            eprintln!("   Current:  {}", block_hash);
+            warn!(height = height, expected = %existing_hash_str, current = %block_hash, "REORG detected");
             // Delete processing marker if it exists (allow reindex)
             db.delete_cf(&cf_state, &processing_key).ok();
         }
@@ -318,7 +368,7 @@ async fn index_block_from_rpc(
     
     // Step 3: Set processing marker to claim this height
     // Use a short TTL value as the marker (height as bytes)
-    db.put_cf(&cf_state, &processing_key, &height.to_le_bytes())?;
+    db.put_cf(&cf_state, &processing_key, height.to_le_bytes())?;
     
     // RAII guard to ensure processing marker is cleaned up even on error
     struct ProcessingGuard<'a> {
@@ -335,7 +385,7 @@ async fn index_block_from_rpc(
     
     let _guard = ProcessingGuard {
         db,
-        cf_state: &cf_state,
+        cf_state,
         key: processing_key.clone(),
     };
     
@@ -389,9 +439,16 @@ async fn index_block_from_rpc(
     // Store height -> hash mapping
     db.put_cf(&cf_metadata, &height_key, &hash_bytes)?;
     
-    // Store hash -> height mapping for reverse lookups
+    // Store hash -> height mapping for reverse lookups. The 'h' key MUST be the
+    // INTERNAL (little-endian) hash to match the parse path (blocks.rs/offset_indexer)
+    // and every 'h' reader (enrichment orphan classifier, reorg cleanup). Writing it
+    // in display order (as this did previously) made live-monitored canonical blocks
+    // invisible to those readers — they were miscounted as orphans, which corrupted
+    // the orphan-rate / daily-series analytics. The forward height->hash map above
+    // stays display order (consistent with blocks.rs).
+    let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     let mut hash_key = vec![b'h'];
-    hash_key.extend_from_slice(&hash_bytes);
+    hash_key.extend_from_slice(&internal_hash);
     let height_bytes = height.to_le_bytes().to_vec();
     db.put_cf(&cf_metadata, &hash_key, &height_bytes)?;
     
@@ -472,7 +529,7 @@ async fn index_block_from_rpc(
                 .ok_or("Missing txid in transaction object")?
                 .to_string()
         } else {
-            eprintln!("⚠️  Skipping invalid transaction at index {} in block {}", tx_index, height);
+            warn!(tx_index = tx_index, height = height, "Skipping invalid transaction");
             tx_errors += 1;
             continue;
         };
@@ -480,7 +537,7 @@ async fn index_block_from_rpc(
         let txid_bytes = match hex::decode(&txid) {
             Ok(bytes) => bytes,
             Err(_) => {
-                eprintln!("⚠️  Invalid txid hex at index {} in block {}: {}", tx_index, height, txid);
+                warn!(tx_index = tx_index, height = height, txid = %txid, "Invalid txid hex");
                 tx_errors += 1;
                 continue;
             }
@@ -493,7 +550,7 @@ async fn index_block_from_rpc(
                 match hex::decode(hex_str) {
                     Ok(bytes) => Some(bytes),
                     Err(_) => {
-                        eprintln!("⚠️  Failed to decode hex for txid {}", txid);
+                        warn!(txid = %txid, "Failed to decode hex for transaction");
                         None
                     }
                 }
@@ -528,26 +585,26 @@ async fn index_block_from_rpc(
                                 match hex::decode(raw_hex) {
                                     Ok(bytes) => bytes,
                                     Err(_) => {
-                                        eprintln!("⚠️  Failed to decode getrawtransaction result for {}", txid);
+                                        warn!(txid = %txid, "Failed to decode getrawtransaction result");
                                         tx_errors += 1;
                                         continue;
                                     }
                                 }
                             } else {
-                                eprintln!("⚠️  No result in getrawtransaction for {}", txid);
+                                warn!(txid = %txid, "No result in getrawtransaction response");
                                 tx_errors += 1;
                                 continue;
                             }
                         }
                         Err(e) => {
-                            eprintln!("⚠️  Failed to parse getrawtransaction response for {}: {}", txid, e);
+                            warn!(txid = %txid, error = %e, "Failed to parse getrawtransaction response");
                             tx_errors += 1;
                             continue;
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("⚠️  Failed to fetch transaction {}: {}", txid, e);
+                    warn!(txid = %txid, error = %e, "Failed to fetch transaction via RPC");
                     tx_errors += 1;
                     continue;
                 }
@@ -585,7 +642,7 @@ async fn index_block_from_rpc(
         let tx_version_bytes = if raw_tx_bytes.len() >= 4 {
             &raw_tx_bytes[0..4]
         } else {
-            eprintln!("⚠️  Transaction {} has invalid size (< 4 bytes), using default version", txid);
+            warn!(txid = %txid, "Transaction has invalid size (< 4 bytes), using default version");
             &[1u8, 0, 0, 0] // Default to version 1
         };
         
@@ -595,13 +652,13 @@ async fn index_block_from_rpc(
         
         if needs_update {
             if let Err(e) = db.put_cf(&cf_transactions, &tx_key, &full_data) {
-                eprintln!("⚠️  Failed to store transaction {}: {}", txid, e);
+                warn!(txid = %txid, error = %e, "Failed to store transaction");
                 tx_errors += 1;
                 continue;
             }
-            
+
             if existing_tx_data.is_some() {
-                eprintln!("✅ Promoted mempool tx {} to confirmed at height {}", txid, height);
+                debug!(txid = %txid, height = height, "Promoted mempool tx to confirmed");
             }
         }
         
@@ -612,7 +669,7 @@ async fn index_block_from_rpc(
         
         // Store the txid in display format
         if let Err(e) = db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes()) {
-            eprintln!("⚠️  Failed to store block TX index for {}: {}", txid, e);
+            warn!(txid = %txid, error = %e, "Failed to store block TX index");
             tx_errors += 1;
             continue;
         }
@@ -620,13 +677,13 @@ async fn index_block_from_rpc(
         // 3. Parse transaction and index addresses/UTXOs
         // Validate transaction size before allocation
         if raw_tx_bytes.len() > 10_000_000 {
-            eprintln!("⚠️  Transaction {} too large ({} bytes), skipping", txid, raw_tx_bytes.len());
+            warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction too large, skipping");
             tx_errors += 1;
             continue;
         }
-        
+
         if raw_tx_bytes.is_empty() {
-            eprintln!("⚠️  Transaction {} has empty data, skipping", txid);
+            warn!(txid = %txid, "Transaction has empty data, skipping");
             tx_errors += 1;
             continue;
         }
@@ -636,7 +693,7 @@ async fn index_block_from_rpc(
         let total_size = match 4_usize.checked_add(raw_tx_bytes.len()) {
             Some(size) if size <= 10_000_004 => size,
             _ => {
-                eprintln!("⚠️  Transaction {} size calculation overflow", txid);
+                warn!(txid = %txid, "Transaction size calculation overflow, skipping");
                 tx_errors += 1;
                 continue;
             }
@@ -651,7 +708,7 @@ async fn index_block_from_rpc(
         let parsed_tx = match deserialize_transaction(&tx_data_with_header).await {
             Ok(tx) => tx,
             Err(e) => {
-                eprintln!("⚠️  Failed to parse transaction {}: {}", txid, e);
+                warn!(txid = %txid, error = %e, "Failed to parse transaction");
                 tx_errors += 1;
                 continue;
             }
@@ -705,10 +762,10 @@ async fn index_block_from_rpc(
                             // Each UTXO is 40 bytes (32 byte txid + 8 byte vout)
                             // Limit to 100k UTXOs = 4MB
                             if data.len() > 4_000_000 {
-                                eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
                                 Vec::new()
                             } else if data.len() % 40 != 0 {
-                                eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
                                 Vec::new()
                             } else {
                                 deserialize_utxos(&data).await
@@ -725,8 +782,8 @@ async fn index_block_from_rpc(
                     if already_exists {
                         // Already indexed - skip (prevents duplicates from reorg/reindex)
                         #[cfg(feature = "debug-address-index")]
-                        eprintln!("⚠️  Duplicate UTXO detected (skipped): {}:{} for {}", 
-                                 hex::encode(&txid_bytes), output_idx, address);
+                        debug!(txid = %hex::encode(&txid_bytes), vout = output_idx, %address,
+                               "Duplicate UTXO detected (skipped)");
                         continue;
                     }
                     
@@ -736,7 +793,7 @@ async fn index_block_from_rpc(
                     // Store updated UTXO list
                     let serialized = serialize_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
-                        eprintln!("⚠️  Failed to index address {} for tx {}: {}", address, txid, e);
+                        warn!(address = %address, txid = %txid, error = %e, "Failed to index address for tx");
                     }
                 }
             }
@@ -766,7 +823,7 @@ async fn index_block_from_rpc(
             let prev_txid_bytes = match hex::decode(prev_txid_hex) {
                 Ok(bytes) => bytes,
                 Err(_) => {
-                    eprintln!("⚠️  Invalid prev txid hex: {}", prev_txid_hex);
+                    warn!(prev_txid = %prev_txid_hex, "Invalid prev txid hex");
                     continue;
                 }
             };
@@ -844,7 +901,7 @@ async fn index_block_from_rpc(
                                                 full_data.extend(&raw_bytes);
                                                 
                                                 if let Err(e) = db.put_cf(&cf_transactions, &prev_tx_key, &full_data) {
-                                                    eprintln!("⚠️  Failed to cache previous tx {}: {}", prev_txid_hex, e);
+                                                    warn!(prev_txid = %prev_txid_hex, error = %e, "Failed to cache previous tx");
                                                 }
                                                 // Successfully cached - debug logging removed for performance
                                                 
@@ -857,21 +914,21 @@ async fn index_block_from_rpc(
                                                 full_data
                                             }
                                             Err(_) => {
-                                                eprintln!("⚠️  Failed to decode previous tx hex {}", prev_txid_hex);
+                                                warn!(prev_txid = %prev_txid_hex, "Failed to decode previous tx hex");
                                                 continue;
                                             }
                                         }
                                     } else {
-                                        eprintln!("⚠️  Missing hex or blockhash for previous tx {}", prev_txid_hex);
+                                        warn!(prev_txid = %prev_txid_hex, "Missing hex or blockhash for previous tx");
                                         continue;
                                     }
                                 } else {
-                                    eprintln!("⚠️  No result for previous tx {}", prev_txid_hex);
+                                    warn!(prev_txid = %prev_txid_hex, "No result for previous tx in RPC response");
                                     continue;
                                 }
                             }
                             Err(_) => {
-                                eprintln!("⚠️  Failed to parse RPC response for previous tx {}", prev_txid_hex);
+                                warn!(prev_txid = %prev_txid_hex, "Failed to parse RPC response for previous tx");
                                 continue;
                             }
                         }
@@ -879,7 +936,7 @@ async fn index_block_from_rpc(
                     Err(_) => {
                         // RPC fetch failed - can't process this input
                         // This is non-fatal, just skip removing from UTXO set
-                        eprintln!("⚠️  RPC request failed for previous tx {}", prev_txid_hex);
+                        debug!(prev_txid = %prev_txid_hex, "RPC request failed for previous tx (non-fatal)");
                         continue;
                     }
                 }
@@ -887,36 +944,36 @@ async fn index_block_from_rpc(
             
             // Now process the previous transaction data
             if prev_tx_data.len() < 8 {
-                eprintln!("⚠️  Previous transaction {} data too short", prev_txid_hex);
+                warn!(prev_txid = %prev_txid_hex, "Previous transaction data too short");
                 continue;
             }
-            
+
             if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
-                eprintln!("⚠️  Previous transaction {} too large: {} bytes", prev_txid_hex, prev_tx_data.len());
+                warn!(prev_txid = %prev_txid_hex, bytes = prev_tx_data.len(), "Previous transaction too large");
                 continue;
             }
-            
+
             // Format: version (4) + height (4) + raw_tx
             // We need to prepend 4-byte dummy header for parser, so extract raw tx part
             let raw_prev_tx = &prev_tx_data[8..];
-            
+
             if raw_prev_tx.is_empty() {
-                eprintln!("⚠️  Previous transaction {} has empty data", prev_txid_hex);
+                warn!(prev_txid = %prev_txid_hex, "Previous transaction has empty data");
                 continue;
             }
-            
+
             // Additional safety check: ensure raw_prev_tx length is reasonable
             if raw_prev_tx.len() > 10_000_000 {
-                eprintln!("⚠️  Previous transaction {} raw data too large: {} bytes", prev_txid_hex, raw_prev_tx.len());
+                warn!(prev_txid = %prev_txid_hex, bytes = raw_prev_tx.len(), "Previous transaction raw data too large");
                 continue;
             }
-            
+
             // Prepend dummy block_version for parser compatibility
             // Use safe checked addition to prevent overflow
             let total_size = match 4_usize.checked_add(raw_prev_tx.len()) {
                 Some(size) if size <= 10_000_004 => size,
                 _ => {
-                    eprintln!("⚠️  Previous transaction {} total size overflow or too large", prev_txid_hex);
+                    warn!(prev_txid = %prev_txid_hex, "Previous transaction total size overflow or too large");
                     continue;
                 }
             };
@@ -945,10 +1002,10 @@ async fn index_block_from_rpc(
                             Some(data) => {
                                 // Validate data size before deserialization
                                 if data.len() > 4_000_000 {
-                                    eprintln!("⚠️  Address {} has suspiciously large UTXO data: {} bytes, skipping deserialization", address, data.len());
+                                    warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
                                     Vec::new()
                                 } else if data.len() % 40 != 0 {
-                                    eprintln!("⚠️  Address {} has invalid UTXO data size: {} bytes (not multiple of 40)", address, data.len());
+                                    warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
                                     Vec::new()
                                 } else {
                                     deserialize_utxos(&data).await
@@ -1006,7 +1063,7 @@ async fn index_block_from_rpc(
                     }
                     
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
-                        eprintln!("⚠️  Failed to update tx list for {}: {}", address, e);
+                        warn!(address = %address, error = %e, "Failed to update tx list for address");
                     }
                 }
             }
@@ -1039,7 +1096,7 @@ async fn index_block_from_rpc(
                         .unwrap_or(0);
                     
                     let new_total = current_total + received_delta;
-                    db.put_cf(&cf_addr_index, &key_r, &new_total.to_le_bytes())?;
+                    db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())?;
                 }
                 
                 // Calculate sent amount (inputs spending from this address)
@@ -1095,7 +1152,7 @@ async fn index_block_from_rpc(
                         .unwrap_or(0);
                     
                     let new_total = current_total + sent_delta;
-                    db.put_cf(&cf_addr_index, &key_s, &new_total.to_le_bytes())?;
+                    db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())?;
                 }
             }
         }
@@ -1105,10 +1162,9 @@ async fn index_block_from_rpc(
     
     // Report any errors
     if tx_errors > 0 {
-        eprintln!("⚠️  Block {}: Indexed {}/{} transactions ({} errors)", 
-                  height, tx_count, tx_array.len(), tx_errors);
+        warn!(height = height, indexed = tx_count, total = tx_array.len(), errors = tx_errors, "Block indexed with errors");
     } else if height % 1000 == 0 {
-        println!("✅ Block {}: Indexed all {} transactions", height, tx_count);
+        debug!(height = height, tx_count = tx_count, "Block indexed");
     }
     // Debug logging reduced for performance - only log every 1000 blocks or on errors
     
@@ -1210,13 +1266,13 @@ fn detect_reorg(
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     // If RPC height is less than ours, definite reorg
     if rpc_tip.height < db_tip.height {
-        println!("REORG DETECTED: RPC height {} < DB height {}", rpc_tip.height, db_tip.height);
+        warn!(rpc_height = rpc_tip.height, db_height = db_tip.height, "REORG DETECTED: RPC height less than DB height");
         return Ok(Some(rpc_tip.height));
     }
-    
+
     // If heights are same, check hashes
     if rpc_tip.height == db_tip.height && rpc_tip.hash != db_tip.hash {
-        println!("REORG DETECTED: Hash mismatch at height {}", rpc_tip.height);
+        warn!(height = rpc_tip.height, "REORG DETECTED: Hash mismatch at tip");
         return Ok(Some(rpc_tip.height - 1));
     }
     
@@ -1242,46 +1298,54 @@ pub async fn run_block_monitor(
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
     
-    // Create RPC client in completely separate OS thread
-    // PivxRpcClient uses reqwest::blocking which creates its own runtime
-    let (tx, rx) = std::sync::mpsc::channel();
+    // Construct the blocking RPC client + test connection on tokio's managed
+    // blocking pool. PivxRpcClient uses reqwest::blocking (own runtime), so it
+    // must not run on a tokio worker thread. spawn_blocking is bounded and
+    // awaited (joined) — unlike the previous detached std::thread::spawn +
+    // recv_timeout, which leaked the OS thread whenever the node was slow.
     let rpc_host_clone = rpc_host.clone();
-    
-    std::thread::spawn(move || {
+    let connect = tokio::task::spawn_blocking(move || {
         let client = PivxRpcClient::new(
-            rpc_host_clone.clone(),
+            rpc_host_clone,
             Some(rpc_user),
             Some(rpc_pass),
             3,
             10,
             30000,
         );
-        
+
         // Test connection
-        let result = match client.getblockcount() {
+        match client.getblockcount() {
             Ok(height) => Ok((Arc::new(client), height)),
             Err(e) => Err(e),
-        };
-        let _ = tx.send(result);
+        }
     });
-    
-    let rpc_client = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(Ok((client, height))) => {
+
+    let rpc_client = match tokio::time::timeout(std::time::Duration::from_secs(10), connect).await {
+        Ok(Ok(Ok((client, height)))) => {
             info!(rpc_height = height, "RPC connection established");
             metrics::set_rpc_connected(true);
-            
+
             // Connected successfully - store initial network height
             if let Err(e) = set_network_height(&db, height as i32) {
                 error!(error = %e, "Failed to set initial network height");
             }
             client
         }
-        Ok(Err(e)) => {
-            error!(error = %e, "RPC connection failed");
+        Ok(Ok(Err(e))) => {
+            error!(error = %e, "RPC connection failed - ensure PIVX node is running with RPC enabled");
             metrics::set_rpc_connected(false);
-            eprintln!("RPC connection failed: {}", e);
-            eprintln!("Tip: Make sure PIVX node is running with RPC enabled");
-            
+
+            // Just poll database for changes
+            loop {
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+            }
+        }
+        Ok(Err(e)) => {
+            // spawn_blocking task panicked/was cancelled.
+            error!(error = %e, "RPC connection task failed");
+            metrics::set_rpc_connected(false);
+
             // Just poll database for changes
             loop {
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
@@ -1290,8 +1354,7 @@ pub async fn run_block_monitor(
         Err(_) => {
             error!("RPC connection timed out");
             metrics::set_rpc_connected(false);
-            eprintln!("RPC connection timed out");
-            
+
             // Just poll database for changes
             loop {
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
@@ -1299,9 +1362,86 @@ pub async fn run_block_monitor(
         }
     };
     
+    // Surface the live daily-analytics gate state at startup. It activates only
+    // after a FULL enrich flips the ready gate; a degraded restart rebuild (zeroed
+    // join fields) keeps it dark until a full re-enrich.
+    if crate::analytics_live::is_enabled() {
+        info!(
+            shadow = crate::analytics_live::shadow_mode(),
+            ready = crate::analytics_live::is_ready(&db),
+            "Live daily-analytics enabled (active once the ready gate is set by a full enrich)"
+        );
+    }
+
+    // One-shot Phase-0 shadow validator: if `sync.live_analytics_shadow_validate_days`
+    // > 0, wait for the daily series to be built, then re-run Lane I/R over that many
+    // recent days into the shadow keyspace and diff each complete day vs the full
+    // enrich, logging the report. (Join-field mismatches vs a DEGRADED rebuild are
+    // expected — run a FULL re-enrich for a true join comparison.)
+    let validate_days = config.get_int("sync.live_analytics_shadow_validate_days").unwrap_or(0);
+    if validate_days > 0 {
+        let db_v = Arc::clone(&db);
+        // std::thread + current-thread runtime: shadow_validate holds a RocksDB
+        // iterator across .await (so it is !Send), the same reason the daily-series
+        // pass is detached this way.
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    warn!(error = %e, "shadow_validate: failed to build runtime");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                for _ in 0..1440 {
+                    let done = db_v
+                        .cf_handle("chain_state")
+                        .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
+                        .map(|v| v.first() == Some(&1u8))
+                        .unwrap_or(false);
+                    if done {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
+                    Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
+                    Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
+                }
+            });
+        });
+    }
+
+    // Tier-3 hourly snapshot tracking (resumes from the persisted series).
+    let mut last_snapshot_hour: u64 = read_last_snapshot_hour(&db);
+    let mut snapshot_failure_warned = false;
+
     loop {
+        // Hourly forward-only snapshot (mempool / masternodes / supply).
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let hour = now_secs / 3600;
+        if now_secs > 0 && hour > last_snapshot_hour {
+            match write_hourly_snapshot(&db, now_secs).await {
+                Ok(()) => {
+                    last_snapshot_hour = hour;
+                    debug!(ts = now_secs, "Hourly analytics snapshot stored");
+                }
+                Err(e) => {
+                    // Skip this hour's snapshot; warn only once to avoid spam.
+                    if !snapshot_failure_warned {
+                        warn!(error = %e, "Hourly analytics snapshot failed (skipping silently from now on)");
+                        snapshot_failure_warned = true;
+                    }
+                    last_snapshot_hour = hour;
+                }
+            }
+        }
+
         // Get current tips
-        let rpc_tip = match get_rpc_chain_tip(&rpc_client) {
+        let rpc_tip = match get_rpc_chain_tip().await {
             Ok(tip) => {
                 info!(
                     rpc_height = tip.height,
@@ -1328,7 +1468,7 @@ pub async fn run_block_monitor(
         let db_tip = match get_db_chain_tip(&db) {
             Ok(tip) => tip,
             Err(e) => {
-                eprintln!("Failed to get DB tip: {}", e);
+                error!(error = %e, "Failed to get DB tip");
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
@@ -1336,8 +1476,8 @@ pub async fn run_block_monitor(
         
         // Check for reorg
         if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
-            println!("\n⚠️  BLOCKCHAIN REORGANIZATION DETECTED!");
-            
+            warn!("BLOCKCHAIN REORGANIZATION DETECTED");
+
             // Handle the reorg using our reorg module
             match reorg::handle_reorg(
                 db.clone(),
@@ -1346,16 +1486,22 @@ pub async fn run_block_monitor(
                 rpc_tip.height,
             ).await {
                 Ok(reorg_info) => {
-                    println!("✅ Reorg handled successfully");
-                    println!("   Orphaned {} blocks from fork at height {}", 
-                             reorg_info.orphaned_blocks, reorg_info.fork_height);
-                    
+                    info!(orphaned = reorg_info.orphaned_blocks, fork_height = reorg_info.fork_height, "Reorg handled successfully");
+
+                    // Keep live daily-analytics correct across the rollback: clear
+                    // the affected (>= fork date) day blobs + reset the watermark so
+                    // the subsequent ticks rebuild them as the new chain is indexed.
+                    crate::analytics_live::on_reorg(
+                        &db,
+                        reorg_info.fork_height,
+                        reorg_info.orphaned_blocks,
+                    );
+
                     // Continue to re-index from the rollback point
                     // The normal sync logic below will pick up from the new chain tip
                 }
                 Err(e) => {
-                    eprintln!("❌ Failed to handle reorg: {}", e);
-                    eprintln!("   Waiting {} seconds before retry...", poll_interval_secs);
+                    error!(error = %e, retry_secs = poll_interval_secs, "Failed to handle reorg");
                     tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                     continue;
                 }
@@ -1385,17 +1531,16 @@ pub async fn run_block_monitor(
             );
             metrics::set_blocks_behind_tip(blocks_behind as i64);
             
-            println!("\n📡 RPC CATCHUP: {} blocks behind (heights {} → {})", 
-                     blocks_behind, db_tip.height + 1, rpc_tip.height);
-            
+            info!(blocks_behind = blocks_behind, start = db_tip.height + 1, end = rpc_tip.height, "RPC catchup starting");
+
             // TWO-PHASE RPC CATCHUP (matches initial sync two-pass algorithm)
             // This ensures 100% accurate spend detection without network dependency
-            
+
             let start_height = db_tip.height + 1;
             let end_height = rpc_tip.height;
-            
+
             // === PHASE 1: Fetch blocks and build complete spent set ===
-            println!("📥 Phase 1: Fetching {} blocks and building spent set...", blocks_behind);
+            debug!(blocks = blocks_behind, "Phase 1: Fetching blocks and building spent set");
             
             let mut fetched_blocks = Vec::new();
             let mut fetch_errors = 0;
@@ -1428,7 +1573,6 @@ pub async fn run_block_monitor(
                     Err(e) => {
                         error!(height = height, error = %e, "Failed to fetch block");
                         metrics::increment_rpc_errors("getblock", "timeout");
-                        eprintln!("❌ Failed to fetch block {}: {}", height, e);
                         fetch_errors += 1;
                     }
                 }
@@ -1440,19 +1584,17 @@ pub async fn run_block_monitor(
                     retry_secs = poll_interval_secs,
                     "Fetch errors occurred, retrying"
                 );
-                eprintln!("⚠️  {} fetch errors occurred, waiting {} seconds before retry...", 
-                         fetch_errors, poll_interval_secs);
                 tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
                 continue;
             }
-            
+
             // Build complete spent set from all fetched blocks
-            println!("🔍 Building spent set from {} blocks...", fetched_blocks.len());
+            debug!(blocks = fetched_blocks.len(), "Building spent set from fetched blocks");
             let spent_set = build_spent_set_from_blocks(&fetched_blocks);
-            println!("✅ Phase 1 complete: {} outputs identified as spent", spent_set.len());
-            
+            debug!(spent_outputs = spent_set.len(), "Phase 1 complete: spent set built");
+
             // === PHASE 2: Sequential indexing with complete spent knowledge ===
-            println!("📝 Phase 2: Indexing blocks with complete spent set...");
+            debug!("Phase 2: Indexing blocks with complete spent set");
             
             let mut indexed = 0;
             let mut index_errors = 0;
@@ -1470,14 +1612,12 @@ pub async fn run_block_monitor(
                 let height_key = block.height.to_le_bytes();
                 
                 // Check if we already have a canonical hash for this height
-                if let Some(stored_hash) = db.get_cf(&cf_metadata, &height_key)? {
+                if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
                     let stored_hash_hex = hex::encode(&stored_hash);
-                    
+
                     if stored_hash_hex != block.block_hash {
-                        eprintln!("⚠️  REORG detected at height {}", block.height);
-                        eprintln!("   DB hash:  {}", stored_hash_hex);
-                        eprintln!("   RPC hash: {}", block.block_hash);
-                        eprintln!("   Aborting catchup to trigger reorg handler");
+                        warn!(height = block.height, db_hash = %stored_hash_hex, rpc_hash = %block.block_hash,
+                              "REORG detected during catchup - aborting to trigger reorg handler");
                         break;
                     }
                 }
@@ -1486,24 +1626,22 @@ pub async fn run_block_monitor(
                 match index_block_from_rpc(&rpc_client, block.height, &db, &broadcaster, Some(&spent_set)).await {
                     Ok(_) => {
                         indexed += 1;
-                        if indexed % 10 == 0 {
+                        if indexed % 100 == 0 {
                             let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
-                            println!("   📊 Progress: {}/{} ({:.1}%)", indexed, blocks_behind, progress);
+                            debug!(indexed = indexed, total = blocks_behind, progress_pct = format!("{:.1}", progress), "Catchup progress");
                         }
                     }
                     Err(e) => {
-                        eprintln!("❌ Failed to index block {}: {}", block.height, e);
+                        error!(height = block.height, error = %e, "Failed to index block");
                         index_errors += 1;
                     }
                 }
             }
             
-            println!("✅ Phase 2 complete: {}/{} blocks indexed ({} errors)", 
-                     indexed, blocks_behind, index_errors);
-            
+            info!(indexed = indexed, total = blocks_behind, errors = index_errors, "Phase 2 complete: blocks indexed");
+
             if index_errors > 0 {
-                eprintln!("⚠️  Some blocks failed to index, waiting {} seconds before retry...", 
-                         poll_interval_secs);
+                warn!(errors = index_errors, retry_secs = poll_interval_secs, "Some blocks failed to index");
             }
             
             // Check if we successfully caught up
@@ -1553,5 +1691,11 @@ pub async fn run_block_monitor(
             // We're caught up - sleep before checking again
             tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
         }
+
+        // Live daily-analytics: drive Lane I over (watermark, sync_height] + the
+        // cadence Lane-R recompute. No-ops unless `sync.live_analytics` is on AND a
+        // full enrich has set the live-ready gate. Steady-state only (this is the
+        // post-enrich monitor; the pre-enrich bulk sync lives in sync.rs).
+        crate::analytics_live::tick(&db).await;
     }
 }

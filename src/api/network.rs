@@ -9,7 +9,6 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::constants::HEIGHT_ORPHAN;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -34,9 +33,8 @@ pub async fn status_v2(
             Duration::from_secs(5),
             || async move {
                 get_chain_state(&db_clone)
-                    .map_err(|e| Box::new(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to get chain state: {}", e)
+                    .map_err(|e| Box::new(std::io::Error::other(
+                        format!("Failed to get chain state: {e}")
                     )) as Box<dyn std::error::Error + Send + Sync>)
             }
         )
@@ -46,7 +44,10 @@ pub async fn status_v2(
         Ok(state) => Ok(Json(state)),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(BlockbookError::new(format!("Failed to get chain state: {}", e)))
+            {
+                tracing::error!(error = %e, "status endpoint failed");
+                Json(BlockbookError::new("Internal error"))
+            }
         ))
     }
 }
@@ -70,75 +71,49 @@ pub struct HealthStatus {
 pub async fn health_check_v2(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<HealthStatus>, StatusCode> {
+    // O(1) health check. The previous implementation iterated the ENTIRE
+    // transactions and addr_index column families on every call — it was both the
+    // Docker healthcheck target (every 30s) and an unauthenticated remote DoS
+    // vector on a synced chain. Counts now come from RocksDB key estimates and
+    // metrics persisted by the sync pipeline.
     let result = tokio::task::spawn_blocking(move || -> Result<HealthStatus, Box<dyn std::error::Error + Send + Sync>> {
         let mut warnings = Vec::new();
-        
-        // Check transaction counts
+
         let tx_cf = db.cf_handle("transactions").ok_or("transactions CF not found")?;
-        let mut total_txs = 0u64;
-        let mut orphaned_txs = 0u64;
-        let mut valid_txs = 0u64;
-        
-        let iter = db.iterator_cf(tx_cf, rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (key, value) = item?;
-            if key.first() == Some(&b'B') {
-                continue;
-            }
-            
-            total_txs += 1;
-            
-            if value.len() >= 8 {
-                let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
-                let height = i32::from_le_bytes(height_bytes);
-                if height == HEIGHT_ORPHAN {
-                    orphaned_txs += 1;
-                } else {
-                    valid_txs += 1;
-                }
-            }
-        }
-        
-        // Check address index
-        let addr_cf = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;
-        let mut indexed_addresses = 0u64;
-        let iter = db.iterator_cf(addr_cf, rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item?;
-            if key.first() == Some(&b't') {
-                indexed_addresses += 1;
-            }
-        }
-        
-        // Check address index completeness marker
+        let total_txs = db
+            .property_int_value_cf(tx_cf, "rocksdb.estimate-num-keys")?
+            .unwrap_or(0);
+
+        // Cheap liveness probe: a point read against chain_state
         let state_cf = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
         let addr_complete = db.get_cf(state_cf, b"address_index_complete")?;
         let address_index_complete = addr_complete.is_some();
-        
-        // Generate warnings
-        if !address_index_complete && valid_txs > 0 {
+
+        // Address count persisted by the sync pipeline (metric_total_addresses)
+        let indexed_addresses = db
+            .get_cf(state_cf, b"metric_total_addresses")?
+            .filter(|b| b.len() >= 8)
+            .map(|b| u64::from_le_bytes(b[0..8].try_into().unwrap_or([0u8; 8])))
+            .unwrap_or(0);
+
+        if !address_index_complete && total_txs > 0 {
             warnings.push("Address index not marked as complete. Run rebuild_address_index if sync is done.".to_string());
         }
-        
-        if indexed_addresses == 0 && valid_txs > 100000 {
+        if indexed_addresses == 0 && total_txs > 100_000 {
             warnings.push("Address index is empty but many transactions exist. Run rebuild_address_index.".to_string());
         }
-        
-        if orphaned_txs > valid_txs / 100 {
-            warnings.push(format!("High orphaned transaction count: {} ({:.1}%)", 
-                                 orphaned_txs, 
-                                 (orphaned_txs as f64 / valid_txs as f64) * 100.0));
-        }
-        
+
         let status = if warnings.is_empty() { "healthy" } else { "degraded" };
-        
+
         Ok(HealthStatus {
             status: status.to_string(),
             database_ok: true,
             address_index_complete,
+            // Estimated via rocksdb.estimate-num-keys (exact counts would require a
+            // full CF scan — see DoS note above). Orphan breakdown is not tracked here.
             total_transactions: total_txs,
-            valid_transactions: valid_txs,
-            orphaned_transactions: orphaned_txs,
+            valid_transactions: total_txs,
+            orphaned_transactions: 0,
             indexed_addresses,
             warnings,
         })
@@ -173,9 +148,17 @@ pub async fn money_supply_v2(
     }
 }
 
-/// Compute money supply from PIVX RPC (direct TCP call for compatibility)
+/// Compute money supply from PIVX RPC (async, non-blocking)
 pub async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
-    compute_money_supply_blocking()
+    // Unforced (fForceUpdate=false): the node maintains supply as it syncs, so this
+    // returns the up-to-date figures in ~20ms. Passing [true] forces a full
+    // chainstate recomputation (~17s) on every call and blew the RPC timeout.
+    let result = super::helpers::rpc_call_json("getsupplyinfo", serde_json::json!([false])).await?;
+    Ok(MoneySupply {
+        moneysupply: result.get("totalsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        transparentsupply: result.get("transparentsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        shieldsupply: result.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+    })
 }
 
 /// Blocking version of compute_money_supply for use in spawn_blocking contexts
@@ -184,13 +167,12 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     let rpc_host = config
         .get_string("rpc.host")
         .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
-    let rpc_user = config
-        .get_string("rpc.user")
-        .unwrap_or_else(|_| "explorer".to_string());
-    let rpc_pass = config
-        .get_string("rpc.pass")
-        .unwrap_or_else(|_| "explorer_test_pass".to_string());
-    
+    // Fail closed: never embed a credential in the binary. Missing config
+    // yields empty creds → the node rejects auth and this errors, rather than
+    // silently using a known password.
+    let rpc_user = config.get_string("rpc.user").unwrap_or_default();
+    let rpc_pass = config.get_string("rpc.pass").unwrap_or_default();
+
     let host_port = rpc_host
         .replace("http://", "")
         .replace("https://", "");
@@ -199,8 +181,8 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     
-    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[true]}"#;
-    let auth = format!("{}:{}", rpc_user, rpc_pass);
+    let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[false]}"#;
+    let auth = format!("{rpc_user}:{rpc_pass}");
     let auth_b64 = base64::encode(auth);
     
     let http_request = format!(

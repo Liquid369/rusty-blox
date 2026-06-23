@@ -26,7 +26,25 @@ export function formatPIV(value, decimals = 8) {
   
   // Convert satoshis to PIV (1 PIV = 100,000,000 satoshis)
   const piv = satoshis / 100000000
-  return piv.toFixed(decimals)
+  return groupThousands(piv.toFixed(decimals))
+}
+
+/**
+ * Insert thousands-separator commas into the integer part of a numeric string,
+ * preserving the fractional part EXACTLY (no rounding / precision change), e.g.
+ * "381780.99997730" -> "381,780.99997730", "-1234.5" -> "-1,234.5".
+ * @param {string|number} numStr
+ * @returns {string}
+ */
+export function groupThousands(numStr) {
+  const str = String(numStr)
+  const neg = str.startsWith('-')
+  const body = neg ? str.slice(1) : str
+  const dot = body.indexOf('.')
+  const intPart = dot === -1 ? body : body.slice(0, dot)
+  const decPart = dot === -1 ? '' : body.slice(dot) // includes the '.'
+  const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return `${neg ? '-' : ''}${grouped}${decPart}`
 }
 
 /**
@@ -45,8 +63,8 @@ export function formatNumber(num) {
  * @returns {string} Formatted percentage
  */
 export function formatPercentage(num) {
-  if (num === null || num === undefined) return '0.00'
-  return parseFloat(num).toFixed(2)
+  const n = parseFloat(num)
+  return Number.isFinite(n) ? n.toFixed(2) : '0.00'
 }
 
 /**
@@ -145,10 +163,11 @@ export function formatDifficulty(diff) {
  * @returns {string} Formatted size
  */
 export function formatBytes(bytes) {
-  if (bytes === 0) return '0 B'
-  
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+
   const sizes = ['B', 'KB', 'MB', 'GB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), sizes.length - 1)
+
+  return `${(n / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`
 }

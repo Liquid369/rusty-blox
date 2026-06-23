@@ -16,9 +16,9 @@
           :value="chainStore.isSynced ? '✓ Synced' : `${chainStore.syncPercentage.toFixed(1)}%`"
           :loading="loading"
         />
-        <StatCard 
-          label="Total Supply" 
-          :value="formatPIV(chainStore.supply)"
+        <StatCard
+          label="Total Supply"
+          :value="formatSupply(chainStore.supply)"
           subtitle="PIV"
           :loading="loading"
         />
@@ -64,7 +64,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
-import { blockService, transactionService, chainService } from '@/services'
+import { blockService, chainService, masternodeService } from '@/services'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import UiCard from '@/components/common/UiCard.vue'
@@ -74,21 +74,13 @@ const chainStore = useChainStore()
 
 const loading = ref(false)
 const loadingBlocks = ref(false)
-const loadingTxs = ref(false)
 const recentBlocks = ref([])
-const recentTxs = ref([])
 
-console.log('Dashboard component mounted')
-console.log('Initial chainStore values:', {
-  height: chainStore.height,
-  syncPercentage: chainStore.syncPercentage,
-  supply: chainStore.supply,
-  masternodeCount: chainStore.masternodeCount
-})
-console.log('Initial recentBlocks:', recentBlocks.value)
-
-const formatPIV = (sats) => {
-  return (Number(sats) / 100000000).toFixed(2)
+// Supply from /v2/moneysupply is already a PIV float (not satoshis)
+const formatSupply = (supply) => {
+  const value = Number(supply)
+  if (!value || !isFinite(value)) return '0'
+  return value.toLocaleString('en-US', { maximumFractionDigits: 0 })
 }
 
 const formatTimeAgo = (timestamp) => {
@@ -117,66 +109,42 @@ const goToBlock = (height) => {
   router.push(`/block/${height}`)
 }
 
-const goToTx = (txid) => {
-  router.push(`/tx/${txid}`)
-}
-
 const loadData = async () => {
-  console.log('loadData() called')
-  try {
-    // Load chain info
-    console.log('Fetching status...')
-    const chainInfo = await chainService.getStatus()
-    console.log('Chain info received:', chainInfo)
-    
-    if (chainInfo && chainInfo.height) {
-      const updateData = {
-        height: chainInfo.height || 0,
-        syncPercentage: chainInfo.synced ? 100 : (chainInfo.sync_percentage || 0),
-        supply: '0', // TODO: Get supply from API
-        masternodeCount: 0 // TODO: Get masternode count from API
-      }
-      console.log('Updating chainStore with:', updateData)
-      chainStore.updateChainInfo(updateData)
-      console.log('ChainStore after update:', {
-        height: chainStore.height,
-        syncPercentage: chainStore.syncPercentage
-      })
-    }
-    loading.value = false
+  loading.value = true
+  loadingBlocks.value = true
 
-    // Load recent blocks - API returns array directly
-    console.log('Fetching blocks...')
-    const blocksData = await blockService.getRecentBlocks(5)
-    console.log('Blocks data received:', blocksData)
-    console.log('Is array?', Array.isArray(blocksData))
-    // blocksData is already an array of blocks
-    recentBlocks.value = Array.isArray(blocksData) ? blocksData : []
-    console.log('recentBlocks.value set to:', recentBlocks.value)
-    console.log('recentBlocks.value.length:', recentBlocks.value.length)
-    loadingBlocks.value = false
+  const [statusResult, supplyResult, mnCountResult, blocksResult] = await Promise.allSettled([
+    chainService.getStatus(),
+    chainService.getMoneySupply(),
+    masternodeService.getMasternodeCount(),
+    blockService.getRecentBlocks(5)
+  ])
 
-    // Load recent transactions - for now use blocks' tx data
-    // TODO: Implement proper recent transactions endpoint
-    recentTxs.value = []
-    loadingTxs.value = false
-  } catch (error) {
-    console.error('Failed to load dashboard data:', error)
-    // Set loading to false so content can render even on error
-    loading.value = false
-    loadingBlocks.value = false
-    loadingTxs.value = false
-    
-    // Set default values so UI doesn't stay blank
-    if (chainStore.height === 0) {
-      chainStore.updateChainInfo({
-        height: 0,
-        syncPercentage: 0,
-        supply: '0',
-        masternodeCount: 0
-      })
-    }
+  const update = {}
+
+  if (statusResult.status === 'fulfilled' && statusResult.value?.height) {
+    const chainInfo = statusResult.value
+    update.height = chainInfo.height
+    update.syncPercentage = chainInfo.synced ? 100 : (chainInfo.sync_percentage || 0)
   }
+
+  if (supplyResult.status === 'fulfilled' && supplyResult.value?.moneysupply) {
+    // moneysupply is a PIV float, store as-is
+    update.supply = supplyResult.value.moneysupply
+  }
+
+  if (mnCountResult.status === 'fulfilled' && mnCountResult.value?.total !== undefined) {
+    update.masternodeCount = mnCountResult.value.total
+  }
+
+  chainStore.updateChainInfo(update)
+  loading.value = false
+
+  if (blocksResult.status === 'fulfilled') {
+    // API returns an array of blocks directly
+    recentBlocks.value = Array.isArray(blocksResult.value) ? blocksResult.value : []
+  }
+  loadingBlocks.value = false
 }
 
 onMounted(() => {

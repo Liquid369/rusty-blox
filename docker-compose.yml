@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  # Rusty-Blox Backend API
+  rustyblox:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rustyblox-api
+    ports:
+      - "3005:3005"
+    volumes:
+      - ./data:/data
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3005/api/v2/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - rustyblox-network
+
+  # Frontend (Vue.js)
+  frontend:
+    build:
+      context: ./frontend-legacy
+      dockerfile: Dockerfile
+    container_name: rustyblox-frontend
+    ports:
+      - "3002:80"
+    depends_on:
+      - rustyblox
+    restart: unless-stopped
+    networks:
+      - rustyblox-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: rustyblox-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+    restart: unless-stopped
+    networks:
+      - rustyblox-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: rustyblox-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - rustyblox-network
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  rustyblox-network:
+    driver: bridge

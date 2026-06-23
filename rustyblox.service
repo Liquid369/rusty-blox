@@ -1,0 +1,23 @@
+[Unit]
+Description=PIVX Blockchain Explorer (RustyBlox)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/rusty-blox
+ExecStart=/root/rusty-blox/target/release/rustyblox
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rustyblox
+
+# Resource limits
+LimitNOFILE=65536
+
+# Environment
+Environment="RUST_LOG=info"
+
+[Install]
+WantedBy=multi-user.target

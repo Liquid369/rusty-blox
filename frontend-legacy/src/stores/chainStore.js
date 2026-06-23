@@ -47,7 +47,7 @@ export const useChainStore = defineStore('chain', () => {
                          networkHash.value !== newHash
       
       if (heightDecreased || hashChanged) {
-        console.warn('⚠️ REORG DETECTED', {
+        console.warn('REORG DETECTED', {
           oldHeight: networkHeight.value,
           newHeight: newNetworkHeight,
           oldHash: networkHash.value,

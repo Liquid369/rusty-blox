@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::io;
+use tracing::{info, debug};
 
 /// Copy a directory recursively
 pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
@@ -29,12 +30,12 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<
             // Skip lock files
             if let Some(name) = file_name.to_str() {
                 if name == "LOCK" || name.ends_with(".lock") {
-                    println!("  Skipping lock file: {}", name);
+                    debug!(file = name, "Skipping lock file");
                     continue;
                 }
             }
-            
-            println!("  Copying: {} -> {}", src_path.display(), dst_path.display());
+
+            debug!(src = %src_path.display(), dst = %dst_path.display(), "Copying file");
             fs::copy(&src_path, &dst_path)?;
         }
     }
@@ -50,13 +51,11 @@ pub fn copy_block_index(
     let src_index = PathBuf::from(pivx_blocks_dir).join("index");
     let dest = PathBuf::from(dest_dir);
     
-    println!("📋 Copying PIVX block index...");
-    println!("  From: {}", src_index.display());
-    println!("  To: {}", dest.display());
-    
+    info!(src = %src_index.display(), dst = %dest.display(), "Copying PIVX block index");
+
     // Remove old copy if exists
     if dest.exists() {
-        println!("  Removing old copy...");
+        debug!("Removing old block index copy");
         fs::remove_dir_all(&dest)?;
     }
     
@@ -66,7 +65,7 @@ pub fn copy_block_index(
     // Copy the index directory
     copy_dir_all(&src_index, &dest)?;
     
-    println!("✅ Block index copied successfully");
+    info!("Block index copied successfully");
     
     Ok(dest)
 }
@@ -79,13 +78,11 @@ pub fn copy_chainstate(
     let src_chainstate = PathBuf::from(pivx_data_dir).join("chainstate");
     let dest = PathBuf::from(dest_dir);
     
-    println!("📋 Copying PIVX chainstate...");
-    println!("  From: {}", src_chainstate.display());
-    println!("  To: {}", dest.display());
-    
+    info!(src = %src_chainstate.display(), dst = %dest.display(), "Copying PIVX chainstate");
+
     // Remove old copy if exists
     if dest.exists() {
-        println!("  Removing old copy...");
+        debug!("Removing old chainstate copy");
         fs::remove_dir_all(&dest)?;
     }
     
@@ -95,7 +92,7 @@ pub fn copy_chainstate(
     // Copy the chainstate directory
     copy_dir_all(&src_chainstate, &dest)?;
     
-    println!("✅ Chainstate copied successfully");
+    info!("Chainstate copied successfully");
     
     Ok(dest)
 }
@@ -108,13 +105,11 @@ pub fn copy_blk_files(
     let src = PathBuf::from(pivx_blocks_dir);
     let dest = PathBuf::from(dest_dir);
     
-    println!("📋 Copying blk*.dat files...");
-    println!("  From: {}", src.display());
-    println!("  To: {}", dest.display());
-    
+    info!(src = %src.display(), dst = %dest.display(), "Copying blk*.dat files");
+
     // Remove old copy if exists
     if dest.exists() {
-        println!("  Removing old copy...");
+        debug!("Removing old blk files copy");
         fs::remove_dir_all(&dest)?;
     }
     
@@ -129,13 +124,13 @@ pub fn copy_blk_files(
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("blk") && name.ends_with(".dat") {
                 let dest_path = dest.join(name);
-                println!("  Copying: {}", name);
+                debug!(file = name, "Copying blk file");
                 fs::copy(&path, &dest_path)?;
             }
         }
     }
     
-    println!("✅ Blk files copied successfully");
+    info!("Blk files copied successfully");
     
     Ok(dest)
 }

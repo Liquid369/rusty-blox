@@ -34,7 +34,7 @@
           <div v-else class="regular-io">
             <div class="io-header">
               <span class="io-index">Input #{{ idx }}</span>
-              <span v-if="input.value" class="io-amount">{{ formatPIV(input.value) }} PIV</span>
+              <span v-if="input.value" class="io-amount">{{ formatSats(input.value) }} PIV</span>
             </div>
             <div v-if="input.type === 'coldstake' && input.addresses && input.addresses.length === 2" class="coldstake-box">
               <div class="coldstake-title">❄️ Cold Staking Contract</div>
@@ -71,7 +71,7 @@
           <div class="regular-io">
             <div class="io-header">
               <span class="io-index">Output #{{ output.n }}</span>
-              <span class="io-amount">{{ formatPIV(output.value) }} PIV</span>
+              <span class="io-amount">{{ formatSats(output.value) }} PIV</span>
             </div>
             <div v-if="output.type === 'coldstake' && output.addresses && output.addresses.length === 2" class="coldstake-box">
               <div class="coldstake-title">❄️ Cold Staking Contract</div>
@@ -100,7 +100,7 @@
 
     <!-- Reward Banner -->
     <div v-if="tx.reward > 0" class="reward-banner">
-      🎉 Staking Reward: <strong>{{ tx.reward }} PIV</strong>
+      🎉 Staking Reward: <strong>{{ formatPIV(tx.reward) }} PIV</strong>
     </div>
   </div>
 </template>
@@ -126,9 +126,16 @@ const formatTxType = (type) => {
   return types[type] || type
 }
 
+// Tx-level totals (value_in/value_out/fees) arrive as PIV floats
 const formatPIV = (value) => {
-  if (!value) return '0.00'
+  if (!value) return '0.00000000'
   return Number(value).toFixed(8)
+}
+
+// Per-input/output values arrive as raw satoshis - divide by 1e8 for display
+const formatSats = (value) => {
+  if (value === null || value === undefined) return '0.00000000'
+  return (Number(value) / 100000000).toFixed(8)
 }
 
 const truncateHash = (hash) => {

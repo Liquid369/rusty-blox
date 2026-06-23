@@ -251,12 +251,13 @@ mod tests {
     
     #[test]
     fn test_coinstake_maturity() {
-        // Coinstake at height 1000, current height 1599
-        assert!(!is_output_spendable(TransactionType::Coinstake, 1000, 1599));
-        
-        // Coinstake at height 1000, current height 1600 (exactly 600 confirmations)
-        assert!(is_output_spendable(TransactionType::Coinstake, 1000, 1600));
-        
+        // PIVX Core GetBlocksToMaturity() applies COINBASE_MATURITY (100) to coinstake too
+        // Coinstake at height 1000, current height 1099 (99 confirmations)
+        assert!(!is_output_spendable(TransactionType::Coinstake, 1000, 1099));
+
+        // Coinstake at height 1000, current height 1100 (exactly 100 confirmations)
+        assert!(is_output_spendable(TransactionType::Coinstake, 1000, 1100));
+
         // Coinstake at height 1000, current height 2000
         assert!(is_output_spendable(TransactionType::Coinstake, 1000, 2000));
     }

@@ -14,7 +14,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Failed to Load Proposals"
           :message="error"
         >
@@ -30,7 +30,7 @@
         <Card class="budget-overview-card">
           <template #header>
             <div class="overview-header">
-              <span class="header-icon">📊</span>
+              <span class="header-icon"><Icon name="chart-bar" :size="18" /></span>
               <span>Budget Overview</span>
             </div>
           </template>
@@ -68,6 +68,24 @@
               </div>
             </div>
             <div class="budget-stat">
+              <div class="stat-label">Monthly Burn (Passing)</div>
+              <div class="stat-value stat-accent" :title="monthlyBurn + ' PIV paid to passing proposals each cycle'">
+                {{ formatNumber(monthlyBurn) }} PIV
+              </div>
+            </div>
+            <div class="budget-stat">
+              <div class="stat-label">Passing Threshold</div>
+              <div class="stat-value stat-info" :title="`10% of ${formatNumber(enabledMasternodes)} enabled masternodes`">
+                {{ formatNumber(passingThreshold) }} votes
+              </div>
+            </div>
+            <div class="budget-stat">
+              <div class="stat-label">Enabled Masternodes</div>
+              <div class="stat-value stat-success" title="Masternodes eligible to vote">
+                {{ formatNumber(enabledMasternodes) }}
+              </div>
+            </div>
+            <div class="budget-stat">
               <div class="stat-label">Next Payout</div>
               <div class="stat-value stat-info" :title="'Block ' + nextSuperblock">
                 {{ timeUntilNextPayout }}
@@ -84,7 +102,7 @@
               ></div>
             </div>
             <div class="budget-bar-label">
-              <span>{{ budgetUtilizationPercent.toFixed(1) }}% Allocated</span>
+              <span>{{ budgetUtilizationPercent.toFixed(1) }}% of the {{ formatNumber(maxMonthlyBudget) }} PIV monthly cap allocated</span>
             </div>
           </div>
         </Card>
@@ -162,13 +180,27 @@
                     <span class="vote-value">{{ proposal.Abstains }}</span>
                   </div>
                 </div>
+
+                <!-- Net votes and margin against the 10% passing threshold -->
+                <div class="vote-margin-row">
+                  <span class="vote-label">Net votes:</span>
+                  <span class="vote-value net">{{ getNetVotes(proposal) >= 0 ? '+' : '' }}{{ formatNumber(getNetVotes(proposal)) }}</span>
+                  <Badge
+                    v-if="passingThreshold > 0"
+                    :variant="getVoteMargin(proposal) >= 0 ? 'success' : 'danger'"
+                    size="sm"
+                    :title="`Threshold: ${formatNumber(passingThreshold)} net votes (10% of enabled masternodes)`"
+                  >
+                    {{ getVoteMargin(proposal) >= 0 ? '+' : '' }}{{ formatNumber(getVoteMargin(proposal)) }} vs threshold
+                  </Badge>
+                </div>
               </div>
 
               <!-- Payment Info -->
               <div class="payment-info">
                 <InfoRow label="Monthly Payment">
                   <span class="payment-amount">
-                    {{ proposal.MonthlyPayment }} PIV
+                    {{ formatNumber(proposal.MonthlyPayment) }} PIV
                     <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                       ≈ {{ formatAmount(proposal.MonthlyPayment, { showPIV: false }) }}
                     </span>
@@ -176,14 +208,18 @@
                 </InfoRow>
                 <InfoRow label="Total Payment">
                   <span class="payment-amount">
-                    {{ proposal.TotalPayment }} PIV
+                    {{ formatNumber(proposal.TotalPayment) }} PIV
                     <span v-if="preferredCurrency !== 'PIV' && hasValidPrices" class="payment-fiat">
                       ≈ {{ formatAmount(proposal.TotalPayment, { showPIV: false }) }}
                     </span>
                   </span>
                 </InfoRow>
+                <InfoRow label="Budget Share">
+                  <span class="payment-amount">{{ getBudgetShare(proposal) }}% of cap</span>
+                </InfoRow>
                 <InfoRow label="Payments Remaining">
                   {{ proposal.RemainingPaymentCount }} / {{ proposal.TotalPaymentCount }}
+                  <span class="remaining-months">({{ proposal.RemainingPaymentCount }} month{{ proposal.RemainingPaymentCount !== 1 ? 's' : '' }} left)</span>
                 </InfoRow>
                 <InfoRow v-if="proposal.PaymentAddress" label="Payment Address">
                   <div class="payment-address-row" @click.stop>
@@ -208,9 +244,15 @@
                 </div>
               </div>
 
-              <!-- URL -->
-              <div v-if="proposal.URL" class="proposal-url">
-                <a :href="proposal.URL" target="_blank" class="external-link" @click.stop>
+              <!-- URL (only rendered when it is a safe http(s) link) -->
+              <div v-if="safeUrl(proposal.URL)" class="proposal-url">
+                <a
+                  :href="safeUrl(proposal.URL)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="external-link"
+                  @click.stop
+                >
                   View Discussion →
                 </a>
               </div>
@@ -221,7 +263,7 @@
         <!-- Empty State -->
         <EmptyState
           v-else
-          icon="📭"
+          icon="inbox"
           title="No Proposals"
           message="No proposals match your filter"
         />
@@ -231,13 +273,14 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from '@/stores/chainStore'
 import { useCurrency } from '@/composables/useCurrency'
 import { governanceService } from '@/services/governanceService'
 import { masternodeService } from '@/services/masternodeService'
-import { formatNumber, formatPIV } from '@/utils/formatters'
+import { formatNumber } from '@/utils/formatters'
 import {
   calculateGovernanceStats,
   getProposalStatus,
@@ -306,6 +349,29 @@ const remainingBudget = computed(() => {
 const budgetUtilizationPercent = computed(() => {
   return governanceStats.value?.budget.utilization || 0
 })
+
+// Total PIV paid out each cycle to proposals that are currently passing/funded
+const monthlyBurn = computed(() => {
+  return (governanceStats.value?.fundedProposals || [])
+    .reduce((sum, p) => sum + (p.MonthlyPayment || 0), 0)
+})
+
+const enabledMasternodes = computed(() => mnCount.value?.enabled || 0)
+
+// 10% of enabled masternodes (net yes votes) required to pass
+const passingThreshold = computed(() => {
+  return governanceStats.value?.voting.threshold || 0
+})
+
+const getNetVotes = (proposal) => proposal.Yeas - proposal.Nays
+
+const getVoteMargin = (proposal) => getNetVotes(proposal) - passingThreshold.value
+
+const getBudgetShare = (proposal) => {
+  const cap = PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET
+  if (!cap) return '0.0'
+  return (((proposal.MonthlyPayment || 0) / cap) * 100).toFixed(1)
+}
 
 // Calculate next superblock and time until payout
 const nextSuperblock = computed(() => {
@@ -408,6 +474,14 @@ const getProposalDisplayInfo = (proposal) => {
   }
 }
 
+// Only surface attacker-controllable proposal URLs when they are plain
+// http(s) links; anything else (javascript:, data:, etc.) is suppressed.
+const safeUrl = (url) => {
+  if (typeof url !== 'string') return ''
+  const trimmed = url.trim()
+  return /^https?:\/\//i.test(trimmed) ? trimmed : ''
+}
+
 const getYeasPercentage = (proposal) => {
   const total = proposal.Yeas + proposal.Nays
   if (total === 0) return 0
@@ -421,7 +495,7 @@ const getNaysPercentage = (proposal) => {
 }
 
 const viewProposal = (proposal) => {
-  router.push(`/governance/${encodeURIComponent(proposal.Name)}`)
+  router.push(`/proposal/${encodeURIComponent(proposal.Name)}`)
 }
 
 const fetchProposals = async () => {
@@ -471,7 +545,7 @@ onMounted(() => {
 .budget-overview-card {
   margin-bottom: var(--space-6);
   background: linear-gradient(135deg, rgba(102, 45, 145, 0.1) 0%, rgba(42, 27, 66, 0.3) 100%);
-  border: 2px solid rgba(89, 252, 179, 0.2);
+  border: 1px solid rgba(179, 255, 120, 0.25);
 }
 
 .overview-header {
@@ -486,11 +560,18 @@ onMounted(() => {
   font-size: var(--text-xl);
 }
 
+/* 8 tiles: keep rows balanced (4x2 / 2x4) instead of uneven auto-fit wraps */
 .budget-stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-5);
+}
+
+@media (max-width: 1024px) {
+  .budget-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .budget-stat {
@@ -498,10 +579,13 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-5);
-  background: linear-gradient(135deg, rgba(59, 44, 84, 0.6) 0%, rgba(45, 34, 64, 0.8) 100%);
+  background: var(--glass-bg);
   border-radius: var(--radius-lg);
-  border: 1px solid rgba(89, 252, 179, 0.15);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid rgba(179, 255, 120, 0.15);
+  transition:
+    transform var(--transition-base),
+    border-color var(--transition-base),
+    box-shadow var(--transition-base);
   min-width: 0;
   overflow: hidden;
   align-items: flex-start;
@@ -517,16 +601,16 @@ onMounted(() => {
   left: 0;
   right: 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--pivx-accent) 0%, rgba(89, 252, 179, 0.3) 100%);
+  background: linear-gradient(90deg, var(--pivx-accent) 0%, rgba(179, 255, 120, 0.3) 100%);
   opacity: 0;
   transition: opacity 0.3s ease;
 }
 
 .budget-stat:hover {
-  transform: translateY(-4px) scale(1.02);
-  box-shadow: 0 12px 24px rgba(89, 252, 179, 0.15), 
-              0 0 40px rgba(89, 252, 179, 0.1);
-  border-color: rgba(89, 252, 179, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(179, 255, 120, 0.15), 
+              0 0 40px rgba(179, 255, 120, 0.1);
+  border-color: rgba(179, 255, 120, 0.4);
 }
 
 .budget-stat:hover::before {
@@ -534,8 +618,8 @@ onMounted(() => {
 }
 
 .stat-label {
-  font-size: 0.65rem;
-  color: rgba(255, 255, 255, 0.6);
+  font-size: var(--text-2xs);
+  color: var(--text-secondary);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -562,31 +646,31 @@ onMounted(() => {
 
 .stat-accent {
   color: var(--pivx-accent);
-  text-shadow: 0 0 20px rgba(89, 252, 179, 0.5),
+  text-shadow: 0 0 20px rgba(179, 255, 120, 0.5),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-info {
-  color: #59b3fc;
-  text-shadow: 0 0 15px rgba(89, 179, 252, 0.4),
+  color: #CD97F7;
+  text-shadow: 0 0 15px rgba(179, 89, 252, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-success {
-  color: #5dfc8a;
-  text-shadow: 0 0 15px rgba(93, 252, 138, 0.4),
+  color: var(--green-accent);
+  text-shadow: 0 0 15px rgba(179, 255, 120, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-warning {
-  color: #fcb559;
-  text-shadow: 0 0 15px rgba(252, 181, 89, 0.4),
+  color: var(--warning);
+  text-shadow: 0 0 15px rgba(246, 255, 120, 0.3),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
 .stat-danger {
-  color: #fc5959;
-  text-shadow: 0 0 15px rgba(252, 89, 89, 0.4),
+  color: var(--danger-text);
+  text-shadow: 0 0 15px rgba(239, 68, 68, 0.35),
                0 2px 4px rgba(0, 0, 0, 0.4);
 }
 
@@ -608,7 +692,7 @@ onMounted(() => {
   height: 100%;
   background: linear-gradient(90deg, var(--pivx-purple-primary) 0%, var(--pivx-accent) 100%);
   transition: width 0.5s ease-out;
-  box-shadow: 0 0 10px rgba(89, 252, 179, 0.5);
+  box-shadow: 0 0 10px rgba(179, 255, 120, 0.5);
 }
 
 .budget-bar-label {
@@ -623,7 +707,7 @@ onMounted(() => {
   display: flex;
   gap: var(--space-2);
   margin-bottom: var(--space-6);
-  border-bottom: 2px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-secondary);
   overflow-x: auto;
 }
 
@@ -633,17 +717,27 @@ onMounted(() => {
   border: none;
   color: var(--text-secondary);
   font-family: var(--font-primary);
-  font-size: var(--text-base);
-  font-weight: 600;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
   cursor: pointer;
-  border-bottom: 3px solid transparent;
+  border-bottom: 2px solid transparent;
   margin-bottom: -2px;
-  transition: all 0.2s;
+  transition:
+    color var(--transition-fast),
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
   white-space: nowrap;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
 }
 
 .filter-tab:hover {
   color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.filter-tab:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: -2px;
 }
 
 .filter-tab.active {
@@ -691,22 +785,24 @@ onMounted(() => {
 .vote-bar {
   height: 8px;
   background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-full);
   overflow: hidden;
   display: flex;
+  border: 1px solid var(--border-secondary);
+  box-shadow: inset 0 1px 2px rgba(var(--rgb-purple-darkest), 0.5);
 }
 
 .vote-bar-fill {
   height: 100%;
-  transition: width 0.3s;
+  transition: width var(--transition-slow);
 }
 
 .vote-bar-fill.yeas {
-  background: var(--success);
+  background: linear-gradient(90deg, var(--green-accent-dark) 0%, var(--success) 100%);
 }
 
 .vote-bar-fill.nays {
-  background: var(--danger);
+  background: linear-gradient(90deg, var(--danger) 0%, #f87171 100%);
 }
 
 .vote-numbers {
@@ -732,12 +828,36 @@ onMounted(() => {
   color: var(--text-primary);
 }
 
+.vote-margin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.vote-value.net {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.remaining-months {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  margin-left: var(--space-1);
+}
+
 .payment-info {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-dark), 0.5);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 

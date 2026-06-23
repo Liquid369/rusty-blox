@@ -15,20 +15,56 @@
         <Card v-if="mnCount">
           <template #header>Enabled</template>
           <div class="stat-value">{{ formatNumber(mnCount.enabled) }}</div>
+          <div class="stat-sub">{{ enabledPercent }}% of network</div>
         </Card>
-        <Card v-if="mnCount">
-          <template #header>IPv4</template>
-          <div class="stat-value">{{ formatNumber(mnCount.ipv4) }}</div>
+        <Card v-if="networkCounts">
+          <template #header>Network</template>
+          <div class="network-breakdown">
+            <div class="network-item">
+              <Badge variant="info" size="sm">IPv4</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.ipv4) }}</span>
+            </div>
+            <div class="network-item">
+              <Badge variant="accent" size="sm">IPv6</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.ipv6) }}</span>
+            </div>
+            <div class="network-item">
+              <Badge variant="warning" size="sm">Onion</Badge>
+              <span class="network-count">{{ formatNumber(networkCounts.onion) }}</span>
+            </div>
+          </div>
         </Card>
-        <Card v-if="mnCount">
-          <template #header>IPv6</template>
-          <div class="stat-value">{{ formatNumber(mnCount.ipv6) }}</div>
+
+        <Card v-if="totalCollateral > 0">
+          <template #header>Collateral Locked</template>
+          <div class="stat-value">{{ formatNumber(totalCollateral) }} <span class="stat-unit">PIV</span></div>
+          <div class="stat-sub">{{ formatNumber(collateralBasis) }} nodes × {{ formatNumber(MASTERNODE_COLLATERAL) }} PIV</div>
         </Card>
-        <Card v-if="mnCount">
-          <template #header>Onion</template>
-          <div class="stat-value">{{ formatNumber(mnCount.onion) }}</div>
-        </Card>
-      </div>
+        <Card v-if="supplyLockedPercent !== null">
+          <template #header>Supply Locked</template>
+          <div class="stat-value">{{ supplyLockedPercent }} <span class="stat-unit">%</span></div>
+          <div class="stat-sub">{{ formatNumber(enabledCollateral) }} PIV locked by enabled nodes</div>
+        </Card>      </div>
+
+      <!-- Status Breakdown Band -->
+      <Card v-if="statusCounts.length > 0" class="status-band-card">
+        <div class="status-band">
+          <span class="status-band-label">Status Breakdown</span>
+          <div class="status-chips">
+            <button
+              v-for="entry in statusCounts"
+              :key="entry.status"
+              class="status-chip"
+              :class="{ active: statusFilter === entry.status }"
+              :title="`Filter by ${entry.status}`"
+              @click="statusFilter = statusFilter === entry.status ? 'all' : entry.status"
+            >
+              <Badge :variant="getStatusVariant(entry.status)" size="sm">{{ entry.status }}</Badge>
+              <span class="status-count">{{ formatNumber(entry.count) }}</span>
+            </button>
+          </div>
+        </div>
+      </Card>
 
       <!-- Loading State -->
       <div v-if="loading && masternodes.length === 0" class="loading-container">
@@ -38,7 +74,7 @@
       <!-- Error State -->
       <div v-else-if="error" class="error-container">
         <EmptyState
-          icon="⚠️"
+          icon="alert-triangle"
           title="Failed to Load Masternodes"
           :message="error"
         >
@@ -67,7 +103,7 @@
               <label>Protocol</label>
               <select v-model="protocolFilter" class="filter-select">
                 <option value="all">All Protocols</option>
-                <option value="70926">70926</option>
+                <option v-for="proto in availableProtocols" :key="proto" :value="proto">{{ proto }}</option>
               </select>
             </div>
             <div class="filter-group">
@@ -89,16 +125,16 @@
               <thead>
                 <tr>
                   <th @click="sortBy('rank')" class="sortable">
-                    Rank <span class="sort-icon">{{ getSortIcon('rank') }}</span>
+                    Rank <span class="sort-icon"><Icon :name="getSortIcon('rank')" :size="12" /></span>
                   </th>
                   <th>Status</th>
                   <th>Address</th>
                   <th @click="sortBy('activetime')" class="sortable">
-                    Active Since <span class="sort-icon">{{ getSortIcon('activetime') }}</span>
+                    Active Since <span class="sort-icon"><Icon :name="getSortIcon('activetime')" :size="12" /></span>
                   </th>
                   <th>Duration</th>
                   <th @click="sortBy('lastpaid')" class="sortable">
-                    Last Paid <span class="sort-icon">{{ getSortIcon('lastpaid') }}</span>
+                    Last Paid <span class="sort-icon"><Icon :name="getSortIcon('lastpaid')" :size="12" /></span>
                   </th>
                   <th>Protocol</th>
                 </tr>
@@ -141,7 +177,7 @@
           <!-- Empty State -->
           <EmptyState
             v-if="filteredMasternodes.length === 0"
-            icon="🔍"
+            icon="search"
             title="No Masternodes Found"
             message="Try adjusting your filters"
           />
@@ -162,10 +198,13 @@
 </template>
 
 <script setup>
+import Icon from '@/components/common/Icon.vue'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import api from '@/services/api'
 import { masternodeService } from '@/services/masternodeService'
 import { formatNumber, formatTimeAgo, formatDuration } from '@/utils/formatters'
+import { MASTERNODE_COLLATERAL } from '@/utils/constants'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Card from '@/components/common/Card.vue'
 import Badge from '@/components/common/Badge.vue'
@@ -178,6 +217,7 @@ import Pagination from '@/components/common/Pagination.vue'
 const router = useRouter()
 
 const mnCount = ref(null)
+const moneySupply = ref(null) // total PIV supply from /api/v2/moneysupply
 const masternodes = ref([])
 const loading = ref(false)
 const error = ref('')
@@ -185,6 +225,13 @@ const error = ref('')
 // Filters
 const statusFilter = ref('all')
 const protocolFilter = ref('all')
+
+// Protocol versions present in the live list (was hardcoded to 70926 and
+// matched nothing once the network moved to 70927)
+const availableProtocols = computed(() => {
+  const versions = new Set(masternodes.value.map(mn => String(mn.version)).filter(Boolean))
+  return [...versions].sort((a, b) => Number(b) - Number(a))
+})
 const searchQuery = ref('')
 
 // Sorting
@@ -202,8 +249,65 @@ const getStatusVariant = (status) => {
     'EXPIRED': 'warning',
     'REMOVE': 'danger'
   }
-  return variants[status] || 'secondary'
+  return variants[status] || 'default'
 }
+
+// Counts by status, descending - drives the summary band and quick filters
+const statusCounts = computed(() => {
+  const counts = new Map()
+  for (const mn of masternodes.value) {
+    const status = mn.status || 'UNKNOWN'
+    counts.set(status, (counts.get(status) || 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => b.count - a.count)
+})
+
+// Each masternode locks exactly 10,000 PIV of collateral
+const collateralBasis = computed(() => {
+  return mnCount.value?.total || masternodes.value.length
+})
+
+const totalCollateral = computed(() => {
+  return collateralBasis.value * MASTERNODE_COLLATERAL
+})
+
+// Collateral locked by ENABLED masternodes only (10,000 PIV each)
+const enabledCollateral = computed(() => {
+  return (mnCount.value?.enabled || 0) * MASTERNODE_COLLATERAL
+})
+
+// (enabled × 10,000 PIV) / moneysupply × 100, one decimal place
+const supplyLockedPercent = computed(() => {
+  const supply = moneySupply.value
+  if (!supply || supply <= 0 || !mnCount.value?.enabled) return null
+  return ((enabledCollateral.value / supply) * 100).toFixed(1)
+})
+
+const enabledPercent = computed(() => {
+  if (!mnCount.value?.total) return '0.0'
+  return ((mnCount.value.enabled / mnCount.value.total) * 100).toFixed(1)
+})
+
+// Network breakdown: prefer /api/v2/mncount, fall back to the list's `network` field
+const networkCounts = computed(() => {
+  if (mnCount.value && (mnCount.value.ipv4 || mnCount.value.ipv6 || mnCount.value.onion)) {
+    return {
+      ipv4: mnCount.value.ipv4 || 0,
+      ipv6: mnCount.value.ipv6 || 0,
+      onion: mnCount.value.onion || 0
+    }
+  }
+  if (!masternodes.value.length) return null
+  const counts = { ipv4: 0, ipv6: 0, onion: 0 }
+  for (const mn of masternodes.value) {
+    const network = (mn.network || '').toLowerCase()
+    if (network in counts) counts[network] += 1
+    else if (String(mn.addr || '').endsWith('.onion')) counts.onion += 1
+  }
+  return counts
+})
 
 const looksLikePivxAddress = (value) => {
   if (typeof value !== 'string') return false
@@ -335,8 +439,8 @@ const goToMasternode = (mn) => {
 }
 
 const getSortIcon = (field) => {
-  if (sortField.value !== field) return '↕'
-  return sortDirection.value === 'asc' ? '↑' : '↓'
+  if (sortField.value !== field) return 'chevrons-up-down'
+  return sortDirection.value === 'asc' ? 'chevron-up' : 'chevron-down'
 }
 
 const fetchMasternodes = async () => {
@@ -360,8 +464,21 @@ const fetchMasternodes = async () => {
   }
 }
 
+// Non-fatal: the "% of Supply Locked" tile simply hides if this fails
+const fetchMoneySupply = async () => {
+  try {
+    const response = await api.get('/api/v2/moneysupply')
+    const supply = Number(response.data?.moneysupply)
+    moneySupply.value = Number.isFinite(supply) && supply > 0 ? supply : null
+  } catch (err) {
+    console.error('Failed to fetch money supply:', err)
+    moneySupply.value = null
+  }
+}
+
 onMounted(() => {
   fetchMasternodes()
+  fetchMoneySupply()
 })
 </script>
 
@@ -382,18 +499,128 @@ onMounted(() => {
   margin-top: var(--space-2);
 }
 
+/* 5 summary tiles: keep rows balanced (5 across / 2+2+full) instead of wrapping 4+1 */
 .stats-grid {
+  align-items: stretch;
+  grid-auto-rows: 1fr;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-6);
 }
 
+@media (max-width: 1280px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* When all 5 tiles render, span the 5th full-width so no row is left lopsided */
+  .stats-grid > :nth-child(5) {
+    grid-column: 1 / -1;
+  }
+}
+
 .stat-value {
-  font-size: var(--text-3xl);
-  font-weight: 700;
-  color: var(--text-accent);
+  font-size: clamp(var(--text-lg), 1.2vw + 0.55rem, var(--text-2xl));
+  font-weight: var(--weight-bold);
+  line-height: 1.2;
+  min-width: 0;
+  white-space: nowrap;
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+}
+
+
+.stat-unit {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+}
+
+.stat-sub {
   margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.network-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.network-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.network-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  color: var(--text-primary);
+}
+
+.status-band-card {
+  margin-bottom: var(--space-4);
+}
+
+.status-band {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.status-band-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  flex-shrink: 0;
+}
+
+.status-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast);
+}
+
+.status-chip:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
+  background: rgba(var(--rgb-purple-mid), 0.35);
+}
+
+.status-chip.active {
+  border-color: var(--border-accent);
+}
+
+.status-count {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
 }
 
 .filters-card {
@@ -422,18 +649,25 @@ onMounted(() => {
 .filter-select,
 .filter-input {
   padding: var(--space-3);
-  background: var(--bg-tertiary);
-  border: 2px solid var(--border-secondary);
+  background: rgba(var(--rgb-purple-darkest), 0.55);
+  border: 1px solid var(--border-secondary);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-family: var(--font-primary);
   font-size: var(--text-base);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.filter-select:hover,
+.filter-input:hover {
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
 }
 
 .filter-select:focus,
 .filter-input:focus {
   outline: none;
   border-color: var(--border-accent);
+  box-shadow: var(--focus-ring-glow);
 }
 
 .table-card {
@@ -450,14 +684,18 @@ onMounted(() => {
 }
 
 .mn-table thead th {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-darkest), 0.92);
   color: var(--text-secondary);
   font-size: var(--text-xs);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
   padding: var(--space-3) var(--space-4);
   text-align: left;
-  border-bottom: 2px solid var(--border-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .mn-table thead th.sortable {
@@ -476,20 +714,21 @@ onMounted(() => {
 
 .mn-table tbody tr {
   border-bottom: 1px solid var(--border-subtle);
-  transition: background 0.2s;
+  transition: background-color var(--transition-fast);
 }
 
 .mn-table tbody tr:hover {
-  background: var(--bg-tertiary);
+  background: var(--bg-hover);
 }
 
 .mn-table tbody td {
   padding: var(--space-3) var(--space-4);
   font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .mn-table .rank {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--text-accent);
 }
 
@@ -527,7 +766,7 @@ onMounted(() => {
   }
 
   .stats-grid {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .filters {

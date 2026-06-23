@@ -50,20 +50,27 @@ const handleClick = (event) => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: var(--space-2);
   font-family: var(--font-primary);
   font-weight: var(--weight-bold);
   border-radius: var(--radius-md);
-  border: 2px solid transparent;
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-fast);
   white-space: nowrap;
   text-decoration: none;
   position: relative;
 }
 
 .btn:focus-visible {
-  outline: 2px solid var(--border-accent);
+  outline: 2px solid var(--focus-ring-color);
   outline-offset: 2px;
+  box-shadow: var(--focus-ring-glow);
 }
 
 /* Sizes */
@@ -87,33 +94,35 @@ const handleClick = (event) => {
 
 /* Primary Variant */
 .btn-primary {
-  background: var(--pivx-purple-primary);
+  background: linear-gradient(180deg, var(--pivx-purple-light), var(--pivx-purple-primary));
   color: white;
-  border-color: var(--pivx-purple-primary);
+  border-color: rgba(var(--rgb-purple-accent), 0.45);
+  box-shadow: var(--shadow-xs), var(--glass-highlight);
 }
 
 .btn-primary:hover:not(.btn-disabled) {
-  background: var(--pivx-purple-dark);
-  border-color: var(--pivx-purple-dark);
+  border-color: var(--purple-accent);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm), var(--glow-purple);
 }
 
 .btn-primary:active:not(.btn-disabled) {
   transform: translateY(0);
+  box-shadow: var(--shadow-xs);
 }
 
 /* Secondary Variant */
 .btn-secondary {
-  background: var(--bg-secondary);
+  background: rgba(var(--rgb-purple-mid), 0.35);
   color: var(--text-primary);
   border-color: var(--border-primary);
 }
 
 .btn-secondary:hover:not(.btn-disabled) {
-  background: var(--bg-tertiary);
+  background: rgba(var(--rgb-purple-mid), 0.6);
   border-color: var(--border-accent);
   transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
 
 /* Danger Variant */
@@ -138,22 +147,21 @@ const handleClick = (event) => {
 }
 
 .btn-ghost:hover:not(.btn-disabled) {
-  background: var(--purple-accent);
+  background: var(--bg-hover);
+  border-color: rgba(var(--rgb-purple-accent), 0.35);
   color: var(--text-primary);
 }
 
 /* Accent Variant */
 .btn-accent {
-  background: var(--pivx-accent);
-  color: var(--pivx-purple-primary);
-  border-color: var(--pivx-accent);
+  background: linear-gradient(180deg, var(--pivx-accent), var(--pivx-accent-dark));
+  color: var(--text-dark);
+  border-color: rgba(var(--rgb-green-accent), 0.6);
 }
 
 .btn-accent:hover:not(.btn-disabled) {
-  background: var(--pivx-accent-dark);
-  border-color: var(--pivx-accent-dark);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-glow);
+  box-shadow: var(--shadow-sm), var(--glow-green-strong);
 }
 
 /* Disabled State */

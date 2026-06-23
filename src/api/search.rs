@@ -22,7 +22,10 @@ pub async fn search_v2(
         Ok(result) => Ok(Json(result)),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(BlockbookError::new(format!("Search failed: {}", e)))
+            {
+                tracing::error!(error = %e, "search failed");
+                Json(BlockbookError::new("Search failed"))
+            }
         ))
     }
 }
@@ -50,7 +53,7 @@ pub async fn mempool_tx_v2(
         Some(tx) => Ok(Json(tx)),
         None => Err((
             StatusCode::NOT_FOUND,
-            Json(BlockbookError::new(format!("Transaction {} not found in mempool", txid)))
+            Json(BlockbookError::new(format!("Transaction {txid} not found in mempool")))
         )),
     }
 }

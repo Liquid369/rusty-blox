@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use rocksdb::{DB, Options};
-use rustyblox::config::load_config;
+use rustyblox::config::{load_config, get_db_path};
 use rustyblox::parser::deserialize_transaction;
 
 #[tokio::main]
@@ -9,19 +9,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address = std::env::args().nth(1)
         .unwrap_or_else(|| "DCSAJGThtCnDokqawZehRvVjdms9XLL6J6".to_string());
     
-    println!("🔍 Analyzing address: {}\n", address);
+    println!("🔍 Analyzing address: {address}\n");
     
     // Open RocksDB
     let config = load_config()?;
-    let db_path = config.get_string("paths.db_path")
-        .unwrap_or_else(|_| "./data/blocks.db".to_string());
+    let db_path = get_db_path(&config)?;
     
-    let cf_names = vec![
-        "default", "blocks", "transactions", "addr_index", 
-        "utxo", "chain_metadata", "pubkey", "chain_state"
-    ];
-    
-    let db = Arc::new(DB::open_cf(&Options::default(), &db_path, &cf_names)?);
+    let opts = Options::default();
+    let cf_names = DB::list_cf(&opts, &db_path).unwrap_or_else(|_| vec!["default".to_string()]);
+
+    let db = Arc::new(DB::open_cf(&opts, &db_path, &cf_names)?);
     
     // Get address data from our DB
     let cf_addr_index = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;
@@ -54,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut our_txs: Vec<(Vec<u8>, i32)> = Vec::new();
     if let Some(txs_bytes) = txs_data_ref {
         let tx_count = txs_bytes.len() / 32;
-        println!("   Transaction count: {}", tx_count);
+        println!("   Transaction count: {tx_count}");
         
         for i in 0..tx_count {
             let offset = i * 32;
@@ -83,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("\n   Our transactions (first 10):");
     for (i, (txid, height)) in our_txs.iter().take(10).enumerate() {
-        let txid_hex: String = txid.iter().rev().map(|b| format!("{:02x}", b)).collect();
+        let txid_hex: String = txid.iter().rev().map(|b| format!("{b:02x}")).collect();
         println!("     {}: {} (height: {})", i+1, txid_hex, height);
     }
     
@@ -155,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if let Some(prev_out) = prev_tx.outputs.get(prevout.n as usize) {
                                                 if debug_prevout_found <= 3 {
                                                     println!("   DEBUG prev_out addresses: {:?}", prev_out.address);
-                                                    println!("   DEBUG looking for: {}", address);
+                                                    println!("   DEBUG looking for: {address}");
                                                 }
                                                 if prev_out.address.contains(&address.to_string()) {
                                                     debug_prevout_to_address += 1;
@@ -179,15 +176,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_balance = total_received - total_sent;
     
     println!("\n� Debug Info:");
-    println!("   Total inputs checked: {}", debug_input_count);
-    println!("   Prevouts found in DB: {}", debug_prevout_found);
-    println!("   Prevouts to this address: {}", debug_prevout_to_address);
+    println!("   Total inputs checked: {debug_input_count}");
+    println!("   Prevouts found in DB: {debug_prevout_found}");
+    println!("   Prevouts to this address: {debug_prevout_to_address}");
     
     println!("\n�💰 Our Explorer Calculations:");
     println!("   Total Received: {:.8} PIV", total_received as f64 / 100_000_000.0);
     println!("   Total Sent: {:.8} PIV", total_sent as f64 / 100_000_000.0);
     println!("   Current Balance: {:.8} PIV", current_balance as f64 / 100_000_000.0);
-    println!("   Transaction Count: {}", tx_count);
+    println!("   Transaction Count: {tx_count}");
     
     println!("\n📌 Expected (from official explorer):");
     println!("   Total Received: 18,979 PIV");

@@ -128,7 +128,7 @@ export function useWebSocket(endpoint, options = {}) {
     // Check if max attempts exceeded
     if (reconnectAttempts.value >= maxReconnectAttempts) {
       console.error(
-        `❌ Max reconnect attempts (${maxReconnectAttempts}) reached for ${endpoint}. Giving up.`
+        `Max reconnect attempts (${maxReconnectAttempts}) reached for ${endpoint}. Giving up.`
       )
       reconnectFailed.value = true
       
@@ -210,7 +210,7 @@ export function useWebSocket(endpoint, options = {}) {
 
   // Manual retry after max attempts exceeded
   const retryConnection = () => {
-    console.log(`🔄 Manual retry requested for ${endpoint}`)
+    console.log(`Manual retry requested for ${endpoint}`)
     reconnectAttempts.value = 0
     reconnectFailed.value = false
     currentReconnectInterval.value = reconnectInterval

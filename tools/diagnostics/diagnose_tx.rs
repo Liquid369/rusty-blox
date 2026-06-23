@@ -1,4 +1,5 @@
 use rocksdb::DB;
+use rustyblox::config::{load_config, get_db_path};
 use std::sync::Arc;
 use std::env;
 use futures::executor;
@@ -15,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let db_path = env::var("DB_PATH")
-        .unwrap_or_else(|_| "/Users/liquid/Projects/rusty-blox/data/blocks.db".to_string());
+    let config = load_config()?;
+    let db_path = get_db_path(&config)?;
 
     println!("Opening DB: {}", db_path);
 

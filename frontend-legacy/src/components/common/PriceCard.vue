@@ -12,17 +12,33 @@
       <span class="price-value">--</span>
     </div>
 
-    <!-- Price Display -->
-    <div v-else class="price-content" @click="toggleCurrency" :title="`Click to change currency (${nextCurrency})`">
+    <!-- Price Display + discoverable currency selector -->
+    <div v-else class="price-content">
       <img src="/PIVX-Shield.svg" alt="PIVX" class="price-icon" />
       <span class="price-label">PIVX:</span>
       <span class="price-value">{{ formattedPrice }}</span>
-      <span v-if="priceStore.isStale" class="price-stale" title="Price data is stale">⚠️</span>
+      <span v-if="priceStore.isStale" class="price-stale" title="Price data is stale"><Icon name="alert-triangle" :size="14" /></span>
+
+      <div class="currency-selector" role="group" aria-label="Display currency">
+        <button
+          v-for="curr in allCurrencies"
+          :key="curr"
+          type="button"
+          class="currency-option"
+          :class="{ active: curr === settingsStore.preferredCurrency }"
+          :aria-pressed="curr === settingsStore.preferredCurrency"
+          :title="`Show amounts in ${curr}`"
+          @click="selectCurrency(curr)"
+        >
+          {{ curr }}
+        </button>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
+import Icon from './Icon.vue'
 import { computed } from 'vue'
 import { usePriceStore } from '@/stores/priceStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -57,14 +73,8 @@ const getCurrencySymbol = (currency) => {
   return symbols[currency] || currency
 }
 
-const nextCurrency = computed(() => {
-  const currentIndex = allCurrencies.indexOf(settingsStore.preferredCurrency)
-  const nextIndex = (currentIndex + 1) % allCurrencies.length
-  return allCurrencies[nextIndex]
-})
-
-const toggleCurrency = () => {
-  settingsStore.setCurrency(nextCurrency.value)
+const selectCurrency = (currency) => {
+  settingsStore.setCurrency(currency)
 }
 </script>
 
@@ -72,27 +82,71 @@ const toggleCurrency = () => {
 .price-widget {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
-  background: #110B1B50;
-  border: 1px solid 110B1B50;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  background: rgba(var(--rgb-purple-darkest), 0.45);
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.2);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(var(--blur-sm));
+  -webkit-backdrop-filter: blur(var(--blur-sm));
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
   white-space: nowrap;
-  user-select: none;
 }
 
 .price-widget:hover {
-  background: #110B1B90;
-  border: 1px solid;
+  background: rgba(var(--rgb-purple-darkest), 0.7);
   border-color: var(--purple-accent);
-  transform: translateY(0px);
+  box-shadow: var(--glow-purple);
 }
 
 .price-widget.loading {
   opacity: 0.7;
-  cursor: default;
+}
+
+.currency-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: var(--space-2);
+  padding: 2px;
+  background: rgba(var(--rgb-purple-darkest), 0.6);
+  border: 1px solid rgba(var(--rgb-purple-accent), 0.2);
+  border-radius: var(--radius-sm);
+}
+
+.currency-option {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-primary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.4px;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition:
+    background-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.currency-option:hover {
+  color: var(--text-primary);
+  background: rgba(var(--rgb-purple-accent), 0.15);
+}
+
+.currency-option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-glow);
+}
+
+.currency-option.active {
+  color: var(--bg-primary);
+  background: var(--purple-accent);
 }
 
 .price-loading,
@@ -112,13 +166,14 @@ const toggleCurrency = () => {
 
 .price-label {
   color: var(--text-primary);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .price-value {
-  color: var(--purple-accent);
-  font-weight: 700;
-  font-size: 1rem;
+  color: #CD97F7;
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+  font-variant-numeric: tabular-nums;
 }
 
 .price-stale {

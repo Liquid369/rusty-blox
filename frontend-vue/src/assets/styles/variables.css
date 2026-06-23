@@ -6,41 +6,42 @@
 :root {
   /* ===== PIVX Official Purple Palette ===== */
   /* Primary - Official PIVX Purple */
-  --pivx-purple-primary: #662D91;    /* CMYK: 75 98 1 0 - Main brand color */
-  --pivx-purple-secondary: #4D3077;  /* CMYK: 85 97 20 8 - Secondary actions */
-  --pivx-purple-tertiary: #2A1B42;   /* CMYK: 88 94 42 47 - Tertiary elements */
-  --pivx-purple-deep: #130D1E;       /* CMYK: 80 77 56 76 - Deep backgrounds */
+  --pivx-purple-primary: #642D8F;    /* CMYK: 75 98 1 0 - Main brand color */
+  --pivx-purple-secondary: #452568;  /* CMYK: 85 97 20 8 - Secondary actions */
+  --pivx-purple-tertiary: #201634;   /* CMYK: 88 94 42 47 - Tertiary elements */
+  --pivx-purple-deep: #110B1B;       /* CMYK: 80 77 56 76 - Deep backgrounds */
 
   /* Derived Tints (for UI variations) */
   --pivx-purple-light: #8547B3;      /* Lighter tint for hover states */
   --pivx-purple-lighter: #A366CC;    /* Lightest tint for subtle backgrounds */
 
-  /* Accent - Teal/Cyan (from PIVX logo) */
-  --pivx-accent: #59FCB3;            /* Success, highlights, focus states */
-  --pivx-accent-dark: #3DD99B;       /* Darker accent for contrast */
+  /* Accent - PIVX green (adopted from the legacy explorer palette) */
+  --pivx-accent: #B3FF78;            /* Success, highlights, focus states */
+  --pivx-accent-dark: #71BB3A;       /* Darker accent for contrast */
+  --purple-accent: #B359FC;          /* Bright purple highlight (legacy palette) */
 
   /* ===== Background Scale (Dark Mode First) ===== */
-  --bg-primary: #130D1E;             /* Main background (official deep purple) */
-  --bg-secondary: #2A1B42;           /* Cards/elevated surfaces (official tertiary) */
-  --bg-tertiary: #4D3077;            /* Hover states/inputs (official secondary) */
+  --bg-primary: #110B1B;             /* Main background (official deep purple) */
+  --bg-secondary: #201634;           /* Cards/elevated surfaces (official tertiary) */
+  --bg-tertiary: #452568;            /* Hover states/inputs (official secondary) */
   --bg-quaternary: #3A2755;          /* Between tertiary and secondary */
   --bg-elevated: #1A1229;            /* Slightly elevated from primary */
 
   /* ===== Border Scale ===== */
-  --border-primary: #662D91;         /* Primary borders (official purple) */
-  --border-secondary: #4D3077;       /* Secondary borders */
-  --border-subtle: #2A1B42;          /* Subtle dividers */
-  --border-accent: #59FCB3;          /* Focus/active borders (accent) */
+  --border-primary: #642D8F;         /* Primary borders (official purple) */
+  --border-secondary: #452568;       /* Secondary borders */
+  --border-subtle: #201634;          /* Subtle dividers */
+  --border-accent: #B3FF78;          /* Focus/active borders (accent) */
 
   /* ===== Text Hierarchy ===== */
   --text-primary: #FFFFFF;           /* Headlines, important data */
   --text-secondary: #B2B2B2;         /* Body text, descriptions */
   --text-tertiary: #8B8B8B;          /* Muted labels */
-  --text-accent: #59FCB3;            /* Links, highlights, interactive elements */
+  --text-accent: #B3FF78;            /* Links, highlights, interactive elements */
   --text-purple: #A366CC;            /* Purple-tinted text for branding */
 
   /* ===== Semantic Colors ===== */
-  --success: #59FCB3;                /* Confirmed, synced, positive actions */
+  --success: #B3FF78;                /* Confirmed, synced, positive actions */
   --warning: #F59E0B;                /* Pending, syncing, caution */
   --danger: #EF4444;                 /* Error, invalid, destructive */
   --info: #8547B3;                   /* Informational (purple tint) */
@@ -114,7 +115,7 @@
   --text-secondary: #4B5563;
   --text-tertiary: #9CA3AF;
 
-  --border-primary: #662D91;
+  --border-primary: #642D8F;
   --border-secondary: #D1D5DB;
   --border-subtle: #E5E7EB;
 
