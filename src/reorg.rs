@@ -187,9 +187,10 @@ pub async fn rollback_to_height(
         // 1. Get all transactions in this block
         let txids = get_block_transactions(&db_clone, height).await?;
         
-        // 2. Disconnect each transaction (reverse UTXO changes, address index, etc.)
-        for txid_internal in txids {
-            disconnect_transaction(&mut writer, &db_clone, &txid_internal, height).await?;
+        // 2. Disconnect each transaction (orphan-mark the tx record; UTXO ops are
+        //    no-ops for live blocks). get_block_transactions returns display order.
+        for txid_display in txids {
+            disconnect_transaction(&mut writer, &db_clone, &txid_display, height).await?;
         }
         
         // 3. Delete block metadata
@@ -259,10 +260,14 @@ async fn get_block_transactions(
                 // Value is the txid hex string
                 let txid_hex = String::from_utf8_lossy(&value).to_string();
                 
-                // Convert to internal format (decode and reverse)
-                if let Ok(txid_bytes) = hex::decode(&txid_hex) {
-                    let internal_txid: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-                    txids.push(internal_txid);
+                // 'B' value is the DISPLAY-order txid hex (monitor writes
+                // txid.as_bytes()); the tx CF and 't' index are display-keyed, so
+                // return display order. disconnect_transaction reverses to internal
+                // only for the internal-keyed 'utxo' CF. (The prior .rev() produced
+                // internal order, so disconnect's tx-CF lookup missed and the real
+                // tx was never orphan-marked.)
+                if let Ok(txid_display) = hex::decode(&txid_hex) {
+                    txids.push(txid_display);
                 }
             }
         }
@@ -284,12 +289,21 @@ async fn get_block_transactions(
 async fn disconnect_transaction(
     writer: &mut AtomicBatchWriter,
     db: &Arc<DB>,
-    txid_internal: &[u8],
+    txid_display: &[u8],
     _height: i32,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Get transaction data
+    // The tx CF and 't' index are DISPLAY-keyed; the 'utxo' CF is INTERNAL-keyed
+    // (transactions.rs stores 'u' + reversed_txid). Keep both orders so each CF is
+    // keyed correctly. NOTE: for live-tip reorgs the 'utxo' CF and utxo_undo are not
+    // maintained (the monitor never writes them; store_spent_utxo has no callers)
+    // and nothing reads 'utxo', so the UTXO ops below are effectively no-ops — the
+    // user-visible effect of this function is correctly orphan-marking the
+    // disconnected tx record (display-keyed) so it is no longer served as confirmed.
+    let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
+
+    // Get transaction data (tx CF is display-keyed)
     let mut tx_key = vec![b't'];
-    tx_key.extend_from_slice(txid_internal);
+    tx_key.extend_from_slice(txid_display);
     
     let db_clone = db.clone();
     let tx_key_clone = tx_key.clone();
@@ -309,13 +323,14 @@ async fn disconnect_transaction(
             tx_with_header.extend_from_slice(&tx_data[8..]);
             
             if let Ok(tx) = deserialize_transaction(&tx_with_header).await {
-                // 1. Remove created outputs (delete UTXOs)
+                // 1. Remove created outputs (delete UTXOs). The 'utxo' CF is
+                // internal-keyed, so use the reversed txid here.
                 for (vout, _output) in tx.outputs.iter().enumerate() {
                     let mut utxo_key = vec![b'u'];
-                    utxo_key.extend_from_slice(txid_internal);
+                    utxo_key.extend_from_slice(&txid_internal);
                     let vout_bytes = (vout as u64).to_le_bytes();
                     utxo_key.extend_from_slice(&vout_bytes);
-                    
+
                     writer.delete("utxo", utxo_key);
                 }
                 
@@ -596,5 +611,88 @@ mod tests {
         assert!(db.get_cf(&cf, &height_key).unwrap().is_none(), "forward height->hash leaked");
         assert!(db.get_cf(&cf, &h_display).unwrap().is_none(), "live-path 'h'+display hash leaked");
         assert!(db.get_cf(&cf, &h_internal).unwrap().is_none(), "parse-path 'h'+internal hash leaked");
+    }
+
+    /// Byte-order regression: get_block_transactions must return DISPLAY-order txids
+    /// (the tx CF / 't' index key order), not internal/reversed. The prior .rev()
+    /// made disconnect_transaction key the display tx CF with internal bytes, so its
+    /// lookup missed and the real tx was never orphan-marked.
+    #[tokio::test]
+    async fn get_block_transactions_returns_display_order() {
+        use rocksdb::{Options, DB};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["transactions"]).unwrap());
+        let cf = db.cf_handle("transactions").unwrap();
+
+        let height: i32 = 5000;
+        // The node/RPC presents txids in display order; monitor stores the 'B' index
+        // value as that display hex string (txid.as_bytes()).
+        let txid_display_hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let txid_display_bytes = hex::decode(txid_display_hex).unwrap();
+
+        let mut bkey = vec![b'B'];
+        bkey.extend(&height.to_le_bytes());
+        bkey.extend(&0u64.to_le_bytes());
+        db.put_cf(&cf, &bkey, txid_display_hex.as_bytes()).unwrap();
+
+        let txids = get_block_transactions(&db, height).await.unwrap();
+        assert_eq!(txids.len(), 1);
+        assert_eq!(
+            txids[0], txid_display_bytes,
+            "must return display-order txids to match the display-keyed tx CF",
+        );
+    }
+
+    /// Disconnect must orphan-mark the REAL tx record at the DISPLAY key (so it is no
+    /// longer served as confirmed) and must NOT leave a phantom stub at the internal
+    /// key (the prior bug). deserialize of the dummy body fails — orphan-marking
+    /// happens regardless, which is the user-visible effect for a live reorg.
+    #[tokio::test]
+    async fn disconnect_orphan_marks_real_tx_at_display_key() {
+        use rocksdb::{Options, DB};
+        use tempfile::TempDir;
+        use crate::constants::HEIGHT_ORPHAN;
+
+        let temp = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["transactions", "utxo"]).unwrap());
+        let cf_tx = db.cf_handle("transactions").unwrap();
+
+        let txid_display =
+            hex::decode("aabbccddeeff00112233445566778899aabbccddeeff001122334455667788ff").unwrap();
+        let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
+
+        // Seed the real tx record at the DISPLAY key: version(4) + height(4) + body.
+        let height: i32 = 7000;
+        let mut rec = vec![1u8, 0, 0, 0];
+        rec.extend_from_slice(&height.to_le_bytes());
+        rec.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02]); // dummy body
+        let mut tkey_display = vec![b't'];
+        tkey_display.extend_from_slice(&txid_display);
+        db.put_cf(&cf_tx, &tkey_display, &rec).unwrap();
+
+        let mut writer = AtomicBatchWriter::new(db.clone(), 1000);
+        disconnect_transaction(&mut writer, &db, &txid_display, height).await.unwrap();
+        writer.flush().await.unwrap();
+
+        // Real tx (display key) is orphan-marked.
+        let after = db.get_cf(&cf_tx, &tkey_display).unwrap().expect("tx record must still exist");
+        let marked = i32::from_le_bytes([after[4], after[5], after[6], after[7]]);
+        assert_eq!(marked, HEIGHT_ORPHAN, "real tx must be orphan-marked at the display key");
+
+        // No phantom stub at the wrong (internal) key.
+        let mut tkey_internal = vec![b't'];
+        tkey_internal.extend_from_slice(&txid_internal);
+        assert!(
+            db.get_cf(&cf_tx, &tkey_internal).unwrap().is_none(),
+            "no phantom orphan stub at the internal key",
+        );
     }
 }
