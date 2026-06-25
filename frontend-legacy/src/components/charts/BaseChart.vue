@@ -29,6 +29,7 @@
 <script setup>
 import Icon from '@/components/common/Icon.vue'
 import { computed } from 'vue'
+import { CHART } from '@/utils/chartTheme'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -104,7 +105,7 @@ const chartOption = computed(() => ({
   ...props.option,
   backgroundColor: 'transparent',
   textStyle: {
-    color: '#B8B0C4'
+    color: CHART.textSecondary
   }
 }))
 

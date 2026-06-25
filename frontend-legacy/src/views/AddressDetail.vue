@@ -264,6 +264,7 @@ import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Modal from '@/components/common/Modal.vue'
 import QRCode from 'qrcode'
+import { CHART } from '@/utils/chartTheme'
 
 const route = useRoute()
 const router = useRouter()
@@ -567,7 +568,7 @@ const generateQR = async (canvas) => {
       width: 256,
       margin: 2,
       color: {
-        dark: '#662D91',
+        dark: CHART.purple,
         light: '#FFFFFF'
       }
     })

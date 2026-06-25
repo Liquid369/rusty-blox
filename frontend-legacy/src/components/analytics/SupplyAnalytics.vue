@@ -67,6 +67,7 @@ import Card from '@/components/common/Card.vue'
 import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
+import { CHART } from '@/utils/chartTheme'
 
 const { getLineChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
@@ -107,21 +108,21 @@ const compositionOption = computed(() => {
       tooltip: {
         trigger: 'axis',
         backgroundColor: 'rgba(17, 11, 27, 0.92)',
-        borderColor: '#642D8F',
-        textStyle: { color: '#FFFFFF' }
+        borderColor: CHART.tooltipBorder,
+        textStyle: { color: CHART.textPrimary }
       },
-      legend: { data: ['Transparent', 'Shielded'], textStyle: { color: '#9B93A8' }, bottom: 0 },
+      legend: { data: ['Transparent', 'Shielded'], textStyle: { color: CHART.axisText }, bottom: 0 },
       grid: { left: '3%', right: '4%', bottom: '14%', top: '8%', containLabel: true },
       xAxis: {
         type: 'category',
         data: dates,
-        axisLine: { lineStyle: { color: '#642D8F' } },
-        axisLabel: { color: '#9B93A8' }
+        axisLine: { lineStyle: { color: CHART.purple } },
+        axisLabel: { color: CHART.axisText }
       },
       yAxis: {
         type: 'value',
-        axisLine: { lineStyle: { color: '#642D8F' } },
-        axisLabel: { color: '#9B93A8' },
+        axisLine: { lineStyle: { color: CHART.purple } },
+        axisLabel: { color: CHART.axisText },
         splitLine: { lineStyle: { color: 'rgba(100, 45, 143, 0.45)', type: 'dashed' } }
       },
       series: [
@@ -132,7 +133,7 @@ const compositionOption = computed(() => {
           smooth: true,
           showSymbol: false,
           areaStyle: { color: 'rgba(179, 255, 120, 0.25)' },
-          lineStyle: { color: '#B3FF78' },
+          lineStyle: { color: CHART.green },
           data: historicalData.value.map(d => d.transparent)
         },
         {
@@ -142,7 +143,7 @@ const compositionOption = computed(() => {
           smooth: true,
           showSymbol: false,
           areaStyle: { color: 'rgba(179, 89, 252, 0.18)' },
-          lineStyle: { color: '#B359FC' },
+          lineStyle: { color: CHART.purpleAccent },
           data: historicalData.value.map(d => d.shielded)
         }
       ]
@@ -161,8 +162,8 @@ const compositionOption = computed(() => {
     tooltip: {
       trigger: 'item',
       backgroundColor: 'rgba(17, 11, 27, 0.92)',
-      borderColor: '#642D8F',
-      textStyle: { color: '#FFFFFF' },
+      borderColor: CHART.tooltipBorder,
+      textStyle: { color: CHART.textPrimary },
       formatter: (p) => `${p.marker} ${p.seriesName}<br/><b>${formatNumber(p.value)} PIV</b> · ${pct(p.value).toFixed(2)}%`
     },
     legend: {
@@ -171,7 +172,7 @@ const compositionOption = computed(() => {
       itemWidth: 12,
       itemHeight: 12,
       data: ['Transparent', 'Shielded'],
-      textStyle: { color: '#C9C2D6' },
+      textStyle: { color: CHART.textSecondary },
       formatter: (name) => `${name}  ${pct(name === 'Transparent' ? t : s).toFixed(2)}%`
     },
     xAxis: { type: 'value', max: total, show: false },
@@ -184,12 +185,12 @@ const compositionOption = computed(() => {
         barWidth: 64,
         itemStyle: {
           borderRadius: [10, 0, 0, 10],
-          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#9BE85C' }, { offset: 1, color: '#B3FF78' }] }
+          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: CHART.greenGradient[0] }, { offset: 1, color: CHART.greenGradient[1] }] }
         },
         label: {
           show: true,
           position: 'insideLeft',
-          color: '#0c0717',
+          color: CHART.surfaceDeep,
           fontWeight: 'bold',
           fontSize: 14,
           formatter: () => `${pct(t).toFixed(2)}%`
@@ -203,7 +204,7 @@ const compositionOption = computed(() => {
         barWidth: 64,
         itemStyle: {
           borderRadius: [0, 10, 10, 0],
-          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#8B3FE0' }, { offset: 1, color: '#B359FC' }] }
+          color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: CHART.purpleGradient[0] }, { offset: 1, color: CHART.purpleGradient[1] }] }
         },
         data: [s]
       }

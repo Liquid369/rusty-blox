@@ -1,28 +1,29 @@
 import { ref } from 'vue'
+import { CHART } from '@/utils/chartTheme'
 
 /**
  * Common chart configuration for PIVX Explorer
  */
 export const useChartConfig = () => {
   const colors = {
-    primary: '#B3FF78',
-    secondary: '#642D8F',
-    accent: '#B359FC',
-    success: '#71BB3A',
-    warning: '#f6ff78',
-    danger: '#EF4444',
+    primary: CHART.green,
+    secondary: CHART.purple,
+    accent: CHART.purpleAccent,
+    success: CHART.greenDark,
+    warning: CHART.warning,
+    danger: CHART.danger,
     info: '#3B82F6',
-    gradient: ['#642D8F', '#B3FF78']
+    gradient: [CHART.purple, CHART.green]
   }
 
   const getBaseOption = () => ({
     tooltip: {
       trigger: 'axis',
       backgroundColor: 'rgba(17, 11, 27, 0.92)',
-      borderColor: '#642D8F',
+      borderColor: CHART.tooltipBorder,
       borderWidth: 1,
       textStyle: {
-        color: '#FFFFFF'
+        color: CHART.textPrimary
       }
     },
     grid: {
@@ -37,22 +38,22 @@ export const useChartConfig = () => {
       boundaryGap: false,
       axisLine: {
         lineStyle: {
-          color: '#642D8F'
+          color: CHART.purple
         }
       },
       axisLabel: {
-        color: '#9B93A8'
+        color: CHART.axisText
       }
     },
     yAxis: {
       type: 'value',
       axisLine: {
         lineStyle: {
-          color: '#642D8F'
+          color: CHART.purple
         }
       },
       axisLabel: {
-        color: '#9B93A8'
+        color: CHART.axisText
       },
       splitLine: {
         lineStyle: {
@@ -96,7 +97,7 @@ export const useChartExport = () => {
     const url = chartInstance.getDataURL({
       type: 'png',
       pixelRatio: 2,
-      backgroundColor: '#110B1B'
+      backgroundColor: CHART.surfaceDeep
     })
 
     const link = document.createElement('a')
@@ -214,16 +215,16 @@ export const useChartOptions = () => {
       trigger: 'item',
       formatter: '{b}: {c} ({d}%)',
       backgroundColor: 'rgba(17, 11, 27, 0.92)',
-      borderColor: '#642D8F',
+      borderColor: CHART.tooltipBorder,
       textStyle: {
-        color: '#FFFFFF'
+        color: CHART.textPrimary
       }
     },
     legend: {
       orient: 'vertical',
       left: 'left',
       textStyle: {
-        color: '#9B93A8'
+        color: CHART.axisText
       }
     },
     series: [
@@ -234,7 +235,7 @@ export const useChartOptions = () => {
         avoidLabelOverlap: false,
         itemStyle: {
           borderRadius: 8,
-          borderColor: '#110B1B',
+          borderColor: CHART.surfaceDeep,
           borderWidth: 2
         },
         label: {
@@ -245,7 +246,7 @@ export const useChartOptions = () => {
             show: true,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#FFFFFF'
+            color: CHART.textPrimary
           }
         },
         data: data

@@ -4,14 +4,14 @@
 
 :root {
   /* ===== Primary PIVX Color Palette - Modified by YuurinBee ===== */
-  --pivx-purple-primary: #642D8F;
+  --pivx-purple-primary: #662D91;
   --pivx-purple-secondary: #452568;
   --pivx-purple-tertiary: #201634;
   --pivx-purple-deep: #110B1B;
 
   /* Updated Color Palette - YuurinBee (Lightest to Darkest) */
   --purple-accent: #B359FC;
-  --purple-main: #642D8F;
+  --purple-main: #662D91;
   --purple-mid: #452568;
   --purple-dark: #201634;
   --purple-darkest: #110B1B;
@@ -29,7 +29,7 @@
 
   /* ===== Brand Channels (for translucent fills/glows, hues unchanged) ===== */
   --rgb-purple-accent: 179, 89, 252;   /* #B359FC */
-  --rgb-purple-main: 100, 45, 143;     /* #642D8F */
+  --rgb-purple-main: 102, 45, 145;     /* #662D91 - OFFICIAL PIVX brand primary */
   --rgb-purple-mid: 69, 37, 104;       /* #452568 */
   --rgb-purple-dark: 32, 22, 52;       /* #201634 */
   --rgb-purple-darkest: 17, 11, 27;    /* #110B1B */
@@ -71,7 +71,7 @@
   --blur-lg: 24px;
 
   /* ===== Borders ===== */
-  --border-primary: #642D8F;
+  --border-primary: #662D91;
   --border-secondary: #452568;
   --border-subtle: #2A1B42;
   --border-accent: #B359FC;
@@ -80,7 +80,7 @@
   /* ===== Text Hierarchy (WCAG AA on the dark purples) ===== */
   --text-primary: #FFFFFF;
   --text-secondary: #B8B0C4;   /* lavender-gray, >=8:1 on bg-primary/secondary */
-  --text-tertiary: #9B93A8;    /* >=5.5:1 on bg-primary/secondary */
+  --text-tertiary: #B2ABBE;    /* AA on ALL surfaces incl. bg-tertiary (>=4.7:1), still dimmer than --text-secondary */
   --text-accent: #B3FF78;
   --text-purple: #A366CC;
   --text-dark: var(--purple-darkest); /* text on green/purple accent fills */
@@ -90,12 +90,12 @@
   --warning: #f6ff78;
   --danger: #EF4444;
   --danger-text: #FCA5A5;      /* readable danger on dark surfaces */
-  --info: #8547B3;
+  --info: #CD97F7;             /* light lavender — AA as text on all surfaces (>=4.6:1); the old #8547B3 failed AA everywhere (<=3.3:1) */
   --text-warning: var(--warning);
 
   /* ===== Typography (Montserrat - Official PIVX Brand) ===== */
   --font-primary: 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Courier New', monospace;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Monaco, 'Cascadia Code', 'Courier New', monospace;
 
   /* Font Weights */
   --weight-extralight: 200;

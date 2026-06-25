@@ -91,7 +91,7 @@ defineProps({
 /* Info Variant - brand purple */
 .badge-info {
   background: rgba(var(--rgb-purple-accent), 0.14);
-  color: #CD97F7;
+  color: var(--info); /* now AA-correct at the token (was a hardcoded #CD97F7 workaround) */
   border: 1px solid rgba(var(--rgb-purple-accent), 0.4);
 }
 

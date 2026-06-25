@@ -148,7 +148,12 @@ textarea {
 *:focus-visible {
   outline: 2px solid var(--focus-ring-color);
   outline-offset: 2px;
-  box-shadow: var(--focus-ring-glow);
+  /* Two-tone ring: a dark separator hugs the element so the accent outline stays
+     >=3:1 visible on ANY surface — including the purple-fill primary button, where a
+     bare accent ring measured only 2.49:1 — followed by the soft accent glow. */
+  box-shadow:
+    0 0 0 2px var(--bg-primary),
+    var(--focus-ring-glow);
 }
 
 /* Selection */
