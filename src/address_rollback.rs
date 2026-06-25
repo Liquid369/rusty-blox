@@ -127,6 +127,29 @@ impl AddressBlockUndo {
     pub fn add_sent(&mut self, address: String, amount: i64) {
         *self.address_sent.entry(address).or_insert(0) += amount;
     }
+
+    /// Fold another block's undo into this one (used to reverse a multi-block reorg
+    /// as a single read-modify-write per address). Sums r/s and concatenates the
+    /// tx/UTXO lists so reverse_address_block reads each on-disk base value exactly
+    /// once and applies the combined delta — avoiding the stale-read last-write-wins
+    /// bug that an un-flushed per-block loop would hit on a repeated address.
+    pub fn merge_from(&mut self, other: AddressBlockUndo) {
+        for (addr, txids) in other.address_txs {
+            self.address_txs.entry(addr).or_default().extend(txids);
+        }
+        for (addr, utxos) in other.address_utxos_created {
+            self.address_utxos_created.entry(addr).or_default().extend(utxos);
+        }
+        for (addr, utxos) in other.address_utxos_spent {
+            self.address_utxos_spent.entry(addr).or_default().extend(utxos);
+        }
+        for (addr, amount) in other.address_received {
+            *self.address_received.entry(addr).or_insert(0) += amount;
+        }
+        for (addr, amount) in other.address_sent {
+            *self.address_sent.entry(addr).or_insert(0) += amount;
+        }
+    }
 }
 
 /// Store address undo data for a block
@@ -267,10 +290,16 @@ pub async fn build_address_undo_from_block(
                     if let Some(prevout) = &input.prevout {
                         // Load previous transaction to get addresses
                         if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
-                            let prev_txid_internal: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
-                            
+                            // prevout.hash is DISPLAY-order hex; the tx CF and the
+                            // addr_index 'a' set are keyed by display-order bytes
+                            // (matching monitor.rs's writes), so use the decoded
+                            // bytes directly. The prior .rev() produced internal
+                            // order, which missed the prev-tx lookup and silently
+                            // under-reversed 'sent' (the reorg r/s-reversal bug).
+                            let prev_txid_display = prev_txid_bytes;
+
                             let mut prev_tx_key = vec![b't'];
-                            prev_tx_key.extend_from_slice(&prev_txid_internal);
+                            prev_tx_key.extend_from_slice(&prev_txid_display);
                             
                             if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key)? {
                                 if prev_tx_data.len() >= 8 {
@@ -288,10 +317,11 @@ pub async fn build_address_undo_from_block(
                                                 // Add spending transaction to address history
                                                 undo.add_tx(address.clone(), txid_internal.clone());
                                                 
-                                                // Track UTXO spend
+                                                // Track UTXO spend (display-order
+                                                // txid, matching the 'a' set keys)
                                                 undo.add_utxo_spent(
                                                     address.clone(),
-                                                    prev_txid_internal.clone(),
+                                                    prev_txid_display.clone(),
                                                     prevout.n as u64,
                                                 );
                                                 
@@ -334,31 +364,46 @@ pub async fn rollback_address_index(
     info!(from = current_height, to = rollback_to_height, "Rolling back address index");
     
     let blocks_to_remove = (current_height - rollback_to_height) as usize;
-    
-    // Process each block in reverse order
+
+    // Merge every reversed block's undo into ONE combined undo, then reverse once.
+    //
+    // reverse_address_block reads each address's current r/s/t/a from the DB (not
+    // from the still-buffered AtomicBatchWriter) and writes back disk_value - delta.
+    // If we reversed block-by-block into the shared writer with no flush between
+    // blocks, an address touched by N reversed blocks would read the SAME stale disk
+    // value N times and the batch's last-write-wins would drop N-1 subtractions,
+    // leaving r/s over-stated. Merging first (sum r/s, concat t/a edits) makes it a
+    // single read-modify-write per address — correct AND still atomic (one flush by
+    // the caller).
+    let mut merged = AddressBlockUndo::new(rollback_to_height);
+    let mut reversed_any = false;
     for height in ((rollback_to_height + 1)..=current_height).rev() {
         if height % 1000 == 0 {
-            debug!(height = height, "Reversing address index");
+            debug!(height = height, "Collecting address undo");
         }
-        
+
         // Load undo data for this block
         if let Some(undo) = load_address_undo(db.clone(), height).await? {
-            // Reverse address changes (using shared writer for atomicity)
-            reverse_address_block(writer, &db, &undo).await?;
-            
-            // Delete undo data (using shared writer)
+            merged.merge_from(undo);
+            reversed_any = true;
+
+            // Delete undo data (using shared writer, atomic with the reversal)
             let mut undo_key = b"addr_undo".to_vec();
             undo_key.extend_from_slice(&height.to_le_bytes());
             writer.delete("chain_state", undo_key);
-            
-            // Note: Periodic flushes removed - caller handles flushing
         } else {
-            // No undo data - this is expected for blocks indexed before undo tracking
-            // In this case, we'll need to rebuild from scratch
+            // No undo data - expected for blocks indexed before undo tracking (e.g.
+            // pre-deploy or below the enrichment watermark). Those blocks' r/s are
+            // left as-is and require a re-enrichment to fully correct.
             warn!(height = height, "No address undo data for block - full rebuild may be required");
         }
     }
-    
+
+    if reversed_any {
+        // Single read-modify-write per address against committed on-disk state.
+        reverse_address_block(writer, &db, &merged).await?;
+    }
+
     // Note: Final flush removed - caller is responsible for flushing shared writer
     
     info!(blocks_removed = blocks_to_remove, "Address index rollback complete");
@@ -446,15 +491,29 @@ async fn reverse_address_block(
             Vec::new()
         };
         
+        // Set of UTXOs this reversal CREATED. A (txid,vout) that was both created
+        // and spent within the reversed range nets to absent, so it must be removed
+        // and NOT restored — otherwise a cross-block create-then-spend (both blocks
+        // reversed and merged) would leave a phantom UTXO in 'a'. Computing this set
+        // once and excluding it from the restore makes the merged reversal
+        // order-independent. ('a'-set correctness only; the served r-s balance is
+        // independent of 'a'.)
+        let created_set: HashSet<(Vec<u8>, u64)> = undo.address_utxos_created
+            .get(&address)
+            .map(|created| created.iter().cloned().collect())
+            .unwrap_or_default();
+
         // Remove created UTXOs
-        if let Some(created) = undo.address_utxos_created.get(&address) {
-            let created_set: HashSet<(Vec<u8>, u64)> = created.iter().cloned().collect();
+        if !created_set.is_empty() {
             utxo_list.retain(|(txid, vout)| !created_set.contains(&(txid.clone(), *vout)));
         }
-        
-        // Restore spent UTXOs
+
+        // Restore spent UTXOs, except any also created in the reversed range.
         if let Some(spent) = undo.address_utxos_spent.get(&address) {
             for (txid, vout) in spent {
+                if created_set.contains(&(txid.clone(), *vout)) {
+                    continue; // created-then-spent within the range → stays absent
+                }
                 // Only add if not already in list
                 if !utxo_list.iter().any(|(t, v)| t == txid && v == vout) {
                     utxo_list.push((txid.clone(), *vout));
@@ -494,8 +553,15 @@ async fn reverse_address_block(
             }
             
             total -= received;
-            total = total.max(0); // Don't go negative
-            
+            if total < 0 {
+                // Reversing should never drive a total below zero. If it does, r/s
+                // had pre-existing drift (e.g. a block whose undo was missing/partial).
+                // Clamp to keep the value sane, but surface it instead of masking.
+                warn!(address = %address, received, deficit = -total,
+                    "total_received reversal went negative; clamping (pre-existing r/s drift)");
+                total = 0;
+            }
+
             writer.put("addr_index", key_r, total.to_le_bytes().to_vec());
         }
         
@@ -523,12 +589,16 @@ async fn reverse_address_block(
             }
             
             total -= sent;
-            total = total.max(0); // Don't go negative
-            
+            if total < 0 {
+                warn!(address = %address, sent, deficit = -total,
+                    "total_sent reversal went negative; clamping (pre-existing r/s drift)");
+                total = 0;
+            }
+
             writer.put("addr_index", key_s, total.to_le_bytes().to_vec());
         }
     }
-    
+
     Ok(())
 }
 
@@ -593,11 +663,184 @@ mod tests {
     #[test]
     fn test_accumulation() {
         let mut undo = AddressBlockUndo::new(12345);
-        
+
         // Multiple additions to same address
         undo.add_received("Address1".to_string(), 100_000_000);
         undo.add_received("Address1".to_string(), 50_000_000);
-        
+
         assert_eq!(undo.address_received.get("Address1"), Some(&150_000_000));
+    }
+
+    /// Reorg-reversal regression: the real entrypoint `rollback_address_index`
+    /// (store_address_undo -> load_address_undo -> reverse_address_block -> delete)
+    /// must reverse r/s/a/t EXACTLY back to the pre-block state, and consume the undo.
+    /// This is the guarantee the addr_v2 balance fix depends on after a chain reorg.
+    #[tokio::test]
+    async fn rollback_reverses_addr_index_r_s_a_t() {
+        use rocksdb::{DB, Options};
+        use crate::atomic_writer::AtomicBatchWriter;
+        use crate::parser::{serialize_utxos, deserialize_utxos};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = std::sync::Arc::new(
+            DB::open_cf(&opts, temp.path(), ["addr_index", "transactions", "chain_state"]).unwrap(),
+        );
+        let cf_ai = db.cf_handle("addr_index").unwrap();
+
+        let addr = "DReorgTestAddressXXXXXXXXXXXXXXXXXX";
+        let key = |p: u8| { let mut k = vec![p]; k.extend_from_slice(addr.as_bytes()); k };
+        let tx0 = vec![0xA0u8; 32];
+        let tx1 = vec![0xB1u8; 32];
+
+        // POST-block state the live monitor left after connecting height H, where the
+        // block received 500 to `addr` and spent addr's prior UTXO (tx0,0)=150:
+        //   r = 1000+500 = 1500, s = 200+150 = 350, t = [tx0, tx1], a = [(tx1,0)]
+        db.put_cf(&cf_ai, &key(b'r'), 1500i64.to_le_bytes()).unwrap();
+        db.put_cf(&cf_ai, &key(b's'), 350i64.to_le_bytes()).unwrap();
+        let mut tlist = Vec::new();
+        tlist.extend_from_slice(&tx0);
+        tlist.extend_from_slice(&tx1);
+        db.put_cf(&cf_ai, &key(b't'), &tlist).unwrap();
+        let a_post = serialize_utxos(&vec![(tx1.clone(), 0u64)]).await;
+        db.put_cf(&cf_ai, &key(b'a'), &a_post).unwrap();
+
+        // The undo the connect path captured for height H (exactly what it applied).
+        let height = 1000i32;
+        let mut undo = AddressBlockUndo::new(height);
+        undo.add_received(addr.to_string(), 500);
+        undo.add_sent(addr.to_string(), 150);
+        undo.add_tx(addr.to_string(), tx1.clone());
+        undo.add_utxo_created(addr.to_string(), tx1.clone(), 0);
+        undo.add_utxo_spent(addr.to_string(), tx0.clone(), 0);
+        store_address_undo(db.clone(), &undo).await.unwrap();
+
+        // Reverse exactly one block via the real reorg entrypoint.
+        let mut writer = AtomicBatchWriter::new(db.clone(), 100_000);
+        rollback_address_index(&mut writer, db.clone(), height, height - 1).await.unwrap();
+        writer.flush().await.unwrap();
+
+        // Pre-block state must be restored exactly.
+        let read_i64 = |p: u8| -> i64 {
+            let v = db.get_cf(&cf_ai, &key(p)).unwrap().unwrap();
+            i64::from_le_bytes(v.as_slice().try_into().unwrap())
+        };
+        assert_eq!(read_i64(b'r'), 1000, "r must reverse to 1500 - 500");
+        assert_eq!(read_i64(b's'), 200, "s must reverse to 350 - 150");
+
+        let t_after = db.get_cf(&cf_ai, &key(b't')).unwrap().unwrap();
+        assert_eq!(t_after, tx0, "t must drop tx1, keep tx0");
+
+        let a_after = deserialize_utxos(&db.get_cf(&cf_ai, &key(b'a')).unwrap().unwrap()).await;
+        assert_eq!(a_after, vec![(tx0.clone(), 0u64)], "a must drop (tx1,0) and restore (tx0,0)");
+
+        // The undo record must be consumed (deleted) after a successful rollback.
+        assert!(
+            load_address_undo(db.clone(), height).await.unwrap().is_none(),
+            "undo must be deleted after rollback",
+        );
+    }
+
+    /// P1 regression (multi-block reorg): an address touched by 2+ reversed blocks
+    /// must have ALL its subtractions applied. The pre-fix code read the same stale
+    /// on-disk r for each block and the batch's last-write-wins dropped all but one
+    /// subtraction (yielding 1300 instead of 1000 here). The merge-then-reverse-once
+    /// fix must restore the exact pre-block total.
+    #[tokio::test]
+    async fn rollback_reverses_multi_block_same_address() {
+        use rocksdb::{DB, Options};
+        use crate::atomic_writer::AtomicBatchWriter;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = std::sync::Arc::new(
+            DB::open_cf(&opts, temp.path(), ["addr_index", "transactions", "chain_state"]).unwrap(),
+        );
+        let cf_ai = db.cf_handle("addr_index").unwrap();
+
+        let addr = "DMultiBlockReorgAddrXXXXXXXXXXXXXXX";
+        let mut r_key = vec![b'r'];
+        r_key.extend_from_slice(addr.as_bytes());
+
+        // Pre-reorg disk state: r = 1000 (base) + 300 (block H) + 300 (block H+1) = 1600,
+        // i.e. the address received 300 in EACH of the two blocks we will reverse.
+        db.put_cf(&cf_ai, &r_key, 1600i64.to_le_bytes()).unwrap();
+
+        let h0 = 1000i32;
+        let h1 = 1001i32;
+        for h in [h0, h1] {
+            let mut undo = AddressBlockUndo::new(h);
+            undo.add_received(addr.to_string(), 300);
+            store_address_undo(db.clone(), &undo).await.unwrap();
+        }
+
+        // Reverse BOTH blocks (current=h1, rollback_to=h0-1) in one batch.
+        let mut writer = AtomicBatchWriter::new(db.clone(), 100_000);
+        rollback_address_index(&mut writer, db.clone(), h1, h0 - 1).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let r_after = i64::from_le_bytes(
+            db.get_cf(&cf_ai, &r_key).unwrap().unwrap().as_slice().try_into().unwrap(),
+        );
+        assert_eq!(r_after, 1000, "both blocks' +300 must be reversed (1600 - 600), not just one");
+
+        // Both undo records consumed.
+        assert!(load_address_undo(db.clone(), h0).await.unwrap().is_none());
+        assert!(load_address_undo(db.clone(), h1).await.unwrap().is_none());
+    }
+
+    /// 'a'-set regression (cross-block create-then-spend): a UTXO created in block H
+    /// and spent in block H+1, with BOTH reversed in one reorg, must NOT be restored
+    /// into 'a' (it was net-absent before the reorg). The merge concatenates it into
+    /// both created and spent; the created∩spent cancellation must keep 'a' empty.
+    #[tokio::test]
+    async fn rollback_cross_block_create_spend_leaves_no_phantom_utxo() {
+        use rocksdb::{DB, Options};
+        use crate::atomic_writer::AtomicBatchWriter;
+        use crate::parser::deserialize_utxos;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = std::sync::Arc::new(
+            DB::open_cf(&opts, temp.path(), ["addr_index", "transactions", "chain_state"]).unwrap(),
+        );
+        let cf_ai = db.cf_handle("addr_index").unwrap();
+
+        let addr = "DCrossBlockUtxoAddrXXXXXXXXXXXXXXXX";
+        let mut a_key = vec![b'a'];
+        a_key.extend_from_slice(addr.as_bytes());
+        let xtx = vec![0xCCu8; 32];
+
+        // Pre-reorg 'a' is EMPTY: X was created in H then spent in H+1, so it is not
+        // a current UTXO. (No 'a' key written.)
+        let h0 = 2000i32;
+        let h1 = 2001i32;
+
+        let mut undo_h0 = AddressBlockUndo::new(h0);
+        undo_h0.add_utxo_created(addr.to_string(), xtx.clone(), 0); // created in H
+        store_address_undo(db.clone(), &undo_h0).await.unwrap();
+
+        let mut undo_h1 = AddressBlockUndo::new(h1);
+        undo_h1.add_utxo_spent(addr.to_string(), xtx.clone(), 0); // spent in H+1
+        store_address_undo(db.clone(), &undo_h1).await.unwrap();
+
+        let mut writer = AtomicBatchWriter::new(db.clone(), 100_000);
+        rollback_address_index(&mut writer, db.clone(), h1, h0 - 1).await.unwrap();
+        writer.flush().await.unwrap();
+
+        // 'a' must remain empty — no phantom UTXO restored.
+        match db.get_cf(&cf_ai, &a_key).unwrap() {
+            None => {} // empty (deleted) — correct
+            Some(bytes) => {
+                let utxos = deserialize_utxos(&bytes).await;
+                assert!(utxos.is_empty(), "cross-block create-then-spend must leave no phantom UTXO, got {utxos:?}");
+            }
+        }
     }
 }
