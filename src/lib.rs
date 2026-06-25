@@ -73,6 +73,7 @@ pub mod types;
 pub mod tx_type;
 pub mod maturity;
 pub mod reorg;
+pub mod crash_recovery;
 pub mod spent_utxo;
 pub mod pos_validation;
 pub mod telemetry;

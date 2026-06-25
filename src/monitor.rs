@@ -1334,6 +1334,52 @@ fn detect_reorg(
     Ok(None)
 }
 
+/// One-shot startup self-heal: a leftover 'P' (processing) marker means a previous
+/// run died mid-block-connect (a hard crash skips the RAII guard that clears it).
+/// Re-apply each such block (the 't'/'a' indexes are idempotent) and recompute r/s
+/// for its addresses, since the r/s totals are NOT idempotent and re-applying would
+/// otherwise leave them double-counted. No-op on a clean shutdown (no markers).
+async fn recover_crashed_blocks(
+    db: &Arc<DB>,
+    rpc_client: &Arc<PivxRpcClient>,
+    broadcaster: &Option<Arc<EventBroadcaster>>,
+) {
+    let dirty = crate::crash_recovery::scan_processing_markers(db);
+    if dirty.is_empty() {
+        return;
+    }
+    warn!(count = dirty.len(), heights = ?dirty,
+        "Leftover processing markers from a previous crash; recovering r/s for affected blocks");
+
+    let cf_state = match db.cf_handle("chain_state") {
+        Some(cf) => cf,
+        None => return,
+    };
+    for height in dirty {
+        // Clear the stale marker so index_block_from_rpc's reservation check does not
+        // skip the re-apply. (It sets and clears its own marker around processing.)
+        let mut pkey = vec![b'P'];
+        pkey.extend(&height.to_le_bytes());
+        let _ = db.delete_cf(&cf_state, &pkey);
+
+        // Re-apply to complete t/a/undo (double-counts the non-idempotent r/s). If
+        // the block already finished before the crash (H-marker present), this is a
+        // no-op skip — the recompute below is still idempotent and harmless.
+        if let Err(e) = index_block_from_rpc(rpc_client, height, db, broadcaster, None).await {
+            warn!(height, error = %e,
+                "Failed to re-apply crashed block during recovery; leaving for normal catchup/reorg");
+            continue;
+        }
+
+        // Recompute r/s for the block's addresses from the authoritative t/a indexes,
+        // correcting any double-count.
+        match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
+            Ok(n) => info!(height, addresses = n, "Recovered r/s after crash-interrupted block"),
+            Err(e) => warn!(height, error = %e, "Failed to repair r/s after re-applying crashed block"),
+        }
+    }
+}
+
 /// Main block monitoring loop
 pub async fn run_block_monitor(
     db: Arc<DB>,
@@ -1412,7 +1458,12 @@ pub async fn run_block_monitor(
             }
         }
     };
-    
+
+    // One-shot crash recovery before any new work: repair r/s for a block that a
+    // previous run died partway through applying (detected via a leftover 'P'
+    // marker). Runs only when such a marker exists.
+    recover_crashed_blocks(&db, &rpc_client, &broadcaster).await;
+
     // Surface the live daily-analytics gate state at startup. It activates only
     // after a FULL enrich flips the ready gate; a degraded restart rebuild (zeroed
     // join fields) keeps it dark until a full re-enrich.
