@@ -119,13 +119,71 @@ export function meetsVotingThreshold(proposal, passingThreshold) {
 }
 
 /**
- * Calculate which proposals will be funded based on budget constraints
- * 
+ * Run PIVX Core's vote-ranked, cap-limited budget allocation over an arbitrary
+ * set of proposals. This is the single source of truth shared by the live page
+ * (calculateFundedProposals) and the interactive Budget Simulator, so they can
+ * never disagree about the rule.
+ *
+ * Algorithm (matches Core): sort by net votes (Yeas - Nays) descending, then walk
+ * the list funding each proposal whose MonthlyPayment still fits under the cap.
+ * Note this is greedy-SKIP, not hard-stop: a small proposal ranked below a skipped
+ * large one can still be funded if it fits the remaining headroom.
+ *
+ * @param {Array} proposals - Candidate proposals (already filtered however the caller wants)
+ * @param {number} cap - Monthly budget cap in PIV (defaults to the protocol cap)
+ * @returns {Object} {
+ *   ranked: Array<{ proposal, funded, amount, cumulative }>, // vote-rank order
+ *   funded: Array, unfunded: Array,
+ *   allocated, remaining, overBy, cap, fundedCount, cutCount
+ * }
+ */
+export function simulateBudget(proposals, cap = PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET) {
+  // Sort by net votes (descending) - PIVX Core priority
+  const sorted = [...proposals].sort((a, b) => {
+    const aVotes = a.Yeas - a.Nays
+    const bVotes = b.Yeas - b.Nays
+    return bVotes - aVotes
+  })
+
+  const ranked = []
+  let allocated = 0
+  let overBy = 0
+
+  for (const proposal of sorted) {
+    const amount = proposal.MonthlyPayment || 0
+    const funded = allocated + amount <= cap
+    if (funded) {
+      allocated += amount
+    } else {
+      overBy += amount // requested beyond the cap (cut by budget)
+    }
+    // cumulative = running funded total at this point (only grows on funded rows)
+    ranked.push({ proposal, funded, amount, cumulative: allocated })
+  }
+
+  const funded = ranked.filter(r => r.funded).map(r => r.proposal)
+  const unfunded = ranked.filter(r => !r.funded).map(r => r.proposal)
+
+  return {
+    ranked,
+    funded,
+    unfunded,
+    allocated,
+    remaining: cap - allocated,
+    overBy,
+    cap,
+    fundedCount: funded.length,
+    cutCount: unfunded.length,
+  }
+}
+
+/**
+ * Calculate which proposals will be funded based on budget constraints.
+ *
  * PIVX Core algorithm:
  * 1. Filter to proposals meeting voting threshold AND with remaining payments
- * 2. Sort by net votes (descending) - highest votes win
- * 3. Allocate budget in order until 43,200 PIV cap reached
- * 
+ * 2. Hand the eligible set to simulateBudget (sort by net votes, fill to the cap)
+ *
  * @param {Array} proposals - All proposals
  * @param {number} passingThreshold - Minimum net votes required
  * @param {number} currentHeight - Current blockchain height
@@ -133,36 +191,14 @@ export function meetsVotingThreshold(proposal, passingThreshold) {
  */
 export function calculateFundedProposals(proposals, passingThreshold, currentHeight) {
   // Filter to active proposals that meet voting threshold AND have remaining payments
-  const eligible = proposals.filter(p => 
-    p.IsValid && 
+  const eligible = proposals.filter(p =>
+    p.IsValid &&
     !isProposalCompleted(p, currentHeight) &&
     meetsVotingThreshold(p, passingThreshold) &&
     (p.RemainingPaymentCount > 0) // Only proposals still receiving payments
   )
-  
-  // Sort by net votes (descending) - PIVX Core priority
-  const sorted = [...eligible].sort((a, b) => {
-    const aVotes = a.Yeas - a.Nays
-    const bVotes = b.Yeas - b.Nays
-    return bVotes - aVotes
-  })
-  
-  // Allocate budget until cap reached
-  const funded = []
-  const unfunded = []
-  let allocatedBudget = 0
-  
-  for (const proposal of sorted) {
-    const amount = proposal.MonthlyPayment || 0
-    
-    if (allocatedBudget + amount <= PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET) {
-      funded.push(proposal)
-      allocatedBudget += amount
-    } else {
-      unfunded.push(proposal)
-    }
-  }
-  
+
+  const { funded, unfunded } = simulateBudget(eligible)
   return { funded, unfunded }
 }
 
