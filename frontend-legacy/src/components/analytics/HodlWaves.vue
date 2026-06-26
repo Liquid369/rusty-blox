@@ -49,7 +49,7 @@
     />
 
     <!-- Age Bands Table -->
-    <Card class="table-card">
+    <Card class="table-card" variant="data">
       <div class="table-header">
         <h3>Age Bands</h3>
       </div>
@@ -301,6 +301,8 @@ onMounted(() => {
 
 .table-container {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
 }
 
 .hodl-table {
@@ -320,7 +322,10 @@ onMounted(() => {
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: var(--tracking-wide);
-  background: rgba(var(--rgb-purple-darkest), 0.92);
+  background: var(--surface-data);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .hodl-table td {
@@ -336,6 +341,10 @@ onMounted(() => {
 
 .table-row:hover {
   background: var(--bg-hover);
+}
+
+.hodl-table tbody tr:nth-child(even):not(:hover) {
+  background: var(--zebra);
 }
 
 .balance {

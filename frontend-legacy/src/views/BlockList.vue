@@ -476,19 +476,23 @@ onUnmounted(() => {
   color: var(--text-accent);
 }
 
-/* Table card */
+/* Table card — flat opaque DATA surface (glass is reserved for hero cards); dense
+   tabular data reads sharper on a flat surface than on blurred glass. */
 .table-card {
   border-radius: var(--radius-md);
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  backdrop-filter: blur(var(--blur-sm));
-  -webkit-backdrop-filter: blur(var(--blur-sm));
-  box-shadow: var(--shadow-xs), var(--glass-highlight);
+  background: var(--surface-data);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-xs);
   overflow: hidden;
 }
 
 .table-scroll {
   overflow-x: auto;
+  /* Own scroll area so the sticky header can anchor to the TABLE's top (top: 0),
+     needing no app-header offset. Internal scroll engages only when the rows
+     exceed this height. */
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
   scrollbar-width: thin;
   scrollbar-color: var(--purple-mid) transparent;
 }
@@ -516,6 +520,19 @@ onUnmounted(() => {
   color: var(--text-tertiary);
   border-bottom: 1px solid var(--glass-border);
   white-space: nowrap;
+  /* Sticky within the table's OWN scroll container (.table-scroll below), so the
+     header stays at the table's top regardless of page scroll / the glass app
+     header — robust, no offset guessing. Opaque bg so rows scroll underneath. */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-data);
+}
+
+/* Zebra striping for scannability. :not(:hover) so the BlockRow hover background
+   still wins on the row you're pointing at (the rows are a child component, hence :deep). */
+.block-table :deep(.block-row:nth-child(even):not(:hover)) {
+  background: var(--zebra);
 }
 
 .th-left {

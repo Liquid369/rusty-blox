@@ -48,6 +48,8 @@
   --bg-quaternary: #3A2755;       /* Between tertiary and secondary */
   --bg-elevated: #1A1229;         /* Slightly elevated from primary */
   --bg-hover: rgba(var(--rgb-purple-accent), 0.08);
+  --surface-data: #15101F;        /* Flat opaque surface for dense DATA (tables/grids) -- glass is reserved for hero cards */
+  --zebra: rgba(var(--rgb-purple-mid), 0.10); /* alternating data-row tint */
 
   /* Legacy aliases (kept so every component resolves) */
   --card-bg: var(--bg-secondary);

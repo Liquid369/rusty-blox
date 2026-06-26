@@ -247,7 +247,7 @@
         </div>
 
         <!-- Individual Votes Section -->
-        <Card v-if="voteEntries.length > 0" class="votes-card">
+        <Card v-if="voteEntries.length > 0" class="votes-card" variant="data">
           <template #header>
             <div class="votes-header">
               <span>Individual Votes</span>
