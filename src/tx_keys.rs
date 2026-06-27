@@ -1,23 +1,22 @@
+use rocksdb::DB;
 /// Transaction Key Helpers
-/// 
+///
 /// Centralized helpers for consistent transaction key format handling.
-/// 
+///
 /// KEY FORMAT IN TRANSACTIONS CF:
 /// - Prefix: b't' (1 byte)
 /// - TXID: 32 bytes in natural/display order (NOT reversed)
 /// - Total: 33 bytes
-/// 
+///
 /// IMPORTANT: prevout.hash from deserialized transactions is hex-encoded in display order.
 /// When decoded, the bytes are already in the correct order to use as-is (no reversal needed).
-
 use std::sync::Arc;
-use rocksdb::DB;
 
 /// Build a transaction CF key from txid bytes.
-/// 
+///
 /// # Arguments
 /// * `txid_bytes` - 32-byte transaction ID in natural/display order
-/// 
+///
 /// # Returns
 /// 33-byte key: b't' + txid_bytes
 pub fn tx_cf_key(txid_bytes: &[u8]) -> Vec<u8> {
@@ -27,10 +26,10 @@ pub fn tx_cf_key(txid_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Extract txid bytes from a transaction CF key.
-/// 
+///
 /// # Arguments
 /// * `key` - Full CF key (should start with b't' and be 33 bytes)
-/// 
+///
 /// # Returns
 /// 32-byte txid in natural/display order, or empty vec if invalid
 pub fn txid_from_key(key: &[u8]) -> Vec<u8> {
@@ -45,13 +44,13 @@ pub fn txid_from_key(key: &[u8]) -> Vec<u8> {
 }
 
 /// Convert hex-encoded txid string to internal bytes.
-/// 
+///
 /// prevout.hash is hex string in display order (big-endian representation).
 /// When hex-decoded, we get bytes in natural order ready to use as-is.
-/// 
+///
 /// # Arguments
 /// * `txid_hex` - Hex-encoded txid string (64 chars)
-/// 
+///
 /// # Returns
 /// 32-byte txid in natural/display order
 pub fn txid_from_hex(txid_hex: &str) -> Result<Vec<u8>, hex::FromHexError> {
@@ -59,12 +58,12 @@ pub fn txid_from_hex(txid_hex: &str) -> Result<Vec<u8>, hex::FromHexError> {
 }
 
 /// Lookup a transaction by txid bytes.
-/// 
+///
 /// # Arguments
 /// * `db` - Database handle
 /// * `cf_transactions` - Transaction column family handle
 /// * `txid_bytes` - 32-byte txid in natural/display order
-/// 
+///
 /// # Returns
 /// Transaction data if found
 pub async fn get_transaction(
@@ -79,7 +78,7 @@ pub async fn get_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_tx_cf_key() {
         let txid = vec![0x12u8; 32];
@@ -88,7 +87,7 @@ mod tests {
         assert_eq!(key[0], b't');
         assert_eq!(&key[1..], &txid[..]);
     }
-    
+
     #[test]
     fn test_txid_from_key() {
         let mut key = vec![b't'];
@@ -97,7 +96,7 @@ mod tests {
         assert_eq!(txid.len(), 32);
         assert_eq!(txid[0], 0xab);
     }
-    
+
     #[test]
     fn test_txid_from_hex() {
         let hex = "000000a08ed90e64aeeb720844d0b75e0aac1cb0a13361161edb2edebb5bba5c";

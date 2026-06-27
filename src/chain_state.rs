@@ -1,14 +1,13 @@
+use rocksdb::DB;
+use serde::{Deserialize, Serialize};
 /// Chain State Tracking
-/// 
+///
 /// Manages blockchain state metadata:
 /// - Current sync height and hash
 /// - Sync progress percentage
 /// - Network statistics
 /// - Reorg detection markers
-
 use std::sync::Arc;
-use rocksdb::DB;
-use serde::{Serialize, Deserialize};
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,31 +21,33 @@ pub struct ChainState {
 
 /// Get current chain state
 pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     // Get sync height
     let height = match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into()?),
         None => 0,
     };
-    
+
     // Get block hash at current height
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     let height_key = height.to_le_bytes().to_vec();
     let hash = match db.get_cf(&cf_metadata, &height_key)? {
         Some(hash_bytes) => hex::encode(&hash_bytes),
         None => String::new(),
     };
-    
+
     // Get network height if available
     let network_height = match db.get_cf(&cf_state, b"network_height")? {
         Some(bytes) => Some(i32::from_le_bytes(bytes.as_slice().try_into()?)),
         None => None,
     };
-    
+
     // Calculate sync percentage
     let sync_percentage = if let Some(net_height) = network_height {
         if net_height > 0 {
@@ -57,9 +58,9 @@ pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::E
     } else {
         100.0
     };
-    
+
     let synced = network_height.map(|nh| height >= nh - 2).unwrap_or(true);
-    
+
     Ok(ChainState {
         height,
         hash,
@@ -71,18 +72,20 @@ pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::E
 
 /// Update network height (from RPC)
 pub fn set_network_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     db.put_cf(&cf_state, b"network_height", height.to_le_bytes())?;
     Ok(())
 }
 
 /// Update sync height
 pub fn set_sync_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
     Ok(())
 }
@@ -90,7 +93,8 @@ pub fn set_sync_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::err
 /// Read the current stored sync height (0 if unset). Cheap point lookup,
 /// used to seed the throttled progress writer so it stays monotonic.
 pub fn get_sync_height(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
     match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => Ok(i32::from_le_bytes(bytes.as_slice().try_into()?)),
@@ -99,16 +103,21 @@ pub fn get_sync_height(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> 
 }
 
 /// Mark reorg point
-pub fn mark_reorg(db: &Arc<DB>, height: i32, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+pub fn mark_reorg(
+    db: &Arc<DB>,
+    height: i32,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     let key = format!("reorg_{height}");
     let value = reason.to_string();
-    
+
     db.put_cf(&cf_state, key.as_bytes(), value.as_bytes())?;
-    
+
     warn!(height = height, reason = %reason, "REORG marked in chain state");
-    
+
     Ok(())
 }

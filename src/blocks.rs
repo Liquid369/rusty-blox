@@ -1,15 +1,15 @@
-use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
-use rocksdb::DB;
-use crate::types::{CBlockHeader, AppState, MyError, CTxIn, CTxOut, COutPoint, CScript};
+use crate::batch_writer::BatchWriter;
 use crate::call_quark_hash;
 use crate::chainwork::calculate_work_from_bits;
-use sha2::{Sha256, Digest};
+use crate::config::get_global_config;
 use crate::db_utils::batch_put_cf;
 use crate::transactions::process_transaction_from_buffer;
-use crate::batch_writer::BatchWriter;
-use crate::config::get_global_config;
-use tracing::{info, warn, error};
+use crate::types::{AppState, CBlockHeader, COutPoint, CScript, CTxIn, CTxOut, MyError};
+use rocksdb::DB;
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tracing::{error, info, warn};
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
 const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput
@@ -110,18 +110,20 @@ async fn read_script<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>,
 
 // Helper to read outpoint
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
-async fn read_outpoint<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<COutPoint, std::io::Error> {
+async fn read_outpoint<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<COutPoint, std::io::Error> {
     let mut hash = [0u8; 32];
     reader.read_exact(&mut hash).await?;
-    
+
     let mut n_buf = [0u8; 4];
     reader.read_exact(&mut n_buf).await?;
     let n = u32::from_le_bytes(n_buf);
-    
+
     // Reverse hash for display
     let reversed_hash: Vec<u8> = hash.iter().rev().cloned().collect();
     let hex_hash = hex::encode(&reversed_hash);
-    
+
     Ok(COutPoint { hash: hex_hash, n })
 }
 
@@ -136,16 +138,16 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
     if input_count > MAX_TX_INPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}")
+            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}"),
         ));
     }
     let mut inputs = Vec::new();
-    
+
     for i in 0..input_count {
         let mut coinbase = None;
         let mut prevout = None;
         let mut script = Vec::new();
-        
+
         // Check if this is a coinbase transaction
         if block_version < 3 && tx_version == 2 {
             // Coinbase transaction
@@ -157,11 +159,11 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
             prevout = Some(read_outpoint(reader).await?);
             script = read_script(reader).await?;
         }
-        
+
         let mut seq_buf = [0u8; 4];
         reader.read_exact(&mut seq_buf).await?;
         let sequence = u32::from_le_bytes(seq_buf);
-        
+
         inputs.push(CTxIn {
             prevout,
             script_sig: CScript { script },
@@ -170,30 +172,32 @@ async fn read_tx_inputs<R: AsyncReadExt + Unpin>(
             coinbase,
         });
     }
-    
+
     Ok(inputs)
 }
 
 // Parse transaction outputs
 #[allow(dead_code)] // Block parsing utility - may be needed for historical block processing
-async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<CTxOut>, std::io::Error> {
+async fn read_tx_outputs<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> Result<Vec<CTxOut>, std::io::Error> {
     let output_count = read_varint(reader).await?;
     if output_count > MAX_TX_OUTPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}")
+            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}"),
         ));
     }
     let mut outputs = Vec::new();
-    
+
     for i in 0..output_count {
         let mut value_buf = [0u8; 8];
         reader.read_exact(&mut value_buf).await?;
         let value = i64::from_le_bytes(value_buf);
-        
+
         let script = read_script(reader).await?;
         let script_length = script.len() as i32;
-        
+
         outputs.push(CTxOut {
             value,
             script_length,
@@ -202,7 +206,7 @@ async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<
             address: Vec::new(), // Will be populated later with address extraction
         });
     }
-    
+
     Ok(outputs)
 }
 
@@ -211,9 +215,8 @@ async fn read_tx_outputs<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Vec<
 /// Priority 1.4: Enhanced to validate size field after finding magic
 async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
     reader: &mut R,
-    magic: &[u8; 4]
+    magic: &[u8; 4],
 ) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
-    
     let start_pos = reader.stream_position().await?;
 
     // Get file size for validation
@@ -222,7 +225,7 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 
     // Scan up to 10MB ahead (reasonable limit to prevent infinite loops)
     const MAX_SCAN: u64 = 10 * 1024 * 1024;
-    
+
     if start_pos + 8 > file_size {
         return Ok(None); // EOF - not enough bytes for magic + size
     }
@@ -243,7 +246,10 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
     for offset in 0..=last {
         if window[offset..offset + 4] == magic[..] {
             let block_size = u32::from_le_bytes([
-                window[offset + 4], window[offset + 5], window[offset + 6], window[offset + 7],
+                window[offset + 4],
+                window[offset + 5],
+                window[offset + 6],
+                window[offset + 7],
             ]) as u64;
             let pos = start_pos + offset as u64;
             if (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size)
@@ -275,10 +281,15 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 /// WAL is pure fsync overhead), `false` on the live/RPC catch-up path (WAL kept
 /// so a crash stays recoverable). It only affects durability, never the bytes
 /// written.
-pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path::Path>, db: Arc<DB>, bulk: bool) -> Result<Option<i32>, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn process_blk_file(
+    _state: AppState,
+    file_path: impl AsRef<std::path::Path>,
+    db: Arc<DB>,
+    bulk: bool,
+) -> Result<Option<i32>, Box<dyn std::error::Error + Send + Sync>> {
     let file_path_ref = file_path.as_ref();
     info!(file = %file_path_ref.display(), "Processing block file");
-    
+
     // Get fast_sync setting from config
     let config = get_global_config();
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
@@ -291,7 +302,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     // sequential scan, so larger reads cut syscall count on high-latency VPS
     // disks. Allocated once per file (bounded by the parallel-files semaphore).
     let mut reader = BufReader::with_capacity(1 << 20, file);
-    
+
     // Priority 1.1: Get file size for bounds validation
     let file_size = reader.seek(std::io::SeekFrom::End(0)).await?;
     reader.seek(std::io::SeekFrom::Start(0)).await?;
@@ -308,33 +319,36 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
     // Highest canonical block height written in this file (i32::MIN = none seen).
     // Returned so the caller advances sync_height without a full-CF scan.
     let mut max_height: i32 = i32::MIN;
-    
+
     // Create batch writer for transaction data
     let mut tx_batch = BatchWriter::new_with_bulk(db.clone(), TX_BATCH_SIZE, bulk);
-    
+
     let mut size_buffer = [0u8; 4];
     let mut magic_bytes = [0u8; 4];
-    
+
     // Get column families for quick lookups
     let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
 
     loop {
         // Track position at start of block (before magic)
         let block_start_pos = reader.stream_position().await?;
-        
+
         // Priority 1.1: Check if we have enough bytes for magic (4 bytes)
         if block_start_pos + 4 > file_size {
             if block_count > 0 {
-                info!(blocks_processed = block_count, "Reached end of file (partial magic)");
+                info!(
+                    blocks_processed = block_count,
+                    "Reached end of file (partial magic)"
+                );
             } else {
                 warn!("File too small for even one block header");
             }
             break;
         }
-        
+
         // Read magic bytes
         match reader.read_exact(&mut magic_bytes).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 if block_count > 0 {
                     info!(
@@ -355,28 +369,28 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 expected = ?PREFIX,
                 "Invalid magic - scanning for next valid block"
             );
-            
+
             // Try to find next magic bytes by scanning ahead
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     // Reader is already positioned at magic bytes, continue to read them
                     continue;
-                },
+                }
                 Ok(None) => {
                     info!("No more magic bytes found, reached end of file");
-                    break;  // Genuine EOF
-                },
+                    break; // Genuine EOF
+                }
                 Err(e) => {
                     error!(error = ?e, "Failed to scan for magic bytes");
-                    break;  // Unrecoverable error
+                    break; // Unrecoverable error
                 }
             }
         }
 
         // Read block size
         match reader.read_exact(&mut size_buffer).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 warn!(
                     position = block_start_pos,
@@ -388,7 +402,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             }
         }
         let block_size = u32::from_le_bytes(size_buffer) as u64;
-        
+
         // Priority 1.2: Validate block size is within acceptable range
         if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) {
             warn!(
@@ -398,24 +412,24 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 max = MAX_BLOCK_SIZE,
                 "Invalid block size - scanning for next magic"
             );
-            
+
             // Try to recover by scanning for next magic
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
-                },
+                }
                 Ok(None) => {
                     info!("No more magic bytes found");
                     break;
-                },
+                }
                 Err(e) => {
                     error!(error = ?e, "Failed to scan for magic bytes");
                     break;
                 }
             }
         }
-        
+
         // Priority 1.1: Validate complete block fits in file
         let current_pos = reader.stream_position().await?;
         let block_end_pos = current_pos + block_size;
@@ -428,7 +442,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             );
             break;
         }
-        
+
         // Calculate EXACT position where next block should start
         // next_block_pos = current_pos (after magic+size) + block_size
         let next_block_pos = block_start_pos + 8 + block_size;
@@ -436,7 +450,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         // Peek at version to determine header size (4 bytes)
         let mut version_bytes = [0u8; 4];
         match reader.read_exact(&mut version_bytes).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 warn!(
                     position = block_start_pos,
@@ -448,11 +462,11 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
             }
         }
         let ver_as_int = u32::from_le_bytes(version_bytes);
-        
+
         // Priority 2.1: Use deterministic version-based header sizing
         // No more heuristics - PIVX protocol has fixed header sizes per version
         let header_size = get_header_size(ver_as_int);
-        
+
         // Priority 2.2: Validate header size fits in block
         if header_size as u64 > block_size {
             warn!(
@@ -462,16 +476,16 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 block_num = block_count,
                 "Header exceeds block size - scanning for next valid block"
             );
-            
+
             match scan_for_next_magic(&mut reader, &PREFIX).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
-                },
+                }
                 Ok(None) => {
                     info!("No more magic bytes found");
                     break;
-                },
+                }
                 Err(e) => {
                     error!(error = ?e, "Failed to scan for magic bytes");
                     break;
@@ -486,7 +500,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         match reader.read_exact(&mut header_buffer[4..]).await {
             Ok(_) => {
                 // Header read successfully - debug logging removed for performance
-            },
+            }
             Err(e) => {
                 warn!(
                     header_size,
@@ -496,18 +510,18 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                     next_block_pos,
                     "Failed to read header - seeking to next block"
                 );
-                
+
                 // Seek to next block and continue instead of breaking
                 if let Err(seek_err) = reader.seek(std::io::SeekFrom::Start(next_block_pos)).await {
                     error!(error = ?seek_err, "Failed to seek to next block");
-                    break;  // Only break if seek fails
+                    break; // Only break if seek fails
                 }
-                continue;  // Skip this block, try next one
+                continue; // Skip this block, try next one
             }
         }
 
         let mut block_header = parse_block_header_sync(&header_buffer, header_size)?;
-        
+
         // Check if this block is already indexed
         let block_hash_vec = block_header.block_hash.to_vec();
         let mut block_key = vec![b'b'];
@@ -538,21 +552,22 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 continue;
             }
         }
-        
+
         // Try to get height from chain_metadata (if leveldb was parsed)
         let cf_metadata = db.cf_handle("chain_metadata");
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
             // Genesis block - verify hash matches known genesis
             // Fix for Phase 2, Issue #1: Improved genesis detection
-            const PIVX_GENESIS_HASH: &str = "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818";
-            
+            const PIVX_GENESIS_HASH: &str =
+                "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818";
+
             // Compare in display format (reversed)
             let mut block_hash_display = block_hash_vec.clone();
             block_hash_display.reverse();
             let block_hash_hex = hex::encode(&block_hash_display);
-            
+
             if block_hash_hex == PIVX_GENESIS_HASH {
-                Some(0)  // Confirmed genesis
+                Some(0) // Confirmed genesis
             } else {
                 // Block with null prev_hash but non-genesis hash - very suspicious!
                 warn!(
@@ -560,32 +575,32 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                     expected_genesis = PIVX_GENESIS_HASH,
                     "Block with null prev_hash but non-genesis hash - marking as orphan"
                 );
-                None  // Orphan or corrupted
+                None // Orphan or corrupted
             }
         } else if let Some(cf) = cf_metadata {
             // Try to look up height from chain_metadata using 'h' + block_hash
             let mut height_key = vec![b'h'];
             height_key.extend_from_slice(&block_header.block_hash);
-            
+
             match db.get_cf(&cf, &height_key) {
                 Ok(Some(height_bytes)) if height_bytes.len() == 4 => {
                     // Found height in metadata
                     let height = i32::from_le_bytes([
                         height_bytes[0],
-                        height_bytes[1], 
+                        height_bytes[1],
                         height_bytes[2],
-                        height_bytes[3]
+                        height_bytes[3],
                     ]);
                     Some(height)
                 }
-                _ => None  // Height not in metadata - block is orphan
+                _ => None, // Height not in metadata - block is orphan
             }
         } else {
             None
         };
-        
+
         block_header.block_height = block_height;
-        
+
         // Extract nBits for chainwork calculation (bytes 72-76 in header)
         let n_bits = if header_buffer.len() >= 76 {
             u32::from_le_bytes([
@@ -597,11 +612,11 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
         } else {
             0
         };
-        
-        // Store in blocks CF: block_hash -> header_buffer  
+
+        // Store in blocks CF: block_hash -> header_buffer
         // ALL blocks are stored, even if height is unknown
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
-        
+
         // If we have a height (genesis or previously resolved), record it — and,
         // on the live path only, the chain_metadata height/chainwork mappings
         // (the bulk reindex skips those; see [Levers A+B] inside the block).
@@ -646,7 +661,9 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                         let mut chainwork_key = vec![b'w']; // 'w' prefix for chainwork
                         chainwork_key.extend_from_slice(&prev_height.to_le_bytes());
 
-                        let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+                        let cf_metadata = db
+                            .cf_handle("chain_metadata")
+                            .ok_or("chain_metadata CF not found")?;
                         match db.get_cf(&cf_metadata, &chainwork_key)? {
                             Some(parent_work_bytes) => {
                                 if parent_work_bytes.len() == 32 {
@@ -681,31 +698,31 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 }
             }
         }
-        
+
         block_count += 1;
-        
+
         // Write batch when it reaches the target size
         if batch_items.len() >= BATCH_SIZE * 2 {
             batch_put_cf(db.clone(), "blocks", batch_items.clone(), bulk).await?;
             batch_items.clear();
         }
-        
+
         // Priority 1.3: Bounded transaction parsing
         // Calculate transaction section size (block_size - header_size)
         let tx_section_size = block_size.saturating_sub(header_size as u64);
-        
+
         if tx_section_size == 0 {
             warn!(
                 block_num = block_count,
-                block_size,
-                header_size,
-                "Block has no transaction data"
+                block_size, header_size, "Block has no transaction data"
             );
             // Seek to next block and continue
-            reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
+            reader
+                .seek(std::io::SeekFrom::Start(next_block_pos))
+                .await?;
             continue;
         }
-        
+
         // Read transaction section into buffer for bounded parsing
         let mut tx_buffer = vec![0u8; tx_section_size as usize];
         match reader.read_exact(&mut tx_buffer).await {
@@ -714,18 +731,20 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                 let block_version = block_header.n_version;
                 let block_hash_slice = &block_header.block_hash;
                 let block_height_val = block_header.block_height;
-                
+
                 // Parse transactions from buffer (cursor position independent of file)
                 let tx_cursor = std::io::Cursor::new(&tx_buffer[..]);
                 match process_transaction_from_buffer(
-                    tx_cursor, 
-                    block_version, 
-                    block_hash_slice, 
-                    block_height_val, 
-                    db.clone(), 
-                    &mut tx_batch, 
-                    fast_sync
-                ).await {
+                    tx_cursor,
+                    block_version,
+                    block_hash_slice,
+                    block_height_val,
+                    db.clone(),
+                    &mut tx_batch,
+                    fast_sync,
+                )
+                .await
+                {
                     Ok(_) => {
                         // Successfully processed transactions
                         if tx_batch.should_flush() {
@@ -733,7 +752,7 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                                 warn!(error = ?e, "Failed to flush transaction batch");
                             }
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!(block_num = block_count, error = ?e, "Failed to parse transactions");
                         // Even on error, flush any pending transactions
@@ -744,51 +763,57 @@ pub async fn process_blk_file(_state: AppState, file_path: impl AsRef<std::path:
                         }
                     }
                 }
-                
+
                 // File cursor is already at next_block_pos since we read exact tx_section_size
-            },
+            }
             Err(e) => {
                 warn!(block_num = block_count, error = ?e, "Failed to read transaction data");
                 // Seek to next block position
-                reader.seek(std::io::SeekFrom::Start(next_block_pos)).await?;
+                reader
+                    .seek(std::io::SeekFrom::Start(next_block_pos))
+                    .await?;
             }
         }
     }
-    
+
     // Write any remaining items
     if !batch_items.is_empty() {
         batch_put_cf(db.clone(), "blocks", batch_items, bulk).await?;
     }
-    
+
     // Flush any remaining transaction batch writes
     if tx_batch.pending_count() > 0 {
         tx_batch.flush().await?;
     }
-    
+
     info!(
         new_blocks = block_count,
         skipped_blocks = skipped_count,
         "File processing complete"
     );
-    
-    Ok(if max_height == i32::MIN { None } else { Some(max_height) })
+
+    Ok(if max_height == i32::MIN {
+        None
+    } else {
+        Some(max_height)
+    })
 }
 
 /// Get deterministic header size based on block version
-/// 
+///
 /// PIVX block header sizes by version:
 /// - v0-3: 80 bytes (standard Bitcoin-style header)
 /// - v4-6: 112 bytes (added 32-byte accumulator checkpoint)
 /// - v7: 80 bytes (no accumulator in v7)
 /// - v8-11: 112 bytes (Sapling: 32-byte sapling root hash)
-/// 
+///
 /// This is DETERMINISTIC - no heuristics needed!
 fn get_header_size(ver_as_int: u32) -> usize {
     match ver_as_int {
-        4..=6 => 112,      // Accumulator checkpoint (32 bytes)
-        7 => 80,               // No accumulator in v7
+        4..=6 => 112,  // Accumulator checkpoint (32 bytes)
+        7 => 80,       // No accumulator in v7
         8..=11 => 112, // Sapling root hash (32 bytes)
-        _ => 80,               // v0-3 and unknown versions default to 80
+        _ => 80,       // v0-3 and unknown versions default to 80
     }
 }
 
@@ -801,35 +826,39 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
 
     // Read block version
     let n_version = u32::from_le_bytes(
-        slice[offset..offset+4].try_into()
-            .map_err(|_| MyError::new("Invalid version bytes"))?
+        slice[offset..offset + 4]
+            .try_into()
+            .map_err(|_| MyError::new("Invalid version bytes"))?,
     );
     offset += 4;
 
     // Read previous block hash
     let mut hash_prev_block = [0u8; 32];
-    hash_prev_block.copy_from_slice(&slice[offset..offset+32]);
+    hash_prev_block.copy_from_slice(&slice[offset..offset + 32]);
     offset += 32;
 
     // Read merkle root
     let mut hash_merkle_root = [0u8; 32];
-    hash_merkle_root.copy_from_slice(&slice[offset..offset+32]);
+    hash_merkle_root.copy_from_slice(&slice[offset..offset + 32]);
     offset += 32;
 
     // Read time, bits, nonce
     let n_time = u32::from_le_bytes(
-        slice[offset..offset+4].try_into()
-            .map_err(|_| MyError::new("Invalid time bytes"))?
+        slice[offset..offset + 4]
+            .try_into()
+            .map_err(|_| MyError::new("Invalid time bytes"))?,
     );
     offset += 4;
     let n_bits = u32::from_le_bytes(
-        slice[offset..offset+4].try_into()
-            .map_err(|_| MyError::new("Invalid bits bytes"))?
+        slice[offset..offset + 4]
+            .try_into()
+            .map_err(|_| MyError::new("Invalid bits bytes"))?,
     );
     offset += 4;
     let n_nonce = u32::from_le_bytes(
-        slice[offset..offset+4].try_into()
-            .map_err(|_| MyError::new("Invalid nonce bytes"))?
+        slice[offset..offset + 4]
+            .try_into()
+            .map_err(|_| MyError::new("Invalid nonce bytes"))?,
     );
     offset += 4;
 
@@ -840,11 +869,11 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
     // v8+: hash 112 bytes (80 + 32 sapling root) with SHA256d
     let hash_size = match n_version {
         0..=3 => 80,
-        4..=6 => 112,  // Include accumulator checkpoint
+        4..=6 => 112, // Include accumulator checkpoint
         7 => 80,
-        _ => 112,  // v8+ includes sapling root
+        _ => 112, // v8+ includes sapling root
     };
-    
+
     let hash_bytes = &slice[..hash_size.min(slice.len())];
     let reversed_hash = match n_version {
         0..=3 => {
@@ -860,7 +889,8 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
         }
     };
 
-    let block_hash: [u8; 32] = reversed_hash.try_into()
+    let block_hash: [u8; 32] = reversed_hash
+        .try_into()
         .map_err(|_| MyError::new("Failed to convert hash"))?;
 
     // Handle version-specific fields
@@ -869,7 +899,7 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
         8..=11 => {
             if offset + 32 <= slice.len() {
                 let mut sapling_root = [0u8; 32];
-                sapling_root.copy_from_slice(&slice[offset..offset+32]);
+                sapling_root.copy_from_slice(&slice[offset..offset + 32]);
                 (Some(sapling_root), None)
             } else {
                 (None, None)
@@ -878,7 +908,7 @@ pub fn parse_block_header_sync(slice: &[u8], _header_size: usize) -> Result<CBlo
         4..=6 => {
             if offset + 32 <= slice.len() {
                 let mut accumulator = [0u8; 32];
-                accumulator.copy_from_slice(&slice[offset..offset+32]);
+                accumulator.copy_from_slice(&slice[offset..offset + 32]);
                 (None, Some(accumulator))
             } else {
                 (None, None)
@@ -931,7 +961,10 @@ mod chainwork_add_tests {
         block[31] = 0x42;
         assert_eq!(add_chainwork_be(&zero, &block), block);
         assert_eq!(add_chainwork_be(&zero, &zero), zero);
-        assert_eq!(add_chainwork_be(&zero, &block), add_bigint_legacy(&zero, &block));
+        assert_eq!(
+            add_chainwork_be(&zero, &block),
+            add_bigint_legacy(&zero, &block)
+        );
     }
 
     #[test]
@@ -949,7 +982,9 @@ mod chainwork_add_tests {
         // Deterministic LCG so the test is reproducible and dependency-free.
         let mut seed: u64 = 0x9E3779B97F4A7C15;
         let mut next = || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             seed
         };
         let mut fill = |buf: &mut [u8; 32], bytes_from_low: usize| {

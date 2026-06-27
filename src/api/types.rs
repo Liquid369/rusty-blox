@@ -1,5 +1,5 @@
 // API Type Definitions
-// 
+//
 // All serializable types used by API endpoints.
 // Extracted from the monolithic api.rs for better organization.
 
@@ -314,12 +314,13 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::de::Error;
-    
+
     let value: Option<String> = Option::deserialize(deserializer)?;
     match value {
         None => Ok(None),
         Some(s) if s == "-Infinity" => Ok(Some(0)), // Treat -Infinity as 0 (from beginning)
-        Some(s) => s.parse::<u32>()
+        Some(s) => s
+            .parse::<u32>()
             .map(Some)
             .map_err(|_| D::Error::custom(format!("Invalid 'from' parameter: {s}"))),
     }

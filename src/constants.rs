@@ -1,5 +1,5 @@
 /// Block and Transaction Height Constants
-/// 
+///
 /// These constants ensure consistent handling of special height values across the codebase.
 /// All height-related logic should use these constants instead of magic numbers.
 
@@ -23,7 +23,7 @@ pub const HEIGHT_ORPHAN: i32 = -1;
 /// - Block is being processed but height not yet determined
 /// - Race condition during sync (should be fixed by metadata validation)
 /// - Awaiting enrichment phase to resolve height
-/// 
+///
 /// Note: After Fix #1, this should rarely appear. If it does, it indicates
 /// blocks that aren't in canonical chain metadata (likely orphans).
 pub const HEIGHT_UNRESOLVED: i32 = -2;
@@ -60,11 +60,11 @@ pub fn is_pos_block(height: i32) -> bool {
 }
 
 /// Check if a transaction should be indexed in address enrichment
-/// 
+///
 /// Returns true for:
 /// - Genesis block (height = 0)
 /// - All canonical blocks (height > 0)
-/// 
+///
 /// Returns false for:
 /// - Orphan blocks (height = -1)
 /// - Unresolved blocks (height = -2)
@@ -120,7 +120,7 @@ mod tests {
         assert!(should_index_transaction(0));
         assert!(should_index_transaction(1));
         assert!(should_index_transaction(1000000));
-        
+
         // Should NOT index orphans or unresolved
         assert!(!should_index_transaction(-1));
         assert!(!should_index_transaction(-2));

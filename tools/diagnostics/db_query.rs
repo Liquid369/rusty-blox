@@ -53,41 +53,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 // (extended below via second binary mode in main — see find_spender)
 
 fn read_varint(data: &[u8], pos: &mut usize) -> Option<u64> {
-    let first = *data.get(*pos)?; *pos += 1;
+    let first = *data.get(*pos)?;
+    *pos += 1;
     Some(match first {
         0..=0xfc => first as u64,
-        0xfd => { let v = u16::from_le_bytes(data.get(*pos..*pos+2)?.try_into().ok()?) as u64; *pos += 2; v }
-        0xfe => { let v = u32::from_le_bytes(data.get(*pos..*pos+4)?.try_into().ok()?) as u64; *pos += 4; v }
-        0xff => { let v = u64::from_le_bytes(data.get(*pos..*pos+8)?.try_into().ok()?); *pos += 8; v }
+        0xfd => {
+            let v = u16::from_le_bytes(data.get(*pos..*pos + 2)?.try_into().ok()?) as u64;
+            *pos += 2;
+            v
+        }
+        0xfe => {
+            let v = u32::from_le_bytes(data.get(*pos..*pos + 4)?.try_into().ok()?) as u64;
+            *pos += 4;
+            v
+        }
+        0xff => {
+            let v = u64::from_le_bytes(data.get(*pos..*pos + 8)?.try_into().ok()?);
+            *pos += 8;
+            v
+        }
     })
 }
 
-fn find_spender(db: &rocksdb::DB, target_internal: &[u8], target_vout: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let cf = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+fn find_spender(
+    db: &rocksdb::DB,
+    target_internal: &[u8],
+    target_vout: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cf = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
     let mut scanned = 0u64;
     let mut hits = 0;
     let iter = db.iterator_cf(cf, rocksdb::IteratorMode::Start);
     for item in iter {
         let (key, value) = item?;
-        if key.first() == Some(&b'B') || value.len() < 12 { continue; }
+        if key.first() == Some(&b'B') || value.len() < 12 {
+            continue;
+        }
         scanned += 1;
         let raw = &value[8..];
         // parse: version u16 + type u16, vin count, inputs
         let mut pos = 4usize;
-        let vin_count = match read_varint(raw, &mut pos) { Some(v) if v <= 100_000 => v, _ => continue };
+        let vin_count = match read_varint(raw, &mut pos) {
+            Some(v) if v <= 100_000 => v,
+            _ => continue,
+        };
         for _ in 0..vin_count {
-            if pos + 36 > raw.len() { break; }
-            let prevhash = &raw[pos..pos+32];
-            let n = u32::from_le_bytes(raw[pos+4+28..pos+36].try_into().unwrap());
+            if pos + 36 > raw.len() {
+                break;
+            }
+            let prevhash = &raw[pos..pos + 32];
+            let n = u32::from_le_bytes(raw[pos + 4 + 28..pos + 36].try_into().unwrap());
             if prevhash == target_internal && n == target_vout {
                 let height = i32::from_le_bytes(value[4..8].try_into().unwrap());
-                let txid_internal = if key.first() == Some(&b't') { &key[1..] } else { &key[..] };
-                let mut disp = txid_internal.to_vec(); disp.reverse();
-                println!("SPENDER: txid={} stored_height={}", hex::encode(disp), height);
+                let txid_internal = if key.first() == Some(&b't') {
+                    &key[1..]
+                } else {
+                    &key[..]
+                };
+                let mut disp = txid_internal.to_vec();
+                disp.reverse();
+                println!(
+                    "SPENDER: txid={} stored_height={}",
+                    hex::encode(disp),
+                    height
+                );
                 hits += 1;
             }
             pos += 36;
-            let slen = match read_varint(raw, &mut pos) { Some(v) => v as usize, None => break };
+            let slen = match read_varint(raw, &mut pos) {
+                Some(v) => v as usize,
+                None => break,
+            };
             pos += slen + 4;
         }
     }

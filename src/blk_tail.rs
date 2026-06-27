@@ -17,10 +17,10 @@
 //! record can be torn / not-yet-flushed. We therefore frame strictly on the magic
 //! and never trust file length.
 
-use std::sync::Arc;
+use rocksdb::{Direction, IteratorMode, ReadOptions, WriteBatch, DB};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use rocksdb::{DB, WriteBatch, IteratorMode, Direction, ReadOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{info, warn};
 
@@ -96,7 +96,9 @@ impl std::fmt::Display for RecordError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RecordError::BadMagic(m) => write!(f, "non-magic, non-zero marker {m:02x?}"),
-            RecordError::BadSize(s) => write!(f, "record size {s} out of bounds [{MIN_BLK},{MAX_BLK}]"),
+            RecordError::BadSize(s) => {
+                write!(f, "record size {s} out of bounds [{MIN_BLK},{MAX_BLK}]")
+            }
         }
     }
 }
@@ -112,7 +114,11 @@ impl std::error::Error for RecordError {}
 /// - body not fully present    -> `Torn`     (retry next tick)
 /// - < 8 bytes available       -> `Incomplete`(EOF)
 /// - complete                  -> `Block`
-pub fn parse_record(window: &[u8], abs_pos: u64, magic: [u8; 4]) -> Result<RecordRead, RecordError> {
+pub fn parse_record(
+    window: &[u8],
+    abs_pos: u64,
+    magic: [u8; 4],
+) -> Result<RecordRead, RecordError> {
     if window.len() < 8 {
         return Ok(RecordRead::Incomplete);
     }
@@ -173,7 +179,9 @@ pub enum TailState {
 }
 
 impl TailState {
-    fn to_u8(self) -> u8 { self as u8 }
+    fn to_u8(self) -> u8 {
+        self as u8
+    }
     fn from_u8(b: u8) -> Option<Self> {
         match b {
             0 => Some(TailState::Pending),
@@ -211,7 +219,12 @@ impl TailCursor {
 
     fn from_bytes(b: &[u8]) -> TailResult<Self> {
         if b.len() != 61 || b[0] != CURSOR_VERSION {
-            return Err(format!("bad tail cursor blob (len {}, ver {})", b.len(), b.first().copied().unwrap_or(0)).into());
+            return Err(format!(
+                "bad tail cursor blob (len {}, ver {})",
+                b.len(),
+                b.first().copied().unwrap_or(0)
+            )
+            .into());
         }
         let file_no = u32::from_le_bytes(b[1..5].try_into().unwrap());
         let offset = u64::from_le_bytes(b[5..13].try_into().unwrap());
@@ -219,7 +232,13 @@ impl TailCursor {
         trailing_hash.copy_from_slice(&b[13..45]);
         let cumulative_blocks = u64::from_le_bytes(b[45..53].try_into().unwrap());
         let file_len_watermark = u64::from_le_bytes(b[53..61].try_into().unwrap());
-        Ok(TailCursor { file_no, offset, trailing_hash, cumulative_blocks, file_len_watermark })
+        Ok(TailCursor {
+            file_no,
+            offset,
+            trailing_hash,
+            cumulative_blocks,
+            file_len_watermark,
+        })
     }
 }
 
@@ -242,7 +261,9 @@ pub struct TailBlockRecord {
 
 impl TailBlockRecord {
     fn to_value(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(1 + 32 + 4 + 32 + 32 + 4 + 8 + 1 + 8 + 8 + 4 + self.txids.len() * 32);
+        let mut v = Vec::with_capacity(
+            1 + 32 + 4 + 32 + 32 + 4 + 8 + 1 + 8 + 8 + 4 + self.txids.len() * 32,
+        );
         v.push(REC_VERSION);
         v.extend_from_slice(&self.prev_hash);
         v.extend_from_slice(&self.claimed_height.to_le_bytes());
@@ -267,30 +288,54 @@ impl TailBlockRecord {
         }
         let mut p = 1usize;
         let mut prev_hash = [0u8; 32];
-        prev_hash.copy_from_slice(&b[p..p + 32]); p += 32;
-        let claimed_height = i32::from_le_bytes(b[p..p + 4].try_into().unwrap()); p += 4;
+        prev_hash.copy_from_slice(&b[p..p + 32]);
+        p += 32;
+        let claimed_height = i32::from_le_bytes(b[p..p + 4].try_into().unwrap());
+        p += 4;
         let mut header_work = [0u8; 32];
-        header_work.copy_from_slice(&b[p..p + 32]); p += 32;
+        header_work.copy_from_slice(&b[p..p + 32]);
+        p += 32;
         let mut cumulative_work = [0u8; 32];
-        cumulative_work.copy_from_slice(&b[p..p + 32]); p += 32;
-        let file_no = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()); p += 4;
-        let offset = u64::from_le_bytes(b[p..p + 8].try_into().unwrap()); p += 8;
-        let state = TailState::from_u8(b[p]).ok_or("bad tail state byte")?; p += 1;
-        let first_seen = u64::from_le_bytes(b[p..p + 8].try_into().unwrap()); p += 8;
-        let last_reconciled = u64::from_le_bytes(b[p..p + 8].try_into().unwrap()); p += 8;
-        let count = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize; p += 4;
+        cumulative_work.copy_from_slice(&b[p..p + 32]);
+        p += 32;
+        let file_no = u32::from_le_bytes(b[p..p + 4].try_into().unwrap());
+        p += 4;
+        let offset = u64::from_le_bytes(b[p..p + 8].try_into().unwrap());
+        p += 8;
+        let state = TailState::from_u8(b[p]).ok_or("bad tail state byte")?;
+        p += 1;
+        let first_seen = u64::from_le_bytes(b[p..p + 8].try_into().unwrap());
+        p += 8;
+        let last_reconciled = u64::from_le_bytes(b[p..p + 8].try_into().unwrap());
+        p += 8;
+        let count = u32::from_le_bytes(b[p..p + 4].try_into().unwrap()) as usize;
+        p += 4;
         if b.len() != FIXED + count * 32 {
-            return Err(format!("tail record txid length mismatch (count {count}, len {})", b.len()).into());
+            return Err(format!(
+                "tail record txid length mismatch (count {count}, len {})",
+                b.len()
+            )
+            .into());
         }
         let mut txids = Vec::with_capacity(count);
         for _ in 0..count {
             let mut t = [0u8; 32];
-            t.copy_from_slice(&b[p..p + 32]); p += 32;
+            t.copy_from_slice(&b[p..p + 32]);
+            p += 32;
             txids.push(t);
         }
         Ok(TailBlockRecord {
-            block_hash, prev_hash, claimed_height, header_work, cumulative_work,
-            file_no, offset, state, first_seen, last_reconciled, txids,
+            block_hash,
+            prev_hash,
+            claimed_height,
+            header_work,
+            cumulative_work,
+            file_no,
+            offset,
+            state,
+            first_seen,
+            last_reconciled,
+            txids,
         })
     }
 }
@@ -337,7 +382,10 @@ impl TailStore {
     }
 
     pub fn load_cursor(&self) -> TailResult<Option<TailCursor>> {
-        let cf = self.db.cf_handle(CF_TAIL_META).ok_or("tail_meta CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_META)
+            .ok_or("tail_meta CF not found")?;
         match self.db.get_cf(&cf, CURSOR_KEY)? {
             Some(b) => Ok(Some(TailCursor::from_bytes(&b)?)),
             None => Ok(None),
@@ -345,7 +393,10 @@ impl TailStore {
     }
 
     pub fn get_record(&self, hash: &[u8; 32]) -> TailResult<Option<TailBlockRecord>> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         match self.db.get_cf(&cf, record_key(hash))? {
             Some(b) => Ok(Some(TailBlockRecord::from_kv(*hash, &b)?)),
             None => Ok(None),
@@ -361,28 +412,44 @@ impl TailStore {
         rec: &TailBlockRecord,
         prior: Option<&TailBlockRecord>,
     ) -> TailResult<()> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         if let Some(p) = prior {
             if (p.claimed_height, p.state) != (rec.claimed_height, rec.state) {
                 batch.delete_cf(&cf, index_key(p.claimed_height, p.state, &p.block_hash));
             }
         }
         batch.put_cf(&cf, record_key(&rec.block_hash), rec.to_value());
-        batch.put_cf(&cf, index_key(rec.claimed_height, rec.state, &rec.block_hash), [0u8; 0]);
+        batch.put_cf(
+            &cf,
+            index_key(rec.claimed_height, rec.state, &rec.block_hash),
+            [0u8; 0],
+        );
         Ok(())
     }
 
     /// Stage removal of a record + its index entry (eviction).
     pub fn stage_evict(&self, batch: &mut WriteBatch, rec: &TailBlockRecord) -> TailResult<()> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         batch.delete_cf(&cf, record_key(&rec.block_hash));
-        batch.delete_cf(&cf, index_key(rec.claimed_height, rec.state, &rec.block_hash));
+        batch.delete_cf(
+            &cf,
+            index_key(rec.claimed_height, rec.state, &rec.block_hash),
+        );
         Ok(())
     }
 
     /// Stage the cursor/anchor advance (committed in the same batch as the block).
     pub fn stage_cursor(&self, batch: &mut WriteBatch, cursor: &TailCursor) -> TailResult<()> {
-        let cf = self.db.cf_handle(CF_TAIL_META).ok_or("tail_meta CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_META)
+            .ok_or("tail_meta CF not found")?;
         batch.put_cf(&cf, CURSOR_KEY, cursor.to_bytes());
         Ok(())
     }
@@ -396,12 +463,17 @@ impl TailStore {
     /// `<K` reconcile/demotion scan (drives state re-derivation). Reads the BE
     /// index only; does not load records.
     pub fn hashes_from_height(&self, from_height: i32) -> TailResult<Vec<[u8; 32]>> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         let mut start = Vec::with_capacity(5);
         start.push(KEY_PREFIX_INDEX);
         start.extend_from_slice(&height_be(from_height));
         let mut out = Vec::new();
-        let iter = self.db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward));
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward));
         for item in iter {
             let (key, _) = item?;
             if key.first() != Some(&KEY_PREFIX_INDEX) {
@@ -421,11 +493,16 @@ impl TailStore {
     /// below every real height, so the `tip - K` reconcile scan misses them — they
     /// need their own retry/age pass to avoid an unbounded leak.
     pub fn hashes_at_unknown(&self) -> TailResult<Vec<[u8; 32]>> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         let mut prefix = Vec::with_capacity(5);
         prefix.push(KEY_PREFIX_INDEX);
         prefix.extend_from_slice(&height_be(CLAIMED_UNKNOWN));
-        let iter = self.db.iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&prefix, Direction::Forward));
         let mut out = Vec::new();
         for item in iter {
             let (key, _) = item?;
@@ -473,7 +550,11 @@ pub fn parse_header(block: &[u8]) -> TailResult<HeaderInfo> {
     let version = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
     let hsize = header_size_for(version);
     if block.len() < hsize {
-        return Err(format!("block {} bytes < header size {hsize} for v{version}", block.len()).into());
+        return Err(format!(
+            "block {} bytes < header size {hsize} for v{version}",
+            block.len()
+        )
+        .into());
     }
     // Block hash = SHA256d over the version-sized header (internal byte order).
     let first = Sha256::digest(&block[..hsize]);
@@ -483,7 +564,12 @@ pub fn parse_header(block: &[u8]) -> TailResult<HeaderInfo> {
     let mut prev_hash = [0u8; 32];
     prev_hash.copy_from_slice(&block[4..36]);
     let n_bits = u32::from_le_bytes([block[72], block[73], block[74], block[75]]);
-    Ok(HeaderInfo { block_hash, prev_hash, n_bits, version })
+    Ok(HeaderInfo {
+        block_hash,
+        prev_hash,
+        n_bits,
+        version,
+    })
 }
 
 /// Sentinel `claimed_height` for a record whose height can't yet be derived
@@ -514,7 +600,10 @@ impl TailStore {
     /// (correctly deleted by `reorg.rs` on a reorg). Returns None if the height is
     /// not on the canonical chain (e.g. tip not there yet).
     pub fn canonical_hash_at(&self, height: i32) -> TailResult<Option<[u8; 32]>> {
-        let cf = self.db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+        let cf = self
+            .db
+            .cf_handle("chain_metadata")
+            .ok_or("chain_metadata CF not found")?;
         match self.db.get_cf(&cf, height.to_le_bytes())? {
             Some(v) if v.len() == 32 => {
                 let mut internal = [0u8; 32];
@@ -531,7 +620,10 @@ impl TailStore {
     /// HINT, then CONFIRMS against the forward map — so a leaked/stale `'h'` entry
     /// can never yield a false-canonical result.
     pub fn canonical_height_of(&self, hash_internal: &[u8; 32]) -> TailResult<Option<i32>> {
-        let cf = self.db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+        let cf = self
+            .db
+            .cf_handle("chain_metadata")
+            .ok_or("chain_metadata CF not found")?;
         let mut display = *hash_internal;
         display.reverse();
         for key_hash in [hash_internal, &display] {
@@ -557,7 +649,10 @@ impl TailStore {
     /// absent (only written on the live path; skipped by a bulk reindex) — callers
     /// treat it as a best-effort optimization for informational cumulative work.
     fn canonical_chainwork_at(&self, height: i32) -> TailResult<Option<[u8; 32]>> {
-        let cf = self.db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+        let cf = self
+            .db
+            .cf_handle("chain_metadata")
+            .ok_or("chain_metadata CF not found")?;
         let mut key = Vec::with_capacity(5);
         key.push(b'w');
         key.extend_from_slice(&height.to_le_bytes());
@@ -593,7 +688,13 @@ impl TailStore {
     /// canonical state; returns the private record to persist (state is a cache
     /// hint — read-time §5.1E re-derivation is authoritative). `txids` are deferred
     /// (analytics-only; empty for now).
-    pub fn classify(&self, block: &[u8], file_no: u32, offset: u64, now: u64) -> TailResult<TailBlockRecord> {
+    pub fn classify(
+        &self,
+        block: &[u8],
+        file_no: u32,
+        offset: u64,
+        now: u64,
+    ) -> TailResult<TailBlockRecord> {
         let hdr = parse_header(block)?;
         let header_work = calculate_work_from_bits(hdr.n_bits);
         let (claimed_opt, parent_cum) = self.resolve_parent(&hdr.prev_hash)?;
@@ -704,7 +805,11 @@ impl TailStore {
                 Ok(RecordRead::Incomplete) => StopReason::Incomplete,
                 Err(e) => StopReason::Corruption(e.to_string()),
             };
-            return Ok(WindowOutcome { next_offset: abs, blocks_ingested: ingested, stop });
+            return Ok(WindowOutcome {
+                next_offset: abs,
+                blocks_ingested: ingested,
+                stop,
+            });
         }
     }
 
@@ -716,9 +821,14 @@ impl TailStore {
     pub fn reconcile_pass(&self, tip: i32, now: u64) -> TailResult<ReconcileStats> {
         let from = tip.saturating_sub(K_RETENTION);
         let hashes = self.hashes_from_height(from)?;
-        let mut stats = ReconcileStats { scanned: hashes.len(), ..Default::default() };
+        let mut stats = ReconcileStats {
+            scanned: hashes.len(),
+            ..Default::default()
+        };
         for h in hashes {
-            let Some(rec) = self.get_record(&h)? else { continue };
+            let Some(rec) = self.get_record(&h)? else {
+                continue;
+            };
             let new_state = match self.canonical_hash_at(rec.claimed_height)? {
                 Some(c) if c == rec.block_hash => TailState::Canonical,
                 Some(_) => TailState::Orphan,
@@ -752,7 +862,9 @@ impl TailStore {
         // parent may have since been recorded (resolve it to a real height), else
         // age it to terminal Unresolved so prune can reclaim it (bounds growth).
         for h in self.hashes_at_unknown()? {
-            let Some(rec) = self.get_record(&h)? else { continue };
+            let Some(rec) = self.get_record(&h)? else {
+                continue;
+            };
             stats.scanned += 1;
             if rec.state == TailState::Unresolved {
                 continue; // already terminal; prune handles reclamation
@@ -794,8 +906,14 @@ impl TailStore {
     /// record and return the orphan set. The stored `state` cache is NOT consulted,
     /// so a concurrent reorg cannot tear the join.
     pub fn orphans_under_snapshot(&self) -> TailResult<Vec<TailBlockRecord>> {
-        let cf_tb = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
-        let cf_cm = self.db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+        let cf_tb = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
+        let cf_cm = self
+            .db
+            .cf_handle("chain_metadata")
+            .ok_or("chain_metadata CF not found")?;
         let snap = self.db.snapshot();
         let mut ro_iter = ReadOptions::default();
         ro_iter.set_snapshot(&snap);
@@ -803,7 +921,11 @@ impl TailStore {
         ro_get.set_snapshot(&snap);
 
         let start = [KEY_PREFIX_RECORD];
-        let iter = self.db.iterator_cf_opt(&cf_tb, ro_iter, IteratorMode::From(&start, Direction::Forward));
+        let iter = self.db.iterator_cf_opt(
+            &cf_tb,
+            ro_iter,
+            IteratorMode::From(&start, Direction::Forward),
+        );
         let mut out = Vec::new();
         for item in iter {
             let (key, val) = item?;
@@ -817,15 +939,19 @@ impl TailStore {
             hash.copy_from_slice(&key[1..33]);
             let rec = TailBlockRecord::from_kv(hash, &val)?;
             // authoritative re-derive vs the forward map UNDER THE SAME snapshot
-            let canon = match self.db.get_cf_opt(&cf_cm, rec.claimed_height.to_le_bytes(), &ro_get)? {
-                Some(v) if v.len() == 32 => {
-                    let mut internal = [0u8; 32];
-                    internal.copy_from_slice(&v);
-                    internal.reverse();
-                    Some(internal)
-                }
-                _ => None,
-            };
+            let canon =
+                match self
+                    .db
+                    .get_cf_opt(&cf_cm, rec.claimed_height.to_le_bytes(), &ro_get)?
+                {
+                    Some(v) if v.len() == 32 => {
+                        let mut internal = [0u8; 32];
+                        internal.copy_from_slice(&v);
+                        internal.reverse();
+                        Some(internal)
+                    }
+                    _ => None,
+                };
             if matches!(canon, Some(c) if c != rec.block_hash) {
                 out.push(rec);
             }
@@ -838,10 +964,15 @@ impl TailStore {
     /// BE index is height-ordered, so we scan from the bottom and stop once we
     /// reach within `K` of the tip. Returns the number evicted.
     pub fn prune_pass(&self, tip: i32, max_evict: usize) -> TailResult<usize> {
-        let cf = self.db.cf_handle(CF_TAIL_BLOCKS).ok_or("tail_blocks CF not found")?;
+        let cf = self
+            .db
+            .cf_handle(CF_TAIL_BLOCKS)
+            .ok_or("tail_blocks CF not found")?;
         let cutoff = tip.saturating_sub(K_RETENTION);
         let start = [KEY_PREFIX_INDEX]; // lowest index key
-        let iter = self.db.iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward));
+        let iter = self
+            .db
+            .iterator_cf(&cf, IteratorMode::From(&start, Direction::Forward));
         let mut victims: Vec<[u8; 32]> = Vec::new();
         for item in iter {
             let (key, _) = item?;
@@ -887,7 +1018,12 @@ impl TailStore {
     pub fn estimate_keys(&self) -> u64 {
         self.db
             .cf_handle(CF_TAIL_BLOCKS)
-            .and_then(|cf| self.db.property_int_value_cf(&cf, "rocksdb.estimate-num-keys").ok().flatten())
+            .and_then(|cf| {
+                self.db
+                    .property_int_value_cf(&cf, "rocksdb.estimate-num-keys")
+                    .ok()
+                    .flatten()
+            })
             .unwrap_or(0)
     }
 }
@@ -900,7 +1036,10 @@ fn decode_height_be(b: [u8; 4]) -> i32 {
 // ---- 3d: async runtime + flag-gated spawn ---------------------------------
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn blk_path(blk_dir: &Path, file_no: u32) -> PathBuf {
@@ -913,7 +1052,10 @@ async fn highest_blk_file(blk_dir: &Path) -> Option<u32> {
     let mut max: Option<u32> = None;
     while let Ok(Some(e)) = rd.next_entry().await {
         if let Some(name) = e.file_name().to_str() {
-            if let Some(num) = name.strip_prefix("blk").and_then(|s| s.strip_suffix(".dat")) {
+            if let Some(num) = name
+                .strip_prefix("blk")
+                .and_then(|s| s.strip_suffix(".dat"))
+            {
                 if let Ok(n) = num.parse::<u32>() {
                     max = Some(max.map_or(n, |m| m.max(n)));
                 }
@@ -955,11 +1097,22 @@ fn roll_to_next_file(store: &TailStore, from: &TailCursor) -> TailResult<()> {
 
 /// One read tick: advance the cursor through complete records now on disk, with
 /// the reindex/shrink guard and file rollover. Returns blocks ingested.
-async fn tail_read_tick(store: &TailStore, blk_dir: &Path, magic: [u8; 4], cap: u64) -> TailResult<u64> {
+async fn tail_read_tick(
+    store: &TailStore,
+    blk_dir: &Path,
+    magic: [u8; 4],
+    cap: u64,
+) -> TailResult<u64> {
     let cursor = match store.load_cursor()? {
         Some(c) => c,
         None => match highest_blk_file(blk_dir).await {
-            Some(f) => TailCursor { file_no: f, offset: 0, trailing_hash: [0u8; 32], cumulative_blocks: 0, file_len_watermark: 0 },
+            Some(f) => TailCursor {
+                file_no: f,
+                offset: 0,
+                trailing_hash: [0u8; 32],
+                cumulative_blocks: 0,
+                file_len_watermark: 0,
+            },
             None => return Ok(0), // no blk files yet
         },
     };
@@ -992,7 +1145,15 @@ async fn tail_read_tick(store: &TailStore, blk_dir: &Path, magic: [u8; 4], cap: 
         let to_read = remaining.min(cap);
         let drained_to_eof = to_read == remaining;
         let window = read_window(&path, cursor.offset, to_read).await?;
-        let outcome = store.process_window(cursor.file_no, cursor.offset, cursor.cumulative_blocks, len, &window, magic, now_secs())?;
+        let outcome = store.process_window(
+            cursor.file_no,
+            cursor.offset,
+            cursor.cumulative_blocks,
+            len,
+            &window,
+            magic,
+            now_secs(),
+        )?;
         ingested = outcome.blocks_ingested;
         match &outcome.stop {
             StopReason::Corruption(msg) => {
@@ -1007,7 +1168,11 @@ async fn tail_read_tick(store: &TailStore, blk_dir: &Path, magic: [u8; 4], cap: 
 
     // Rollover: Core opens blk{n+1} only once blk{n} is full. Roll only when this
     // file is genuinely exhausted (above) AND the next file exists.
-    if file_exhausted && tokio::fs::try_exists(blk_path(blk_dir, cursor.file_no + 1)).await.unwrap_or(false) {
+    if file_exhausted
+        && tokio::fs::try_exists(blk_path(blk_dir, cursor.file_no + 1))
+            .await
+            .unwrap_or(false)
+    {
         let latest = store.load_cursor()?.unwrap_or(cursor);
         roll_to_next_file(store, &latest)?;
     }
@@ -1034,7 +1199,10 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
         // below still run, so it auto-resumes as the tip advances and drains.
         let keys = store.estimate_keys();
         if keys > MAX_TAIL_BLOCKS * 2 {
-            warn!(keys, "blk_tail: MAX_TAIL_BLOCKS reached — pausing ingest this tick");
+            warn!(
+                keys,
+                "blk_tail: MAX_TAIL_BLOCKS reached — pausing ingest this tick"
+            );
         } else if let Err(e) = tail_read_tick(&store, &blk_dir, magic, WINDOW_CAP).await {
             warn!(error = %e, "blk_tail: read tick error");
         }
@@ -1045,8 +1213,11 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
             let tip = crate::chain_state::get_sync_height(&db).unwrap_or(0);
             match store.reconcile_pass(tip, now_secs()) {
                 Ok(s) if s.demotions + s.promotions + s.unresolved > 0 => info!(
-                    scanned = s.scanned, demotions = s.demotions, promotions = s.promotions,
-                    unresolved = s.unresolved, "blk_tail: reconcile"
+                    scanned = s.scanned,
+                    demotions = s.demotions,
+                    promotions = s.promotions,
+                    unresolved = s.unresolved,
+                    "blk_tail: reconcile"
                 ),
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "blk_tail: reconcile error"),
@@ -1055,7 +1226,9 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
             if tip > last_prune_tip {
                 last_prune_tip = tip;
                 match store.prune_pass(tip, MAX_EVICT_PER_PASS) {
-                    Ok(n) if n > 0 => info!(evicted = n, "blk_tail: pruned settled records below tip-K"),
+                    Ok(n) if n > 0 => {
+                        info!(evicted = n, "blk_tail: pruned settled records below tip-K")
+                    }
                     Ok(_) => {}
                     Err(e) => warn!(error = %e, "blk_tail: prune error"),
                 }
@@ -1093,7 +1266,10 @@ mod tests {
     #[test]
     fn all_zero_magic_is_padding_not_corruption() {
         let buf = vec![0u8; 64]; // pre-allocated zero region ahead of the frontier
-        assert_eq!(parse_record(&buf, 0, PIVX_MAGIC).unwrap(), RecordRead::Padding);
+        assert_eq!(
+            parse_record(&buf, 0, PIVX_MAGIC).unwrap(),
+            RecordRead::Padding
+        );
     }
 
     #[test]
@@ -1117,7 +1293,10 @@ mod tests {
     #[test]
     fn incomplete_when_under_frame_header() {
         let buf = vec![0x90u8, 0xc4, 0xfd]; // 3 bytes, < 8
-        assert_eq!(parse_record(&buf, 0, PIVX_MAGIC).unwrap(), RecordRead::Incomplete);
+        assert_eq!(
+            parse_record(&buf, 0, PIVX_MAGIC).unwrap(),
+            RecordRead::Incomplete
+        );
     }
 
     #[test]
@@ -1226,7 +1405,13 @@ mod tests {
     fn cursor_persists_and_loads() {
         let (store, _t) = tail_test_store();
         assert!(store.load_cursor().unwrap().is_none());
-        let c = TailCursor { file_no: 1, offset: 64, trailing_hash: [3; 32], cumulative_blocks: 1, file_len_watermark: 64 };
+        let c = TailCursor {
+            file_no: 1,
+            offset: 64,
+            trailing_hash: [3; 32],
+            cumulative_blocks: 1,
+            file_len_watermark: 64,
+        };
         let mut batch = rocksdb::WriteBatch::default();
         store.stage_cursor(&mut batch, &c).unwrap();
         store.commit(batch).unwrap();
@@ -1254,7 +1439,10 @@ mod tests {
         commit_block(&store, &o, Some(&p));
         // The record reflects the new state, and there is STILL exactly one index
         // entry (the old (height,Pending) slot was deleted in the same batch).
-        assert_eq!(store.get_record(&o.block_hash).unwrap().unwrap().state, TailState::Orphan);
+        assert_eq!(
+            store.get_record(&o.block_hash).unwrap().unwrap().state,
+            TailState::Orphan
+        );
         assert_eq!(store.hashes_from_height(0).unwrap(), vec![[0x33; 32]]);
     }
 
@@ -1305,7 +1493,12 @@ mod tests {
         assert!(!is_evictable(400, TailState::Canonical, 500, K_RETENTION));
         // pending/unresolved are never evictable, regardless of depth
         assert!(!is_evictable(1, TailState::Pending, 100_000, K_RETENTION));
-        assert!(!is_evictable(1, TailState::Unresolved, 100_000, K_RETENTION));
+        assert!(!is_evictable(
+            1,
+            TailState::Unresolved,
+            100_000,
+            K_RETENTION
+        ));
     }
 
     // ---- 3c classifier ----
@@ -1319,13 +1512,24 @@ mod tests {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        let db = DB::open_cf(&opts, temp.path(), [CF_TAIL_BLOCKS, CF_TAIL_META, "chain_metadata"]).unwrap();
+        let db = DB::open_cf(
+            &opts,
+            temp.path(),
+            [CF_TAIL_BLOCKS, CF_TAIL_META, "chain_metadata"],
+        )
+        .unwrap();
         (TailStore::new(Arc::new(db)), temp)
     }
 
     /// Seed a canonical block at `height`: forward `height -> display(hash)`, plus
     /// the reverse `'h'` entry in the requested byte order(s).
-    fn seed_canonical(store: &TailStore, height: i32, hash_internal: [u8; 32], internal_h: bool, display_h: bool) {
+    fn seed_canonical(
+        store: &TailStore,
+        height: i32,
+        hash_internal: [u8; 32],
+        internal_h: bool,
+        display_h: bool,
+    ) {
         let cf = store.db.cf_handle("chain_metadata").unwrap();
         let mut display = hash_internal;
         display.reverse();
@@ -1485,8 +1689,14 @@ mod tests {
         assert_eq!(out.stop, StopReason::Padding);
         // h1 resolves off the canonical parent (10 -> 11); h2 resolves off h1's
         // just-written private record (11 -> 12) — sequential chain resolution.
-        assert_eq!(store.get_record(&hash1).unwrap().unwrap().claimed_height, 11);
-        assert_eq!(store.get_record(&hash2).unwrap().unwrap().claimed_height, 12);
+        assert_eq!(
+            store.get_record(&hash1).unwrap().unwrap().claimed_height,
+            11
+        );
+        assert_eq!(
+            store.get_record(&hash2).unwrap().unwrap().claimed_height,
+            12
+        );
         let c = store.load_cursor().unwrap().unwrap();
         assert_eq!(c.cumulative_blocks, 2);
         assert_eq!(c.trailing_hash, hash2);
@@ -1538,7 +1748,10 @@ mod tests {
         set_forward(&store, 900, [0x99; 32]);
         let s = store.reconcile_pass(1000, 2000).unwrap();
         assert_eq!(s.demotions, 1);
-        assert_eq!(store.get_record(&[0x77; 32]).unwrap().unwrap().state, TailState::Orphan);
+        assert_eq!(
+            store.get_record(&[0x77; 32]).unwrap().unwrap().state,
+            TailState::Orphan
+        );
     }
 
     #[test]
@@ -1551,7 +1764,10 @@ mod tests {
         set_forward(&store, 900, [0x88; 32]); // our branch wins
         let s = store.reconcile_pass(1000, 2000).unwrap();
         assert_eq!(s.promotions, 1);
-        assert_eq!(store.get_record(&[0x88; 32]).unwrap().unwrap().state, TailState::Canonical);
+        assert_eq!(
+            store.get_record(&[0x88; 32]).unwrap().unwrap().state,
+            TailState::Canonical
+        );
     }
 
     #[test]
@@ -1560,13 +1776,21 @@ mod tests {
         let mut r = rec(0x66, 0x65, 950, TailState::Pending);
         r.first_seen = 1000;
         commit_block(&store, &r, None); // forward[950] absent
-        // not yet old enough -> stays pending
+                                        // not yet old enough -> stays pending
         assert_eq!(store.reconcile_pass(1000, 1010).unwrap().unresolved, 0);
-        assert_eq!(store.get_record(&[0x66; 32]).unwrap().unwrap().state, TailState::Pending);
+        assert_eq!(
+            store.get_record(&[0x66; 32]).unwrap().unwrap().state,
+            TailState::Pending
+        );
         // aged past max_pending_age -> terminal Unresolved
-        let s = store.reconcile_pass(1000, 1000 + MAX_PENDING_AGE_SECS + 1).unwrap();
+        let s = store
+            .reconcile_pass(1000, 1000 + MAX_PENDING_AGE_SECS + 1)
+            .unwrap();
         assert_eq!(s.unresolved, 1);
-        assert_eq!(store.get_record(&[0x66; 32]).unwrap().unwrap().state, TailState::Unresolved);
+        assert_eq!(
+            store.get_record(&[0x66; 32]).unwrap().unwrap().state,
+            TailState::Unresolved
+        );
     }
 
     #[test]
@@ -1595,7 +1819,7 @@ mod tests {
         assert!(store.get_record(&[0x02; 32]).unwrap().is_none());
         assert!(store.get_record(&[0x03; 32]).unwrap().is_some()); // pending never evicted
         assert!(store.get_record(&[0x04; 32]).unwrap().is_some()); // within K of tip
-        // index entries for the evicted records are gone too (scan reflects it).
+                                                                   // index entries for the evicted records are gone too (scan reflects it).
         let remaining = store.hashes_from_height(i32::MIN).unwrap();
         assert_eq!(remaining.len(), 2);
     }
@@ -1608,11 +1832,19 @@ mod tests {
         commit_block(&store, &r, None);
         // not yet aged -> stays Pending (and is NOT in the tip-K scan)
         store.reconcile_pass(2000, 1010).unwrap();
-        assert_eq!(store.get_record(&[0x5A; 32]).unwrap().unwrap().state, TailState::Pending);
+        assert_eq!(
+            store.get_record(&[0x5A; 32]).unwrap().unwrap().state,
+            TailState::Pending
+        );
         // aged past max_pending_age -> terminal Unresolved (the leak-closing transition)
-        let s = store.reconcile_pass(2000, 1000 + MAX_PENDING_AGE_SECS + 1).unwrap();
+        let s = store
+            .reconcile_pass(2000, 1000 + MAX_PENDING_AGE_SECS + 1)
+            .unwrap();
         assert_eq!(s.unresolved, 1);
-        assert_eq!(store.get_record(&[0x5A; 32]).unwrap().unwrap().state, TailState::Unresolved);
+        assert_eq!(
+            store.get_record(&[0x5A; 32]).unwrap().unwrap().state,
+            TailState::Unresolved
+        );
         // prune reclaims the terminal Unresolved row -> growth is bounded
         assert_eq!(store.prune_pass(2000, 100).unwrap(), 1);
         assert!(store.get_record(&[0x5A; 32]).unwrap().is_none());
@@ -1641,13 +1873,16 @@ mod tests {
     fn seed_cursor_file0(store: &TailStore) {
         let mut batch = rocksdb::WriteBatch::default();
         store
-            .stage_cursor(&mut batch, &TailCursor {
-                file_no: 0,
-                offset: 0,
-                trailing_hash: [0u8; 32],
-                cumulative_blocks: 0,
-                file_len_watermark: 0,
-            })
+            .stage_cursor(
+                &mut batch,
+                &TailCursor {
+                    file_no: 0,
+                    offset: 0,
+                    trailing_hash: [0u8; 32],
+                    cumulative_blocks: 0,
+                    file_len_watermark: 0,
+                },
+            )
             .unwrap();
         store.commit(batch).unwrap();
     }
@@ -1665,12 +1900,19 @@ mod tests {
         content.extend_from_slice(&[0u8; 32]); // trailing padding
         write_blk(bdir.path(), 0, &content);
 
-        let n = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap();
+        let n = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
         assert_eq!(n, 2);
         let c = store.load_cursor().unwrap().unwrap();
         assert_eq!((c.file_no, c.cumulative_blocks), (0, 2));
         // re-read with no new data -> no-op
-        assert_eq!(tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap(), 0);
+        assert_eq!(
+            tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1682,10 +1924,17 @@ mod tests {
         let mut content = frame(PIVX_MAGIC, &make_header(1, parent, NBITS));
         content.extend_from_slice(&[0u8; 32]);
         write_blk(bdir.path(), 0, &content);
-        tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap();
+        tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
         // file shrinks below the watermark (reindex/truncate) -> halt, no advance
         write_blk(bdir.path(), 0, &content[..content.len() / 2]);
-        assert_eq!(tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap(), 0);
+        assert_eq!(
+            tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1698,9 +1947,11 @@ mod tests {
         content.extend_from_slice(&[0u8; 32]); // trailing padding = "full" file
         write_blk(bdir.path(), 0, &content);
         write_blk(bdir.path(), 1, &[]); // next file exists
-        // start the tail on file 0 (a no-cursor start would pick the highest = blk1).
+                                        // start the tail on file 0 (a no-cursor start would pick the highest = blk1).
         seed_cursor_file0(&store);
-        tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap();
+        tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
         let c = store.load_cursor().unwrap().unwrap();
         assert_eq!((c.file_no, c.offset), (1, 0));
     }
@@ -1721,7 +1972,9 @@ mod tests {
         write_blk(bdir.path(), 0, &content);
         write_blk(bdir.path(), 1, &[]); // next exists
         seed_cursor_file0(&store); // start on file 0 (not the highest, empty blk1)
-        let n = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20).await.unwrap();
+        let n = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
         assert_eq!(n, 1); // only h1 ingested
         assert_eq!(store.load_cursor().unwrap().unwrap().file_no, 0); // stayed — waits for h2
     }

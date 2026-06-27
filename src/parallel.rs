@@ -1,32 +1,33 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
-use rocksdb::DB;
-use tokio::sync::Semaphore;
-use crate::types::AppState;
 use crate::blocks::process_blk_file;
-use crate::db_utils::{save_file_as_incomplete, bulk_write_options};
-use crate::chain_state::{set_sync_height, get_sync_height};
+use crate::chain_state::{get_sync_height, set_sync_height};
 use crate::chainwork::calculate_all_chainwork;
-use crate::sync::validate_canonical_metadata_complete;
-use hex;
 use crate::config::get_global_config;
+use crate::db_utils::{bulk_write_options, save_file_as_incomplete};
+use crate::sync::validate_canonical_metadata_complete;
+use crate::types::AppState;
+use hex;
+use rocksdb::DB;
 use serde_json::Value;
-use tracing::{info, warn, debug, info_span, Instrument};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tracing::{debug, info, info_span, warn, Instrument};
 
 /// Update sync_height by finding the highest block in chain_metadata
 /// This allows incremental progress updates as files are processed
 /// Full forward scan of all 4-byte height keys to find the max.
 async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     // Iterate FORWARD through ALL entries to find the max height
     // We need to check ALL 4-byte keys since they're mixed with 33-byte 'h' + hash keys
     let mut max_height: i32 = -1;
-    
+
     let iter = db.iterator_cf(&cf_metadata, rocksdb::IteratorMode::Start);
-    
+
     for item in iter {
         if let Ok((key, _value)) = item {
             // Only check 4-byte keys (height → hash mappings)
@@ -39,19 +40,18 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
             }
         }
     }
-    
+
     // Only update if we found a valid height and it's higher than current
     if max_height >= 0 {
         set_sync_height(db, max_height)?;
         info!(height = max_height, "Updated sync_height");
     }
-    
+
     Ok(())
 }
 
-
 /// Process multiple block files in parallel with controlled concurrency
-/// 
+///
 /// Architecture:
 /// - Uses tokio tasks with semaphore to limit concurrent processing
 /// - Each file is processed on the tokio runtime
@@ -76,9 +76,10 @@ pub async fn process_files_parallel(
     let _span = info_span!("parallel_processing",
         file_count = %"calculating",
         max_workers = max_concurrent
-    ).entered();
+    )
+    .entered();
     info!("Starting parallel block file processing");
-    
+
     // [F3] CRITICAL: Validate canonical metadata completeness BEFORE parallel processing.
     // This prevents the height=0 bug where all transactions get stored with height=0
     // instead of their correct heights due to missing height→hash mappings.
@@ -92,7 +93,8 @@ pub async fn process_files_parallel(
     } else {
         info!("[F3] Validating canonical chain metadata before parallel processing");
 
-        let cf_metadata = db_arc.cf_handle("chain_metadata")
+        let cf_metadata = db_arc
+            .cf_handle("chain_metadata")
             .ok_or("chain_metadata CF not found")?;
 
         // Count height→hash mappings (4-byte keys) to determine expected chain length
@@ -108,7 +110,8 @@ pub async fn process_files_parallel(
 
         if height_count > 0 {
             // Metadata exists - validate it's complete
-            let metadata_complete = validate_canonical_metadata_complete(&db_arc, height_count).await?;
+            let metadata_complete =
+                validate_canonical_metadata_complete(&db_arc, height_count).await?;
 
             if !metadata_complete {
                 return Err(format!(
@@ -119,14 +122,20 @@ pub async fn process_files_parallel(
                 ).into());
             }
 
-            info!(height_count = height_count, "[F3] Canonical metadata validated - complete and contiguous");
+            info!(
+                height_count = height_count,
+                "[F3] Canonical metadata validated - complete and contiguous"
+            );
         } else {
             info!("[F3] No canonical metadata found - will assign heights dynamically (normal for first sync)");
         }
     }
 
-    info!(workers = max_concurrent, "Starting parallel file processing");
-    
+    info!(
+        workers = max_concurrent,
+        "Starting parallel file processing"
+    );
+
     // Filter for .dat files
     let mut blk_files: Vec<_> = entries
         .into_iter()
@@ -137,12 +146,12 @@ pub async fn process_files_parallel(
                 .unwrap_or(false)
         })
         .collect();
-    
+
     // CRITICAL: Sort blk files in REVERSE order (newest first)
     // This ensures we process blk00141.dat, blk00140.dat, etc.
     // So we find the highest blocks first and work backwards to genesis
     blk_files.sort_by(|a, b| b.cmp(a));
-    
+
     let total_files = blk_files.len();
     info!(
         total_files = total_files,
@@ -150,10 +159,10 @@ pub async fn process_files_parallel(
         last_file = ?blk_files.last().map(|p| p.file_name()),
         "Processing blk files in REVERSE order (newest first)"
     );
-    
+
     // Semaphore to limit concurrent file processing
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    
+
     // Progress tracking
     let completed = Arc::new(tokio::sync::Mutex::new(0_usize));
 
@@ -164,7 +173,7 @@ pub async fn process_files_parallel(
     // path sync_height is set before parse and must not move backwards).
     let running_max = Arc::new(AtomicI32::new(-1));
     let last_written = Arc::new(AtomicI32::new(get_sync_height(&db_arc).unwrap_or(0)));
-    
+
     // Process files with controlled concurrency
     let tasks: Vec<_> = blk_files
         .into_iter()
@@ -190,7 +199,7 @@ pub async fn process_files_parallel(
 
             async move {
                 debug!("Processing blk file");
-                
+
                 // Acquire permit - if this fails, semaphore is closed (shutdown).
                 // The permit is held for the entire duration of the blocking task
                 // below (it is dropped when this scope ends), so the Semaphore(8)
@@ -251,16 +260,16 @@ pub async fn process_files_parallel(
                         let _ = save_file_as_incomplete(&db, &file_path).await;
                     }
                 }
-                
+
                 // Update progress
                 let mut count = completed_clone.lock().await;
                 *count += 1;
                 let current = *count;
                 drop(count);
-                
+
                 let progress = (current as f64 / total_files as f64) * 100.0;
                 info!(current = current, total = total_files, progress_pct = format!("{:.1}", progress), "File progress");
-                
+
                 // Throttled progress refresh from the in-memory running max,
                 // replacing the old per-file full-CF scan of chain_metadata
                 // (~O(files x blocks)). `cur > last_written` keeps it monotonic;
@@ -281,21 +290,22 @@ pub async fn process_files_parallel(
             .instrument(file_span)
         })
         .collect();
-    
+
     // Execute all tasks concurrently
     futures::future::join_all(tasks).await;
-    
+
     info!("All blk*.dat files processed");
-    
+
     // CRITICAL: Update sync_height to reflect all blocks processed
     // This ensures the next phase (RPC monitoring) knows our true current height
     info!("Updating sync height from all processed blocks");
     update_sync_height_from_metadata(&db_arc).await?;
-    
+
     // Check if canonical chain metadata already exists (from leveldb phase)
-    let cf_metadata = db_arc.cf_handle("chain_metadata")
+    let cf_metadata = db_arc
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     // Check if canonical metadata appears complete: count how many height->hash 4-byte keys exist.
     // If there's only the genesis mapping (or none) we consider the metadata incomplete and
     // fall back to resolving block heights from the processed blk files. This avoids the
@@ -314,7 +324,10 @@ pub async fn process_files_parallel(
     let has_canonical_metadata = height_key_count > 1; // more than just genesis
 
     if has_canonical_metadata {
-        info!(height_mappings = height_key_count, "Canonical chain metadata exists (from leveldb) - extending with new blocks");
+        info!(
+            height_mappings = height_key_count,
+            "Canonical chain metadata exists (from leveldb) - extending with new blocks"
+        );
         // CRITICAL: Always resolve to pick up new blocks beyond the leveldb import
         resolve_block_heights(&db_arc, bulk).await?;
         info!("Chain resolution complete (extended with new blocks)");
@@ -324,13 +337,13 @@ pub async fn process_files_parallel(
         resolve_block_heights(&db_arc, bulk).await?;
         info!("Chain building complete");
     }
-    
+
     // CRITICAL: Update sync_height AGAIN after chain resolution to pick up newly resolved heights
     info!("Updating sync height after chain resolution");
     update_sync_height_from_metadata(&db_arc).await?;
-    
+
     info!("BLK FILE PROCESSING COMPLETE");
-    
+
     Ok(())
 }
 
@@ -343,12 +356,12 @@ pub async fn process_files_parallel(
 /// DB), `false` keeps it for the live/RPC catch-up path. Bytes are identical.
 async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn std::error::Error>> {
     use std::collections::HashMap;
-    
-    let cf_blocks = db.cf_handle("blocks")
-        .ok_or("blocks CF not found")?;
-    let cf_metadata = db.cf_handle("chain_metadata")
+
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     info!("Building hash map (loading all blocks into memory)");
 
     // [A] Single scan of the blocks CF building only the fields the chain-walk
@@ -400,19 +413,23 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             };
             if header_bytes.len() >= 68 {
                 let prev_hash: [u8; 32] = header_bytes[4..36].try_into().unwrap();
-                children_map.entry(prev_hash)
-                    .or_default()
-                    .push(hash32);
+                children_map.entry(prev_hash).or_default().push(hash32);
 
                 total_blocks += 1;
                 if total_blocks % 1_000_000 == 0 {
-                    info!(loaded = total_blocks, "Loading blocks into memory (resolving canonical heights)");
+                    info!(
+                        loaded = total_blocks,
+                        "Loading blocks into memory (resolving canonical heights)"
+                    );
                 }
             }
             if header_bytes.len() >= 80 {
                 let prev_hash: [u8; 32] = header_bytes[4..36].try_into().unwrap();
                 let n_bits = u32::from_le_bytes([
-                    header_bytes[72], header_bytes[73], header_bytes[74], header_bytes[75],
+                    header_bytes[72],
+                    header_bytes[73],
+                    header_bytes[74],
+                    header_bytes[75],
                 ]);
                 block_meta.insert(hash32, (prev_hash, n_bits));
             }
@@ -424,13 +441,13 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     info!("Calculating accumulated chainwork (Bitcoin consensus)");
     let chainwork_map = calculate_all_chainwork(db, &block_meta, &children_map)?;
     info!(blocks = chainwork_map.len(), "Chainwork calculated");
-    
+
     info!("Finding best chain tip");
-    
+
     // STEP 3A: Find blocks with no children (potential tips)
     let mut all_blocks: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut has_children: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    
+
     for (parent_hash, children) in &children_map {
         all_blocks.insert(*parent_hash);
         for child_hash in children {
@@ -438,20 +455,17 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             has_children.insert(*parent_hash);
         }
     }
-    
-    let potential_tips: Vec<[u8; 32]> = all_blocks
-        .difference(&has_children)
-        .cloned()
-        .collect();
-    
+
+    let potential_tips: Vec<[u8; 32]> = all_blocks.difference(&has_children).cloned().collect();
+
     debug!(tips = potential_tips.len(), "Found potential chain tips");
 
     // [M2] OPTIMIZATION: Use chainwork-only selection instead of RPC validating every tip
     // Old approach: RPC validate 1000+ tips (100+ seconds)
     // New approach: Use chainwork to find best tip, only RPC validate the chosen one (1 call)
-    
+
     debug!("Selecting best tip by chainwork");
-    
+
     // Find tip with highest chainwork
     let mut best_tip: Option<([u8; 32], [u8; 32])> = None;
     for tip in &potential_tips {
@@ -466,17 +480,17 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             }
         }
     }
-    
+
     let (highest_tip, best_chainwork) = match best_tip {
         Some((tip, work)) => (tip, work),
         None => return Err("No tips found with chainwork data".into()),
     };
-    
+
     let tip_display: Vec<u8> = highest_tip.iter().rev().cloned().collect();
     let tip_hex = hex::encode(&tip_display);
-    
+
     info!(tip = &tip_hex[..16], chainwork = %hex::encode(best_chainwork), "Selected best tip by chainwork");
-    
+
     // Optional: RPC-validate the chosen tip matches node's view
     let config = get_global_config();
     let rpc_validation = match (
@@ -490,16 +504,16 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             } else {
                 format!("http://{host}")
             };
-            
+
             debug!("Validating chosen tip with RPC");
-            
+
             let body = serde_json::json!({
                 "jsonrpc": "1.0",
                 "id": "rbx",
                 "method": "getblock",
                 "params": [tip_hex, 1]
             });
-            
+
             // Use async reqwest client to avoid runtime nesting issues
             let client = reqwest::Client::new();
             let rpc_result = tokio::time::timeout(
@@ -508,14 +522,19 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
                     .post(&url)
                     .basic_auth(&user, Some(&pass))
                     .json(&body)
-                    .send()
-            ).await;
-            
+                    .send(),
+            )
+            .await;
+
             match rpc_result {
                 Ok(Ok(resp)) if resp.status().is_success() => {
                     if let Ok(text) = resp.text().await {
                         if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
-                            if let Some(height) = json_val.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()) {
+                            if let Some(height) = json_val
+                                .get("result")
+                                .and_then(|r| r.get("height"))
+                                .and_then(|h| h.as_i64())
+                            {
                                 info!(height = height, "RPC confirms tip");
                                 Some(height as i32)
                             } else {
@@ -550,35 +569,38 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             None
         }
     };
-    
+
     let highest_height_opt = rpc_validation;
 
     // [M2] Old O(n²) loop removed - we now select best tip via chainwork only
     // This eliminates 1000+ RPC calls (saving 100+ seconds on typical sync)
-    
+
     // Display result
     if let Some(h) = highest_height_opt {
         info!(height = h, hash = %tip_hex, "Selected canonical chain tip");
     } else {
         info!(hash = %tip_hex, "Selected canonical chain tip (chainwork-based, height unknown)");
     }
-    
+
     // STEP 3C: Walk backwards from the HIGHEST tip to genesis
     let mut highest_height: i32 = 0;
     let mut have_highest_height = false;
     if let Some(h) = highest_height_opt {
         highest_height = h;
         have_highest_height = true;
-        info!(height = highest_height, "Walking backwards from highest tip to genesis");
+        info!(
+            height = highest_height,
+            "Walking backwards from highest tip to genesis"
+        );
     } else {
         info!("Walking backwards from highest tip to genesis (height unknown)");
     }
-    
+
     let mut chain_path: Vec<[u8; 32]> = Vec::new();
     let mut current_hash = highest_tip;
     let genesis_parent = [0u8; 32];
     let mut steps = 0;
-    
+
     loop {
         chain_path.push(current_hash);
         steps += 1;
@@ -613,36 +635,50 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             break;
         }
     }
-    
-    let reached_genesis = chain_path.last().map(|h| h == &genesis_parent).unwrap_or(false);
-    
+
+    let reached_genesis = chain_path
+        .last()
+        .map(|h| h == &genesis_parent)
+        .unwrap_or(false);
+
     debug!(chain_length = chain_path.len(), "Chain path built");
-    
+
     if !reached_genesis {
         warn!("Chain did NOT reach genesis - checking for gap");
-        
+
         // STEP 3C2: The chain broke - now walk backwards from the MISSING block to see if it reaches genesis
         let missing_hash_display: Vec<u8> = current_hash.iter().rev().cloned().collect();
         warn!(missing_block = %hex::encode(&missing_hash_display), "Gap detected - recommend full resync");
-        
+
         // [M2] Note: Gap filling via RPC removed as part of optimization
-        return Err(format!("Chain gap detected at block {}", hex::encode(&missing_hash_display)).into());
+        return Err(format!(
+            "Chain gap detected at block {}",
+            hex::encode(&missing_hash_display)
+        )
+        .into());
     } else {
         info!("Chain successfully reached genesis");
     }
-    
+
     // If we couldn't reach genesis and don't have an RPC-supplied tip height,
     // we cannot reliably assign heights — abort with a clear error so the
     // operator can supply RPC access or rebuild metadata with leveldb tools.
     if !reached_genesis && !have_highest_height {
-        return Err("Chain did not reach genesis and tip height is unknown (RPC required to continue)".into());
+        return Err(
+            "Chain did not reach genesis and tip height is unknown (RPC required to continue)"
+                .into(),
+        );
     }
 
     // STEP 3D: Reverse and assign heights
     info!("Assigning heights to canonical chain");
     chain_path.reverse();
-    
-    let start_idx = if reached_genesis && chain_path[0] == genesis_parent { 1 } else { 0 };
+
+    let start_idx = if reached_genesis && chain_path[0] == genesis_parent {
+        1
+    } else {
+        0
+    };
 
     // On the initial reindex these per-block metadata writes are pure WAL fsync
     // overhead; disable the WAL on the bulk path (kept on for live catch-up).
@@ -673,7 +709,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
             db.put_cf(&cf_metadata, height.to_le_bytes(), &display_hash)?;
         }
     }
-    
+
     let chain_height = if reached_genesis {
         (chain_path.len() - start_idx - 1) as i32
     } else {
@@ -682,11 +718,15 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
 
     info!(
         chain_blocks = chain_path.len() - start_idx,
-        start_height = if reached_genesis { 0 } else { highest_height - (chain_path.len() - start_idx - 1) as i32 },
+        start_height = if reached_genesis {
+            0
+        } else {
+            highest_height - (chain_path.len() - start_idx - 1) as i32
+        },
         tip_height = chain_height,
         "Canonical chain established"
     );
-    
+
     // Calculate statistics
     let orphaned_count = total_blocks - (chain_path.len() - start_idx);
     info!(
@@ -696,6 +736,6 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         orphaned = orphaned_count,
         "Chain statistics"
     );
-    
+
     Ok(())
 }

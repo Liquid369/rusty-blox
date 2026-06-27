@@ -11,9 +11,9 @@
 //! many txs landed), but we CAN recompute each affected address's r/s from the
 //! now-idempotently-complete 't'/'a' indexes — bounded to the crashed tail.
 
+use rocksdb::DB;
 use std::collections::HashSet;
 use std::sync::Arc;
-use rocksdb::DB;
 
 use crate::constants::is_canonical_height;
 use crate::parser::{deserialize_transaction, deserialize_utxos};
@@ -71,8 +71,12 @@ pub async fn recompute_address_rs(
     db: &Arc<DB>,
     address: &str,
 ) -> Result<(i64, i64), Box<dyn std::error::Error + Send + Sync>> {
-    let cf_ai = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;
-    let cf_tx = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+    let cf_ai = db
+        .cf_handle("addr_index")
+        .ok_or("addr_index CF not found")?;
+    let cf_tx = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
 
     // totalReceived: scan the 't' list (display-order 32-byte txids).
     let mut t_key = vec![b't'];
@@ -138,7 +142,9 @@ async fn block_involved_addresses(
     db: &Arc<DB>,
     height: i32,
 ) -> Result<HashSet<String>, Box<dyn std::error::Error + Send + Sync>> {
-    let cf_tx = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+    let cf_tx = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
 
     let mut prefix = vec![b'B'];
     prefix.extend_from_slice(&height.to_le_bytes());
@@ -218,7 +224,9 @@ pub async fn repair_block_addresses_rs(
     height: i32,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     let addresses = block_involved_addresses(db, height).await?;
-    let cf_ai = db.cf_handle("addr_index").ok_or("addr_index CF not found")?;
+    let cf_ai = db
+        .cf_handle("addr_index")
+        .ok_or("addr_index CF not found")?;
     let cap = recovery_scan_cap();
 
     let mut repaired = 0usize;
@@ -228,7 +236,10 @@ pub async fn repair_block_addresses_rs(
         // on the next enrichment.
         let mut t_key = vec![b't'];
         t_key.extend_from_slice(address.as_bytes());
-        let tx_count = db.get_cf(&cf_ai, &t_key)?.map(|v| v.len() / 32).unwrap_or(0);
+        let tx_count = db
+            .get_cf(&cf_ai, &t_key)?
+            .map(|v| v.len() / 32)
+            .unwrap_or(0);
         if tx_count > cap {
             tracing::warn!(address = %address, txs = tx_count, cap,
                 "address exceeds crash-recovery scan cap; r/s left as-is (bounded double-count self-heals on next enrichment)");
@@ -250,8 +261,8 @@ pub async fn repair_block_addresses_rs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rocksdb::{DB, Options};
     use crate::parser::serialize_utxos;
+    use rocksdb::{Options, DB};
 
     // The P2PKH address that the script below decodes to (see parser p2pkh_matches_core).
     const ADDR: &str = "DRN9vVxE9WNQM5XxS1RxdfH2NqqKG4VS1A";
@@ -321,10 +332,18 @@ mod tests {
         db.put_cf(&cf_ai, &t_list_key, &txid).unwrap();
         let mut a_key = vec![b'a'];
         a_key.extend_from_slice(ADDR.as_bytes());
-        db.put_cf(&cf_ai, &a_key, serialize_utxos(&vec![(txid.clone(), 0u64)]).await).unwrap();
+        db.put_cf(
+            &cf_ai,
+            &a_key,
+            serialize_utxos(&vec![(txid.clone(), 0u64)]).await,
+        )
+        .unwrap();
 
         // received = 500M (from the 't' output), balance = 500M (UTXO unspent), sent = 0.
-        assert_eq!(recompute_address_rs(&db, ADDR).await.unwrap(), (500_000_000, 0));
+        assert_eq!(
+            recompute_address_rs(&db, ADDR).await.unwrap(),
+            (500_000_000, 0)
+        );
     }
 
     #[tokio::test]
@@ -346,7 +365,8 @@ mod tests {
         let mut bkey = vec![b'B'];
         bkey.extend(&height.to_le_bytes());
         bkey.extend(&0u64.to_le_bytes());
-        db.put_cf(&cf_tx, &bkey, hex::encode(&txid).as_bytes()).unwrap();
+        db.put_cf(&cf_tx, &bkey, hex::encode(&txid).as_bytes())
+            .unwrap();
 
         // Idempotent indexes are correct; r/s are DOUBLE-COUNTED (the crash symptom).
         let mut t_list_key = vec![b't'];
@@ -354,10 +374,16 @@ mod tests {
         db.put_cf(&cf_ai, &t_list_key, &txid).unwrap();
         let mut a_key = vec![b'a'];
         a_key.extend_from_slice(ADDR.as_bytes());
-        db.put_cf(&cf_ai, &a_key, serialize_utxos(&vec![(txid.clone(), 0u64)]).await).unwrap();
+        db.put_cf(
+            &cf_ai,
+            &a_key,
+            serialize_utxos(&vec![(txid.clone(), 0u64)]).await,
+        )
+        .unwrap();
         let mut rk = vec![b'r'];
         rk.extend_from_slice(ADDR.as_bytes());
-        db.put_cf(&cf_ai, &rk, 1_000_000_000i64.to_le_bytes()).unwrap(); // doubled
+        db.put_cf(&cf_ai, &rk, 1_000_000_000i64.to_le_bytes())
+            .unwrap(); // doubled
         let mut sk = vec![b's'];
         sk.extend_from_slice(ADDR.as_bytes());
         db.put_cf(&cf_ai, &sk, 7_777i64.to_le_bytes()).unwrap(); // garbage
@@ -365,8 +391,26 @@ mod tests {
         let repaired = repair_block_addresses_rs(&db, height).await.unwrap();
         assert_eq!(repaired, 1, "one address involved in the block");
 
-        let r = i64::from_le_bytes(db.get_cf(&cf_ai, &rk).unwrap().unwrap().as_slice().try_into().unwrap());
-        let s = i64::from_le_bytes(db.get_cf(&cf_ai, &sk).unwrap().unwrap().as_slice().try_into().unwrap());
-        assert_eq!((r, s), (500_000_000, 0), "r/s recomputed from t/a, double-count corrected");
+        let r = i64::from_le_bytes(
+            db.get_cf(&cf_ai, &rk)
+                .unwrap()
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        let s = i64::from_le_bytes(
+            db.get_cf(&cf_ai, &sk)
+                .unwrap()
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            (r, s),
+            (500_000_000, 0),
+            "r/s recomputed from t/a, double-count corrected"
+        );
     }
 }

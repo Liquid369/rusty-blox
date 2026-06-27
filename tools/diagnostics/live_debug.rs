@@ -1,5 +1,5 @@
 //! Throwaway: dump live-analytics state (read-only secondary; safe while running).
-use rustyblox::config::{load_config, get_db_path};
+use rustyblox::config::{get_db_path, load_config};
 use rustyblox::enrich_addresses::TxDayAgg;
 
 fn i32_at(db: &rocksdb::DB, cf: &impl rocksdb::AsColumnFamilyRef, k: &[u8]) -> Option<i32> {
@@ -20,21 +20,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = db.try_catch_up_with_primary();
     let cf = db.cf_handle("chain_state").ok_or("no chain_state")?;
 
-    println!("sync_height          = {:?}", i32_at(&db, &cf, b"sync_height"));
-    println!("analytics_live_height= {:?}  (watermark)", i32_at(&db, &cf, b"analytics_live_height"));
+    println!(
+        "sync_height          = {:?}",
+        i32_at(&db, &cf, b"sync_height")
+    );
+    println!(
+        "analytics_live_height= {:?}  (watermark)",
+        i32_at(&db, &cf, b"analytics_live_height")
+    );
     println!(
         "analytics_live_ready = {:?}",
-        db.get_cf(&cf, b"analytics_live_ready")?.and_then(|v| v.first().copied())
+        db.get_cf(&cf, b"analytics_live_ready")?
+            .and_then(|v| v.first().copied())
     );
     println!(
         "analytics_complete   = {:?}",
-        db.get_cf(&cf, b"analytics_complete")?.and_then(|v| v.first().copied())
+        db.get_cf(&cf, b"analytics_complete")?
+            .and_then(|v| v.first().copied())
     );
 
     if let Some(v) = db.get_cf(&cf, b"analytics_tx_days")? {
         let dates: Vec<String> = bincode::deserialize(&v).unwrap_or_default();
         let n = dates.len();
-        println!("analytics_tx_days index: {n} dates; last 6 = {:?}", &dates[n.saturating_sub(6)..]);
+        println!(
+            "analytics_tx_days index: {n} dates; last 6 = {:?}",
+            &dates[n.saturating_sub(6)..]
+        );
     } else {
         println!("analytics_tx_days index: ABSENT");
     }

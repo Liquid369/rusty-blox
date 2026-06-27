@@ -1,10 +1,10 @@
-use serde::Serialize;
+use crate::cache::CacheManager;
+use rocksdb::DB;
 use serde::Deserialize;
-use serde::{Serializer, Deserializer};
+use serde::Serialize;
+use serde::{Deserializer, Serializer};
 use std::fmt;
 use std::sync::Arc;
-use rocksdb::DB;
-use crate::cache::CacheManager;
 
 // Helper functions to serialize large byte arrays
 fn serialize_bytes<S, const N: usize>(bytes: &[u8; N], serializer: S) -> Result<S::Ok, S::Error>
@@ -22,7 +22,11 @@ where
     use serde::de::Error;
     let bytes: &[u8] = Deserialize::deserialize(deserializer)?;
     if bytes.len() != N {
-        return Err(Error::custom(format!("expected {} bytes, got {}", N, bytes.len())));
+        return Err(Error::custom(format!(
+            "expected {} bytes, got {}",
+            N,
+            bytes.len()
+        )));
     }
     let mut array = [0u8; N];
     array.copy_from_slice(bytes);
@@ -91,17 +95,18 @@ pub enum AddressType {
 /// Used for correct transaction attribution matching Core's IsMine() logic
 #[derive(Debug, Clone)]
 pub enum ScriptClassification {
-    P2PKH(String),           // Single address receives value
-    P2SH(String),            // Single address receives value
-    P2PK(String),            // Single address receives value
-    ColdStake {              // TWO addresses with different roles
-        staker: String,      // Receives delegation (S-address) - gets the VALUE
-        owner: String,       // Retains ownership (D-address) - can SPEND
+    P2PKH(String), // Single address receives value
+    P2SH(String),  // Single address receives value
+    P2PK(String),  // Single address receives value
+    ColdStake {
+        // TWO addresses with different roles
+        staker: String, // Receives delegation (S-address) - gets the VALUE
+        owner: String,  // Retains ownership (D-address) - can SPEND
     },
-    OpReturn,                // OP_RETURN (no address, no value attribution)
-    Coinbase,                // Coinbase marker
-    Coinstake,               // Coinstake marker
-    Nonstandard,             // Non-standard script
+    OpReturn,    // OP_RETURN (no address, no value attribution)
+    Coinbase,    // Coinbase marker
+    Coinstake,   // Coinstake marker
+    Nonstandard, // Non-standard script
 }
 
 pub struct CBlockHeader {
@@ -158,7 +163,7 @@ pub struct CTransaction {
     pub inputs: Vec<CTxIn>,
     pub outputs: Vec<CTxOut>,
     pub lock_time: u32,
-    pub sapling_data: Option<SaplingTxData>,  // Sapling-specific data for version >= 3
+    pub sapling_data: Option<SaplingTxData>, // Sapling-specific data for version >= 3
 }
 
 impl std::fmt::Debug for CTransaction {
@@ -246,13 +251,13 @@ pub struct SaplingTxData {
     /// Positive: shield -> transparent (unshielding)
     /// Negative: transparent -> shield (shielding)
     pub value_balance: i64,
-    
+
     /// Shielded spends (inputs from shielded pool)
     pub vshielded_spend: Vec<SpendDescription>,
-    
+
     /// Shielded outputs (new notes added to shielded pool)
     pub vshielded_output: Vec<OutputDescription>,
-    
+
     /// Binding signature (64 bytes) - proves balance between spends and outputs
     #[serde(serialize_with = "serialize_bytes")]
     pub binding_sig: [u8; 64],
@@ -261,9 +266,22 @@ pub struct SaplingTxData {
 impl std::fmt::Debug for SaplingTxData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "SaplingTxData {{")?;
-        writeln!(f, "    value_balance: {} satoshis ({} PIV)", self.value_balance, self.value_balance as f64 / 100_000_000.0)?;
-        writeln!(f, "    vshielded_spend: {} spend(s)", self.vshielded_spend.len())?;
-        writeln!(f, "    vshielded_output: {} output(s)", self.vshielded_output.len())?;
+        writeln!(
+            f,
+            "    value_balance: {} satoshis ({} PIV)",
+            self.value_balance,
+            self.value_balance as f64 / 100_000_000.0
+        )?;
+        writeln!(
+            f,
+            "    vshielded_spend: {} spend(s)",
+            self.vshielded_spend.len()
+        )?;
+        writeln!(
+            f,
+            "    vshielded_output: {} output(s)",
+            self.vshielded_output.len()
+        )?;
         writeln!(f, "    binding_sig: {}", hex::encode(self.binding_sig))?;
         write!(f, "}}")
     }
@@ -275,21 +293,21 @@ impl std::fmt::Debug for SaplingTxData {
 pub struct SpendDescription {
     /// Value commitment (32 bytes) - cryptographic commitment to the value being spent
     pub cv: [u8; 32],
-    
+
     /// Merkle anchor (32 bytes) - root of the note commitment tree at a past block
     pub anchor: [u8; 32],
-    
+
     /// Nullifier (32 bytes) - prevents double-spending of the same note
     pub nullifier: [u8; 32],
-    
+
     /// Randomized public key (32 bytes) - used for spendAuthSig verification
     pub rk: [u8; 32],
-    
+
     /// Zero-knowledge proof (192 bytes) - proves spend is valid without revealing details
     /// Groth16 proof: π_A (48) + π_B (96) + π_C (48)
     #[serde(serialize_with = "serialize_bytes")]
     pub zkproof: [u8; 192],
-    
+
     /// Spend authorization signature (64 bytes) - authorizes this spend
     #[serde(serialize_with = "serialize_bytes")]
     pub spend_auth_sig: [u8; 64],
@@ -302,8 +320,17 @@ impl fmt::Debug for SpendDescription {
         writeln!(f, "    anchor: {}", hex::encode(self.anchor))?;
         writeln!(f, "    nullifier: {}", hex::encode(self.nullifier))?;
         writeln!(f, "    rk: {}", hex::encode(self.rk))?;
-        writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;
-        writeln!(f, "    spend_auth_sig: {}", hex::encode(self.spend_auth_sig))?;
+        writeln!(
+            f,
+            "    zkproof: {}... ({} bytes)",
+            &hex::encode(&self.zkproof[..16]),
+            self.zkproof.len()
+        )?;
+        writeln!(
+            f,
+            "    spend_auth_sig: {}",
+            hex::encode(self.spend_auth_sig)
+        )?;
         write!(f, "}}")
     }
 }
@@ -314,23 +341,23 @@ impl fmt::Debug for SpendDescription {
 pub struct OutputDescription {
     /// Value commitment (32 bytes) - cryptographic commitment to the output value
     pub cv: [u8; 32],
-    
+
     /// Note commitment u-coordinate (32 bytes) - commitment to the new note
     pub cmu: [u8; 32],
-    
+
     /// Ephemeral public key (32 bytes) - Jubjub public key for note encryption
     pub ephemeral_key: [u8; 32],
-    
+
     /// Encrypted ciphertext (580 bytes) - encrypted note for recipient
     /// Contains: leading byte (1) + diversifier (11) + value (8) + rcm (32) + memo (512) + auth tag (16)
     #[serde(serialize_with = "serialize_bytes")]
     pub enc_ciphertext: [u8; 580],
-    
+
     /// Outgoing ciphertext (80 bytes) - encrypted note for sender's outgoing viewing key
     /// Contains: pk_d (32) + esk (32) + auth tag (16)
     #[serde(serialize_with = "serialize_bytes")]
     pub out_ciphertext: [u8; 80],
-    
+
     /// Zero-knowledge proof (192 bytes) - proves output construction is valid
     /// Groth16 proof: π_A (48) + π_B (96) + π_C (48)
     #[serde(serialize_with = "serialize_bytes")]
@@ -343,9 +370,24 @@ impl std::fmt::Debug for OutputDescription {
         writeln!(f, "    cv: {}", hex::encode(self.cv))?;
         writeln!(f, "    cmu: {}", hex::encode(self.cmu))?;
         writeln!(f, "    ephemeral_key: {}", hex::encode(self.ephemeral_key))?;
-        writeln!(f, "    enc_ciphertext: {}... ({} bytes)", &hex::encode(&self.enc_ciphertext[..16]), self.enc_ciphertext.len())?;
-        writeln!(f, "    out_ciphertext: {}... ({} bytes)", &hex::encode(&self.out_ciphertext[..16]), self.out_ciphertext.len())?;
-        writeln!(f, "    zkproof: {}... ({} bytes)", &hex::encode(&self.zkproof[..16]), self.zkproof.len())?;
+        writeln!(
+            f,
+            "    enc_ciphertext: {}... ({} bytes)",
+            &hex::encode(&self.enc_ciphertext[..16]),
+            self.enc_ciphertext.len()
+        )?;
+        writeln!(
+            f,
+            "    out_ciphertext: {}... ({} bytes)",
+            &hex::encode(&self.out_ciphertext[..16]),
+            self.out_ciphertext.len()
+        )?;
+        writeln!(
+            f,
+            "    zkproof: {}... ({} bytes)",
+            &hex::encode(&self.zkproof[..16]),
+            self.zkproof.len()
+        )?;
         write!(f, "}}")
     }
 }

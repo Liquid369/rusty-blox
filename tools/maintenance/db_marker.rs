@@ -12,7 +12,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(args.len() == 3 && matches!(args[1].as_str(), "get" | "clear"))
         && !(args.len() == 4 && args[1] == "set-height")
     {
-        eprintln!("usage: db-marker <get|clear> <marker-name> | db-marker set-height <marker-name> <i32>");
+        eprintln!(
+            "usage: db-marker <get|clear> <marker-name> | db-marker set-height <marker-name> <i32>"
+        );
         std::process::exit(2);
     }
     let action = args[1].as_str();
@@ -25,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     opts.create_if_missing(false);
     let cfs = rocksdb::DB::list_cf(&opts, &db_path)?;
     let db = Arc::new(rocksdb::DB::open_cf(&opts, &db_path, &cfs)?);
-    let cf = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
 
     match action {
         "get" => match db.get_cf(&cf, marker)? {

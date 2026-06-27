@@ -1,3 +1,9 @@
+use crate::batch_writer::BatchWriter;
+use crate::config::get_global_config;
+use crate::transactions::process_transaction;
+use crate::types::AppState;
+use rocksdb::DB;
+use std::path::PathBuf;
 /// Pattern A Block Indexer - Direct offset-based block reading
 ///
 /// This module implements the authoritative Pattern A approach:
@@ -7,17 +13,10 @@
 ///
 /// This runs in parallel with the old scanner initially for validation.
 /// Once validated, the old scanner can be removed.
-
 use std::sync::Arc;
-use std::path::PathBuf;
-use rocksdb::DB;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
-use crate::types::AppState;
-use crate::batch_writer::BatchWriter;
-use crate::transactions::process_transaction;
-use crate::config::get_global_config;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network magic
 const TX_BATCH_SIZE: usize = 10000;
@@ -38,7 +37,8 @@ async fn index_block_by_offset(
     path.push(filename);
 
     // Open file and seek to offset
-    let file = File::open(&path).await
+    let file = File::open(&path)
+        .await
         .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(data_pos)).await?;
@@ -47,8 +47,13 @@ async fn index_block_by_offset(
     let mut magic_bytes = [0u8; 4];
     reader.read_exact(&mut magic_bytes).await?;
     if magic_bytes != PREFIX {
-        return Err(format!("Invalid magic at {}:{} - got {:02x?}", 
-            path.display(), data_pos, magic_bytes).into());
+        return Err(format!(
+            "Invalid magic at {}:{} - got {:02x?}",
+            path.display(),
+            data_pos,
+            magic_bytes
+        )
+        .into());
     }
 
     // Read block size
@@ -60,7 +65,7 @@ async fn index_block_by_offset(
     let mut version_bytes = [0u8; 4];
     reader.read_exact(&mut version_bytes).await?;
     let block_version = u32::from_le_bytes(version_bytes);
-    
+
     let header_size = get_header_size(block_version);
 
     // Read full header (including the version we already read)
@@ -70,39 +75,45 @@ async fn index_block_by_offset(
 
     // Parse header to get block hash and verify it matches expected
     let parsed_header = parse_block_header_sync(&header_buffer, header_size)?;
-    
+
     // Verify block hash matches what we expect from LevelDB
     if parsed_header.block_hash != block_hash {
-        return Err(format!("Block hash mismatch at {}:{} - expected {}, got {}", 
-            path.display(), data_pos,
+        return Err(format!(
+            "Block hash mismatch at {}:{} - expected {}, got {}",
+            path.display(),
+            data_pos,
             hex::encode(block_hash),
-            hex::encode(&parsed_header.block_hash)).into());
+            hex::encode(&parsed_header.block_hash)
+        )
+        .into());
     }
 
     // Store block header
-    let cf_blocks = db.cf_handle("blocks")
-        .ok_or("blocks CF not found")?;
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
     let mut block_key = vec![b'b'];
     block_key.extend_from_slice(block_hash);
     db.put_cf(&cf_blocks, &block_key, &header_buffer)?;
 
     // Store height mappings in chain_metadata
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     // height -> display_hash (reversed)
     let height_bytes = height.to_le_bytes();
     let mut display_hash = block_hash.to_vec();
     display_hash.reverse();
     db.put_cf(&cf_metadata, height_bytes, &display_hash)?;
-    
+
     // 'h' + internal_hash -> height
     let mut h_key = vec![b'h'];
     h_key.extend_from_slice(block_hash);
     db.put_cf(&cf_metadata, &h_key, height_bytes)?;
 
     // Process transactions
-    let fast_sync = get_global_config().get_bool("sync.fast_sync").unwrap_or(false);
+    let fast_sync = get_global_config()
+        .get_bool("sync.fast_sync")
+        .unwrap_or(false);
     let mut tx_batch = BatchWriter::new(db.clone(), TX_BATCH_SIZE);
 
     // Process transactions using existing transaction parser
@@ -114,7 +125,9 @@ async fn index_block_by_offset(
         db.clone(),
         &mut tx_batch,
         fast_sync,
-    ).await {
+    )
+    .await
+    {
         Ok(_) => {
             // Flush remaining transactions
             tx_batch.flush().await?;
@@ -134,7 +147,7 @@ async fn index_block_by_offset(
 fn get_header_size(version: u32) -> usize {
     match version {
         1..=3 => 80,
-        4..=6 => 112,  // May vary, but we handle dynamic detection in main code
+        4..=6 => 112, // May vary, but we handle dynamic detection in main code
         7..=10 => 112,
         11.. => 112,
         _ => 80,
@@ -146,19 +159,19 @@ fn parse_block_header_sync(
     header_bytes: &[u8],
     _header_size: usize,
 ) -> Result<ParsedBlockHeader, Box<dyn std::error::Error + Send + Sync>> {
-    use sha2::{Sha256, Digest};
-    
+    use sha2::{Digest, Sha256};
+
     // Hash the header to get block hash
     let first_hash = Sha256::digest(header_bytes);
     let second_hash = Sha256::digest(&first_hash);
     let block_hash: Vec<u8> = second_hash.to_vec(); // Internal format (little-endian)
-    
+
     // Extract hash_prev_block (bytes 4-36, internal format)
     let mut hash_prev_block = [0u8; 32];
     if header_bytes.len() >= 36 {
         hash_prev_block.copy_from_slice(&header_bytes[4..36]);
     }
-    
+
     Ok(ParsedBlockHeader {
         block_hash,
         hash_prev_block,
@@ -184,14 +197,16 @@ pub async fn index_canonical_blocks_by_offset(
     state: AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Pattern A: offset-based block indexing starting");
-    
-    let cf_metadata = db.cf_handle("chain_metadata")
+
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     // Find highest height in canonical chain
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     let sync_height = match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into()?),
         None => {
@@ -201,14 +216,14 @@ pub async fn index_canonical_blocks_by_offset(
     };
 
     info!(height = sync_height, blk_dir = %blk_dir.display(), "Canonical chain status");
-    
+
     // Count how many blocks have offset mappings
     let mut blocks_with_offsets = 0;
     let mut blocks_without_offsets = 0;
-    
+
     for height in 0..=sync_height {
         let height_bytes = height.to_le_bytes();
-        
+
         // Get block hash for this height
         let display_hash = match db.get_cf(&cf_metadata, height_bytes)? {
             Some(h) => h,
@@ -217,15 +232,15 @@ pub async fn index_canonical_blocks_by_offset(
                 continue;
             }
         };
-        
+
         // Convert to internal format
         let mut internal_hash = display_hash.clone();
         internal_hash.reverse();
-        
+
         // Check if we have offset mapping
         let mut o_key = vec![b'o'];
         o_key.extend_from_slice(&internal_hash);
-        
+
         if db.get_cf(&cf_metadata, &o_key)?.is_some() {
             blocks_with_offsets += 1;
         } else {
@@ -233,8 +248,11 @@ pub async fn index_canonical_blocks_by_offset(
         }
     }
 
-    info!(with_offsets = blocks_with_offsets, without_offsets = blocks_without_offsets,
-          "Offset mapping coverage");
+    info!(
+        with_offsets = blocks_with_offsets,
+        without_offsets = blocks_without_offsets,
+        "Offset mapping coverage"
+    );
 
     if blocks_with_offsets == 0 {
         warn!("No offset mappings found - run sync again to generate offset mappings from LevelDB");
@@ -242,57 +260,73 @@ pub async fn index_canonical_blocks_by_offset(
     }
 
     // Process blocks with offsets
-    info!(blocks = blocks_with_offsets, "Starting offset-based indexing");
-    
+    info!(
+        blocks = blocks_with_offsets,
+        "Starting offset-based indexing"
+    );
+
     let config = get_global_config();
     let max_concurrent = config.get_int("sync.parallel_files").unwrap_or(4) as usize;
-    
+
     use futures::stream::{self, StreamExt};
-    
+
     let mut tasks = Vec::new();
     for height in 0..=sync_height {
         let height_bytes = height.to_le_bytes();
-        
+
         // Get block hash
         let display_hash = match db.get_cf(&cf_metadata, height_bytes)? {
             Some(h) => h,
             None => continue,
         };
-        
+
         let mut internal_hash = display_hash.clone();
         internal_hash.reverse();
-        
+
         // Get offset mapping
         let mut o_key = vec![b'o'];
         o_key.extend_from_slice(&internal_hash);
-        
+
         let offset_data = match db.get_cf(&cf_metadata, &o_key)? {
             Some(d) => d,
             None => continue, // Skip blocks without offsets
         };
-        
+
         if offset_data.len() != 12 {
             warn!(height = height, "Invalid offset data length");
             continue;
         }
-        
+
         // Parse file number and data position
         let file_num = u32::from_le_bytes([
-            offset_data[0], offset_data[1], offset_data[2], offset_data[3]
+            offset_data[0],
+            offset_data[1],
+            offset_data[2],
+            offset_data[3],
         ]);
         let data_pos = u64::from_le_bytes([
-            offset_data[4], offset_data[5], offset_data[6], offset_data[7],
-            offset_data[8], offset_data[9], offset_data[10], offset_data[11]
+            offset_data[4],
+            offset_data[5],
+            offset_data[6],
+            offset_data[7],
+            offset_data[8],
+            offset_data[9],
+            offset_data[10],
+            offset_data[11],
         ]);
-        
+
         tasks.push((height, internal_hash, file_num, data_pos));
     }
-    
-    info!(blocks = tasks.len(), workers = max_concurrent, "Processing blocks with offset indexer");
-    
+
+    info!(
+        blocks = tasks.len(),
+        workers = max_concurrent,
+        "Processing blocks with offset indexer"
+    );
+
     let total_tasks = tasks.len();
     let processed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    
+
     // Process in parallel
     stream::iter(tasks)
         .map(|(height, internal_hash, file_num, data_pos)| {
@@ -300,7 +334,7 @@ pub async fn index_canonical_blocks_by_offset(
             let db = db.clone();
             let state = state.clone();
             let processed = processed.clone();
-            
+
             async move {
                 let result = index_block_by_offset(
                     &blk_dir,
@@ -310,14 +344,19 @@ pub async fn index_canonical_blocks_by_offset(
                     height,
                     db,
                     state,
-                ).await;
-                
+                )
+                .await;
+
                 let count = processed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                
+
                 if count % 10000 == 0 {
-                    debug!(count = count, total = total_tasks,
-                           progress_pct = format!("{:.1}", (count as f64 / total_tasks as f64) * 100.0),
-                           "Offset indexing progress");
+                    debug!(
+                        count = count,
+                        total = total_tasks,
+                        progress_pct =
+                            format!("{:.1}", (count as f64 / total_tasks as f64) * 100.0),
+                        "Offset indexing progress"
+                    );
                 }
 
                 if let Err(e) = result {
@@ -328,10 +367,10 @@ pub async fn index_canonical_blocks_by_offset(
         .buffer_unordered(max_concurrent)
         .collect::<Vec<_>>()
         .await;
-    
+
     let final_count = processed.load(std::sync::atomic::Ordering::Relaxed);
 
     info!(blocks = final_count, "Pattern A offset indexing complete");
-    
+
     Ok(())
 }

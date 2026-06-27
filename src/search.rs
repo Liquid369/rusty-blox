@@ -1,14 +1,13 @@
+use rocksdb::DB;
+use serde::{Deserialize, Serialize};
 /// Search Functionality
-/// 
+///
 /// Universal search that handles:
 /// - Block height (numeric)
 /// - Block hash (64 hex chars)
 /// - Transaction ID (64 hex chars)
 /// - Address (base58, starts with D for PIVX)
-
 use std::sync::Arc;
-use rocksdb::DB;
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -50,27 +49,31 @@ fn detect_query_type(query: &str) -> QueryType {
     if q.chars().all(|c| c.is_numeric()) {
         return QueryType::BlockHeight;
     }
-    
+
     // 64 hex chars = block hash or txid
     if q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit()) {
         return QueryType::HashOrTxid;
     }
-    
+
     // XPub (BIP32 extended public key): starts with "xpub" and is 111 chars
     if q.starts_with("xpub") && q.len() >= 100 && q.len() <= 120 {
         return QueryType::XPub;
     }
-    
+
     // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
     // 6/7 (P2SH), E (exchange/EXM). Most are ~26-35 chars, but EXM exchange
     // addresses are 36 — the old <=35 cap made them unsearchable. Upper bound
     // is generous (<=40) for headroom; a false positive just falls through to
     // NotFound in search_address, so over-inclusion is safe.
-    if matches!(q.chars().next(), Some('D') | Some('S') | Some('6') | Some('7') | Some('E'))
-        && q.len() >= 26 && q.len() <= 40 {
+    if matches!(
+        q.chars().next(),
+        Some('D') | Some('S') | Some('6') | Some('7') | Some('E')
+    ) && q.len() >= 26
+        && q.len() <= 40
+    {
         return QueryType::Address;
     }
-    
+
     QueryType::Unknown
 }
 
@@ -108,28 +111,33 @@ pub fn search(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::er
 }
 
 /// Search for block by height
-fn search_block_by_height(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+fn search_block_by_height(
+    db: &Arc<DB>,
+    query: &str,
+) -> Result<SearchResult, Box<dyn std::error::Error>> {
     // Parse defensively: a long numeric query (satoshi amount, large id, or a
     // mistyped height beyond i32::MAX) overflows i32. Previously `?` bubbled the
     // ParseIntError into a 500 + an error-level log on every such search; treat
     // an unparseable/out-of-range height as a normal NotFound instead.
     let height: i32 = match query.parse() {
         Ok(h) => h,
-        Err(_) => return Ok(SearchResult::NotFound { query: query.to_string() }),
+        Err(_) => {
+            return Ok(SearchResult::NotFound {
+                query: query.to_string(),
+            })
+        }
     };
-    
-    let cf_metadata = db.cf_handle("chain_metadata")
+
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     let height_key = height.to_le_bytes().to_vec();
-    
+
     match db.get_cf(&cf_metadata, &height_key)? {
         Some(hash_bytes) => {
             let hash = hex::encode(&hash_bytes);
-            Ok(SearchResult::Block {
-                height,
-                hash,
-            })
+            Ok(SearchResult::Block { height, hash })
         }
         None => Ok(SearchResult::NotFound {
             query: query.to_string(),
@@ -138,29 +146,36 @@ fn search_block_by_height(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box
 }
 
 /// Search for block hash or transaction ID
-fn search_hash_or_txid(db: &Arc<DB>, query: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+fn search_hash_or_txid(
+    db: &Arc<DB>,
+    query: &str,
+) -> Result<SearchResult, Box<dyn std::error::Error>> {
     // Try as block hash first
     if let Ok(result) = search_block_by_hash(db, query) {
         if !matches!(result, SearchResult::NotFound { .. }) {
             return Ok(result);
         }
     }
-    
+
     // Try as transaction ID
     search_transaction(db, query)
 }
 
 /// Search for block by hash
-fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    let cf_metadata = db.cf_handle("chain_metadata")
+fn search_block_by_hash(
+    db: &Arc<DB>,
+    hash: &str,
+) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     let hash_bytes = hex::decode(hash)?;
-    
+
     // Method 1: Try direct hash -> height lookup (for newly indexed blocks)
     let mut key = vec![b'h'];
     key.extend_from_slice(&hash_bytes);
-    
+
     if let Some(height_bytes) = db.get_cf(&cf_metadata, &key)? {
         let height = i32::from_le_bytes(height_bytes.as_slice().try_into()?);
         return Ok(SearchResult::Block {
@@ -168,7 +183,7 @@ fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dy
             hash: hash.to_string(),
         });
     }
-    
+
     // Method 2: some writers key 'h' entries by internal (reversed) byte order —
     // try the reversed form before giving up. (The old fallback here iterated the
     // ENTIRE chain_metadata CF on every miss: any unknown 64-hex query forced a
@@ -191,18 +206,22 @@ fn search_block_by_hash(db: &Arc<DB>, hash: &str) -> Result<SearchResult, Box<dy
 }
 
 /// Search for transaction
-fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    let cf_transactions = db.cf_handle("transactions")
+fn search_transaction(
+    db: &Arc<DB>,
+    txid: &str,
+) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    let cf_transactions = db
+        .cf_handle("transactions")
         .ok_or("transactions CF not found")?;
-    
+
     // Transaction key format: 't' + txid_bytes_reversed (internal format)
     let txid_bytes = hex::decode(txid)?;
-    
+
     // Try reversed format first (new/correct format)
     let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
     let mut key = vec![b't'];
     key.extend_from_slice(&txid_reversed);
-    
+
     let tx_data = if let Ok(Some(data)) = db.get_cf(&cf_transactions, &key) {
         Some(data)
     } else {
@@ -211,7 +230,7 @@ fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn 
         key_display.extend_from_slice(&txid_bytes);
         db.get_cf(&cf_transactions, &key_display)?
     };
-    
+
     match tx_data {
         Some(tx_data) => {
             // Data format: version (4 bytes) + height (4 bytes) + raw_tx_bytes
@@ -220,7 +239,7 @@ fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn 
             } else {
                 None
             };
-            
+
             Ok(SearchResult::Transaction {
                 txid: txid.to_string(),
                 block_height,
@@ -234,13 +253,14 @@ fn search_transaction(db: &Arc<DB>, txid: &str) -> Result<SearchResult, Box<dyn 
 
 /// Search for address
 fn search_address(db: &Arc<DB>, address: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    let cf_addr = db.cf_handle("addr_index")
+    let cf_addr = db
+        .cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
-    
+
     // Address key format: 'a' + address
     let mut key = vec![b'a'];
     key.extend_from_slice(address.as_bytes());
-    
+
     match db.get_cf(&cf_addr, &key)? {
         Some(_utxo_data) => {
             // TODO: Calculate balance from UTXO data

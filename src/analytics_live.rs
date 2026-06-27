@@ -53,7 +53,9 @@ impl Drop for ReenrichGuard {
 
 /// Is auto-reenrich opted in?
 fn auto_reenrich() -> bool {
-    crate::config::get_global_config().get_bool(AUTO_REENRICH_KEY).unwrap_or(false)
+    crate::config::get_global_config()
+        .get_bool(AUTO_REENRICH_KEY)
+        .unwrap_or(false)
 }
 
 /// Detached, single-flight FULL re-enrich (the join-producing `enrich_all_addresses`,
@@ -69,7 +71,10 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
         // Moved into the thread: the guard releases when this thread ends, covering
         // every exit (incl. the runtime-build-fail early return below).
         let _guard = guard;
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "run_full_analytics_enrich: runtime build failed");
@@ -78,7 +83,8 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
         };
         rt.block_on(async move {
             info!("live-analytics: full re-enrich starting (re-green)");
-            if let Err(e) = crate::enrich_addresses::enrich_all_addresses(Arc::clone(&db_bg)).await {
+            if let Err(e) = crate::enrich_addresses::enrich_all_addresses(Arc::clone(&db_bg)).await
+            {
                 warn!(error = %e, "live-analytics: full re-enrich failed");
             }
         });
@@ -182,13 +188,17 @@ pub const SHADOW_FLAG_KEY: &str = "sync.live_analytics_shadow";
 
 /// Is the live daily-analytics updater enabled?
 pub fn is_enabled() -> bool {
-    crate::config::get_global_config().get_bool(FLAG_KEY).unwrap_or(false)
+    crate::config::get_global_config()
+        .get_bool(FLAG_KEY)
+        .unwrap_or(false)
 }
 
 /// Phase-0 shadow mode (default ON): Lane I/R write `shadow_tx_day:` blobs and
 /// leave the real `analytics_tx_day:` untouched, for diffing against a full enrich.
 pub fn shadow_mode() -> bool {
-    crate::config::get_global_config().get_bool(SHADOW_FLAG_KEY).unwrap_or(true)
+    crate::config::get_global_config()
+        .get_bool(SHADOW_FLAG_KEY)
+        .unwrap_or(true)
 }
 
 /// The day-blob keyspace prefix for the current mode.
@@ -219,9 +229,21 @@ pub async fn tick(db: &Arc<DB>) {
     let count = tip - start;
     if count > 10 {
         // A real backfill (gap > 10 blocks) — make it visible.
-        info!(from = start + 1, to = tip, count, prefix, "live-analytics: backfilling blocks");
+        info!(
+            from = start + 1,
+            to = tip,
+            count,
+            prefix,
+            "live-analytics: backfilling blocks"
+        );
     } else {
-        debug!(from = start + 1, to = tip, count, prefix, "live-analytics: applying blocks");
+        debug!(
+            from = start + 1,
+            to = tip,
+            count,
+            prefix,
+            "live-analytics: applying blocks"
+        );
     }
     let mut wm = start;
     while wm < tip {
@@ -258,11 +280,16 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     if !is_enabled() {
         return;
     }
-    let Some(cf_state) = db.cf_handle("chain_state") else { return };
+    let Some(cf_state) = db.cf_handle("chain_state") else {
+        return;
+    };
     if orphaned_blocks > R_BLOCKS {
         let _ = db.put_cf(&cf_state, K_READY, [0u8]);
         if auto_reenrich() {
-            warn!(orphaned_blocks, "live-analytics: deep reorg — gate cleared, auto re-enrich starting");
+            warn!(
+                orphaned_blocks,
+                "live-analytics: deep reorg — gate cleared, auto re-enrich starting"
+            );
             run_full_analytics_enrich(db);
         } else {
             warn!(
@@ -272,7 +299,9 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
         }
         return;
     }
-    let Some((fork_time, _)) = header_time_bits(db, fork_height) else { return };
+    let Some((fork_time, _)) = header_time_bits(db, fork_height) else {
+        return;
+    };
     if fork_time == 0 {
         return;
     }
@@ -361,7 +390,9 @@ fn seed_day_state(db: &Arc<DB>, date: &str, up_to_height: i32) -> (f64, HashMap<
         }
     }
     for h in lo..=up_to_height {
-        let Some((t, bits)) = header_time_bits(db, h) else { continue };
+        let Some((t, bits)) = header_time_bits(db, h) else {
+            continue;
+        };
         if t == 0 {
             continue;
         }
@@ -436,7 +467,10 @@ fn block_tx_values(
         }
     }
     if unresolved > 0 {
-        warn!(height, unresolved, "live-analytics: 'B' index entries with no matching 't' tx (corruption?)");
+        warn!(
+            height,
+            unresolved, "live-analytics: 'B' index entries with no matching 't' tx (corruption?)"
+        );
     }
     Ok(out)
 }
@@ -474,7 +508,9 @@ async fn resolve_prevout(
     let mut with_header = Vec::with_capacity(4 + data.len() - 8);
     with_header.extend_from_slice(&[0u8; 4]);
     with_header.extend_from_slice(&data[8..]);
-    let prev_tx = crate::parser::deserialize_transaction(&with_header).await.ok()?;
+    let prev_tx = crate::parser::deserialize_transaction(&with_header)
+        .await
+        .ok()?;
     let out = prev_tx.outputs.get(vout as usize)?;
     Some(ResolvedInput {
         value: out.value,
@@ -511,8 +547,12 @@ pub(crate) async fn apply_block_core(
     if height < 0 {
         return Ok(());
     }
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
-    let cf_tx = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    let cf_tx = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
 
     let Some((ntime, nbits)) = header_time_bits(db, height) else {
         return Ok(()); // can't date the block yet — leave the watermark, retry later
@@ -573,7 +613,9 @@ pub(crate) async fn apply_block_core(
             if input.coinbase.is_some() {
                 continue;
             }
-            let Some(prevout) = &input.prevout else { continue };
+            let Some(prevout) = &input.prevout else {
+                continue;
+            };
             inputs_with_prevout += 1;
             if let Some(r) = resolve_prevout(db, &cf_tx, &prevout.hash, prevout.n).await {
                 inputs_resolved += 1;
@@ -594,7 +636,11 @@ pub(crate) async fn apply_block_core(
             .filter(|o| matches!(classify_output(o), ScriptClassification::ColdStake { .. }))
             .map(|o| o.value)
             .sum();
-        let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+        let value_balance = tx
+            .sapling_data
+            .as_ref()
+            .map(|s| s.value_balance)
+            .unwrap_or(0);
         let contrib = compute_tx_join(
             &TxJoinInputs {
                 height,
@@ -658,7 +704,11 @@ pub(crate) async fn apply_block_core(
         };
     diffsum += nbits_to_difficulty(nbits);
     agg.blocks += 1;
-    agg.avg_difficulty = if agg.blocks > 0 { diffsum / agg.blocks as f64 } else { 0.0 };
+    agg.avg_difficulty = if agg.blocks > 0 {
+        diffsum / agg.blocks as f64
+    } else {
+        0.0
+    };
 
     if height >= 1 {
         if let Some((prev_t, _)) = header_time_bits(db, height - 1) {
@@ -740,10 +790,16 @@ pub async fn recompute_window(
     if tip <= 0 {
         return Ok(());
     }
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
-    let cf_tx = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    let cf_tx = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
 
-    let Some((tip_time, _)) = header_time_bits(db, tip) else { return Ok(()) };
+    let Some((tip_time, _)) = header_time_bits(db, tip) else {
+        return Ok(());
+    };
     if tip_time == 0 {
         return Ok(());
     }
@@ -757,7 +813,9 @@ pub async fn recompute_window(
     let mut window_dates: HashSet<String> = HashSet::new();
 
     for h in h_lo..=tip {
-        let Some((t, _)) = header_time_bits(db, h) else { continue };
+        let Some((t, _)) = header_time_bits(db, h) else {
+            continue;
+        };
         if t == 0 {
             continue;
         }
@@ -777,7 +835,9 @@ pub async fn recompute_window(
             let mut with_header = Vec::with_capacity(4 + data.len() - 8);
             with_header.extend_from_slice(&[0u8; 4]);
             with_header.extend_from_slice(&data[8..]);
-            let Ok(tx) = crate::parser::deserialize_transaction(&with_header).await else { continue };
+            let Ok(tx) = crate::parser::deserialize_transaction(&with_header).await else {
+                continue;
+            };
             let tx_type = crate::tx_type::detect_transaction_type(&tx);
             if tx_type == crate::tx_type::TransactionType::Coinstake {
                 if let Some(addr) = tx
@@ -864,7 +924,9 @@ pub async fn shadow_validate(
     db: &Arc<DB>,
     days_back: i64,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
     let tip = crate::chain_state::get_sync_height(db).unwrap_or(-1);
     if tip <= 0 {
         return Ok("shadow_validate: no synced tip".into());
@@ -873,7 +935,8 @@ pub async fn shadow_validate(
         return Ok("shadow_validate: no tip header".into());
     };
     let tip_date = unix_to_date(tip_time as u64);
-    let window_start = unix_to_date(tip_time.saturating_sub(days_back as u32 * SECS_PER_DAY) as u64);
+    let window_start =
+        unix_to_date(tip_time.saturating_sub(days_back as u32 * SECS_PER_DAY) as u64);
     let h_lo = (tip - (days_back as i32 + 1) * 1440).max(0);
 
     // Collect window dates and clear the shadow keyspace (apply_block_core RMW-
@@ -1100,9 +1163,11 @@ mod tests {
         };
         // parse path: value = hex(internal) where internal = display.rev()
         let internal_p: Vec<u8> = d_p.iter().rev().cloned().collect();
-        db.put_cf(&cf, b13(h_p, 0), hex::encode(&internal_p).as_bytes()).unwrap();
+        db.put_cf(&cf, b13(h_p, 0), hex::encode(&internal_p).as_bytes())
+            .unwrap();
         // monitor path: value = hex(display)
-        db.put_cf(&cf, b13(h_m, 0), hex::encode(d_m).as_bytes()).unwrap();
+        db.put_cf(&cf, b13(h_m, 0), hex::encode(d_m).as_bytes())
+            .unwrap();
         // rebuild path: value = raw 32-byte display suffix (9-byte key)
         db.put_cf(&cf, b9(h_r, 0), d_r.to_vec()).unwrap();
 
@@ -1145,6 +1210,10 @@ mod tests {
             bk.extend_from_slice(&idx.to_le_bytes());
             db.put_cf(&cf, &bk, hex::encode(d).as_bytes()).unwrap();
         }
-        assert_eq!(block_tx_values(&db, &cf, h).unwrap().len(), 1, "duplicate txid deduped");
+        assert_eq!(
+            block_tx_values(&db, &cf, h).unwrap().len(),
+            1,
+            "duplicate txid deduped"
+        );
     }
 }

@@ -1,24 +1,23 @@
+use crate::metrics;
+use pivx_rpc_rs::PivxRpcClient;
+use rocksdb::DB;
+use serde_json::Value;
+use std::collections::HashSet;
 /// Block Monitor Service - Real-time blockchain monitoring via RPC
-/// 
+///
 /// Responsibilities:
 /// - Poll RPC node for new blocks
 /// - Detect chain tip changes
 /// - Trigger block indexing
 /// - Detect and handle reorgs
-
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashSet;
-use rocksdb::DB;
-use pivx_rpc_rs::PivxRpcClient;
-use serde_json::Value;
-use tracing::{info, warn, error, debug, info_span};
-use crate::metrics;
+use tracing::{debug, error, info, info_span, warn};
 
-use crate::config::get_global_config;
-use crate::websocket::EventBroadcaster;
 use crate::chain_state::set_network_height;
+use crate::config::get_global_config;
 use crate::reorg;
+use crate::websocket::EventBroadcaster;
 
 #[derive(Debug, Clone)]
 pub struct ChainTip {
@@ -68,14 +67,19 @@ async fn write_hourly_snapshot(
         mempool_txs: mempool.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
         mempool_bytes: mempool.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
         masternode_count: mn.get("total").and_then(|v| v.as_u64()).unwrap_or(0),
-        shield_supply_piv: supply.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        shield_supply_piv: supply
+            .get("shieldsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
         transparent_supply_piv: supply
             .get("transparentsupply")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
     };
 
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
     // Load-append-store; an unreadable (old-schema) blob restarts the series.
     let mut series: Vec<HourlySnapshot> = db
         .get_cf(&cf_state, b"analytics_snapshots")?
@@ -86,7 +90,11 @@ async fn write_hourly_snapshot(
         let excess = series.len() - SNAPSHOT_CAP;
         series.drain(0..excess);
     }
-    db.put_cf(&cf_state, b"analytics_snapshots", bincode::serialize(&series)?)?;
+    db.put_cf(
+        &cf_state,
+        b"analytics_snapshots",
+        bincode::serialize(&series)?,
+    )?;
     Ok(())
 }
 
@@ -128,25 +136,24 @@ async fn get_rpc_chain_tip() -> Result<ChainTip, Box<dyn std::error::Error + Sen
         .with_label_values(&["getblockhash"])
         .observe(timer2.elapsed_secs());
 
-    Ok(ChainTip {
-        height,
-        hash,
-    })
+    Ok(ChainTip { height, hash })
 }
 
 /// Get our current chain tip from database
 fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     // Get sync height
     let height = match db.get_cf(&cf_state, b"sync_height")? {
         Some(bytes) => i32::from_le_bytes(bytes.as_slice().try_into()?),
         None => {
             // Fallback: scan chain_metadata
-            let cf_metadata = db.cf_handle("chain_metadata")
+            let cf_metadata = db
+                .cf_handle("chain_metadata")
                 .ok_or("chain_metadata CF not found")?;
-            
+
             let mut h: i32 = 0;
             loop {
                 let key = h.to_le_bytes().to_vec();
@@ -161,28 +168,25 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
             h - 1
         }
     };
-    
+
     // Get block hash at this height
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     let height_key = height.to_le_bytes().to_vec();
-    let hash_bytes = db.get_cf(&cf_metadata, &height_key)?
+    let hash_bytes = db
+        .get_cf(&cf_metadata, &height_key)?
         .ok_or("Block hash not found for current height")?;
-    
+
     let hash = hex::encode(&hash_bytes);
-    
-    Ok(ChainTip {
-        height,
-        hash,
-    })
+
+    Ok(ChainTip { height, hash })
 }
 
 /// Phase 1a: Fetch block data from RPC (without indexing)
 /// Returns parsed block JSON for later processing
-async fn fetch_block_data(
-    height: i32,
-) -> Result<FetchedBlock, Box<dyn std::error::Error>> {
+async fn fetch_block_data(height: i32) -> Result<FetchedBlock, Box<dyn std::error::Error>> {
     use crate::api::helpers::rpc_call_json;
 
     let config = get_global_config();
@@ -219,17 +223,18 @@ async fn fetch_block_data(
         }))
         .send()
         .await?;
-    
+
     let json: Value = response.json().await?;
-    let result = json.get("result")
+    let result = json
+        .get("result")
         .ok_or("No result in RPC response")?
         .clone();
-    
+
     let elapsed = timer.elapsed_secs();
     metrics::RPC_CALL_DURATION
         .with_label_values(&["getblock"])
         .observe(elapsed);
-    
+
     if elapsed > 5.0 {
         warn!(
             method = "getblock",
@@ -238,7 +243,7 @@ async fn fetch_block_data(
             "Slow RPC call"
         );
     }
-    
+
     Ok(FetchedBlock {
         height,
         block_hash,
@@ -250,7 +255,7 @@ async fn fetch_block_data(
 /// This scans all transactions in the blocks to identify which outputs are spent
 fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64)> {
     let mut spent_set = HashSet::new();
-    
+
     for block in blocks {
         // Extract transactions from block JSON
         if let Some(tx_array) = block.json_result.get("tx").and_then(|t| t.as_array()) {
@@ -264,7 +269,7 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
                             if input.get("coinbase").is_some() {
                                 continue;
                             }
-                            
+
                             // Get previous output reference
                             if let (Some(txid_str), Some(vout)) = (
                                 input.get("txid").and_then(|t| t.as_str()),
@@ -282,12 +287,12 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
             }
         }
     }
-    
+
     spent_set
 }
 
 /// Fetch and index a single block from RPC
-/// 
+///
 /// Parameters:
 /// - spent_set: Optional pre-built set of spent outputs. If provided, spend detection
 ///   is done via HashSet lookup instead of on-demand RPC fetching. This ensures
@@ -304,10 +309,12 @@ async fn index_block_from_rpc(
     // Check if address enrichment has completed and at what height
     // Only update address index for blocks AFTER enrichment height
     // (Enrichment already processed all historical blocks correctly)
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
-    let enrichment_height = db.get_cf(&cf_state, b"enrichment_height")?
+
+    let enrichment_height = db
+        .get_cf(&cf_state, b"enrichment_height")?
         .and_then(|bytes| {
             if bytes.len() >= 4 {
                 Some(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -315,36 +322,34 @@ async fn index_block_from_rpc(
                 None
             }
         });
-    
+
     // Only update address index if:
     // 1. Enrichment hasn't run yet (enrichment_height is None), OR
     // 2. This block is NEWER than enrichment height (arrived after enrichment)
     let should_update_address_index = match enrichment_height {
-        None => true,  // Enrichment hasn't run, update address index
-        Some(enrich_height) => height > enrich_height,  // Only for NEW blocks
+        None => true, // Enrichment hasn't run, update address index
+        Some(enrich_height) => height > enrich_height, // Only for NEW blocks
     };
-    
+
     // Get block hash at this height. Async helper (carries its own timeout)
     // instead of a detached thread::spawn + recv_timeout that leaked a thread
     // on every node timeout.
-    let block_hash = crate::api::helpers::rpc_call_json(
-        "getblockhash",
-        serde_json::json!([height as i64]),
-    )
-    .await
-    .map_err(|e| format!("RPC error getting block hash: {e}"))?
-    .as_str()
-    .ok_or("getblockhash returned non-string")?
-    .to_string();
+    let block_hash =
+        crate::api::helpers::rpc_call_json("getblockhash", serde_json::json!([height as i64]))
+            .await
+            .map_err(|e| format!("RPC error getting block hash: {e}"))?
+            .as_str()
+            .ok_or("getblockhash returned non-string")?
+            .to_string();
 
     // CRITICAL FIX: Atomic check-and-reserve to prevent race conditions
     // Step 1: Check if already indexed OR being processed
     let mut height_hash_key = vec![b'H'];
     height_hash_key.extend(&height.to_le_bytes());
-    
+
     let mut processing_key = vec![b'P']; // P = "Processing" marker
     processing_key.extend(&height.to_le_bytes());
-    
+
     // Use a transaction-like approach with RocksDB's write batch for atomicity
     if let Some(existing_hash) = db.get_cf(&cf_state, &height_hash_key)? {
         let existing_hash_str = String::from_utf8_lossy(&existing_hash);
@@ -358,40 +363,40 @@ async fn index_block_from_rpc(
             db.delete_cf(&cf_state, &processing_key).ok();
         }
     }
-    
+
     // Step 2: Try to reserve this height atomically
     // If processing marker already exists, another task is working on it
     if db.get_cf(&cf_state, &processing_key)?.is_some() {
         // Another task is already processing this height - skip
         return Ok(());
     }
-    
+
     // Step 3: Set processing marker to claim this height
     // Use a short TTL value as the marker (height as bytes)
     db.put_cf(&cf_state, &processing_key, height.to_le_bytes())?;
-    
+
     // RAII guard to ensure processing marker is cleaned up even on error
     struct ProcessingGuard<'a> {
         db: &'a Arc<DB>,
         cf_state: &'a rocksdb::ColumnFamily,
         key: Vec<u8>,
     }
-    
+
     impl<'a> Drop for ProcessingGuard<'a> {
         fn drop(&mut self) {
             self.db.delete_cf(self.cf_state, &self.key).ok();
         }
     }
-    
+
     let _guard = ProcessingGuard {
         db,
         cf_state,
         key: processing_key.clone(),
     };
-    
+
     // From this point forward, we own this height's processing
     // The guard will clean up the marker automatically when function exits
-    
+
     // Make raw RPC call to get block with verbosity=2 (full transaction data)
     // We can't use the library's getblock because FullBlock deserialization
     // fails when the response has mixed string/object types in the tx array
@@ -399,9 +404,9 @@ async fn index_block_from_rpc(
     let url = config.get_string("rpc.host")?;
     let user = config.get_string("rpc.user")?;
     let pass = config.get_string("rpc.pass")?;
-    
+
     let client = reqwest::Client::new();
-    
+
     // Use verbosity=2 for full block data with all transactions
     // This is more efficient than fetching each TX separately
     let response = client
@@ -415,30 +420,29 @@ async fn index_block_from_rpc(
         }))
         .send()
         .await?;
-    
+
     let json: Value = response.json().await?;
-    let result = json.get("result")
-        .ok_or("No result in RPC response")?;
-    
+    let result = json.get("result").ok_or("No result in RPC response")?;
+
     // Extract block version and transactions
-    let version = result.get("version")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(1) as i32;
-    
-    let tx_array = result.get("tx")
+    let version = result.get("version").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
+
+    let tx_array = result
+        .get("tx")
         .and_then(|t| t.as_array())
         .ok_or("No tx array in block")?;
-    
+
     // Store block header data in chain_metadata
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or("chain_metadata CF not found")?;
-    
+
     let height_key = height.to_le_bytes().to_vec();
     let hash_bytes = hex::decode(&block_hash)?;
-    
+
     // Store height -> hash mapping
     db.put_cf(&cf_metadata, &height_key, &hash_bytes)?;
-    
+
     // Store hash -> height mapping for reverse lookups. The 'h' key MUST be the
     // INTERNAL (little-endian) hash to match the parse path (blocks.rs/offset_indexer)
     // and every 'h' reader (enrichment orphan classifier, reorg cleanup). Writing it
@@ -451,23 +455,31 @@ async fn index_block_from_rpc(
     hash_key.extend_from_slice(&internal_hash);
     let height_bytes = height.to_le_bytes().to_vec();
     db.put_cf(&cf_metadata, &hash_key, &height_bytes)?;
-    
+
     // Store block header in blocks CF
     // Create a minimal header with the data we have from RPC
-    let cf_blocks = db.cf_handle("blocks")
-        .ok_or("blocks CF not found")?;
-    
+    let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
+
     // Parse block header fields from RPC result
     let time = result.get("time").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let nonce = result.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let bits = result.get("bits").and_then(|v| v.as_str()).unwrap_or("00000000");
-    let merkleroot = result.get("merkleroot").and_then(|v| v.as_str()).unwrap_or("");
-    let previousblockhash = result.get("previousblockhash").and_then(|v| v.as_str()).unwrap_or("");
-    
+    let bits = result
+        .get("bits")
+        .and_then(|v| v.as_str())
+        .unwrap_or("00000000");
+    let merkleroot = result
+        .get("merkleroot")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let previousblockhash = result
+        .get("previousblockhash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
     // Build a minimal 80-byte block header
     let mut header = Vec::with_capacity(80);
     header.extend(&version.to_le_bytes()); // 4 bytes: version
-    
+
     // 32 bytes: previous block hash
     if !previousblockhash.is_empty() {
         if let Ok(prev_hash) = hex::decode(previousblockhash) {
@@ -479,7 +491,7 @@ async fn index_block_from_rpc(
     } else {
         header.extend(&[0u8; 32]); // Genesis block
     }
-    
+
     // 32 bytes: merkle root
     if !merkleroot.is_empty() {
         if let Ok(merkle) = hex::decode(merkleroot) {
@@ -491,26 +503,27 @@ async fn index_block_from_rpc(
     } else {
         header.extend(&[0u8; 32]);
     }
-    
+
     header.extend(&time.to_le_bytes()); // 4 bytes: time
-    
+
     // 4 bytes: bits
     if let Ok(bits_val) = u32::from_str_radix(bits, 16) {
         header.extend(&bits_val.to_le_bytes());
     } else {
         header.extend(&[0u8; 4]);
     }
-    
+
     header.extend(&nonce.to_le_bytes()); // 4 bytes: nonce
-    
+
     // Store the header (key is internal format hash, value is header)
     let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     db.put_cf(&cf_blocks, &internal_hash, &header)?;
-    
+
     // Index all transactions from this block
-    let cf_transactions = db.cf_handle("transactions")
+    let cf_transactions = db
+        .cf_handle("transactions")
         .ok_or("transactions CF not found")?;
-    
+
     let mut tx_count = 0;
     let mut tx_errors = 0;
     // Address-index undo for this block, captured INLINE as we apply each r/s/a/t
@@ -525,22 +538,27 @@ async fn index_block_from_rpc(
         // With verbosity=2, tx_val could be:
         // - A string (just txid) - older PIVX versions
         // - An object (full transaction data) - newer versions
-        
+
         let txid = if let Some(txid_str) = tx_val.as_str() {
             // Old format: just a txid string
             txid_str.to_string()
         } else if let Some(tx_obj) = tx_val.as_object() {
             // New format: full transaction object
-            tx_obj.get("txid")
+            tx_obj
+                .get("txid")
                 .and_then(|t| t.as_str())
                 .ok_or("Missing txid in transaction object")?
                 .to_string()
         } else {
-            warn!(tx_index = tx_index, height = height, "Skipping invalid transaction");
+            warn!(
+                tx_index = tx_index,
+                height = height,
+                "Skipping invalid transaction"
+            );
             tx_errors += 1;
             continue;
         };
-        
+
         let txid_bytes = match hex::decode(&txid) {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -549,7 +567,7 @@ async fn index_block_from_rpc(
                 continue;
             }
         };
-        
+
         // Attempt to get raw transaction data
         let raw_tx_bytes = if let Some(tx_obj) = tx_val.as_object() {
             // Try to get 'hex' field from transaction object (verbosity=2)
@@ -567,7 +585,7 @@ async fn index_block_from_rpc(
         } else {
             None
         };
-        
+
         // If we don't have raw bytes from verbosity=2, fetch individually
         let raw_tx_bytes = if let Some(bytes) = raw_tx_bytes {
             bytes
@@ -585,31 +603,29 @@ async fn index_block_from_rpc(
                 .send()
                 .await
             {
-                Ok(tx_resp) => {
-                    match tx_resp.json::<Value>().await {
-                        Ok(tx_json) => {
-                            if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
-                                match hex::decode(raw_hex) {
-                                    Ok(bytes) => bytes,
-                                    Err(_) => {
-                                        warn!(txid = %txid, "Failed to decode getrawtransaction result");
-                                        tx_errors += 1;
-                                        continue;
-                                    }
+                Ok(tx_resp) => match tx_resp.json::<Value>().await {
+                    Ok(tx_json) => {
+                        if let Some(raw_hex) = tx_json.get("result").and_then(|r| r.as_str()) {
+                            match hex::decode(raw_hex) {
+                                Ok(bytes) => bytes,
+                                Err(_) => {
+                                    warn!(txid = %txid, "Failed to decode getrawtransaction result");
+                                    tx_errors += 1;
+                                    continue;
                                 }
-                            } else {
-                                warn!(txid = %txid, "No result in getrawtransaction response");
-                                tx_errors += 1;
-                                continue;
                             }
-                        }
-                        Err(e) => {
-                            warn!(txid = %txid, error = %e, "Failed to parse getrawtransaction response");
+                        } else {
+                            warn!(txid = %txid, "No result in getrawtransaction response");
                             tx_errors += 1;
                             continue;
                         }
                     }
-                }
+                    Err(e) => {
+                        warn!(txid = %txid, error = %e, "Failed to parse getrawtransaction response");
+                        tx_errors += 1;
+                        continue;
+                    }
+                },
                 Err(e) => {
                     warn!(txid = %txid, error = %e, "Failed to fetch transaction via RPC");
                     tx_errors += 1;
@@ -617,22 +633,25 @@ async fn index_block_from_rpc(
                 }
             }
         };
-        
+
         // 1. Store full transaction: 't' + txid → (tx_version + height + raw_tx)
         // Database uses DISPLAY format for txid keys (same as Bitcoin Core's internal format)
         // RPC returns txid in display format, use it directly (do NOT reverse)
         let mut tx_key = vec![b't'];
         tx_key.extend_from_slice(&txid_bytes);
-        
+
         // CRITICAL FIX: Check if transaction already exists and update height if needed
         // This handles the case where a transaction was added to mempool (height=-1)
         // and later confirmed in a block (needs height update)
         let existing_tx_data = db.get_cf(&cf_transactions, &tx_key)?;
-        
+
         let needs_update = if let Some(existing_data) = &existing_tx_data {
             if existing_data.len() >= 8 {
                 let existing_height = i32::from_le_bytes([
-                    existing_data[4], existing_data[5], existing_data[6], existing_data[7]
+                    existing_data[4],
+                    existing_data[5],
+                    existing_data[6],
+                    existing_data[7],
                 ]);
                 // Update if existing is unconfirmed (-1) or unresolved (-2)
                 existing_height < 0
@@ -644,7 +663,7 @@ async fn index_block_from_rpc(
             // New transaction
             true
         };
-        
+
         // Extract transaction version from raw_tx_bytes (first 4 bytes)
         let tx_version_bytes = if raw_tx_bytes.len() >= 4 {
             &raw_tx_bytes[0..4]
@@ -652,11 +671,11 @@ async fn index_block_from_rpc(
             warn!(txid = %txid, "Transaction has invalid size (< 4 bytes), using default version");
             &[1u8, 0, 0, 0] // Default to version 1
         };
-        
+
         let mut full_data = tx_version_bytes.to_vec();
         full_data.extend(&height.to_le_bytes());
         full_data.extend(&raw_tx_bytes);
-        
+
         if needs_update {
             if let Err(e) = db.put_cf(&cf_transactions, &tx_key, &full_data) {
                 warn!(txid = %txid, error = %e, "Failed to store transaction");
@@ -668,19 +687,19 @@ async fn index_block_from_rpc(
                 debug!(txid = %txid, height = height, "Promoted mempool tx to confirmed");
             }
         }
-        
+
         // 2. Block transaction index: 'B' + height + tx_index → txid
         let mut block_tx_key = vec![b'B'];
         block_tx_key.extend(&height.to_le_bytes());
         block_tx_key.extend(&(tx_index as u64).to_le_bytes());
-        
+
         // Store the txid in display format
         if let Err(e) = db.put_cf(&cf_transactions, &block_tx_key, txid.as_bytes()) {
             warn!(txid = %txid, error = %e, "Failed to store block TX index");
             tx_errors += 1;
             continue;
         }
-        
+
         // 3. Parse transaction and index addresses/UTXOs
         // Validate transaction size before allocation
         if raw_tx_bytes.len() > 10_000_000 {
@@ -694,7 +713,7 @@ async fn index_block_from_rpc(
             tx_errors += 1;
             continue;
         }
-        
+
         // Prepend dummy block_version for parser compatibility
         // Use safe checked addition to prevent overflow
         let total_size = match 4_usize.checked_add(raw_tx_bytes.len()) {
@@ -708,10 +727,10 @@ async fn index_block_from_rpc(
         let mut tx_data_with_header = Vec::with_capacity(total_size);
         tx_data_with_header.extend_from_slice(&[0u8; 4]);
         tx_data_with_header.extend_from_slice(&raw_tx_bytes);
-        
+
         // Parse the transaction
-        use crate::parser::{deserialize_transaction, serialize_utxos, deserialize_utxos};
-        
+        use crate::parser::{deserialize_transaction, deserialize_utxos, serialize_utxos};
+
         let parsed_tx = match deserialize_transaction(&tx_data_with_header).await {
             Ok(tx) => tx,
             Err(e) => {
@@ -720,24 +739,25 @@ async fn index_block_from_rpc(
                 continue;
             }
         };
-        
+
         // Track Sapling transactions for metrics
         if parsed_tx.sapling_data.is_some() {
             metrics::increment_sapling_transactions(1);
         }
-        
+
         // Index addresses from outputs
         // CRITICAL FIX: Only modify address index for NEW blocks (after enrichment height)
         // Blocks processed by enrichment already have correct address index data
-        let cf_addr_index = db.cf_handle("addr_index")
+        let cf_addr_index = db
+            .cf_handle("addr_index")
             .ok_or("addr_index CF not found")?;
-        
+
         // txid_bytes is already in display format (no reversal needed)
         // Database keys and UTXO storage use display format consistently
-        
+
         // Track which addresses are involved in this transaction (for tx history)
         let mut involved_addresses = std::collections::HashSet::new();
-        
+
         // Add outputs as UTXOs ONLY for new blocks
         if should_update_address_index {
             for (output_idx, output) in parsed_tx.outputs.iter().enumerate() {
@@ -745,10 +765,10 @@ async fn index_block_from_rpc(
                     if address.is_empty() {
                         continue;
                     }
-                    
+
                     // Track address for transaction history
                     involved_addresses.insert(address.clone());
-                    
+
                     // TWO-PHASE OPTIMIZATION: Skip outputs that are spent within this batch
                     // These are "born and die" outputs that should never appear in UTXO set
                     if let Some(spent) = spent_set {
@@ -757,11 +777,11 @@ async fn index_block_from_rpc(
                             continue;
                         }
                     }
-                    
+
                     // Key format: 'a' + address (UTXOs)
                     let mut addr_key = vec![b'a'];
                     addr_key.extend_from_slice(address.as_bytes());
-                    
+
                     // Get existing UTXOs for this address
                     let mut existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
                         Some(data) => {
@@ -777,15 +797,15 @@ async fn index_block_from_rpc(
                             } else {
                                 deserialize_utxos(&data).await
                             }
-                        },
+                        }
                         None => Vec::new(),
                     };
-                    
+
                     // CRITICAL FIX: Check if UTXO already exists (idempotent)
-                    let already_exists = existing_utxos.iter().any(|(t, i)| {
-                        t == &txid_bytes && *i == output_idx as u64
-                    });
-                    
+                    let already_exists = existing_utxos
+                        .iter()
+                        .any(|(t, i)| t == &txid_bytes && *i == output_idx as u64);
+
                     if already_exists {
                         // Already indexed - skip (prevents duplicates from reorg/reindex)
                         #[cfg(feature = "debug-address-index")]
@@ -793,11 +813,15 @@ async fn index_block_from_rpc(
                                "Duplicate UTXO detected (skipped)");
                         continue;
                     }
-                    
+
                     // Add new UTXO: (txid_bytes, output_index)
                     existing_utxos.push((txid_bytes.clone(), output_idx as u64));
                     // Reorg-undo capture: record exactly the UTXO we add to 'a'.
-                    block_undo.add_utxo_created(address.clone(), txid_bytes.clone(), output_idx as u64);
+                    block_undo.add_utxo_created(
+                        address.clone(),
+                        txid_bytes.clone(),
+                        output_idx as u64,
+                    );
 
                     // Store updated UTXO list
                     let serialized = serialize_utxos(&existing_utxos).await;
@@ -807,7 +831,7 @@ async fn index_block_from_rpc(
                 }
             }
         }
-        
+
         // Process inputs: Remove spent UTXOs from address index
         // TWO-PHASE OPTIMIZATION: If spent_set is provided (from Phase 1),
         // we can skip spend removal for outputs that aren't in the spent set.
@@ -818,16 +842,16 @@ async fn index_block_from_rpc(
                 Some(p) => p,
                 None => continue,
             };
-            
+
             // Skip if coinbase (indicated by coinbase field)
             if input.coinbase.is_some() {
                 continue;
             }
-            
+
             // Get previous txid and output index
             let prev_txid_hex = &prevout.hash;
             let prev_output_idx = prevout.n;
-            
+
             // Decode the previous txid from hex string to bytes (display format)
             let prev_txid_bytes = match hex::decode(prev_txid_hex) {
                 Ok(bytes) => bytes,
@@ -836,14 +860,14 @@ async fn index_block_from_rpc(
                     continue;
                 }
             };
-            
+
             // Get the previous transaction (prevout.hash is already in display format)
             let mut prev_tx_key = vec![b't'];
             prev_tx_key.extend_from_slice(&prev_txid_bytes);
-            
+
             // Try to get from database first
             let prev_tx_data_opt = db.get_cf(&cf_transactions, &prev_tx_key)?;
-            
+
             // If not in database, fetch from RPC and store it
             let prev_tx_data = if let Some(data) = prev_tx_data_opt {
                 data
@@ -869,9 +893,11 @@ async fn index_block_from_rpc(
                                 if let Some(result) = json.get("result") {
                                     // Extract hex and blockhash
                                     let raw_hex = result.get("hex").and_then(|h| h.as_str());
-                                    let blockhash = result.get("blockhash").and_then(|h| h.as_str());
-                                    
-                                    if let (Some(hex_str), Some(block_hash)) = (raw_hex, blockhash) {
+                                    let blockhash =
+                                        result.get("blockhash").and_then(|h| h.as_str());
+
+                                    if let (Some(hex_str), Some(block_hash)) = (raw_hex, blockhash)
+                                    {
                                         match hex::decode(hex_str) {
                                             Ok(raw_bytes) => {
                                                 // Fetch block height for this blockhash
@@ -887,16 +913,20 @@ async fn index_block_from_rpc(
                                                     .send()
                                                     .await
                                                 {
-                                                    Ok(block_resp) => {
-                                                        block_resp.json::<Value>()
-                                                            .await
-                                                            .ok()
-                                                            .and_then(|j| j.get("result").and_then(|r| r.get("height")).and_then(|h| h.as_i64()))
-                                                            .unwrap_or(0) as i32
-                                                    }
+                                                    Ok(block_resp) => block_resp
+                                                        .json::<Value>()
+                                                        .await
+                                                        .ok()
+                                                        .and_then(|j| {
+                                                            j.get("result")
+                                                                .and_then(|r| r.get("height"))
+                                                                .and_then(|h| h.as_i64())
+                                                        })
+                                                        .unwrap_or(0)
+                                                        as i32,
                                                     Err(_) => 0,
                                                 };
-                                                
+
                                                 // Store this transaction with proper height
                                                 // Extract tx version from raw bytes (first 4 bytes)
                                                 let tx_version_bytes = if raw_bytes.len() >= 4 {
@@ -904,22 +934,26 @@ async fn index_block_from_rpc(
                                                 } else {
                                                     &[1u8, 0, 0, 0] // Default to version 1
                                                 };
-                                                
+
                                                 let mut full_data = tx_version_bytes.to_vec();
                                                 full_data.extend(&prev_height.to_le_bytes());
                                                 full_data.extend(&raw_bytes);
-                                                
-                                                if let Err(e) = db.put_cf(&cf_transactions, &prev_tx_key, &full_data) {
+
+                                                if let Err(e) = db.put_cf(
+                                                    &cf_transactions,
+                                                    &prev_tx_key,
+                                                    &full_data,
+                                                ) {
                                                     warn!(prev_txid = %prev_txid_hex, error = %e, "Failed to cache previous tx");
                                                 }
                                                 // Successfully cached - debug logging removed for performance
-                                                
+
                                                 // Also store the 'B' index entry for this transaction
                                                 if prev_height > 0 {
                                                     // We don't know the tx_index within the block, so skip 'B' entry
                                                     // The transaction will still be queryable via 't' prefix
                                                 }
-                                                
+
                                                 full_data
                                             }
                                             Err(_) => {
@@ -950,14 +984,15 @@ async fn index_block_from_rpc(
                     }
                 }
             };
-            
+
             // Now process the previous transaction data
             if prev_tx_data.len() < 8 {
                 warn!(prev_txid = %prev_txid_hex, "Previous transaction data too short");
                 continue;
             }
 
-            if prev_tx_data.len() > 10_000_008 {  // 10MB + 8 byte header
+            if prev_tx_data.len() > 10_000_008 {
+                // 10MB + 8 byte header
                 warn!(prev_txid = %prev_txid_hex, bytes = prev_tx_data.len(), "Previous transaction too large");
                 continue;
             }
@@ -989,7 +1024,7 @@ async fn index_block_from_rpc(
             let mut prev_tx_with_header = Vec::with_capacity(total_size);
             prev_tx_with_header.extend_from_slice(&[0u8; 4]);
             prev_tx_with_header.extend_from_slice(raw_prev_tx);
-            
+
             // Parse previous transaction to find addresses of the spent output
             if let Ok(prev_tx) = deserialize_transaction(&prev_tx_with_header).await {
                 // Get the output at this index
@@ -999,13 +1034,13 @@ async fn index_block_from_rpc(
                         if address.is_empty() {
                             continue;
                         }
-                        
+
                         // Track address for transaction history (inputs spend from this address)
                         involved_addresses.insert(address.clone());
-                        
+
                         let mut addr_key = vec![b'a'];
                         addr_key.extend_from_slice(address.as_bytes());
-                        
+
                         // Get existing UTXOs
                         let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
                             Some(data) => {
@@ -1019,10 +1054,10 @@ async fn index_block_from_rpc(
                                 } else {
                                     deserialize_utxos(&data).await
                                 }
-                            },
+                            }
                             None => Vec::new(),
                         };
-                        
+
                         // Reorg-undo capture: only record the spend if the UTXO was
                         // actually present in 'a'. A born-and-die output (created and
                         // spent within this same batch) never entered 'a', so capturing
@@ -1031,16 +1066,22 @@ async fn index_block_from_rpc(
                             stored_txid == &prev_txid_bytes && *stored_idx == prev_output_idx as u64
                         });
                         if was_present {
-                            block_undo.add_utxo_spent(address.clone(), prev_txid_bytes.clone(), prev_output_idx as u64);
+                            block_undo.add_utxo_spent(
+                                address.clone(),
+                                prev_txid_bytes.clone(),
+                                prev_output_idx as u64,
+                            );
                         }
 
                         // Remove the spent UTXO (match by txid and index)
-                        let updated_utxos: Vec<_> = existing_utxos.into_iter()
+                        let updated_utxos: Vec<_> = existing_utxos
+                            .into_iter()
                             .filter(|(stored_txid, stored_idx)| {
-                                !(stored_txid == &prev_txid_bytes && *stored_idx == prev_output_idx as u64)
+                                !(stored_txid == &prev_txid_bytes
+                                    && *stored_idx == prev_output_idx as u64)
                             })
                             .collect();
-                        
+
                         // Update or delete
                         if !updated_utxos.is_empty() {
                             let serialized = serialize_utxos(&updated_utxos).await;
@@ -1052,7 +1093,7 @@ async fn index_block_from_rpc(
                 }
             }
         }
-        
+
         // Add this transaction to all involved addresses' transaction lists
         // Only for new blocks to avoid duplicates
         if should_update_address_index {
@@ -1060,7 +1101,7 @@ async fn index_block_from_rpc(
             for address in &involved_addresses {
                 let mut tx_list_key = vec![b't'];
                 tx_list_key.extend_from_slice(address.as_bytes());
-                
+
                 // Get existing transaction list
                 let mut tx_list = match db.get_cf(&cf_addr_index, &tx_list_key)? {
                     Some(data) => {
@@ -1068,10 +1109,10 @@ async fn index_block_from_rpc(
                         data.chunks_exact(32)
                             .map(|chunk| chunk.to_vec())
                             .collect::<Vec<Vec<u8>>>()
-                    },
+                    }
                     None => Vec::new(),
                 };
-                
+
                 // Add this transaction (if not already present)
                 if !tx_list.iter().any(|t| t == &txid_bytes) {
                     tx_list.push(txid_bytes.clone());
@@ -1083,13 +1124,13 @@ async fn index_block_from_rpc(
                     for tx in &tx_list {
                         serialized.extend(tx);
                     }
-                    
+
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
                         warn!(address = %address, error = %e, "Failed to update tx list for address");
                     }
                 }
             }
-            
+
             // CRITICAL FIX: Update total_received and total_sent for involved addresses
             // This ensures balances stay correct during RPC catchup
             for address in &involved_addresses {
@@ -1100,29 +1141,32 @@ async fn index_block_from_rpc(
                         received_delta += output.value;
                     }
                 }
-                
+
                 // Update total_received ('r' + address)
                 if received_delta > 0 {
                     let mut key_r = vec![b'r'];
                     key_r.extend_from_slice(address.as_bytes());
-                    
-                    let current_total = db.get_cf(&cf_addr_index, &key_r)?
+
+                    let current_total = db
+                        .get_cf(&cf_addr_index, &key_r)?
                         .and_then(|bytes| {
                             if bytes.len() == 8 {
-                                Some(i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                                                         bytes[4], bytes[5], bytes[6], bytes[7]]))
+                                Some(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ]))
                             } else {
                                 None
                             }
                         })
                         .unwrap_or(0);
-                    
+
                     let new_total = current_total + received_delta;
                     db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())?;
                     // Reorg-undo capture: record exactly the amount we add to 'r'.
                     block_undo.add_received(address.clone(), received_delta);
                 }
-                
+
                 // Calculate sent amount (inputs spending from this address)
                 let mut sent_delta: i64 = 0;
                 for input in &parsed_tx.inputs {
@@ -1132,22 +1176,27 @@ async fn index_block_from_rpc(
                     if let Some(prevout) = &input.prevout {
                         let prev_txid_hex = &prevout.hash;
                         let prev_output_idx = prevout.n;
-                        
+
                         // Decode previous txid
                         if let Ok(prev_txid_bytes) = hex::decode(prev_txid_hex) {
                             let mut prev_tx_key = vec![b't'];
                             prev_tx_key.extend_from_slice(&prev_txid_bytes);
-                            
+
                             // Get previous transaction
                             if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key)? {
                                 if prev_tx_data.len() >= 8 {
                                     let prev_raw_tx = &prev_tx_data[8..];
-                                    let mut prev_tx_with_header = Vec::with_capacity(4 + prev_raw_tx.len());
+                                    let mut prev_tx_with_header =
+                                        Vec::with_capacity(4 + prev_raw_tx.len());
                                     prev_tx_with_header.extend_from_slice(&[0u8; 4]);
                                     prev_tx_with_header.extend_from_slice(prev_raw_tx);
-                                    
-                                    if let Ok(prev_tx) = deserialize_transaction(&prev_tx_with_header).await {
-                                        if let Some(prev_output) = prev_tx.outputs.get(prev_output_idx as usize) {
+
+                                    if let Ok(prev_tx) =
+                                        deserialize_transaction(&prev_tx_with_header).await
+                                    {
+                                        if let Some(prev_output) =
+                                            prev_tx.outputs.get(prev_output_idx as usize)
+                                        {
                                             if prev_output.address.contains(address) {
                                                 sent_delta += prev_output.value;
                                             }
@@ -1158,23 +1207,26 @@ async fn index_block_from_rpc(
                         }
                     }
                 }
-                
+
                 // Update total_sent ('s' + address)
                 if sent_delta > 0 {
                     let mut key_s = vec![b's'];
                     key_s.extend_from_slice(address.as_bytes());
-                    
-                    let current_total = db.get_cf(&cf_addr_index, &key_s)?
+
+                    let current_total = db
+                        .get_cf(&cf_addr_index, &key_s)?
                         .and_then(|bytes| {
                             if bytes.len() == 8 {
-                                Some(i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3],
-                                                         bytes[4], bytes[5], bytes[6], bytes[7]]))
+                                Some(i64::from_le_bytes([
+                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                    bytes[6], bytes[7],
+                                ]))
                             } else {
                                 None
                             }
                         })
                         .unwrap_or(0);
-                    
+
                     let new_total = current_total + sent_delta;
                     db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())?;
                     // Reorg-undo capture: record exactly the amount we add to 's'.
@@ -1182,13 +1234,19 @@ async fn index_block_from_rpc(
                 }
             }
         }
-        
+
         tx_count += 1;
     }
-    
+
     // Report any errors
     if tx_errors > 0 {
-        warn!(height = height, indexed = tx_count, total = tx_array.len(), errors = tx_errors, "Block indexed with errors");
+        warn!(
+            height = height,
+            indexed = tx_count,
+            total = tx_array.len(),
+            errors = tx_errors,
+            "Block indexed with errors"
+        );
     } else if height % 1000 == 0 {
         debug!(height = height, tx_count = tx_count, "Block indexed");
     }
@@ -1213,28 +1271,31 @@ async fn index_block_from_rpc(
         const REORG_UNDO_WINDOW: i32 = 200;
         let prune_below = height - REORG_UNDO_WINDOW;
         if prune_below > 0 {
-            if let Err(e) = crate::address_rollback::delete_address_undo(db.clone(), prune_below).await {
+            if let Err(e) =
+                crate::address_rollback::delete_address_undo(db.clone(), prune_below).await
+            {
                 debug!(height = prune_below, error = %e, "Failed to prune old address undo");
             }
         }
     }
 
     // Update sync height
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
 
     db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
-    
+
     // CRITICAL FIX: Store block hash for deduplication
     let mut height_hash_key = vec![b'H'];
     height_hash_key.extend(&height.to_le_bytes());
     db.put_cf(&cf_state, &height_hash_key, block_hash.as_bytes())?;
-    
+
     // Update indexed height metric
     metrics::set_indexed_height("rpc_monitor", height as i64);
-    
+
     // Processing marker will be cleaned up automatically by the guard's Drop impl
-    
+
     // Broadcast new block event if broadcaster is available
     if let Some(bc) = broadcaster {
         let timestamp = std::time::SystemTime::now()
@@ -1243,16 +1304,17 @@ async fn index_block_from_rpc(
             .as_secs();
         bc.broadcast_block(height, block_hash, timestamp, tx_count);
     }
-    
+
     Ok(())
 }
 
 /// Update aggregate database metrics (address count, UTXO count, Sapling tx count)
 /// Should be called periodically during monitoring to keep metrics up to date
 fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_addr_index = db.cf_handle("addr_index")
+    let cf_addr_index = db
+        .cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
-    
+
     // Count unique addresses and their unspent UTXOs
     // In addr_index CF:
     //   - Keys starting with 'a' contain UTXO lists for addresses
@@ -1260,7 +1322,7 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
     let mut address_count: u64 = 0;
     let mut utxo_count: u64 = 0;
     let mut sample_checked = 0;
-    
+
     let iter = db.iterator_cf(&cf_addr_index, rocksdb::IteratorMode::Start);
     for item in iter {
         if let Ok((key, value)) = item {
@@ -1269,7 +1331,7 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
                 // Count 'a' (address) keys - these contain UTXO lists
                 if prefix == b'a' {
                     address_count += 1;
-                    
+
                     // Count UTXOs for this address
                     // Each UTXO is 40 bytes: txid(32) + vout(8)
                     if !value.is_empty() {
@@ -1290,23 +1352,23 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
             }
         }
     }
-    
+
     debug!(
         addresses = address_count,
         utxos = utxo_count,
         "Aggregate metrics updated from database scan"
     );
-    
+
     // Update metrics
     metrics::set_total_addresses_indexed(address_count);
     metrics::set_total_utxos_tracked(utxo_count);
-    
+
     // NOTE: We don't update SAPLING_TRANSACTIONS_COUNT here because:
     // 1. SAPLING_TRANSACTIONS_TOTAL (counter) is incremented as new txs are processed
     // 2. SAPLING_TRANSACTIONS_COUNT (gauge) is set during enrichment phase
     // 3. Counting from DB requires full parsing which is too expensive for periodic updates
     // The counter (TOTAL) gives us the cumulative count which is what we need for monitoring
-    
+
     Ok(())
 }
 
@@ -1317,20 +1379,27 @@ fn detect_reorg(
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     // If RPC height is less than ours, definite reorg
     if rpc_tip.height < db_tip.height {
-        warn!(rpc_height = rpc_tip.height, db_height = db_tip.height, "REORG DETECTED: RPC height less than DB height");
+        warn!(
+            rpc_height = rpc_tip.height,
+            db_height = db_tip.height,
+            "REORG DETECTED: RPC height less than DB height"
+        );
         return Ok(Some(rpc_tip.height));
     }
 
     // If heights are same, check hashes
     if rpc_tip.height == db_tip.height && rpc_tip.hash != db_tip.hash {
-        warn!(height = rpc_tip.height, "REORG DETECTED: Hash mismatch at tip");
+        warn!(
+            height = rpc_tip.height,
+            "REORG DETECTED: Hash mismatch at tip"
+        );
         return Ok(Some(rpc_tip.height - 1));
     }
-    
+
     // TODO: More sophisticated reorg detection
     // - Compare hashes at previous heights
     // - Find common ancestor
-    
+
     Ok(None)
 }
 
@@ -1374,8 +1443,14 @@ async fn recover_crashed_blocks(
         // Recompute r/s for the block's addresses from the authoritative t/a indexes,
         // correcting any double-count.
         match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
-            Ok(n) => info!(height, addresses = n, "Recovered r/s after crash-interrupted block"),
-            Err(e) => warn!(height, error = %e, "Failed to repair r/s after re-applying crashed block"),
+            Ok(n) => info!(
+                height,
+                addresses = n,
+                "Recovered r/s after crash-interrupted block"
+            ),
+            Err(e) => {
+                warn!(height, error = %e, "Failed to repair r/s after re-applying crashed block")
+            }
         }
     }
 }
@@ -1388,13 +1463,13 @@ pub async fn run_block_monitor(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _span = info_span!("block_monitor", poll_interval_secs = poll_interval_secs).entered();
     info!("Starting block monitor");
-    
+
     // Initialize RPC client
     let config = get_global_config();
     let rpc_host = config.get_string("rpc.host")?;
     let rpc_user = config.get_string("rpc.user")?;
     let rpc_pass = config.get_string("rpc.pass")?;
-    
+
     // Construct the blocking RPC client + test connection on tokio's managed
     // blocking pool. PivxRpcClient uses reqwest::blocking (own runtime), so it
     // must not run on a tokio worker thread. spawn_blocking is bounded and
@@ -1402,14 +1477,8 @@ pub async fn run_block_monitor(
     // recv_timeout, which leaked the OS thread whenever the node was slow.
     let rpc_host_clone = rpc_host.clone();
     let connect = tokio::task::spawn_blocking(move || {
-        let client = PivxRpcClient::new(
-            rpc_host_clone,
-            Some(rpc_user),
-            Some(rpc_pass),
-            3,
-            10,
-            30000,
-        );
+        let client =
+            PivxRpcClient::new(rpc_host_clone, Some(rpc_user), Some(rpc_pass), 3, 10, 30000);
 
         // Test connection
         match client.getblockcount() {
@@ -1480,14 +1549,19 @@ pub async fn run_block_monitor(
     // recent days into the shadow keyspace and diff each complete day vs the full
     // enrich, logging the report. (Join-field mismatches vs a DEGRADED rebuild are
     // expected — run a FULL re-enrich for a true join comparison.)
-    let validate_days = config.get_int("sync.live_analytics_shadow_validate_days").unwrap_or(0);
+    let validate_days = config
+        .get_int("sync.live_analytics_shadow_validate_days")
+        .unwrap_or(0);
     if validate_days > 0 {
         let db_v = Arc::clone(&db);
         // std::thread + current-thread runtime: shadow_validate holds a RocksDB
         // iterator across .await (so it is !Send), the same reason the daily-series
         // pass is detached this way.
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     warn!(error = %e, "shadow_validate: failed to build runtime");
@@ -1561,12 +1635,12 @@ pub async fn run_block_monitor(
                 continue;
             }
         };
-        
+
         // Update network height in database
         if let Err(e) = set_network_height(&db, rpc_tip.height) {
             error!(error = %e, "Failed to update network height");
         }
-        
+
         let db_tip = match get_db_chain_tip(&db) {
             Ok(tip) => tip,
             Err(e) => {
@@ -1575,20 +1649,20 @@ pub async fn run_block_monitor(
                 continue;
             }
         };
-        
+
         // Check for reorg
         if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
             warn!("BLOCKCHAIN REORGANIZATION DETECTED");
 
             // Handle the reorg using our reorg module
-            match reorg::handle_reorg(
-                db.clone(),
-                &rpc_client,
-                db_tip.height,
-                rpc_tip.height,
-            ).await {
+            match reorg::handle_reorg(db.clone(), &rpc_client, db_tip.height, rpc_tip.height).await
+            {
                 Ok(reorg_info) => {
-                    info!(orphaned = reorg_info.orphaned_blocks, fork_height = reorg_info.fork_height, "Reorg handled successfully");
+                    info!(
+                        orphaned = reorg_info.orphaned_blocks,
+                        fork_height = reorg_info.fork_height,
+                        "Reorg handled successfully"
+                    );
 
                     // Keep live daily-analytics correct across the rollback: clear
                     // the affected (>= fork date) day blobs + reset the watermark so
@@ -1608,23 +1682,24 @@ pub async fn run_block_monitor(
                     continue;
                 }
             }
-            
+
             // After reorg, immediately check for new blocks on the canonical chain
             tokio::time::sleep(Duration::from_secs(1)).await;
             continue;
         }
-        
+
         // Check if we're behind
         if rpc_tip.height > db_tip.height {
             let blocks_behind = rpc_tip.height - db_tip.height;
-            
+
             let _catchup_span = info_span!(
                 "rpc_catchup",
                 current_height = db_tip.height,
                 target_height = rpc_tip.height,
                 blocks_behind = blocks_behind
-            ).entered();
-            
+            )
+            .entered();
+
             info!(
                 blocks_behind = blocks_behind,
                 current_height = db_tip.height,
@@ -1632,8 +1707,13 @@ pub async fn run_block_monitor(
                 "RPC catchup needed"
             );
             metrics::set_blocks_behind_tip(blocks_behind as i64);
-            
-            info!(blocks_behind = blocks_behind, start = db_tip.height + 1, end = rpc_tip.height, "RPC catchup starting");
+
+            info!(
+                blocks_behind = blocks_behind,
+                start = db_tip.height + 1,
+                end = rpc_tip.height,
+                "RPC catchup starting"
+            );
 
             // TWO-PHASE RPC CATCHUP (matches initial sync two-pass algorithm)
             // This ensures 100% accurate spend detection without network dependency
@@ -1642,32 +1722,35 @@ pub async fn run_block_monitor(
             let end_height = rpc_tip.height;
 
             // === PHASE 1: Fetch blocks and build complete spent set ===
-            debug!(blocks = blocks_behind, "Phase 1: Fetching blocks and building spent set");
-            
+            debug!(
+                blocks = blocks_behind,
+                "Phase 1: Fetching blocks and building spent set"
+            );
+
             let mut fetched_blocks = Vec::new();
             let mut fetch_errors = 0;
-            
+
             // Fetch blocks in parallel for network efficiency
             // Use semaphore to limit concurrency
-            use tokio::sync::Semaphore;
             use std::sync::Arc as StdArc;
-            
+            use tokio::sync::Semaphore;
+
             const MAX_CONCURRENT_FETCH: usize = 10;
             let fetch_semaphore = StdArc::new(Semaphore::new(MAX_CONCURRENT_FETCH));
-            
+
             let mut fetch_futures = Vec::new();
             for height in start_height..=end_height {
                 let sem = fetch_semaphore.clone();
-                
+
                 fetch_futures.push(async move {
                     let _permit = sem.acquire().await.unwrap();
                     (height, fetch_block_data(height).await)
                 });
             }
-            
+
             // Wait for all fetches to complete
             let fetch_results = futures::future::join_all(fetch_futures).await;
-            
+
             // Collect successfully fetched blocks
             for (height, result) in fetch_results {
                 match result {
@@ -1679,7 +1762,7 @@ pub async fn run_block_monitor(
                     }
                 }
             }
-            
+
             if fetch_errors > 0 {
                 warn!(
                     fetch_errors = fetch_errors,
@@ -1691,16 +1774,22 @@ pub async fn run_block_monitor(
             }
 
             // Build complete spent set from all fetched blocks
-            debug!(blocks = fetched_blocks.len(), "Building spent set from fetched blocks");
+            debug!(
+                blocks = fetched_blocks.len(),
+                "Building spent set from fetched blocks"
+            );
             let spent_set = build_spent_set_from_blocks(&fetched_blocks);
-            debug!(spent_outputs = spent_set.len(), "Phase 1 complete: spent set built");
+            debug!(
+                spent_outputs = spent_set.len(),
+                "Phase 1 complete: spent set built"
+            );
 
             // === PHASE 2: Sequential indexing with complete spent knowledge ===
             debug!("Phase 2: Indexing blocks with complete spent set");
-            
+
             let mut indexed = 0;
             let mut index_errors = 0;
-            
+
             // Process blocks sequentially in height order
             // This ensures:
             // - No race conditions
@@ -1708,11 +1797,12 @@ pub async fn run_block_monitor(
             // - Spend removal has complete knowledge
             for block in fetched_blocks {
                 // Add canonical hash validation
-                let cf_metadata = db.cf_handle("chain_metadata")
+                let cf_metadata = db
+                    .cf_handle("chain_metadata")
                     .ok_or("chain_metadata CF not found")?;
-                
+
                 let height_key = block.height.to_le_bytes();
-                
+
                 // Check if we already have a canonical hash for this height
                 if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
                     let stored_hash_hex = hex::encode(&stored_hash);
@@ -1723,14 +1813,27 @@ pub async fn run_block_monitor(
                         break;
                     }
                 }
-                
+
                 // Index this block with spent set available
-                match index_block_from_rpc(&rpc_client, block.height, &db, &broadcaster, Some(&spent_set)).await {
+                match index_block_from_rpc(
+                    &rpc_client,
+                    block.height,
+                    &db,
+                    &broadcaster,
+                    Some(&spent_set),
+                )
+                .await
+                {
                     Ok(_) => {
                         indexed += 1;
                         if indexed % 100 == 0 {
                             let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
-                            debug!(indexed = indexed, total = blocks_behind, progress_pct = format!("{:.1}", progress), "Catchup progress");
+                            debug!(
+                                indexed = indexed,
+                                total = blocks_behind,
+                                progress_pct = format!("{:.1}", progress),
+                                "Catchup progress"
+                            );
                         }
                     }
                     Err(e) => {
@@ -1739,19 +1842,28 @@ pub async fn run_block_monitor(
                     }
                 }
             }
-            
-            info!(indexed = indexed, total = blocks_behind, errors = index_errors, "Phase 2 complete: blocks indexed");
+
+            info!(
+                indexed = indexed,
+                total = blocks_behind,
+                errors = index_errors,
+                "Phase 2 complete: blocks indexed"
+            );
 
             if index_errors > 0 {
-                warn!(errors = index_errors, retry_secs = poll_interval_secs, "Some blocks failed to index");
+                warn!(
+                    errors = index_errors,
+                    retry_secs = poll_interval_secs,
+                    "Some blocks failed to index"
+                );
             }
-            
+
             // Check if we successfully caught up
             let new_db_tip = match get_db_chain_tip(&db) {
                 Ok(tip) => tip,
                 Err(_) => db_tip.clone(),
             };
-            
+
             if new_db_tip.height >= rpc_tip.height {
                 info!(
                     current_height = new_db_tip.height,
@@ -1760,7 +1872,7 @@ pub async fn run_block_monitor(
                 );
                 metrics::set_blocks_behind_tip(0);
                 metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
-                
+
                 // Update aggregate metrics after catchup completes
                 if let Err(e) = update_aggregate_metrics(&db) {
                     warn!(error = %e, "Failed to update aggregate metrics");
@@ -1778,7 +1890,7 @@ pub async fn run_block_monitor(
             // Only update every 10 poll intervals to reduce overhead
             static POLL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = POLL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            
+
             if count % 10 == 0 {
                 if let Err(e) = update_aggregate_metrics(&db) {
                     warn!(error = %e, "Failed to update aggregate metrics");
@@ -1789,7 +1901,7 @@ pub async fn run_block_monitor(
                     }
                 }
             }
-            
+
             // We're caught up - sleep before checking again
             tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
         }

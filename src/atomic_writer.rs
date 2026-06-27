@@ -1,26 +1,25 @@
+use crate::db_utils::bulk_write_options;
+use crate::metrics;
+use rocksdb::{WriteBatch, DB};
+use std::collections::HashMap;
 /// Atomic Multi-CF Database Writer
-/// 
+///
 /// Provides atomic write operations across multiple RocksDB column families.
 /// This ensures that either ALL writes succeed together, or NONE do - critical
 /// for maintaining database consistency during crashes or errors.
-/// 
+///
 /// WITHOUT atomic writes:
 /// - Crash during sync → partial state (blocks written, metadata missing)
 /// - Database corruption requiring full resync
 /// - Reorg rollback impossible to implement safely
-/// 
+///
 /// WITH atomic writes:
 /// - All-or-nothing commits across CFs
 /// - Safe crash recovery
 /// - Foundation for reorg handling
 /// - Guaranteed consistency
-
 use std::sync::Arc;
-use std::collections::HashMap;
-use rocksdb::{DB, WriteBatch};
-use tracing::{debug, warn, error, info};
-use crate::metrics;
-use crate::db_utils::bulk_write_options;
+use tracing::{debug, error, info, warn};
 
 /// Atomic batch writer that commits writes across multiple column families atomically
 pub struct AtomicBatchWriter {
@@ -48,7 +47,7 @@ enum Operation {
 
 impl AtomicBatchWriter {
     /// Create a new atomic batch writer
-    /// 
+    ///
     /// # Arguments
     /// * `db` - RocksDB instance
     /// * `batch_size_limit` - Maximum number of operations before auto-flush
@@ -73,7 +72,7 @@ impl AtomicBatchWriter {
     }
 
     /// Add a put operation to the batch
-    /// 
+    ///
     /// # Arguments
     /// * `cf_name` - Column family name
     /// * `key` - Key bytes
@@ -87,7 +86,7 @@ impl AtomicBatchWriter {
     }
 
     /// Add a delete operation to the batch
-    /// 
+    ///
     /// # Arguments
     /// * `cf_name` - Column family name
     /// * `key` - Key bytes to delete
@@ -109,11 +108,11 @@ impl AtomicBatchWriter {
     }
 
     /// Flush all accumulated writes to database ATOMICALLY
-    /// 
+    ///
     /// This is the critical function that ensures all-or-nothing semantics.
     /// All operations across all column families are committed in a single
     /// atomic RocksDB WriteBatch.
-    /// 
+    ///
     /// # Returns
     /// Ok(()) if all writes succeeded, Err if any write failed (none committed)
     pub async fn flush(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -123,7 +122,7 @@ impl AtomicBatchWriter {
 
         let pending_ops = self.operations.len();
         let timer = metrics::Timer::new();
-        
+
         debug!(pending_ops = pending_ops, "Batch flush start");
 
         // Move operations out to process
@@ -132,80 +131,83 @@ impl AtomicBatchWriter {
         let disable_wal = self.disable_wal;
 
         // Perform atomic commit in blocking task
-        let task_result = tokio::task::spawn_blocking(move || -> (Result<(), String>, HashMap<String, usize>) {
-            // Create single WriteBatch for ALL operations across ALL CFs
-            let mut batch = WriteBatch::default();
-            
-            // Group operations by CF for efficient handle lookup
-            let mut cf_operations: HashMap<String, Vec<&Operation>> = HashMap::new();
-            for op in &operations {
-                let cf_name = match op {
-                    Operation::Put { cf_name, .. } => cf_name,
-                    Operation::Delete { cf_name, .. } => cf_name,
-                };
-                cf_operations.entry(cf_name.clone())
-                    .or_default()
-                    .push(op);
-            }
-            
-            // Track batch sizes per CF for metrics
-            let mut cf_batch_sizes: HashMap<String, usize> = HashMap::new();
+        let task_result =
+            tokio::task::spawn_blocking(move || -> (Result<(), String>, HashMap<String, usize>) {
+                // Create single WriteBatch for ALL operations across ALL CFs
+                let mut batch = WriteBatch::default();
 
-            // Add all operations to the single WriteBatch
-            for (cf_name, ops) in cf_operations {
-                let cf = match db.cf_handle(&cf_name) {
-                    Some(cf) => cf,
-                    None => {
-                        let err_msg = format!("Column family not found: {cf_name}");
-                        return (Err(err_msg), HashMap::new());
-                    }
-                };
-                
-                cf_batch_sizes.insert(cf_name.clone(), ops.len());
-                
-                for op in ops {
-                    match op {
-                        Operation::Put { key, value, .. } => {
-                            batch.put_cf(&cf, key, value);
+                // Group operations by CF for efficient handle lookup
+                let mut cf_operations: HashMap<String, Vec<&Operation>> = HashMap::new();
+                for op in &operations {
+                    let cf_name = match op {
+                        Operation::Put { cf_name, .. } => cf_name,
+                        Operation::Delete { cf_name, .. } => cf_name,
+                    };
+                    cf_operations.entry(cf_name.clone()).or_default().push(op);
+                }
+
+                // Track batch sizes per CF for metrics
+                let mut cf_batch_sizes: HashMap<String, usize> = HashMap::new();
+
+                // Add all operations to the single WriteBatch
+                for (cf_name, ops) in cf_operations {
+                    let cf = match db.cf_handle(&cf_name) {
+                        Some(cf) => cf,
+                        None => {
+                            let err_msg = format!("Column family not found: {cf_name}");
+                            return (Err(err_msg), HashMap::new());
                         }
-                        Operation::Delete { key, .. } => {
-                            batch.delete_cf(&cf, key);
+                    };
+
+                    cf_batch_sizes.insert(cf_name.clone(), ops.len());
+
+                    for op in ops {
+                        match op {
+                            Operation::Put { key, value, .. } => {
+                                batch.put_cf(&cf, key, value);
+                            }
+                            Operation::Delete { key, .. } => {
+                                batch.delete_cf(&cf, key);
+                            }
                         }
                     }
                 }
-            }
 
-            // CRITICAL: Single atomic commit for ALL column families
-            // Either everything succeeds, or nothing does.
-            // On the bulk-reindex path the WAL is disabled (pure fsync overhead
-            // on a fully-reconstructible DB); the live path keeps the WAL.
-            let write_result = if disable_wal {
-                db.write_opt(batch, &bulk_write_options())
-            } else {
-                db.write(batch)
-            }
-            .map_err(|e| e.to_string());
-            
-            // Return both the result and metadata regardless of success/failure
-            (write_result, cf_batch_sizes)
-        })
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-        
+                // CRITICAL: Single atomic commit for ALL column families
+                // Either everything succeeds, or nothing does.
+                // On the bulk-reindex path the WAL is disabled (pure fsync overhead
+                // on a fully-reconstructible DB); the live path keeps the WAL.
+                let write_result = if disable_wal {
+                    db.write_opt(batch, &bulk_write_options())
+                } else {
+                    db.write(batch)
+                }
+                .map_err(|e| e.to_string());
+
+                // Return both the result and metadata regardless of success/failure
+                (write_result, cf_batch_sizes)
+            })
+            .await
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+
         let elapsed_secs = timer.elapsed_secs();
         let elapsed_ms = elapsed_secs * 1000.0;
-        
+
         let (write_result, cf_batch_sizes) = task_result;
-        
+
         match write_result {
             Ok(_) => {
                 // Record successful flush metrics for each CF
                 for (cf_name, batch_size) in &cf_batch_sizes {
                     metrics::record_db_flush_duration(cf_name, elapsed_secs);
-                    metrics::BATCH_FLUSH_COUNT.with_label_values(&[cf_name]).inc();
-                    metrics::DB_BATCH_SIZE_ENTRIES.with_label_values(&[cf_name]).set(*batch_size as i64);
+                    metrics::BATCH_FLUSH_COUNT
+                        .with_label_values(&[cf_name])
+                        .inc();
+                    metrics::DB_BATCH_SIZE_ENTRIES
+                        .with_label_values(&[cf_name])
+                        .set(*batch_size as i64);
                 }
-                
+
                 // Warn on slow flushes
                 if elapsed_secs > 10.0 {
                     let cf_list: Vec<String> = cf_batch_sizes.keys().cloned().collect();
@@ -223,7 +225,7 @@ impl AtomicBatchWriter {
                         "Flush complete"
                     );
                 }
-                
+
                 Ok(())
             }
             Err(db_error) => {
@@ -237,7 +239,7 @@ impl AtomicBatchWriter {
                     );
                     metrics::increment_db_errors("flush", cf_name);
                 }
-                
+
                 Err(Box::from(db_error))
             }
         }
@@ -250,14 +252,14 @@ impl AtomicBatchWriter {
 }
 
 /// Convenience function for atomic batch writes across column families
-/// 
+///
 /// This is a simplified API for one-off atomic writes without needing
 /// to create and manage an AtomicBatchWriter instance.
-/// 
+///
 /// # Arguments
 /// * `db` - RocksDB instance
 /// * `operations` - List of (cf_name, key, value) tuples to write
-/// 
+///
 /// # Returns
 /// Ok(()) if all writes succeeded atomically, Err otherwise
 pub async fn atomic_batch_write(
@@ -271,14 +273,16 @@ pub async fn atomic_batch_write(
     let db_clone = db.clone();
     tokio::task::spawn_blocking(move || {
         let mut batch = WriteBatch::default();
-        
+
         for (cf_name, key, value) in operations {
-            let cf = db_clone.cf_handle(&cf_name)
+            let cf = db_clone
+                .cf_handle(&cf_name)
                 .ok_or_else(|| format!("Column family not found: {cf_name}"))?;
             batch.put_cf(&cf, key, value);
         }
 
-        db_clone.write(batch)
+        db_clone
+            .write(batch)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     })
     .await
@@ -299,14 +303,16 @@ pub async fn atomic_batch_delete(
     let db_clone = db.clone();
     tokio::task::spawn_blocking(move || {
         let mut batch = WriteBatch::default();
-        
+
         for (cf_name, key) in operations {
-            let cf = db_clone.cf_handle(&cf_name)
+            let cf = db_clone
+                .cf_handle(&cf_name)
                 .ok_or_else(|| format!("Column family not found: {cf_name}"))?;
             batch.delete_cf(&cf, key);
         }
 
-        db_clone.write(batch)
+        db_clone
+            .write(batch)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     })
     .await
@@ -326,7 +332,7 @@ mod tests {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        
+
         let cf_names = vec!["cf1", "cf2", "cf3"];
         let db = DB::open_cf(&opts, temp_dir.path(), &cf_names).unwrap();
         (Arc::new(db), temp_dir)

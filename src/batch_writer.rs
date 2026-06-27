@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use rocksdb::DB;
 use crate::atomic_writer::AtomicBatchWriter;
+use rocksdb::DB;
+use std::sync::Arc;
 
 /// Accumulates database writes and flushes them in batches for better performance
-/// 
+///
 /// NOW WITH ATOMIC SEMANTICS: All writes across all column families are committed
 /// atomically. Either all succeed together, or none do. This prevents database
 /// corruption on crashes.
@@ -46,7 +46,7 @@ impl BatchWriter {
     }
 
     /// Flush all accumulated writes to database ATOMICALLY
-    /// 
+    ///
     /// CRITICAL CHANGE: This now commits ALL writes across ALL column families
     /// in a single atomic operation. Previously, each CF was written separately.
     pub async fn flush(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

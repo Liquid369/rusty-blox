@@ -1,5 +1,5 @@
-use std::env;
 use rustyblox::leveldb_index::build_canonical_chain_from_leveldb;
+use std::env;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Accept path via first CLI argument or LEVELDB_PATH env var.
@@ -20,10 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Canonical chain entries found: {len}");
 
     if len > 0 {
-    let first = &chain[0];
-    let last = &chain[len - 1];
-    println!("First: height {}", first.0);
-    println!("Last: height {}", last.0);
+        let first = &chain[0];
+        let last = &chain[len - 1];
+        println!("First: height {}", first.0);
+        println!("Last: height {}", last.0);
 
         // Print sample of first 5 and last 5 entries
         println!("\nFirst 5 entries:");

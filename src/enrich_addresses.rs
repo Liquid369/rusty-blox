@@ -1,36 +1,34 @@
 /// Address Enrichment Module - Transaction Database Approach
-/// 
+///
 /// **Purpose:** Builds address index from our RocksDB transaction database
-/// 
+///
 /// **When to use:**
 /// - Normal sync operations (automatically called after fast_sync)
 /// - Incremental address index rebuilding
 /// - Recovery when address index is corrupted but transactions are intact
-/// 
+///
 /// **Algorithm:**
 /// - Pass 1: Scan all transactions to identify spent outputs
 /// - Pass 2: Index only UNSPENT outputs per address
-/// 
+///
 /// **Advantages:**
 /// - Works with our own database (no dependency on PIVX Core)
-
-use crate::constants::{should_index_transaction};
+use crate::constants::should_index_transaction;
 use crate::metrics;
+use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, serialize_utxos};
+use crate::tx_keys::{txid_from_hex, txid_from_key};
+use crate::types::{CTransaction, CTxOut, ScriptClassification};
+use rocksdb::DB;
+use std::collections::{HashMap, HashSet};
 /// - Fast incremental updates
 /// - Proper UTXO tracking (spent vs unspent)
-/// 
+///
 /// **Alternative Approach:**
 /// See `enrich_from_chainstate.rs` for verification using PIVX Core's chainstate
 /// as the authoritative source of truth. That approach is best for one-time
 /// verification or recovery but requires PIVX Core to be stopped.
-
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
-use rocksdb::DB;
-use tracing::{info, warn, info_span};
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, serialize_utxos};
-use crate::tx_keys::{txid_from_key, txid_from_hex};
-use crate::types::{CTransaction, CTxOut, ScriptClassification};
+use tracing::{info, info_span, warn};
 
 /// Classify output script for correct PIVX Core attribution.
 /// Classification is driven by the SCRIPT structure (like PIVX Core's Solver()),
@@ -52,10 +50,9 @@ pub(crate) fn classify_output(output: &CTxOut) -> ScriptClassification {
     }
 
     // OP_RETURN check (empty script or starts with 0x6a)
-    if output.value == 0 && (
-        output.script_pubkey.script.is_empty() ||
-        output.script_pubkey.script[0] == 0x6a
-    ) {
+    if output.value == 0
+        && (output.script_pubkey.script.is_empty() || output.script_pubkey.script[0] == 0x6a)
+    {
         return ScriptClassification::OpReturn;
     }
 
@@ -173,7 +170,7 @@ fn pack_output(
         | ScriptClassification::Nonstandard => (0u8, NO_ADDR, NO_ADDR),
     };
     PackedOut {
-        value: output.value,       // INVARIANT #1: exact, verbatim i64
+        value: output.value, // INVARIANT #1: exact, verbatim i64
         addr_a,
         addr_b,
         vout: output.index as u32, // parser sets index == position
@@ -228,7 +225,11 @@ fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i3
     // INVARIANT #2: detect the type while inputs[0]'s null/zerocoin prevout is
     // still alive. INVARIANT #4: carry the SIGNED Sapling net value forward.
     let ty = ty_to_u8(crate::tx_type::detect_transaction_type(tx));
-    let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+    let value_balance = tx
+        .sapling_data
+        .as_ref()
+        .map(|s| s.value_balance)
+        .unwrap_or(0);
 
     // PUSH EVERY output (incl. kind=0 markers / zerocoin / nonstandard) so
     // outs.len() == tx.outputs.len() and out_sum is identical (INVARIANT #1, #8).
@@ -571,7 +572,10 @@ fn pass2b_process_tx(
                                 // Standard: address is spending.
                                 let id = prev_out.addr_a;
                                 *sh.totals_sent.entry(id).or_insert(0) += prev_out.value;
-                                sh.txs_map_adds.entry(id).or_default().push(current_txid_bytes.to_vec());
+                                sh.txs_map_adds
+                                    .entry(id)
+                                    .or_default()
+                                    .push(current_txid_bytes.to_vec());
                             }
                             2 => {
                                 // Cold stake spend: debit BOTH addresses, mirroring the
@@ -580,8 +584,14 @@ fn pass2b_process_tx(
                                 let owner_id = prev_out.addr_b;
                                 *sh.totals_sent.entry(staker_id).or_insert(0) += prev_out.value;
                                 *sh.totals_sent.entry(owner_id).or_insert(0) += prev_out.value;
-                                sh.txs_map_adds.entry(staker_id).or_default().push(current_txid_bytes.to_vec());
-                                sh.txs_map_adds.entry(owner_id).or_default().push(current_txid_bytes.to_vec());
+                                sh.txs_map_adds
+                                    .entry(staker_id)
+                                    .or_default()
+                                    .push(current_txid_bytes.to_vec());
+                                sh.txs_map_adds
+                                    .entry(owner_id)
+                                    .or_default()
+                                    .push(current_txid_bytes.to_vec());
                             }
                             _ => {
                                 // No attribution for nonstandard/OP_RETURN/etc.
@@ -661,7 +671,9 @@ fn run_pass1_parallel(db: Arc<DB>, n: usize) -> Result<Pass1Shard, String> {
     for (lo, hi) in bounds {
         let db = Arc::clone(&db);
         handles.push(std::thread::spawn(move || -> Pass1Shard {
-            let cf = db.cf_handle("transactions").expect("transactions CF not found");
+            let cf = db
+                .cf_handle("transactions")
+                .expect("transactions CF not found");
             let mut ro = rocksdb::ReadOptions::default();
             ro.set_iterate_lower_bound(lo);
             ro.set_iterate_upper_bound(hi);
@@ -792,7 +804,9 @@ fn run_pass2b_parallel(
         let tx_index = Arc::clone(&tx_index);
         let block_times = Arc::clone(&block_times);
         handles.push(std::thread::spawn(move || -> Pass2bShard {
-            let cf = db.cf_handle("transactions").expect("transactions CF not found");
+            let cf = db
+                .cf_handle("transactions")
+                .expect("transactions CF not found");
             let mut ro = rocksdb::ReadOptions::default();
             ro.set_iterate_lower_bound(lo);
             ro.set_iterate_upper_bound(hi);
@@ -885,7 +899,9 @@ fn merge_pass2b_shards(shards: Vec<Pass2bShard>) -> Pass2bShard {
             agg.fees_total = agg.fees_total.saturating_add(j.fees_total);
             agg.normal_tx_bytes += j.normal_tx_bytes;
             agg.rewards_total = agg.rewards_total.saturating_add(j.rewards_total);
-            agg.staker_rewards_total = agg.staker_rewards_total.saturating_add(j.staker_rewards_total);
+            agg.staker_rewards_total = agg
+                .staker_rewards_total
+                .saturating_add(j.staker_rewards_total);
             agg.coin_days_destroyed += j.coin_days_destroyed;
             agg.p2cs_created = agg.p2cs_created.saturating_add(j.p2cs_created);
             agg.p2cs_spent = agg.p2cs_spent.saturating_add(j.p2cs_spent);
@@ -908,11 +924,14 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     let _span = info_span!("enrich_all_addresses").entered();
     info!("Building address index from transactions");
 
-    let cf_transactions = db.cf_handle("transactions")
+    let cf_transactions = db
+        .cf_handle("transactions")
         .ok_or("transactions CF not found")?;
-    let cf_addr_index = db.cf_handle("addr_index")
+    let cf_addr_index = db
+        .cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;
-    let cf_state = db.cf_handle("chain_state")
+    let cf_state = db
+        .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
 
     // Build the height -> block-time index ONCE, up front: Pass 2b buckets its
@@ -936,15 +955,18 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // gate must pass at every shard count before the default is raised.
     let shards = effective_enrich_shards();
     if shards >= 2 {
-        info!(shards = shards, "Enrichment: parallel range-sharded Pass 1 / Pass 2b enabled");
+        info!(
+            shards = shards,
+            "Enrichment: parallel range-sharded Pass 1 / Pass 2b enabled"
+        );
     }
 
     let mut processed = 0;
     let mut indexed_outputs = 0;
     let batch_size = 10000;
-    
+
     info!("Pass 1: Building complete spent outputs set");
-    
+
     // PASS 1: Build the packed tx store + the complete spent-outpoint set by
     // scanning every indexed transaction. The per-tx body lives in
     // `pass1_index_tx` so this serial scan and each parallel shard share ONE
@@ -1050,9 +1072,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         packed_entries = packed.len(),
         "Pass 1 complete: Spent outputs set built"
     );
-    
+
     info!("Pass 2: Indexing outputs with spent flags");
-    
+
     // Reset counter for pass 2
     processed = 0;
 
@@ -1069,7 +1091,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // NEW: Track total received and sent per address during Pass 2 (much faster!)
     let mut totals_received: HashMap<u32, i64> = HashMap::new();
     let mut totals_sent: HashMap<u32, i64> = HashMap::new();
-    
+
     // Phase 2 Instrumentation: Track Pass 2 metrics. Pass 2 now reads the packed
     // store built in Pass 1 (no DB re-read, no re-deserialize, no re-classify):
     // every slot is an already-indexed, already-deserialized tx, so total ==
@@ -1141,7 +1163,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                             .entry(owner_id)
                             .or_default()
                             .push((slot as u32, out.vout));
-                        indexed_outputs += 2;  // Count both
+                        indexed_outputs += 2; // Count both
                     }
                 }
 
@@ -1170,23 +1192,32 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         pass2_failed = pass2_tx_failed,
         "Pass 2 complete"
     );
-    
+
     // CRITICAL: Detect asymmetric failures between passes
     if pass1_tx_total != pass2_tx_total {
-        warn!(pass1_total = pass1_tx_total, pass2_total = pass2_tx_total, 
-              diff = (pass1_tx_total as i64 - pass2_tx_total as i64).abs(), 
-              "Pass divergence: Transaction count mismatch");
+        warn!(
+            pass1_total = pass1_tx_total,
+            pass2_total = pass2_tx_total,
+            diff = (pass1_tx_total as i64 - pass2_tx_total as i64).abs(),
+            "Pass divergence: Transaction count mismatch"
+        );
     }
     if pass1_tx_failed != pass2_tx_failed {
-        warn!(pass1_failed = pass1_tx_failed, pass2_failed = pass2_tx_failed,
-              diff = (pass1_tx_failed as i64 - pass2_tx_failed as i64).abs(),
-              "Asymmetric failures between passes - will cause balance errors");
+        warn!(
+            pass1_failed = pass1_tx_failed,
+            pass2_failed = pass2_tx_failed,
+            diff = (pass1_tx_failed as i64 - pass2_tx_failed as i64).abs(),
+            "Asymmetric failures between passes - will cause balance errors"
+        );
     }
-    
-    info!(unique_addresses = address_map.len(), spent_outputs = spent_outputs.len(), 
-          "Writing address index to database");
+
+    info!(
+        unique_addresses = address_map.len(),
+        spent_outputs = spent_outputs.len(),
+        "Writing address index to database"
+    );
     info!("Pass 2b: Scanning inputs to include sent transactions and calculate totals");
-    
+
     // Pass 2b accumulators live in a shard so this serial scan and each parallel
     // shard share ONE per-tx implementation (pass2b_process_tx) and merge the
     // same way. The byte-exact outputs are totals_sent (i64, plain += is
@@ -1212,15 +1243,23 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let iter3 = db.iterator_cf(&cf_transactions, rocksdb::IteratorMode::Start);
         for item in iter3 {
             let (key, value) = item?;
-            if key.first() == Some(&b'B') { continue; }
-            if value.len() < 8 { continue; }
-            let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0,0,0,0]);
+            if key.first() == Some(&b'B') {
+                continue;
+            }
+            if value.len() < 8 {
+                continue;
+            }
+            let height_bytes: [u8; 4] = value[4..8].try_into().unwrap_or([0, 0, 0, 0]);
             let height = i32::from_le_bytes(height_bytes);
-            if !should_index_transaction(height) { continue; }
+            if !should_index_transaction(height) {
+                continue;
+            }
 
             // Extract current txid from key
             let current_txid_bytes = txid_from_key(&key);
-            if current_txid_bytes.is_empty() { continue; }
+            if current_txid_bytes.is_empty() {
+                continue;
+            }
 
             // Resolve this tx's slot in the packed store (built in Pass 1). Outputs,
             // ty and value_balance come from packed[slot]; the raw inputs come from
@@ -1303,35 +1342,53 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         pass2b_prevout_resolved = pass2b_prevout_resolved,
         "Pass 2b complete"
     );
-    
+
     // Interning round-trip invariant: every id resolves back to the exact string
     // that was interned, and the forward/reverse maps stay the same size.
-    debug_assert_eq!(addr_intern.len(), addr_rev.len(), "intern/rev size mismatch");
+    debug_assert_eq!(
+        addr_intern.len(),
+        addr_rev.len(),
+        "intern/rev size mismatch"
+    );
     if let Some((s, &id)) = addr_intern.iter().next() {
         debug_assert_eq!(&addr_rev[id as usize], s, "intern round-trip mismatch");
     }
 
     // CRITICAL: Final divergence check across all passes
     if pass1_tx_total != pass2_tx_total || pass2_tx_total != pass2b_tx_total {
-        warn!(pass1_total = pass1_tx_total, pass2_total = pass2_tx_total, pass2b_total = pass2b_tx_total,
-              "TX count mismatch across passes");
+        warn!(
+            pass1_total = pass1_tx_total,
+            pass2_total = pass2_tx_total,
+            pass2b_total = pass2b_tx_total,
+            "TX count mismatch across passes"
+        );
     }
-    
+
     if pass1_tx_failed > 0 || pass2_tx_failed > 0 || pass2b_tx_failed > 0 {
         if pass1_tx_failed != pass2_tx_failed || pass2_tx_failed != pass2b_tx_failed {
-            warn!(pass1_failed = pass1_tx_failed, pass2_failed = pass2_tx_failed, pass2b_failed = pass2b_tx_failed,
-                  "Asymmetric deserialization failures - will cause balance errors");
+            warn!(
+                pass1_failed = pass1_tx_failed,
+                pass2_failed = pass2_tx_failed,
+                pass2b_failed = pass2b_tx_failed,
+                "Asymmetric deserialization failures - will cause balance errors"
+            );
         } else {
-            info!(failed = pass1_tx_failed, "Deserialization failures (consistent across passes)");
+            info!(
+                failed = pass1_tx_failed,
+                "Deserialization failures (consistent across passes)"
+            );
         }
     }
-    
-    info!(unique_addresses = address_map.len(), "Writing address index to database");
-    
+
+    info!(
+        unique_addresses = address_map.len(),
+        "Writing address index to database"
+    );
+
     // Write address mappings to database
     let mut batch = rocksdb::WriteBatch::default();
     let mut written = 0;
-    let total_addresses = address_map.len();  // Cache length before consuming map
+    let total_addresses = address_map.len(); // Cache length before consuming map
     let mut total_utxos_checked = 0;
     let mut total_spent_found = 0;
 
@@ -1387,8 +1444,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                         // — identical to the original tx.outputs[vout].value.
                         if let Some(out) = ptx.outs.get(*vout as usize) {
                             let band_idx = hodl_band_index(tip, h);
-                            hodl_sums[band_idx] =
-                                hodl_sums[band_idx].saturating_add(out.value);
+                            hodl_sums[band_idx] = hodl_sums[band_idx].saturating_add(out.value);
                             hodl_total = hodl_total.saturating_add(out.value);
                         }
                     }
@@ -1409,7 +1465,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             let mut unique_txids = txids.clone();
             unique_txids.sort();
             unique_txids.dedup();
-            
+
             // Serialize transaction list
             let mut txs_serialized: Vec<u8> = Vec::with_capacity(unique_txids.len() * 32);
             for txid in unique_txids {
@@ -1419,36 +1475,36 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             tx_list_key.extend_from_slice(address.as_bytes());
             batch.put_cf(&cf_addr_index, &tx_list_key, &txs_serialized);
         }
-        
+
         // Write total received ('r' + address) - i64 LE bytes
         let mut key_r = vec![b'r'];
         key_r.extend_from_slice(address.as_bytes());
         batch.put_cf(&cf_addr_index, &key_r, total_received.to_le_bytes());
-        
+
         // Write total sent ('s' + address) - i64 LE bytes
         let mut key_s = vec![b's'];
         key_s.extend_from_slice(address.as_bytes());
         batch.put_cf(&cf_addr_index, &key_s, total_sent.to_le_bytes());
-        
+
         written += 1;
-        
+
         if batch.len() >= batch_size {
             db.write(batch)?;
             batch = rocksdb::WriteBatch::default();
         }
     }
-    
+
     // Write final batch
     if !batch.is_empty() {
         db.write(batch)?;
     }
-    
+
     let spent_rate = if total_utxos_checked > 0 {
         (total_spent_found as f64 / total_utxos_checked as f64) * 100.0
     } else {
         0.0
     };
-    
+
     info!(
         transactions_scanned = processed,
         outputs_indexed = indexed_outputs,
@@ -1459,21 +1515,21 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         spent_rate = spent_rate,
         "Address index building complete"
     );
-    
+
     // UPDATE METRICS: Set current counts for Grafana/Prometheus
     let total_unspent_utxos = total_utxos_checked - total_spent_found;
     metrics::set_total_addresses_indexed(total_addresses as u64);
     metrics::set_total_utxos_tracked(total_unspent_utxos as u64);
     metrics::set_sapling_transactions_count(pass1_sapling_count);
     metrics::increment_sapling_transactions(pass1_sapling_count);
-    
+
     info!(
         metric_addresses = total_addresses,
         metric_utxos_tracked = total_unspent_utxos,
         metric_sapling_tx = pass1_sapling_count,
         "Metrics updated: addresses, UTXOs, and Sapling transactions"
     );
-    
+
     // Persist metrics to database after enrichment completes
     if let Err(e) = metrics::save_metrics_to_db(&db) {
         warn!(error = %e, "Failed to persist metrics to database after enrichment");
@@ -1498,7 +1554,9 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Blockbook), so this needs no extra DB reads and produces the TRUE top
     // holders — replacing the old O(addresses) full-scan endpoints that only
     // sampled the first 10k addresses.
-    if let Err(e) = persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map, &addr_rev) {
+    if let Err(e) =
+        persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map, &addr_rev)
+    {
         warn!(error = %e, "Failed to persist wealth analytics");
     }
 
@@ -1538,7 +1596,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     }
     let db_bg = Arc::clone(&db);
     std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(rt) => rt,
             Err(e) => {
                 warn!(error = %e, "Background: failed to build runtime for daily series");
@@ -1567,7 +1628,11 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             if let Some(cf_state) = db_bg.cf_handle("chain_state") {
                 let mut batch = rocksdb::WriteBatch::default();
                 batch.put_cf(&cf_state, b"analytics_complete", [1u8]);
-                batch.put_cf(&cf_state, crate::analytics_live::K_WATERMARK, tip.to_le_bytes());
+                batch.put_cf(
+                    &cf_state,
+                    crate::analytics_live::K_WATERMARK,
+                    tip.to_le_bytes(),
+                );
                 batch.put_cf(&cf_state, crate::analytics_live::K_READY, [1u8]);
                 // Join series is durably persisted — clear the in-flight marker so a
                 // later restart does NOT trigger the interrupted-enrich recovery, and
@@ -1722,8 +1787,13 @@ pub fn unix_to_date(ts: u64) -> String {
 }
 
 /// Build a height -> block nTime index by reading every canonical block header.
-fn build_block_times(db: &Arc<DB>, tip: i32) -> Result<(Vec<u32>, Vec<u32>), Box<dyn std::error::Error>> {
-    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+fn build_block_times(
+    db: &Arc<DB>,
+    tip: i32,
+) -> Result<(Vec<u32>, Vec<u32>), Box<dyn std::error::Error>> {
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
     let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
     let mut times = vec![0u32; (tip as usize) + 1];
     let mut bits = vec![0u32; (tip as usize) + 1];
@@ -1763,7 +1833,9 @@ fn is_canonical_hash(
     let mut h_display = vec![b'h'];
     h_display.extend(hash.iter().rev());
     for hk in [&h_internal, &h_display] {
-        let Ok(Some(hb)) = db.get_cf(cf_metadata, hk) else { continue };
+        let Ok(Some(hb)) = db.get_cf(cf_metadata, hk) else {
+            continue;
+        };
         if hb.len() != 4 {
             continue;
         }
@@ -1861,9 +1933,13 @@ pub fn mark_orphans(
     tip_time: u32,
     tail_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
     let cf_blocks = db.cf_handle("blocks").ok_or("blocks CF not found")?;
-    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
     let mut batch = rocksdb::WriteBatch::default();
     let mut new_by_date: HashMap<String, u64> = HashMap::new();
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
@@ -1872,7 +1948,11 @@ pub fn mark_orphans(
     if !tail_only {
         for item in db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start) {
             let (key, header) = item?;
-            let hash: &[u8] = if key.len() == 33 && key[0] == b'b' { &key[1..] } else { &key[..] };
+            let hash: &[u8] = if key.len() == 33 && key[0] == b'b' {
+                &key[1..]
+            } else {
+                &key[..]
+            };
             if hash.len() != 32 || header.len() < 72 {
                 continue;
             }
@@ -1883,7 +1963,15 @@ pub fn mark_orphans(
             if is_canonical_hash(db, &cf_metadata, hash) {
                 continue;
             }
-            mark_one(db, &cf_state, &mut batch, &mut seen, &mut new_by_date, hash, t)?;
+            mark_one(
+                db,
+                &cf_state,
+                &mut batch,
+                &mut seen,
+                &mut new_by_date,
+                hash,
+                t,
+            )?;
         }
     }
 
@@ -1915,7 +2003,15 @@ pub fn mark_orphans(
             if is_canonical_hash(db, &cf_metadata, hash) {
                 continue;
             }
-            mark_one(db, &cf_state, &mut batch, &mut seen, &mut new_by_date, hash, t)?;
+            mark_one(
+                db,
+                &cf_state,
+                &mut batch,
+                &mut seen,
+                &mut new_by_date,
+                hash,
+                t,
+            )?;
         }
     }
 
@@ -1972,7 +2068,15 @@ pub async fn rebuild_daily_series_degraded(db: Arc<DB>) -> Result<(), Box<dyn st
     let (block_times, block_bits) = build_block_times(&db, tip)?;
     let empty_joins: HashMap<String, DayJoinAgg> = HashMap::new();
     let empty_treasury: Vec<TreasuryPayout> = Vec::new();
-    persist_tx_daily_series(&db, tip, &block_times, &block_bits, &empty_joins, &empty_treasury).await?;
+    persist_tx_daily_series(
+        &db,
+        tip,
+        &block_times,
+        &block_bits,
+        &empty_joins,
+        &empty_treasury,
+    )
+    .await?;
     if let Some(cf_state) = db.cf_handle("chain_state") {
         db.put_cf(&cf_state, b"analytics_complete", [1u8])?;
         // The degraded base has ZEROED join fields, so it is NOT a valid live
@@ -1992,8 +2096,12 @@ async fn persist_tx_daily_series(
     day_joins: &HashMap<String, DayJoinAgg>,
     coinstake_treasury: &[TreasuryPayout],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
-    let cf_transactions = db.cf_handle("transactions").ok_or("transactions CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    let cf_transactions = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
 
     if tip <= 0 || block_times.len() <= tip as usize {
         return Ok(());
@@ -2109,7 +2217,11 @@ async fn persist_tx_daily_series(
 
     for (date, (diff_sum, blocks)) in &day_diff {
         if let Some(agg) = days.get_mut(date) {
-            agg.avg_difficulty = if *blocks > 0 { diff_sum / *blocks as f64 } else { 0.0 };
+            agg.avg_difficulty = if *blocks > 0 {
+                diff_sum / *blocks as f64
+            } else {
+                0.0
+            };
             agg.blocks = *blocks;
         }
     }
@@ -2188,7 +2300,11 @@ async fn persist_tx_daily_series(
     // by height.
     treasury.extend_from_slice(coinstake_treasury);
     treasury.sort_by_key(|t| t.height);
-    batch.put_cf(&cf_state, b"analytics_treasury", bincode::serialize(&treasury)?);
+    batch.put_cf(
+        &cf_state,
+        b"analytics_treasury",
+        bincode::serialize(&treasury)?,
+    );
     db.write(batch)?;
     info!(
         days = dates.len(),
@@ -2236,7 +2352,9 @@ fn persist_wealth_analytics(
     txs_map: &HashMap<u32, Vec<Vec<u8>>>,
     addr_rev: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
 
     // Compute balance per address (by interned id); keep only positive balances.
     let mut balances: Vec<(u32, i64)> = Vec::with_capacity(totals_received.len());
@@ -2291,7 +2409,10 @@ fn persist_wealth_analytics(
     let histogram: Vec<(String, u64)> = histogram_ranges
         .iter()
         .map(|(min, max, label)| {
-            let count = balances.iter().filter(|(_, b)| *b >= *min && *b < *max).count() as u64;
+            let count = balances
+                .iter()
+                .filter(|(_, b)| *b >= *min && *b < *max)
+                .count() as u64;
             (label.to_string(), count)
         })
         .collect();
@@ -2333,7 +2454,11 @@ fn persist_wealth_analytics(
         nakamoto_coefficient,
     };
 
-    db.put_cf(&cf_state, b"analytics_richlist", bincode::serialize(&richlist)?)?;
+    db.put_cf(
+        &cf_state,
+        b"analytics_richlist",
+        bincode::serialize(&richlist)?,
+    )?;
     db.put_cf(&cf_state, b"analytics_wealth", bincode::serialize(&wealth)?)?;
     info!(
         richlist_entries = richlist.len(),
@@ -2383,7 +2508,9 @@ fn persist_hodl_snapshot(
     if tip <= 0 {
         return Ok(());
     }
-    let cf_state = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
 
     let snapshot = HodlSnapshot {
         bands: HODL_BANDS
@@ -2394,7 +2521,10 @@ fn persist_hodl_snapshot(
         total,
     };
     db.put_cf(&cf_state, b"analytics_hodl", bincode::serialize(&snapshot)?)?;
-    info!(total_sats = total, "HODL age-band snapshot precomputed and stored");
+    info!(
+        total_sats = total,
+        "HODL age-band snapshot precomputed and stored"
+    );
     Ok(())
 }
 
@@ -2491,18 +2621,36 @@ mod tests {
             // vout 0: empty coinstake marker — value 0, empty script => kind 0.
             mk_out(0, 0, vec![], vec![]),
             // vout 1: P2PKH single address => kind 1.
-            mk_out(5_0000_0000, 1, p2pkh_script(), vec!["DStakerOrPayee1111111111111111111"]),
+            mk_out(
+                5_0000_0000,
+                1,
+                p2pkh_script(),
+                vec!["DStakerOrPayee1111111111111111111"],
+            ),
             // vout 2: P2CS cold stake (staker, owner) => kind 2, two DISTINCT ids.
             mk_out(
                 12_0000_0000,
                 2,
                 coldstake_script(),
-                vec!["SStakerColdAddr1111111111111111111", "DOwnerColdAddr1111111111111111111"],
+                vec![
+                    "SStakerColdAddr1111111111111111111",
+                    "DOwnerColdAddr1111111111111111111",
+                ],
             ),
             // vout 3: OP_RETURN (value 0, script starts with 0x6a) => kind 0.
-            mk_out(0, 3, vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef], vec!["ignored"]),
+            mk_out(
+                0,
+                3,
+                vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef],
+                vec!["ignored"],
+            ),
             // vout 4: another P2PKH for the SAME address as vout 1 => same interned id.
-            mk_out(3_0000_0000, 4, p2pkh_script(), vec!["DStakerOrPayee1111111111111111111"]),
+            mk_out(
+                3_0000_0000,
+                4,
+                p2pkh_script(),
+                vec!["DStakerOrPayee1111111111111111111"],
+            ),
         ];
 
         let mut addr_intern: HashMap<String, u32> = HashMap::new();
@@ -2544,8 +2692,14 @@ mod tests {
 
         assert_eq!(packed[4].kind, 1, "second P2PKH => kind 1");
         // Interning round-trip: identical address strings share one dense id.
-        assert_eq!(packed[1].addr_a, packed[4].addr_a, "same address => same id");
-        assert_eq!(addr_rev[packed[1].addr_a as usize], "DStakerOrPayee1111111111111111111");
+        assert_eq!(
+            packed[1].addr_a, packed[4].addr_a,
+            "same address => same id"
+        );
+        assert_eq!(
+            addr_rev[packed[1].addr_a as usize],
+            "DStakerOrPayee1111111111111111111"
+        );
     }
 
     /// ty_to_u8 / u8_to_ty round-trip, with 1 == Coinstake load-bearing for the
@@ -2614,7 +2768,10 @@ mod tests {
             ..base_inputs()
         };
         let c = compute_tx_join(&inp, "2024-01-01");
-        assert_eq!(c.fees_total, 0, "fee suppressed when not all inputs resolved");
+        assert_eq!(
+            c.fees_total, 0,
+            "fee suppressed when not all inputs resolved"
+        );
         assert_eq!(c.coin_days, 42.5);
         assert_eq!(c.p2cs_spent, 3 * COIN);
         assert_eq!(c.p2cs_created, 7 * COIN);
@@ -2663,7 +2820,10 @@ mod tests {
         let c = compute_tx_join(&inp, "d");
         assert_eq!(c.rewards_total, minted);
         assert!(c.treasury.is_none());
-        assert_eq!(c.normal_tx_bytes, 0, "coinstake never counts normal_tx_bytes");
+        assert_eq!(
+            c.normal_tx_bytes, 0,
+            "coinstake never counts normal_tx_bytes"
+        );
         assert_eq!(c.staker_rewards_total, era_staker_reward(h).min(minted));
     }
 
@@ -2712,7 +2872,11 @@ mod tests {
         let c = compute_tx_join(&inp, "d");
         assert_eq!(c.rewards_total, 0);
         assert_eq!(c.staker_rewards_total, 0);
-        assert_eq!(c.p2cs_created, 11 * COIN, "output-only field is unconditional");
+        assert_eq!(
+            c.p2cs_created,
+            11 * COIN,
+            "output-only field is unconditional"
+        );
     }
 
     /// Coinbase contributes only the unconditional output-derived fields.
@@ -2731,4 +2895,3 @@ mod tests {
         assert_eq!(c.p2cs_created, 2 * COIN);
     }
 }
-

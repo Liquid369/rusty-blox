@@ -4,7 +4,7 @@
 //!
 //! Usage: reset-live-watermark [days]   (default 2 = redo the tip day + the day
 //! before it)
-use rustyblox::config::{load_config, get_db_path};
+use rustyblox::config::{get_db_path, load_config};
 use rustyblox::enrich_addresses::unix_to_date;
 use std::collections::BTreeSet;
 
@@ -24,7 +24,10 @@ fn header_date(db: &rocksdb::DB, height: i32) -> Option<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let days: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(2);
+    let days: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2);
     let config = load_config()?;
     let db_path = get_db_path(&config)?;
     let mut opts = rocksdb::Options::default();
@@ -63,7 +66,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("tip={tip}; redoing {} day(s): {:?}; h_first={h_first}", redo.len(), redo);
+    println!(
+        "tip={tip}; redoing {} day(s): {:?}; h_first={h_first}",
+        redo.len(),
+        redo
+    );
     println!("watermark resets to {}", h_first - 1);
 
     // Drop the affected dates from the API index, delete their blobs + side keys,
@@ -77,7 +84,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut batch = rocksdb::WriteBatch::default();
     batch.put_cf(&cf, b"analytics_tx_days", bincode::serialize(&idx)?);
     for d in &redo {
-        for pfx in ["analytics_tx_day:", "live_day_diffsum:", "live_day_intervals:"] {
+        for pfx in [
+            "analytics_tx_day:",
+            "live_day_diffsum:",
+            "live_day_intervals:",
+        ] {
             let mut k = pfx.as_bytes().to_vec();
             k.extend_from_slice(d.as_bytes());
             batch.delete_cf(&cf, &k);
@@ -86,6 +97,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     batch.put_cf(&cf, b"analytics_live_height", (h_first - 1).to_le_bytes());
     db.write(batch)?;
 
-    println!("done — restart the backend; Lane I will rebuild those days from {}.", h_first);
+    println!(
+        "done — restart the backend; Lane I will rebuild those days from {}.",
+        h_first
+    );
     Ok(())
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::chainstate_leveldb;
-use crate::types::{CScript, AddressType};
+use crate::types::{AddressType, CScript};
 use secp256k1::{PublicKey, Secp256k1};
 
 /// Decompress amount following Bitcoin Core / PIVX Core CompressAmount scheme.
@@ -26,7 +26,7 @@ pub fn decompress_amount(x: u64) -> u64 {
 
 /// Decompress script pubkey as used by Core's CompressScript.
 /// Decompress a script from PIVX's ScriptCompression format.
-/// 
+///
 /// Special scripts (types 0-5) are passed with the type byte first:
 /// - Type 0x00 + 20 bytes: P2PKH
 /// - Type 0x01 + 20 bytes: P2SH  
@@ -35,12 +35,14 @@ pub fn decompress_amount(x: u64) -> u64 {
 ///
 /// Non-special scripts are just the raw script bytes (returned as-is).
 pub fn decompress_script(data: &[u8]) -> Vec<u8> {
-    if data.is_empty() { return vec![]; }
+    if data.is_empty() {
+        return vec![];
+    }
 
     // Check if this is a special compressed script (has type byte + data)
     if data.len() == 21 || data.len() == 33 {
         let nsize = data[0];
-        
+
         // P2PKH: 0x00 + 20
         if nsize == 0x00 && data.len() == 21 {
             let mut script = Vec::with_capacity(25);
@@ -75,7 +77,7 @@ pub fn decompress_script(data: &[u8]) -> Vec<u8> {
             script.push(0xac);
             return script;
         }
-        
+
         // P2PK uncompressed: 0x04/0x05 + 32
         // These are stored as 32 bytes + a type indicating which y parity to use.
         // Reconstruct compressed pubkey (0x02/0x03 + 32) and decompress to 65 bytes.
@@ -110,27 +112,43 @@ pub fn decompress_script(data: &[u8]) -> Vec<u8> {
 
 /// Read a CompactSize (Bitcoin varint) from bytes at pos, advancing pos.
 fn read_compact_size(data: &[u8], pos: &mut usize) -> Option<u64> {
-    if *pos >= data.len() { return None; }
+    if *pos >= data.len() {
+        return None;
+    }
     let first = data[*pos];
     *pos += 1;
     match first {
         0..=0xfc => Some(first as u64),
         0xfd => {
-            if *pos + 2 > data.len() { return None; }
-            let v = u16::from_le_bytes([data[*pos], data[*pos+1]]) as u64;
+            if *pos + 2 > data.len() {
+                return None;
+            }
+            let v = u16::from_le_bytes([data[*pos], data[*pos + 1]]) as u64;
             *pos += 2;
             Some(v)
         }
         0xfe => {
-            if *pos + 4 > data.len() { return None; }
-            let v = u32::from_le_bytes([data[*pos], data[*pos+1], data[*pos+2], data[*pos+3]]) as u64;
+            if *pos + 4 > data.len() {
+                return None;
+            }
+            let v = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]])
+                as u64;
             *pos += 4;
             Some(v)
         }
         0xff => {
-            if *pos + 8 > data.len() { return None; }
+            if *pos + 8 > data.len() {
+                return None;
+            }
             let v = u64::from_le_bytes([
-                data[*pos], data[*pos+1], data[*pos+2], data[*pos+3], data[*pos+4], data[*pos+5], data[*pos+6], data[*pos+7]
+                data[*pos],
+                data[*pos + 1],
+                data[*pos + 2],
+                data[*pos + 3],
+                data[*pos + 4],
+                data[*pos + 5],
+                data[*pos + 6],
+                data[*pos + 7],
             ]);
             *pos += 8;
             Some(v)
@@ -161,7 +179,7 @@ pub enum OutputKind {
 
 /// Parse a single raw CCoins value (as stored in chainstate LevelDB) into
 /// a ParsedCoins structure. Returns None on parse error.
-/// 
+///
 /// PIVX COIN FORMAT (different from Bitcoin!):
 /// code = VARINT((coinbase ? 2 : 0) | (coinstake ? 1 : 0) | (height << 2))
 /// - Bit 0: coinstake flag (PIVX-specific)
@@ -171,22 +189,27 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
     let mut pos = 0usize;
     // PIVX format: code = nHeight * 4 + (fCoinBase ? 2 : 0) + (fCoinStake ? 1 : 0)
     let code = read_compact_size(raw, &mut pos)?;
-    let height = (code >> 2) as u32;           // Extract height from bits 2+
-    let is_coinbase = (code & 2) != 0;         // Check bit 1
-    let is_coinstake = (code & 1) != 0;        // Check bit 0 (PIVX-specific)
+    let height = (code >> 2) as u32; // Extract height from bits 2+
+    let is_coinbase = (code & 2) != 0; // Check bit 1
+    let is_coinstake = (code & 1) != 0; // Check bit 0 (PIVX-specific)
 
     // mask: vector<unsigned char> (compact size length + bytes)
     // mask: vector<unsigned char> (compact size length + bytes)
     // mask_len is the number of bytes in the bitmap; each bit represents an output (vout)
     let mask_len = read_compact_size(raw, &mut pos)? as usize;
-    if pos + mask_len > raw.len() { return None; }
-    let mask_bytes = &raw[pos..pos+mask_len];
+    if pos + mask_len > raw.len() {
+        return None;
+    }
+    let mask_bytes = &raw[pos..pos + mask_len];
     pos += mask_len;
 
     let mut unspent_outputs: Vec<(usize, u64, Vec<u8>, OutputKind, Vec<String>)> = Vec::new();
 
     // Count set bits in mask to know how many outputs to expect
-    let _expected_bits = mask_bytes.iter().map(|b| b.count_ones() as usize).sum::<usize>();
+    let _expected_bits = mask_bytes
+        .iter()
+        .map(|b| b.count_ones() as usize)
+        .sum::<usize>();
     let mut parsed_count = 0usize;
 
     // Walk mask bits; for each set bit read amount and script
@@ -201,7 +224,9 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
 
             if (b >> bit) & 1 == 1 {
                 let vout_index = byte_i * 8 + bit;
-                if vout_index >= max_vouts { break; }
+                if vout_index >= max_vouts {
+                    break;
+                }
 
                 // LENIENT: Try to read amount, but break loop if it fails (don't return None)
                 let amt_compact = match read_compact_size(raw, &mut pos) {
@@ -217,16 +242,16 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
                 //    - Types 2-5: 32 bytes (P2PK)
                 // 3. If nSize >= 6: non-special script
                 //    - Actual script size = nSize - 6
-                
+
                 let nsize = match read_compact_size(raw, &mut pos) {
                     Some(v) => v as usize,
                     None => break 'outer,
                 };
-                
+
                 let script_comp: Vec<u8>;
-                
+
                 const N_SPECIAL_SCRIPTS: usize = 6;
-                
+
                 if nsize < N_SPECIAL_SCRIPTS {
                     // Special compressed script - read fixed-size data
                     let data_len = if nsize <= 1 { 20 } else { 32 };
@@ -237,7 +262,7 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
                     // For special scripts, we need to include the type byte + data
                     script_comp = {
                         let mut v = Vec::with_capacity(1 + data_len);
-                        v.push(nsize as u8);  // Type byte (0-5)
+                        v.push(nsize as u8); // Type byte (0-5)
                         v.extend_from_slice(&raw[pos..pos + data_len]);
                         v
                     };
@@ -255,11 +280,13 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
                     script_comp = raw[pos..pos + script_len].to_vec();
                     pos += script_len;
                 }
-                
+
                 let script = decompress_script(&script_comp);
 
                 // Try to identify special PIVX output kinds (staking, zerocoin, sapling)
-                let cs = CScript { script: script.clone() };
+                let cs = CScript {
+                    script: script.clone(),
+                };
                 let addr_type_opt = crate::address::scriptpubkey_to_address_blocking(&cs);
 
                 // Determine output kind based on flags and script type
@@ -276,11 +303,20 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
                         OutputKind::Sapling
                     } else {
                         match addr_type_opt.as_ref() {
-                            Some(AddressType::Staking(staker, owner)) => OutputKind::ColdStake { staker: staker.clone(), owner: owner.clone() },
+                            Some(AddressType::Staking(staker, owner)) => OutputKind::ColdStake {
+                                staker: staker.clone(),
+                                owner: owner.clone(),
+                            },
                             Some(AddressType::CoinStakeTx) => OutputKind::CoinStake,
-                            Some(AddressType::ZerocoinMint) => OutputKind::Zerocoin("mint".to_string()),
-                            Some(AddressType::ZerocoinSpend) => OutputKind::Zerocoin("spend".to_string()),
-                            Some(AddressType::ZerocoinPublicSpend) => OutputKind::Zerocoin("publicspend".to_string()),
+                            Some(AddressType::ZerocoinMint) => {
+                                OutputKind::Zerocoin("mint".to_string())
+                            }
+                            Some(AddressType::ZerocoinSpend) => {
+                                OutputKind::Zerocoin("spend".to_string())
+                            }
+                            Some(AddressType::ZerocoinPublicSpend) => {
+                                OutputKind::Zerocoin("publicspend".to_string())
+                            }
                             Some(AddressType::Sapling) => OutputKind::Sapling,
                             Some(_) => OutputKind::Standard,
                             None => OutputKind::Unknown,
@@ -291,7 +327,8 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
                 // Resolve address strings now (once) to avoid re-resolving later in aggregator
                 let mut resolved_addrs: Vec<String> = Vec::new();
                 if let Some(addr_type) = addr_type_opt {
-                    resolved_addrs = crate::address::address_type_to_string_blocking(Some(addr_type));
+                    resolved_addrs =
+                        crate::address::address_type_to_string_blocking(Some(addr_type));
                 }
 
                 unspent_outputs.push((vout_index, amount, script, kind, resolved_addrs));
@@ -304,7 +341,11 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
     // This is LENIENT parsing - we accept incomplete data rather than rejecting everything
     // As long as we got SOME outputs, the data is useful
     if parsed_count > 0 || !unspent_outputs.is_empty() {
-        Some(ParsedCoins { height, is_coinbase, unspent_outputs })
+        Some(ParsedCoins {
+            height,
+            is_coinbase,
+            unspent_outputs,
+        })
     } else {
         // Completely empty or failed to parse anything - return None
         None
@@ -314,7 +355,9 @@ pub fn parse_coins_value(raw: &[u8]) -> Option<ParsedCoins> {
 /// Fully aggregate chainstate balances by address. This opens the copied
 /// LevelDB at `chainstate_path`, parses every 'C' entry, and sums amounts
 /// per extracted address. Addresses are derived using `address::scriptpubkey_to_address`.
-pub fn aggregate_chainstate_balances(chainstate_path: &str) -> Result<HashMap<String, u64>, Box<dyn std::error::Error>> {
+pub fn aggregate_chainstate_balances(
+    chainstate_path: &str,
+) -> Result<HashMap<String, u64>, Box<dyn std::error::Error>> {
     // Default options: don't include shielded/unknown outputs
     aggregate_chainstate_balances_with_opts(chainstate_path, AggregateOptions::default())
 }
@@ -334,12 +377,21 @@ pub struct AggregateOptions {
 
 impl Default for AggregateOptions {
     fn default() -> Self {
-        AggregateOptions { include_shielded: false, include_unknown: false, include_coinbase: true, coinbase_maturity: None, current_height: None }
+        AggregateOptions {
+            include_shielded: false,
+            include_unknown: false,
+            include_coinbase: true,
+            coinbase_maturity: None,
+            current_height: None,
+        }
     }
 }
 
 /// Aggregate balances with options. Keeps behavior internal-only.
-pub fn aggregate_chainstate_balances_with_opts(chainstate_path: &str, opts: AggregateOptions) -> Result<HashMap<String, u64>, Box<dyn std::error::Error>> {
+pub fn aggregate_chainstate_balances_with_opts(
+    chainstate_path: &str,
+    opts: AggregateOptions,
+) -> Result<HashMap<String, u64>, Box<dyn std::error::Error>> {
     let agg = aggregate_chainstate_with_coinbase_opts(chainstate_path, opts)?;
     Ok(agg.balances)
 }
@@ -359,7 +411,10 @@ pub struct AggregationResult {
 }
 
 /// Core aggregator that returns both per-address balances and separate coinbase totals.
-pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: AggregateOptions) -> Result<AggregationResult, Box<dyn std::error::Error>> {
+pub fn aggregate_chainstate_with_coinbase_opts(
+    chainstate_path: &str,
+    opts: AggregateOptions,
+) -> Result<AggregationResult, Box<dyn std::error::Error>> {
     let raw_map = chainstate_leveldb::read_chainstate_map(chainstate_path)?;
     let mut balances: HashMap<String, u64> = HashMap::new();
     let mut coinbase_balances: HashMap<String, u64> = HashMap::new();
@@ -368,7 +423,9 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
     for (_key_hex, raw_val) in raw_map.into_iter() {
         if let Some(parsed) = parse_coins_value(&raw_val) {
             for (_vout, amount, script, kind, addrs) in parsed.unspent_outputs {
-                if amount == 0 { continue; }
+                if amount == 0 {
+                    continue;
+                }
 
                 let mut is_coinbase_output = false;
                 if let OutputKind::Coinbase = kind {
@@ -388,7 +445,9 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
                     if !opts.include_coinbase {
                         coinbase_accepted_for_balances = false;
                     }
-                    if let (Some(maturity), Some(current_h)) = (opts.coinbase_maturity, opts.current_height) {
+                    if let (Some(maturity), Some(current_h)) =
+                        (opts.coinbase_maturity, opts.current_height)
+                    {
                         let coin_h = parsed.height;
                         if current_h < coin_h.saturating_add(maturity) {
                             coinbase_accepted_for_balances = false;
@@ -399,7 +458,9 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
                 // Use resolved addresses produced by parse_coins_value when available
                 if !addrs.is_empty() {
                     for a in addrs {
-                        if a == "Nonstandard" || a == "CoinBaseTx" || a == "CoinStakeTx" { continue; }
+                        if a == "Nonstandard" || a == "CoinBaseTx" || a == "CoinStakeTx" {
+                            continue;
+                        }
                         if is_coinbase_output {
                             let entry = coinbase_balances.entry(a.clone()).or_insert(0);
                             *entry = entry.saturating_add(amount);
@@ -444,9 +505,12 @@ pub fn aggregate_chainstate_with_coinbase_opts(chainstate_path: &str, opts: Aggr
         }
     }
 
-    Ok(AggregationResult { balances, coinbase_balances, coinbase_total })
+    Ok(AggregationResult {
+        balances,
+        coinbase_balances,
+        coinbase_total,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -499,7 +563,12 @@ mod tests {
     /// Build a CCoins raw value in PIVX encoding:
     ///   code = height*4 + coinbase*2 + coinstake*1, a mask with each `vout` bit
     ///   set, then per-output `compact(amt) ++ script_field` in ascending vout.
-    fn coins(height: u32, coinbase: bool, coinstake: bool, outs: &[(usize, u64, Vec<u8>)]) -> Vec<u8> {
+    fn coins(
+        height: u32,
+        coinbase: bool,
+        coinstake: bool,
+        outs: &[(usize, u64, Vec<u8>)],
+    ) -> Vec<u8> {
         let code = height as u64 * 4 + u64::from(coinbase) * 2 + u64::from(coinstake);
         let max_vout = outs.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
         let mask_len = max_vout / 8 + 1;
@@ -521,7 +590,12 @@ mod tests {
 
     #[test]
     fn test_parse_coins_value_simple_p2pkh() {
-        let raw = coins(100, false, false, &[(0, 1, special_script(0x00, &[0x11u8; 20]))]);
+        let raw = coins(
+            100,
+            false,
+            false,
+            &[(0, 1, special_script(0x00, &[0x11u8; 20]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.height, 100);
         assert!(!parsed.is_coinbase);
@@ -539,7 +613,12 @@ mod tests {
     #[test]
     fn test_parse_coins_value_multi_byte_mask() {
         // vout 10 -> mask byte 1, bit 2 (a 2-byte mask).
-        let raw = coins(300, false, false, &[(10, 1, special_script(0x00, &[0x22u8; 20]))]);
+        let raw = coins(
+            300,
+            false,
+            false,
+            &[(10, 1, special_script(0x00, &[0x22u8; 20]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.height, 300);
         assert_eq!(parsed.unspent_outputs.len(), 1);
@@ -550,7 +629,12 @@ mod tests {
 
     #[test]
     fn test_parse_coins_value_p2sh() {
-        let raw = coins(50, false, false, &[(0, 5, special_script(0x01, &[0x33u8; 20]))]);
+        let raw = coins(
+            50,
+            false,
+            false,
+            &[(0, 5, special_script(0x01, &[0x33u8; 20]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
         let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
@@ -561,7 +645,12 @@ mod tests {
 
     #[test]
     fn test_parse_coins_value_p2pk_compressed() {
-        let raw = coins(10, false, false, &[(0, 2, special_script(0x02, &[0x44u8; 32]))]);
+        let raw = coins(
+            10,
+            false,
+            false,
+            &[(0, 2, special_script(0x02, &[0x44u8; 32]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
         let (_vout, _amount, script, _kind, _addrs) = &parsed.unspent_outputs[0];
@@ -572,7 +661,12 @@ mod tests {
 
     #[test]
     fn test_parse_coins_value_zero_amount_present() {
-        let raw = coins(5, false, false, &[(0, 0, special_script(0x00, &[0x55u8; 20]))]);
+        let raw = coins(
+            5,
+            false,
+            false,
+            &[(0, 0, special_script(0x00, &[0x55u8; 20]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
         let (_vout, amount, _script, _kind, _addrs) = &parsed.unspent_outputs[0];
@@ -624,7 +718,12 @@ mod tests {
     #[test]
     fn test_parse_coins_value_zerocoin_detection() {
         // 0xc1 = OP_ZEROCOINMINT.
-        let raw = coins(2, false, false, &[(0, 1, full_script(&[0xc1u8, 0x00, 0x01]))]);
+        let raw = coins(
+            2,
+            false,
+            false,
+            &[(0, 1, full_script(&[0xc1u8, 0x00, 0x01]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert_eq!(parsed.unspent_outputs.len(), 1);
         let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];
@@ -637,7 +736,12 @@ mod tests {
     #[test]
     fn test_parse_coins_value_coinbase_flag() {
         // code = height*4 + 2 sets the coinbase bit.
-        let raw = coins(1, true, false, &[(0, 7, special_script(0x00, &[0x11u8; 20]))]);
+        let raw = coins(
+            1,
+            true,
+            false,
+            &[(0, 7, special_script(0x00, &[0x11u8; 20]))],
+        );
         let parsed = parse_coins_value(&raw).expect("parse should succeed");
         assert!(parsed.is_coinbase);
         let (_v, _a, _s, kind, _addrs) = &parsed.unspent_outputs[0];

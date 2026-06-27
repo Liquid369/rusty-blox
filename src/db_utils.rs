@@ -1,7 +1,7 @@
+use rocksdb::{WriteBatch, WriteOptions, DB};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use rocksdb::{DB, WriteBatch, WriteOptions};
 
 pub const IN_PROGRESS: &str = "in-progress";
 
@@ -120,30 +120,24 @@ pub async fn perform_rocksdb_del(
 // Non-column-family helper functions for API handlers
 pub async fn db_get_blocking(db: Arc<DB>, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
     let key = key.to_vec();
-    tokio::task::spawn_blocking(move || {
-        db.get(&key).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))?
+    tokio::task::spawn_blocking(move || db.get(&key).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_put_blocking(db: Arc<DB>, key: &[u8], value: &[u8]) -> Result<(), String> {
     let key = key.to_vec();
     let value = value.to_vec();
-    tokio::task::spawn_blocking(move || {
-        db.put(&key, &value).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))?
+    tokio::task::spawn_blocking(move || db.put(&key, &value).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 pub async fn db_delete_blocking(db: Arc<DB>, key: &[u8]) -> Result<(), String> {
     let key = key.to_vec();
-    tokio::task::spawn_blocking(move || {
-        db.delete(&key).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("Task join error: {e}"))?
+    tokio::task::spawn_blocking(move || db.delete(&key).map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// Batch write multiple key-value pairs to a column family in a single atomic operation

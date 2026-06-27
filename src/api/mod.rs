@@ -3,33 +3,33 @@
 // This module provides a clean, maintainable API with caching support.
 // Each domain (blocks, transactions, addresses, etc.) is in its own submodule.
 
-pub mod types;
-pub mod helpers;
-pub mod network;
-pub mod blocks;
-pub mod transactions;
 pub mod addresses;
-pub mod masternodes;
-pub mod governance;
-pub mod search;
 pub mod analytics;
+pub mod blocks;
+pub mod governance;
+pub mod helpers;
+pub mod masternodes;
+pub mod network;
 pub mod price;
+pub mod search;
+pub mod transactions;
+pub mod types;
 
 #[cfg(test)]
 mod xpub_tests;
 
 // Re-export all public items
-pub use types::*;
-pub use helpers::*;
-pub use network::*;
-pub use blocks::*;
-pub use transactions::*;
 pub use addresses::*;
-pub use masternodes::*;
-pub use governance::*;
-pub use search::*;
 pub use analytics::*;
+pub use blocks::*;
+pub use governance::*;
+pub use helpers::*;
+pub use masternodes::*;
+pub use network::*;
 pub use price::*;
+pub use search::*;
+pub use transactions::*;
+pub use types::*;
 
 // Degraded "/" fallback. main.rs only routes here when the SPA ServeDir did
 // NOT find `{paths.frontend_dist}/index.html` at startup, so we re-read the SAME

@@ -3,18 +3,21 @@
 // NOTE: These are complex endpoints with significant database operations.
 // Caching provides moderate benefits since addresses are frequently updated.
 
-use axum::{Json, Extension, extract::{Path as AxumPath, Query}};
+use axum::{
+    extract::{Path as AxumPath, Query},
+    Extension, Json,
+};
 use rocksdb::DB;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+use super::transactions::fetch_transactions_batch;
+use super::types::{AddressInfo, AddressQuery, UtxoQuery, XPubInfo, UTXO};
 use crate::cache::CacheManager;
-use crate::constants::{HEIGHT_ORPHAN, HEIGHT_UNRESOLVED, is_canonical_height};
-use crate::parser::{deserialize_utxos, deserialize_transaction, deserialize_transaction_blocking};
+use crate::constants::{is_canonical_height, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 use crate::maturity::get_current_height;
-use super::types::{AddressInfo, AddressQuery, XPubInfo, UTXO, UtxoQuery};
-use super::transactions::{fetch_transactions_batch};
+use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, deserialize_utxos};
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
@@ -22,7 +25,7 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
     if xpub.len() <= 12 {
         return "<invalid>".to_string();
     }
-    format!("{}...{}", &xpub[..8], &xpub[xpub.len()-4..])
+    format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 4..])
 }
 
 /// P2-B: validate a PIVX transparent address before treating it as a real
@@ -168,17 +171,13 @@ pub async fn addr_v2(
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
     let params_clone = params.clone();
-    
+
     let result = cache
-        .get_or_compute(
-            &cache_key,
-            Duration::from_secs(30),
-            || async move {
-                compute_address_info(&db_clone, &address_clone, &params_clone).await
-            }
-        )
+        .get_or_compute(&cache_key, Duration::from_secs(30), || async move {
+            compute_address_info(&db_clone, &address_clone, &params_clone).await
+        })
         .await;
-    
+
     match result {
         Ok(info) => Ok(Json(info)),
         Err(_) => {
@@ -215,15 +214,18 @@ async fn compute_address_info(
     let db_clone = Arc::clone(db);
 
     let tx_list_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let cf_addr_index = db_clone.cf_handle("addr_index")
+        let cf_addr_index = db_clone
+            .cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
-        db_clone.get_cf(&cf_addr_index, &tx_list_key_bytes)
+        db_clone
+            .get_cf(&cf_addr_index, &tx_list_key_bytes)
             .map_err(|e| e.to_string())
             .map(|opt| opt.unwrap_or_default())
     })
     .await??;
 
-    let all_txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
+    let all_txids: Vec<Vec<u8>> = tx_list_data
+        .chunks_exact(32)
         .map(|chunk| chunk.to_vec())
         .collect();
 
@@ -252,9 +254,7 @@ async fn compute_address_info(
     // 't' + display bytes). Emit them directly — a prior extra .reverse()
     // flipped txids to a non-canonical order that the node, duddino, and every
     // other explorer reject (broke Blockbook compat on /address.txids[]).
-    let unique_txids: Vec<String> = all_txids.iter()
-        .map(hex::encode)
-        .collect();
+    let unique_txids: Vec<String> = all_txids.iter().map(hex::encode).collect();
 
     // Order newest-first by block height. This is the only history-sized step
     // left, so do it as ONE blocking pass: a single get_cf per txid that reads
@@ -285,14 +285,17 @@ async fn compute_address_info(
             for txid in txids_for_sort {
                 // tx CF is keyed by 't' + canonical display-order bytes (exactly
                 // the bytes we just hex-encoded), so decode straight back to it.
-                let height = hex::decode(&txid).ok()
+                let height = hex::decode(&txid)
+                    .ok()
                     .and_then(|txid_bytes| {
                         let mut key = vec![b't'];
                         key.extend(&txid_bytes);
                         db_clone.get_cf(&cf, &key).ok().flatten()
                     })
                     .filter(|tx_data| tx_data.len() >= 8)
-                    .map(|tx_data| i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]))
+                    .map(|tx_data| {
+                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]])
+                    })
                     .unwrap_or(0);
                 txid_heights.push((txid, height));
             }
@@ -320,18 +323,20 @@ async fn compute_address_info(
     const MAX_PAGE_SIZE: u32 = 1000;
     let page = params.page.max(1);
     let page_size = params.page_size.clamp(1, MAX_PAGE_SIZE);
-    
+
     let total_tx_count = all_txids.len();
     let total_pages = if total_tx_count == 0 {
         1
     } else {
         ((total_tx_count as f64) / (page_size as f64)).ceil() as u32
     };
-    
+
     // Calculate pagination indices
     let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
-    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
-    
+    let end_idx = start_idx
+        .saturating_add(page_size as usize)
+        .min(total_tx_count);
+
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
         (vec![], 0)
@@ -339,7 +344,7 @@ async fn compute_address_info(
         let slice = &all_txids[start_idx..end_idx];
         (slice.to_vec(), slice.len())
     };
-    
+
     // === DETAILS MODE HANDLING ===
     // Blockbook API:
     // - basic: No transaction data (just balances)
@@ -349,29 +354,29 @@ async fn compute_address_info(
         "basic" => {
             // No transaction data at all
             (None, None)
-        },
+        }
         "txs" => {
             // Full transaction objects - fetch them
             let txs = fetch_transactions_batch(db, &paginated_txids).await;
             (None, Some(txs))
-        },
+        }
         _ => {
             // Default: "txids" or any other value = just txid strings
             (Some(paginated_txids), None)
         }
     };
-    
+
     Ok(AddressInfo {
         page: Some(page),
         total_pages: Some(total_pages),
-        items_on_page: Some(actual_items as u32),  // Actual count, not pageSize
+        items_on_page: Some(actual_items as u32), // Actual count, not pageSize
         address: address.to_string(),
         balance: balance.to_string(),
         total_received: total_received.to_string(),
         total_sent: total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_tx_count as u32,  // Total tx count (not paginated count)
+        txs: total_tx_count as u32, // Total tx count (not paginated count)
         txids,
         transactions,
     })
@@ -379,7 +384,7 @@ async fn compute_address_info(
 
 /// GET /api/v2/xpub/{xpub}
 /// Returns aggregated data for all addresses derived from extended public key.
-/// 
+///
 /// **CACHED**: 5 minute TTL
 pub async fn xpub_v2(
     AxumPath(xpub_str): AxumPath<String>,
@@ -408,17 +413,13 @@ pub async fn xpub_v2(
     let db_clone = Arc::clone(&db);
     let xpub_clone = xpub_str.clone();
     let params_clone = params.clone();
-    
+
     let result = cache
-        .get_or_compute(
-            &cache_key,
-            Duration::from_secs(300),
-            || async move {
-                compute_xpub_info(&db_clone, &xpub_clone, &params_clone).await
-            }
-        )
+        .get_or_compute(&cache_key, Duration::from_secs(300), || async move {
+            compute_xpub_info(&db_clone, &xpub_clone, &params_clone).await
+        })
         .await;
-    
+
     match result {
         Ok(info) => Ok(Json(info)),
         Err(e) => {
@@ -426,7 +427,7 @@ pub async fn xpub_v2(
             warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
             Err((
                 axum::http::StatusCode::BAD_REQUEST,
-                Json(super::types::BlockbookError::new(e.to_string()))
+                Json(super::types::BlockbookError::new(e.to_string())),
             ))
         }
     }
@@ -439,11 +440,12 @@ async fn compute_xpub_info(
 ) -> Result<XPubInfo, Box<dyn std::error::Error + Send + Sync>> {
     use bitcoin::util::bip32::ExtendedPubKey;
     use std::str::FromStr;
-    
+
     // Parse and validate the xpub
-    let xpub = ExtendedPubKey::from_str(xpub_str)
-        .map_err(|e| format!("Invalid xpub format: {e}. Please provide a valid BIP32 extended public key."))?;
-    
+    let xpub = ExtendedPubKey::from_str(xpub_str).map_err(|e| {
+        format!("Invalid xpub format: {e}. Please provide a valid BIP32 extended public key.")
+    })?;
+
     // Validate xpub is at correct depth (account level = 3 for m/44'/119'/account')
     if xpub.depth != 3 {
         return Err(format!(
@@ -451,7 +453,7 @@ async fn compute_xpub_info(
             xpub.depth
         ).into());
     }
-    
+
     // Validate gap limit parameter (if provided)
     if let Some(gap) = params.gap_limit {
         if gap == 0 {
@@ -461,7 +463,7 @@ async fn compute_xpub_info(
             return Err("Gap limit cannot exceed 200 for performance reasons".into());
         }
     }
-    
+
     // Validate max_scan parameter (if provided) - limits total addresses scanned per request
     if let Some(max_scan) = params.max_scan {
         if max_scan == 0 {
@@ -471,68 +473,68 @@ async fn compute_xpub_info(
             return Err("Max scan limit cannot exceed 2000 for performance reasons".into());
         }
     }
-    
+
     // Note: PIVX uses the same xpub version bytes as Bitcoin (0x0488B21E) for wallet compatibility.
     // This is intentional and allows PIVX wallets to use standard BIP32 tools.
     // We cannot validate coin type from the xpub itself as it's not encoded in the serialization.
-    
+
     // Create secp256k1 context once for all derivations (performance optimization)
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    
+
     // BIP44 gap limit: stop scanning after N consecutive unused addresses
     let gap_limit = params.gap_limit.unwrap_or(20); // Default 20 per BIP44
     let max_scan_limit = params.max_scan.unwrap_or(1000); // Configurable safety limit (default 1000)
-    
+
     // Derive addresses with gap limit logic for both chains
     let mut all_addresses: Vec<(String, String)> = Vec::new(); // (address, path)
-    
+
     // External chain (receive addresses): m/44'/119'/account'/0/index
     let mut external_consecutive_unused = 0;
     for i in 0..max_scan_limit {
         if external_consecutive_unused >= gap_limit {
             break; // Gap limit reached
         }
-        
+
         match derive_address(&xpub, &secp, 0, i, xpub.depth) {
             Ok((address, path)) => {
                 // Check if address has activity
                 let has_activity = check_address_activity(db, &address).await?;
-                
+
                 if has_activity {
                     external_consecutive_unused = 0; // Reset gap counter
                 } else {
                     external_consecutive_unused += 1;
                 }
-                
+
                 all_addresses.push((address, path));
-            },
+            }
             Err(_) => break,
         }
     }
-    
+
     // Internal chain (change addresses): m/44'/119'/account'/1/index
     let mut internal_consecutive_unused = 0;
     for i in 0..max_scan_limit {
         if internal_consecutive_unused >= gap_limit {
             break; // Gap limit reached
         }
-        
+
         match derive_address(&xpub, &secp, 1, i, xpub.depth) {
             Ok((address, path)) => {
                 let has_activity = check_address_activity(db, &address).await?;
-                
+
                 if has_activity {
                     internal_consecutive_unused = 0;
                 } else {
                     internal_consecutive_unused += 1;
                 }
-                
+
                 all_addresses.push((address, path));
-            },
+            }
             Err(_) => break,
         }
     }
-    
+
     // Aggregate UTXOs and transactions from all derived addresses
     aggregate_xpub_data(db, xpub_str, &all_addresses, params).await
 }
@@ -546,21 +548,21 @@ pub(crate) fn derive_address(
     xpub_depth: u8,
 ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
     use bitcoin::util::bip32::ChildNumber;
-    
+
     // Derive: xpub/chain/index
     let chain_key = xpub.ckd_pub(secp, ChildNumber::from_normal_idx(chain)?)?;
     let child_key = chain_key.ckd_pub(secp, ChildNumber::from_normal_idx(index)?)?;
-    
+
     let pubkey_hash = child_key.public_key.pubkey_hash();
-    
+
     // Encode as PIVX address (version 30 for mainnet P2PKH)
     let address = crate::parser::encode_pivx_address(pubkey_hash.as_ref(), 30)
         .ok_or("Failed to encode PIVX address")?;
-    
+
     // Construct full derivation path
     let account = xpub_depth.saturating_sub(3);
     let path = format!("m/44'/119'/{account}'/{chain}/{index}");
-    
+
     Ok((address, path))
 }
 
@@ -572,35 +574,36 @@ async fn check_address_activity(
     // Check UTXO key: 'a' + address
     let utxo_key = format!("a{address}");
     let utxo_key_bytes = utxo_key.as_bytes().to_vec();
-    
+
     // Check transaction list key: 't' + address
     let tx_key = format!("t{address}");
     let tx_key_bytes = tx_key.as_bytes().to_vec();
-    
+
     let db_clone = db.clone();
-    
+
     let has_activity = tokio::task::spawn_blocking(move || -> Result<bool, String> {
-        let cf_addr_index = db_clone.cf_handle("addr_index")
+        let cf_addr_index = db_clone
+            .cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
-        
+
         // Check UTXOs
         if let Ok(Some(utxo_data)) = db_clone.get_cf(&cf_addr_index, &utxo_key_bytes) {
             if !utxo_data.is_empty() {
                 return Ok(true);
             }
         }
-        
+
         // Check transaction history
         if let Ok(Some(tx_data)) = db_clone.get_cf(&cf_addr_index, &tx_key_bytes) {
             if !tx_data.is_empty() {
                 return Ok(true);
             }
         }
-        
+
         Ok(false)
     })
     .await??;
-    
+
     Ok(has_activity)
 }
 
@@ -612,70 +615,81 @@ async fn aggregate_xpub_data(
     params: &AddressQuery,
 ) -> Result<XPubInfo, Box<dyn std::error::Error + Send + Sync>> {
     use std::collections::HashSet;
-    
+
     let mut all_txids = HashSet::new();
     let mut used_addresses: Vec<(String, String, usize, i64, i64, i64)> = Vec::new();
-    
+
     // Get current chain height for maturity checks
     let _current_height = get_current_height(db).unwrap_or(0);
-    
+
     // PERFORMANCE OPTIMIZATION: Batch all address lookups into single multi_get_cf call
     // This replaces N sequential queries with 1 batched query (10-50x faster)
-    
+
     // Build batch of UTXO keys ("a" + address)
-    let utxo_keys: Vec<Vec<u8>> = all_addresses.iter()
+    let utxo_keys: Vec<Vec<u8>> = all_addresses
+        .iter()
         .map(|(addr, _)| format!("a{addr}").into_bytes())
         .collect();
-    
+
     // Build batch of transaction list keys ("t" + address)
-    let tx_list_keys: Vec<Vec<u8>> = all_addresses.iter()
+    let tx_list_keys: Vec<Vec<u8>> = all_addresses
+        .iter()
         .map(|(addr, _)| format!("t{addr}").into_bytes())
         .collect();
-    
+
     let db_clone = db.clone();
     let utxo_keys_clone = utxo_keys.clone();
     let tx_list_keys_clone = tx_list_keys.clone();
-    
+
     // Execute batched queries
-    let (utxo_results, tx_list_results) = tokio::task::spawn_blocking(move || -> Result<(Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>), String> {
-        let cf_addr_index = db_clone.cf_handle("addr_index")
-            .ok_or_else(|| "addr_index CF not found".to_string())?;
-        
-        // Batch get UTXOs for all addresses
-        let utxo_batch: Vec<_> = utxo_keys_clone.iter()
-            .map(|k| (&cf_addr_index, k.as_slice()))
-            .collect();
-        let utxo_results: Vec<Option<Vec<u8>>> = db_clone.multi_get_cf(utxo_batch)
-            .into_iter()
-            .map(|r| r.ok().flatten())
-            .collect();
-        
-        // Batch get transaction lists for all addresses
-        let tx_list_batch: Vec<_> = tx_list_keys_clone.iter()
-            .map(|k| (&cf_addr_index, k.as_slice()))
-            .collect();
-        let tx_list_results: Vec<Option<Vec<u8>>> = db_clone.multi_get_cf(tx_list_batch)
-            .into_iter()
-            .map(|r| r.ok().flatten())
-            .collect();
-        
-        Ok((utxo_results, tx_list_results))
-    })
+    let (utxo_results, tx_list_results) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>), String> {
+            let cf_addr_index = db_clone
+                .cf_handle("addr_index")
+                .ok_or_else(|| "addr_index CF not found".to_string())?;
+
+            // Batch get UTXOs for all addresses
+            let utxo_batch: Vec<_> = utxo_keys_clone
+                .iter()
+                .map(|k| (&cf_addr_index, k.as_slice()))
+                .collect();
+            let utxo_results: Vec<Option<Vec<u8>>> = db_clone
+                .multi_get_cf(utxo_batch)
+                .into_iter()
+                .map(|r| r.ok().flatten())
+                .collect();
+
+            // Batch get transaction lists for all addresses
+            let tx_list_batch: Vec<_> = tx_list_keys_clone
+                .iter()
+                .map(|k| (&cf_addr_index, k.as_slice()))
+                .collect();
+            let tx_list_results: Vec<Option<Vec<u8>>> = db_clone
+                .multi_get_cf(tx_list_batch)
+                .into_iter()
+                .map(|r| r.ok().flatten())
+                .collect();
+
+            Ok((utxo_results, tx_list_results))
+        },
+    )
     .await
     .map_err(|e| format!("Task join error: {e}"))?
     .map_err(|e| e.to_string())?;
-    
+
     // Process each address with pre-fetched data
     for (idx, (address, path)) in all_addresses.iter().enumerate() {
-        let utxo_data = utxo_results.get(idx)
-            .and_then(|opt| opt.as_ref()).cloned()
+        let utxo_data = utxo_results
+            .get(idx)
+            .and_then(|opt| opt.as_ref())
+            .cloned()
             .unwrap_or_default();
-        
+
         let utxos = deserialize_utxos(&utxo_data).await;
-        
+
         // Blockbook parity: include immature outputs in xpub balances
         let spendable_utxos = utxos.clone();
-        
+
         // Calculate balance for this address
         let mut address_balance: i64 = 0;
         for (txid_hash, output_index) in &spendable_utxos {
@@ -683,17 +697,20 @@ async fn aggregate_xpub_data(
             key.extend(txid_hash);
             let key_clone = key.clone();
             let db_clone = db.clone();
-            
-            let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-                let cf_transactions = db_clone.cf_handle("transactions")
-                    .ok_or_else(|| "transactions CF not found".to_string())?;
-                db_clone.get_cf(&cf_transactions, &key_clone)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))?
-            .map_err(|e| e.to_string())?;
-            
+
+            let tx_data =
+                tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+                    let cf_transactions = db_clone
+                        .cf_handle("transactions")
+                        .ok_or_else(|| "transactions CF not found".to_string())?;
+                    db_clone
+                        .get_cf(&cf_transactions, &key_clone)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| format!("Task join error: {e}"))?
+                .map_err(|e| e.to_string())?;
+
             if let Some(tx_data) = tx_data {
                 if tx_data.len() >= 8 {
                     let tx_data_len = tx_data.len() - 8;
@@ -701,7 +718,7 @@ async fn aggregate_xpub_data(
                         let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
                         tx_data_with_header.extend_from_slice(&[0u8; 4]);
                         tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                        
+
                         if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
                             if let Some(output) = tx.outputs.get(*output_index as usize) {
                                 address_balance += output.value;
@@ -711,41 +728,48 @@ async fn aggregate_xpub_data(
                 }
             }
         }
-        
+
         // Get transaction list from pre-fetched batch data
-        let tx_list_data = tx_list_results.get(idx)
-            .and_then(|opt| opt.as_ref()).cloned()
+        let tx_list_data = tx_list_results
+            .get(idx)
+            .and_then(|opt| opt.as_ref())
+            .cloned()
             .unwrap_or_default();
-        
+
         // Parse transaction list (32 bytes per txid)
-        let txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
+        let txids: Vec<Vec<u8>> = tx_list_data
+            .chunks_exact(32)
             .map(|chunk| chunk.to_vec())
             .collect();
-        
+
         // Calculate total received for this address
         let mut total_received: i64 = 0;
-        
+
         for txid_bytes in &txids {
             let mut key = vec![b't'];
             key.extend(txid_bytes);
             let key_clone = key.clone();
             let db_clone = db.clone();
             let addr_clone = address.clone();
-            
-            let tx_data = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-                let cf_transactions = db_clone.cf_handle("transactions")
-                    .ok_or_else(|| "transactions CF not found".to_string())?;
-                db_clone.get_cf(&cf_transactions, &key_clone)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))?
-            .map_err(|e| e.to_string())?;
-            
+
+            let tx_data =
+                tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
+                    let cf_transactions = db_clone
+                        .cf_handle("transactions")
+                        .ok_or_else(|| "transactions CF not found".to_string())?;
+                    db_clone
+                        .get_cf(&cf_transactions, &key_clone)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .map_err(|e| format!("Task join error: {e}"))?
+                .map_err(|e| e.to_string())?;
+
             if let Some(tx_data) = tx_data {
                 if tx_data.len() >= 8 {
                     // Skip orphaned and unresolved transactions
-                    let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                    let block_height =
+                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
                     if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
                         continue;
                     }
@@ -754,7 +778,7 @@ async fn aggregate_xpub_data(
                         let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
                         tx_data_with_header.extend_from_slice(&[0u8; 4]);
                         tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                        
+
                         if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
                             for output in &tx.outputs {
                                 if output.address.contains(&addr_clone) {
@@ -766,9 +790,9 @@ async fn aggregate_xpub_data(
                 }
             }
         }
-        
+
         let total_sent = total_received - address_balance;
-        
+
         // Track address if it has activity
         if !txids.is_empty() || !utxos.is_empty() {
             used_addresses.push((
@@ -780,16 +804,16 @@ async fn aggregate_xpub_data(
                 total_sent,
             ));
         }
-        
+
         // Add transaction IDs to set
         for txid in txids {
             all_txids.insert(hex::encode(txid));
         }
     }
-    
+
     // Convert txid set to vec
     let unique_txids: Vec<String> = all_txids.into_iter().collect();
-    
+
     // Sort transactions by block height (descending = newest first)
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
@@ -804,7 +828,9 @@ async fn aggregate_xpub_data(
                 if let Some(cf) = db_clone.cf_handle("transactions") {
                     if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
                         if tx_data.len() >= 8 {
-                            return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                            return i32::from_le_bytes([
+                                tx_data[4], tx_data[5], tx_data[6], tx_data[7],
+                            ]);
                         }
                     }
                 }
@@ -815,28 +841,30 @@ async fn aggregate_xpub_data(
             txid_heights.push((txid.clone(), height));
         }
     }
-    
+
     // Sort by height descending (newest first = highest block)
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
     let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
-    
+
     // === PAGINATION LOGIC (same as address endpoint) ===
     // Validate and clamp parameters
     const MAX_PAGE_SIZE: u32 = 1000;
     let page = params.page.max(1);
     let page_size = params.page_size.clamp(1, MAX_PAGE_SIZE);
-    
+
     let total_tx_count = unique_txids.len();
     let total_pages = if total_tx_count == 0 {
         1
     } else {
         ((total_tx_count as f64) / (page_size as f64)).ceil() as u32
     };
-    
+
     // Calculate pagination indices
     let start_idx = (page as usize - 1).saturating_mul(page_size as usize);
-    let end_idx = start_idx.saturating_add(page_size as usize).min(total_tx_count);
-    
+    let end_idx = start_idx
+        .saturating_add(page_size as usize)
+        .min(total_tx_count);
+
     // Handle page out of bounds - return empty result
     let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
         (vec![], 0)
@@ -844,7 +872,7 @@ async fn aggregate_xpub_data(
         let slice = &unique_txids[start_idx..end_idx];
         (slice.to_vec(), slice.len())
     };
-    
+
     // === DETAILS MODE HANDLING (same as address endpoint) ===
     // Blockbook API:
     // - basic: No transaction data (just balances)
@@ -854,139 +882,169 @@ async fn aggregate_xpub_data(
         "basic" => {
             // No transaction data at all
             (None, None)
-        },
+        }
         "txs" => {
             // Full transaction objects - fetch them
             let txs = fetch_transactions_batch(db, &paginated_txids).await;
             (None, Some(txs))
-        },
+        }
         "tokens" | "tokenBalances" => {
             // Token modes don't return tx data
             (None, None)
-        },
+        }
         _ => {
             // Default: "txids" or any other value = just txid strings
             (Some(paginated_txids), None)
         }
     };
-    
+
     // Build tokens array if requested, filtered by tokens parameter
     let tokens = if params.details == "tokens" || params.details == "tokenBalances" {
         // Filter addresses based on tokens parameter
-        let filtered_addresses: Vec<_> = all_addresses.iter().filter_map(|(addr, path)| {
-            // Find matching used address data
-            let addr_data = used_addresses.iter().find(|(a, _, _, _, _, _)| a == addr);
-            
-            match params.tokens.as_str() {
-                "derived" => {
-                    // Return all derived addresses, even if unused
-                    if let Some((_, _, tx_count, balance, total_recv, total_snt)) = addr_data {
-                        Some(super::types::XPubToken {
-                            token_type: "XPUBAddress".to_string(),
-                            name: addr.clone(),
-                            path: path.clone(),
-                            transfers: *tx_count as u32,
-                            decimals: 8,
-                            balance: balance.to_string(),
-                            total_received: total_recv.to_string(),
-                            total_sent: total_snt.to_string(),
-                        })
-                    } else {
-                        // Address was derived but never used
-                        Some(super::types::XPubToken {
-                            token_type: "XPUBAddress".to_string(),
-                            name: addr.clone(),
-                            path: path.clone(),
-                            transfers: 0,
-                            decimals: 8,
-                            balance: "0".to_string(),
-                            total_received: "0".to_string(),
-                            total_sent: "0".to_string(),
-                        })
+        let filtered_addresses: Vec<_> = all_addresses
+            .iter()
+            .filter_map(|(addr, path)| {
+                // Find matching used address data
+                let addr_data = used_addresses.iter().find(|(a, _, _, _, _, _)| a == addr);
+
+                match params.tokens.as_str() {
+                    "derived" => {
+                        // Return all derived addresses, even if unused
+                        if let Some((_, _, tx_count, balance, total_recv, total_snt)) = addr_data {
+                            Some(super::types::XPubToken {
+                                token_type: "XPUBAddress".to_string(),
+                                name: addr.clone(),
+                                path: path.clone(),
+                                transfers: *tx_count as u32,
+                                decimals: 8,
+                                balance: balance.to_string(),
+                                total_received: total_recv.to_string(),
+                                total_sent: total_snt.to_string(),
+                            })
+                        } else {
+                            // Address was derived but never used
+                            Some(super::types::XPubToken {
+                                token_type: "XPUBAddress".to_string(),
+                                name: addr.clone(),
+                                path: path.clone(),
+                                transfers: 0,
+                                decimals: 8,
+                                balance: "0".to_string(),
+                                total_received: "0".to_string(),
+                                total_sent: "0".to_string(),
+                            })
+                        }
                     }
-                },
-                "used" => {
-                    // Return addresses with at least one transaction
-                    addr_data.filter(|(_, _, tx_count, _, _, _)| *tx_count > 0).map(|(_, _, tx_count, balance, total_recv, total_snt)| {
-                        super::types::XPubToken {
-                            token_type: "XPUBAddress".to_string(),
-                            name: addr.clone(),
-                            path: path.clone(),
-                            transfers: *tx_count as u32,
-                            decimals: 8,
-                            balance: balance.to_string(),
-                            total_received: total_recv.to_string(),
-                            total_sent: total_snt.to_string(),
-                        }
-                    })
-                },
-                "nonzero" | _ => {
-                    // Default: return only addresses with nonzero balance
-                    addr_data.filter(|(_, _, _, balance, _, _)| *balance != 0).map(|(_, _, tx_count, balance, total_recv, total_snt)| {
-                        super::types::XPubToken {
-                            token_type: "XPUBAddress".to_string(),
-                            name: addr.clone(),
-                            path: path.clone(),
-                            transfers: *tx_count as u32,
-                            decimals: 8,
-                            balance: balance.to_string(),
-                            total_received: total_recv.to_string(),
-                            total_sent: total_snt.to_string(),
-                        }
-                    })
+                    "used" => {
+                        // Return addresses with at least one transaction
+                        addr_data
+                            .filter(|(_, _, tx_count, _, _, _)| *tx_count > 0)
+                            .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
+                                super::types::XPubToken {
+                                    token_type: "XPUBAddress".to_string(),
+                                    name: addr.clone(),
+                                    path: path.clone(),
+                                    transfers: *tx_count as u32,
+                                    decimals: 8,
+                                    balance: balance.to_string(),
+                                    total_received: total_recv.to_string(),
+                                    total_sent: total_snt.to_string(),
+                                }
+                            })
+                    }
+                    "nonzero" | _ => {
+                        // Default: return only addresses with nonzero balance
+                        addr_data
+                            .filter(|(_, _, _, balance, _, _)| *balance != 0)
+                            .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
+                                super::types::XPubToken {
+                                    token_type: "XPUBAddress".to_string(),
+                                    name: addr.clone(),
+                                    path: path.clone(),
+                                    transfers: *tx_count as u32,
+                                    decimals: 8,
+                                    balance: balance.to_string(),
+                                    total_received: total_recv.to_string(),
+                                    total_sent: total_snt.to_string(),
+                                }
+                            })
+                    }
                 }
-            }
-        }).collect();
-        
+            })
+            .collect();
+
         // Apply pagination to tokens array
         let total_tokens = filtered_addresses.len() as u32;
         let tokens_page = params.tokens_page.max(1);
         let tokens_page_size = params.tokens_page_size.clamp(1, 1000);
         let total_tokens_pages = ((total_tokens as f64) / (tokens_page_size as f64)).ceil() as u32;
-        let total_tokens_pages = if total_tokens_pages == 0 { 1 } else { total_tokens_pages };
+        let total_tokens_pages = if total_tokens_pages == 0 {
+            1
+        } else {
+            total_tokens_pages
+        };
 
         let start_idx = (tokens_page as usize - 1).saturating_mul(tokens_page_size as usize);
-        let end_idx = start_idx.saturating_add(tokens_page_size as usize).min(filtered_addresses.len());
-        
+        let end_idx = start_idx
+            .saturating_add(tokens_page_size as usize)
+            .min(filtered_addresses.len());
+
         let paginated_tokens: Vec<_> = if start_idx < filtered_addresses.len() {
             filtered_addresses[start_idx..end_idx].to_vec()
         } else {
             Vec::new()
         };
-        
-        (Some(paginated_tokens), Some(total_tokens), Some(tokens_page), Some(total_tokens_pages))
+
+        (
+            Some(paginated_tokens),
+            Some(total_tokens),
+            Some(tokens_page),
+            Some(total_tokens_pages),
+        )
     } else {
         (None, None, None, None)
     };
-    
+
     // Blockbook always returns usedTokens (count of addresses with activity)
     // regardless of details mode
     let used_tokens = Some(used_addresses.len() as u32);
-    
+
     // Aggregate totals
-    let xpub_total_received: i64 = used_addresses.iter().map(|(_, _, _, _, total_recv, _)| total_recv).sum();
-    let xpub_total_sent: i64 = used_addresses.iter().map(|(_, _, _, _, _, total_snt)| total_snt).sum();
-    let xpub_balance: i64 = used_addresses.iter().map(|(_, _, _, balance, _, _)| balance).sum();
-    
+    let xpub_total_received: i64 = used_addresses
+        .iter()
+        .map(|(_, _, _, _, total_recv, _)| total_recv)
+        .sum();
+    let xpub_total_sent: i64 = used_addresses
+        .iter()
+        .map(|(_, _, _, _, _, total_snt)| total_snt)
+        .sum();
+    let xpub_balance: i64 = used_addresses
+        .iter()
+        .map(|(_, _, _, balance, _, _)| balance)
+        .sum();
+
     // Blockbook's txs field for xpub = total transfers across ALL addresses
     // (not unique transactions). If an address appears in 2 txs, it counts as 2.
     // This matches: sum of all per-address tx counts = total "transfers"
-    let total_transfers: usize = used_addresses.iter().map(|(_, _, tx_count, _, _, _)| tx_count).sum();
-    
+    let total_transfers: usize = used_addresses
+        .iter()
+        .map(|(_, _, tx_count, _, _, _)| tx_count)
+        .sum();
+
     Ok(XPubInfo {
         page,
         total_pages,
-        items_on_page: actual_items as u32,  // Actual count, not pageSize
+        items_on_page: actual_items as u32, // Actual count, not pageSize
         address: xpub_str.to_string(),
         balance: xpub_balance.to_string(),
         total_received: xpub_total_received.to_string(),
         total_sent: xpub_total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_transfers as u32,  // Total transfers (Blockbook compatibility)
+        txs: total_transfers as u32, // Total transfers (Blockbook compatibility)
         txids,
         tokens: tokens.0,
-        transactions,  // Now properly populated when details=txs
+        transactions, // Now properly populated when details=txs
         used_tokens,
         total_tokens: tokens.1,
         tokens_page: tokens.2,
@@ -996,7 +1054,7 @@ async fn aggregate_xpub_data(
 
 /// GET /api/v2/utxo/{address}
 /// Returns unspent outputs for address.
-/// 
+///
 /// **CACHED**: 30 second TTL
 pub async fn utxo_v2(
     AxumPath(address): AxumPath<String>,
@@ -1020,13 +1078,9 @@ pub async fn utxo_v2(
     let address_clone = address.clone();
 
     let result = cache
-        .get_or_compute(
-            &cache_key,
-            Duration::from_secs(30),
-            || async move {
-                compute_utxos(&db_clone, &address_clone).await
-            }
-        )
+        .get_or_compute(&cache_key, Duration::from_secs(30), || async move {
+            compute_utxos(&db_clone, &address_clone).await
+        })
         .await;
 
     match result {
@@ -1042,24 +1096,26 @@ async fn compute_utxos(
     let key = format!("a{address}");
     let key_bytes = key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
-    
+
     let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let cf_addr_index = db_clone.cf_handle("addr_index")
+        let cf_addr_index = db_clone
+            .cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
-        db_clone.get_cf(&cf_addr_index, &key_bytes)
+        db_clone
+            .get_cf(&cf_addr_index, &key_bytes)
             .map_err(|e| e.to_string())
             .map(|opt| opt.unwrap_or_default())
     })
     .await??;
-    
+
     let unspent_utxos = deserialize_utxos(&result).await;
     let current_height = get_current_height(db).unwrap_or(0);
     // Blockbook parity: the UTXO list includes immature coinbase/coinstake outputs
     // (Blockbook flags them rather than hiding them; wallets handle maturity).
     let spendable_utxos = unspent_utxos.clone();
-    
+
     let mut utxo_list = Vec::new();
-    
+
     for (txid_hash, vout) in &spendable_utxos {
         // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
         // (the same bytes that key the tx CF below), so emit them directly. The
@@ -1081,11 +1137,15 @@ async fn compute_utxos(
             } else {
                 None
             }
-        }).await.ok().flatten();
+        })
+        .await
+        .ok()
+        .flatten();
 
         if let Some(tx_data) = tx_data_opt {
             if tx_data.len() >= 8 {
-                let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                let block_height =
+                    i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
 
                 // Filter hardening: a UTXO present in the 'a' unspent set is
                 // canonical by construction (the balance loop trusts it with no
@@ -1097,24 +1157,26 @@ async fn compute_utxos(
                 if block_height == HEIGHT_ORPHAN {
                     continue;
                 }
-                
+
                 // Parse transaction to get output value
                 let tx_data_len = tx_data.len() - 8;
                 let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
                 tx_data_with_header.extend_from_slice(&[0u8; 4]);
                 tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                
+
                 if let Ok(tx) = deserialize_transaction_blocking(&tx_data_with_header) {
                     if let Some(output) = tx.outputs.get(*vout as usize) {
-                        let confirmations = if is_canonical_height(block_height) && is_canonical_height(current_height) {
+                        let confirmations = if is_canonical_height(block_height)
+                            && is_canonical_height(current_height)
+                        {
                             ((current_height - block_height) + 1).max(0) as u32
                         } else {
                             0
                         };
-                        
+
                         use crate::tx_type::detect_transaction_type;
                         let tx_type = detect_transaction_type(&tx);
-                        
+
                         utxo_list.push(UTXO {
                             txid: txid_display,
                             vout: *vout as u32,
@@ -1140,10 +1202,10 @@ async fn compute_utxos(
             }
         }
     }
-    
+
     // Sort by confirmations ascending (newest first = least confirmations first)
     utxo_list.sort_by(|a, b| a.confirmations.cmp(&b.confirmations));
-    
+
     Ok(utxo_list)
 }
 
@@ -1157,13 +1219,25 @@ mod tests {
     #[test]
     fn is_valid_address_accepts_all_real_classes() {
         // D = standard P2PKH (version 30)
-        assert!(is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "D/P2PKH must be valid");
+        assert!(
+            is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"),
+            "D/P2PKH must be valid"
+        );
         // S = cold-staking staker (version 63)
-        assert!(is_valid_address("SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy"), "S/cold-staking must be valid");
+        assert!(
+            is_valid_address("SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy"),
+            "S/cold-staking must be valid"
+        );
         // 6 = P2SH (version 13)
-        assert!(is_valid_address("6EPs1STNZh4rxbsgP93Zu4BeHF5n9dtECo"), "6/P2SH must be valid");
+        assert!(
+            is_valid_address("6EPs1STNZh4rxbsgP93Zu4BeHF5n9dtECo"),
+            "6/P2SH must be valid"
+        );
         // EXM = exchange address (3-byte prefix, OP_EXCHANGEADDR 0xe0, 36 chars)
-        assert!(is_valid_address("EXMBfGoMQMNiHTNsrs8SdrsBotUButbb1SP1"), "EXM/exchange must be valid");
+        assert!(
+            is_valid_address("EXMBfGoMQMNiHTNsrs8SdrsBotUButbb1SP1"),
+            "EXM/exchange must be valid"
+        );
     }
 
     /// A one-char typo of a real address must be rejected (checksum mismatch) —
@@ -1171,13 +1245,22 @@ mod tests {
     #[test]
     fn is_valid_address_rejects_typos_and_garbage() {
         // Flip the last char of the D address: r5 -> r6 (breaks the checksum).
-        assert!(!is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr6"), "typo'd address must be invalid");
+        assert!(
+            !is_valid_address("DU8gPC5mh4KxWJARQRxoESFark2jAguBr6"),
+            "typo'd address must be invalid"
+        );
         // Empty / clearly-not-an-address input.
         assert!(!is_valid_address(""), "empty must be invalid");
-        assert!(!is_valid_address("not an address"), "garbage must be invalid");
+        assert!(
+            !is_valid_address("not an address"),
+            "garbage must be invalid"
+        );
         // Valid base58check but wrong payload length (1-byte version + 19-byte
         // hash = 20-byte payload) must still be rejected.
-        assert!(!is_valid_address("11GsChQR2U32pvwJcDNPoYHhGcnz5Rv"), "short payload must be invalid");
+        assert!(
+            !is_valid_address("11GsChQR2U32pvwJcDNPoYHhGcnz5Rv"),
+            "short payload must be invalid"
+        );
     }
 
     /// xpub guard: accepts a real BIP32 xpub, rejects typos/non-xpub input.
@@ -1190,7 +1273,10 @@ mod tests {
         let bad = "xpub661MyMwAqRbcEYSGagKuFUqExQV8d2eizDP5SamP9TcLeqAk9JsrNexcG6RbwEy38PSSahG1iVxeqWMJEq3YFHbfEaayHjyFJnJ6DS2h49A";
         assert!(!is_valid_xpub(bad), "typo'd xpub must be invalid");
         // A transparent address is not an xpub.
-        assert!(!is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "address is not an xpub");
+        assert!(
+            !is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"),
+            "address is not an xpub"
+        );
     }
 
     /// Option-① regression: compute_address_info must (a) serve balance/totals
@@ -1200,9 +1286,9 @@ mod tests {
     /// transactions DB and asserts both.
     #[tokio::test]
     async fn compute_address_info_serves_persisted_and_orders_by_height() {
-        use rocksdb::{DB, Options};
         use super::compute_address_info;
         use crate::api::types::AddressQuery;
+        use rocksdb::{Options, DB};
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut opts = Options::default();
@@ -1255,7 +1341,10 @@ mod tests {
         let info = compute_address_info(&db, address, &params).await.unwrap();
 
         // (a) values served straight from r/s, balance = r - s (no recompute).
-        assert_eq!(info.total_received, "1000", "totalReceived must come from 'r'");
+        assert_eq!(
+            info.total_received, "1000",
+            "totalReceived must come from 'r'"
+        );
         assert_eq!(info.total_sent, "300", "totalSent must come from 's'");
         assert_eq!(info.balance, "700", "balance must be r - s exactly");
         assert_eq!(info.txs, 3, "tx count from the 't' list");

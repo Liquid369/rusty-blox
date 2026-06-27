@@ -1,23 +1,22 @@
+use super::call_quark_hash;
+use crate::chainwork::calculate_work_from_bits;
+use num_bigint::BigUint;
+use sha2::{Digest, Sha256};
 /// Canonical Chain Builder
-/// 
+///
 /// Determines the canonical blockchain from blk*.dat files using chainwork,
 /// exactly as PIVX Core does in validation.cpp
-/// 
+///
 /// Algorithm (from PIVX Core):
 /// 1. Load all blocks into index (mapBlockIndex)
 /// 2. Calculate chainwork for each block (nChainWork = parent.nChainWork + GetBlockProof)
 /// 3. Find tip with highest chainwork (FindMostWorkChain)
 /// 4. Walk backwards from that tip (this is the canonical chain)
-
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use sha2::{Sha256, Digest};
-use crate::chainwork::calculate_work_from_bits;
-use super::call_quark_hash;
-use num_bigint::BigUint;
-use tracing::{info, warn, debug};
+use std::path::PathBuf;
+use tracing::{debug, info, warn};
 
 /// Block index entry
 #[derive(Clone, Debug)]
@@ -25,7 +24,7 @@ pub struct BlockIndexEntry {
     pub hash: Vec<u8>,
     pub prev_hash: Vec<u8>,
     pub n_bits: u32,
-    pub chainwork: Option<[u8; 32]>,  // Cumulative proof-of-work
+    pub chainwork: Option<[u8; 32]>, // Cumulative proof-of-work
     pub height: Option<i32>,
 }
 
@@ -34,18 +33,23 @@ fn calculate_block_hash(header_bytes: &[u8]) -> Vec<u8> {
     if header_bytes.len() < 4 {
         return vec![0u8; 32];
     }
-    
-    let n_version = i32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]]);
-    
+
+    let n_version = i32::from_le_bytes([
+        header_bytes[0],
+        header_bytes[1],
+        header_bytes[2],
+        header_bytes[3],
+    ]);
+
     let hash_size = match n_version {
         0..=3 => 80,
         4..=6 => 112,
         7 => 80,
         _ => 112,
     };
-    
+
     let hash_bytes = &header_bytes[..hash_size.min(header_bytes.len())];
-    
+
     match n_version {
         0..=3 => {
             // For v0-v3, use Quark hash on first 80 bytes
@@ -60,7 +64,9 @@ fn calculate_block_hash(header_bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Scan all blk files and build block index
-pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry>, Box<dyn std::error::Error>> {
+pub fn scan_all_blocks(
+    blk_dir: &str,
+) -> Result<HashMap<Vec<u8>, BlockIndexEntry>, Box<dyn std::error::Error>> {
     info!("Phase 1: Scanning all blk*.dat files");
 
     let mut block_index: HashMap<Vec<u8>, BlockIndexEntry> = HashMap::new();
@@ -88,7 +94,8 @@ pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry
                 break;
             }
 
-            let block_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+            let block_size =
+                u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
 
             if block_size == 0 || block_size > 10_000_000 {
                 break;
@@ -116,13 +123,16 @@ pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry
                     block_data[75],
                 ]);
 
-                block_index.insert(hash.clone(), BlockIndexEntry {
-                    hash,
-                    prev_hash,
-                    n_bits,
-                    chainwork: None,  // Will calculate in next phase
-                    height: None,     // Will calculate in next phase
-                });
+                block_index.insert(
+                    hash.clone(),
+                    BlockIndexEntry {
+                        hash,
+                        prev_hash,
+                        n_bits,
+                        chainwork: None, // Will calculate in next phase
+                        height: None,    // Will calculate in next phase
+                    },
+                );
 
                 blocks_in_file += 1;
                 total_blocks += 1;
@@ -132,11 +142,18 @@ pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry
         }
 
         if file_num % 10 == 0 || blocks_in_file > 0 {
-            debug!(file_num = file_num, blocks = blocks_in_file, "blk file scanned");
+            debug!(
+                file_num = file_num,
+                blocks = blocks_in_file,
+                "blk file scanned"
+            );
         }
     }
 
-    info!(total_blocks = total_blocks, "Phase 1 complete: blocks scanned (includes orphans/forks)");
+    info!(
+        total_blocks = total_blocks,
+        "Phase 1 complete: blocks scanned (includes orphans/forks)"
+    );
 
     // Debug: find blocks with all-zero prev_hash (potential genesis blocks)
     let mut genesis_candidates = Vec::new();
@@ -145,7 +162,10 @@ pub fn scan_all_blocks(blk_dir: &str) -> Result<HashMap<Vec<u8>, BlockIndexEntry
             genesis_candidates.push(hash.clone());
         }
     }
-    debug!(count = genesis_candidates.len(), "Blocks with zero prev_hash (genesis candidates)");
+    debug!(
+        count = genesis_candidates.len(),
+        "Blocks with zero prev_hash (genesis candidates)"
+    );
     for (i, hash) in genesis_candidates.iter().take(5).enumerate() {
         debug!(index = i + 1, hash = %hex::encode(hash), "Genesis candidate");
     }
@@ -167,7 +187,7 @@ pub fn calculate_chainwork_for_all(
     genesis_hash_bytes.reverse(); // Reverse to get internal format
 
     debug!(genesis = genesis_hash_display, "Looking for genesis block");
-    
+
     // Build parent→children mapping for forward traversal
     let mut children_map: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
     for (hash, entry) in block_index.iter() {
@@ -176,11 +196,11 @@ pub fn calculate_chainwork_for_all(
             .or_default()
             .push(hash.clone());
     }
-    
+
     // BFS from genesis to calculate chainwork
     let mut queue = std::collections::VecDeque::new();
     queue.push_back(genesis_hash_bytes.clone());
-    
+
     // Genesis has no parent, chainwork = its own proof
     if let Some(genesis_entry) = block_index.get_mut(&genesis_hash_bytes) {
         let genesis_work = calculate_work_from_bits(genesis_entry.n_bits);
@@ -190,9 +210,9 @@ pub fn calculate_chainwork_for_all(
     } else {
         return Err("Genesis block not found in blk files!".into());
     }
-    
+
     let mut processed = 1;
-    
+
     while let Some(current_hash) = queue.pop_front() {
         let current_entry = match block_index.get(&current_hash) {
             Some(e) => e.clone(),
@@ -217,31 +237,31 @@ pub fn calculate_chainwork_for_all(
                 continue;
             }
         };
-        
+
         // Process all children
         if let Some(children) = children_map.get(&current_hash) {
             for child_hash in children {
                 let child_entry = block_index.get_mut(child_hash).unwrap();
-                
+
                 // Calculate child's chainwork = parent chainwork + child's proof
                 let child_proof = calculate_work_from_bits(child_entry.n_bits);
-                
+
                 // Add using BigUint for arbitrary precision
                 let parent_big = BigUint::from_bytes_be(&current_chainwork);
                 let proof_big = BigUint::from_bytes_be(&child_proof);
                 let total = parent_big + proof_big;
-                
+
                 let work_bytes = total.to_bytes_be();
                 let mut chainwork = [0u8; 32];
                 let start = 32 - work_bytes.len().min(32);
                 chainwork[start..].copy_from_slice(&work_bytes[..work_bytes.len().min(32)]);
-                
+
                 child_entry.chainwork = Some(chainwork);
                 child_entry.height = Some(current_height + 1);
-                
+
                 queue.push_back(child_hash.clone());
                 processed += 1;
-                
+
                 if processed % 100_000 == 0 {
                     debug!(processed = processed, "Chainwork BFS progress");
                 }
@@ -249,7 +269,10 @@ pub fn calculate_chainwork_for_all(
         }
     }
 
-    info!(processed = processed, "Phase 2 complete: chainwork calculated");
+    info!(
+        processed = processed,
+        "Phase 2 complete: chainwork calculated"
+    );
 
     Ok(())
 }
@@ -271,7 +294,11 @@ pub fn find_best_tip(
     let mut tips = Vec::new();
     for (hash, entry) in block_index.iter() {
         if !has_children.contains(hash) && entry.chainwork.is_some() {
-            tips.push((hash.clone(), entry.chainwork.unwrap(), entry.height.unwrap()));
+            tips.push((
+                hash.clone(),
+                entry.chainwork.unwrap(),
+                entry.height.unwrap(),
+            ));
         }
     }
 
@@ -309,28 +336,30 @@ pub fn build_canonical_chain(
     block_index: &HashMap<Vec<u8>, BlockIndexEntry>,
 ) -> Result<Vec<(i32, Vec<u8>)>, Box<dyn std::error::Error>> {
     info!("Phase 4: Walking backwards from tip to build canonical chain");
-    
+
     let mut chain = Vec::new();
     let mut current_hash = tip_hash.to_vec();
-    
+
     // Genesis hash in internal format (little-endian)
-    let mut genesis_hash_bytes = hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")?;
+    let mut genesis_hash_bytes =
+        hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")?;
     genesis_hash_bytes.reverse();
-    
+
     loop {
-        let entry = block_index.get(&current_hash)
+        let entry = block_index
+            .get(&current_hash)
             .ok_or_else(|| format!("Block not found: {}", hex::encode(&current_hash)))?;
-        
+
         let height = entry.height.ok_or("Block missing height")?;
         chain.push((height, current_hash.clone()));
-        
+
         // Check if we reached genesis
         if current_hash == genesis_hash_bytes || entry.prev_hash.iter().all(|&b| b == 0) {
             break;
         }
-        
+
         current_hash = entry.prev_hash.clone();
-        
+
         if chain.len() % 100_000 == 0 {
             debug!(walked = chain.len(), "Chain walk progress");
         }
@@ -339,7 +368,11 @@ pub fn build_canonical_chain(
     // Reverse to get genesis → tip order
     chain.reverse();
 
-    info!(blocks = chain.len(), tip_height = chain.len().saturating_sub(1), "Phase 4 complete: canonical chain built");
+    info!(
+        blocks = chain.len(),
+        tip_height = chain.len().saturating_sub(1),
+        "Phase 4 complete: canonical chain built"
+    );
 
     Ok(chain)
 }
@@ -362,7 +395,10 @@ pub fn build_canonical_chain_from_blk_files(
     // Phase 4: Build canonical chain
     let canonical_chain = build_canonical_chain(&best_tip, &block_index)?;
 
-    info!(blocks = canonical_chain.len(), "Canonical chain build complete");
+    info!(
+        blocks = canonical_chain.len(),
+        "Canonical chain build complete"
+    );
 
     Ok(canonical_chain)
 }

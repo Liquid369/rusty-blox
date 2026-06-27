@@ -1,23 +1,27 @@
+use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
+use crate::db_utils::bulk_write_options;
+use crate::leveldb_index::build_canonical_chain_from_leveldb;
 /// Height Resolution from PIVX Core Block Index
-/// 
+///
 /// This module reads PIVX Core's leveldb block index to build the canonical chain,
 /// then updates all transactions in our database with correct heights BEFORE enrichment.
-/// 
+///
 /// On success this supersedes the "repair" phase (which remains as a fallback
 /// when resolution fails) and identifies orphaned transactions using Core's
 /// canonical chain data.
-
-use rocksdb::{DB, WriteBatch, WriteOptions, IteratorMode};
+use rocksdb::{IteratorMode, WriteBatch, WriteOptions, DB};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::collections::{HashSet, HashMap};
-use tracing::{warn, info};
-use crate::leveldb_index::build_canonical_chain_from_leveldb;
-use crate::constants::{HEIGHT_GENESIS, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
-use crate::db_utils::bulk_write_options;
+use tracing::{info, warn};
 
 /// Commit a height-resolution WriteBatch, honoring the bulk durability mode.
 /// `bulk` disables the WAL (initial reindex only); otherwise the WAL is kept.
-fn commit_batch(db: &DB, batch: WriteBatch, wo: &WriteOptions, bulk: bool) -> Result<(), rocksdb::Error> {
+fn commit_batch(
+    db: &DB,
+    batch: WriteBatch,
+    wo: &WriteOptions,
+    bulk: bool,
+) -> Result<(), rocksdb::Error> {
     if bulk {
         db.write_opt(batch, wo)
     } else {
@@ -26,11 +30,11 @@ fn commit_batch(db: &DB, batch: WriteBatch, wo: &WriteOptions, bulk: bool) -> Re
 }
 
 /// Resolve all transaction heights using PIVX Core's block index
-/// 
+///
 /// This reads Core's canonical chain and updates ALL transactions in one pass:
 /// - Transactions in canonical blocks get their correct height
 /// - Transactions in non-canonical blocks get marked as orphaned (HEIGHT_ORPHAN)
-/// 
+///
 /// Returns (fixed_count, orphaned_count)
 /// `bulk` selects the write durability for the height-fix batches below: `true`
 /// disables the WAL on the initial full-reindex path (the DB is reconstructible
@@ -50,7 +54,7 @@ pub async fn resolve_heights_from_block_index(
     // (~35 min) is pure redundancy. pivx_dir is retained only for the safety
     // fallback used when chain_metadata is unexpectedly empty.
     let pivx_dir = pivx_data_dir.unwrap_or_else(crate::config::default_pivx_data_dir);
-    
+
     // 3. Build lookup structures
     //
     // [C] Only the height -> block_hash direction (built in step 5 below) is ever
@@ -61,33 +65,36 @@ pub async fn resolve_heights_from_block_index(
     // No output depends on them.
 
     // 4. Scan all transactions to collect which ones need fixing
-    
-    let cf_transactions = db.cf_handle("transactions")
+
+    let cf_transactions = db
+        .cf_handle("transactions")
         .ok_or("transactions CF not found")?;
-    
+
     // Collect txids that need fixing:
     // - height=0 or HEIGHT_UNRESOLVED need resolution
     // - Positive heights need validation against canonical chain
     let mut txids_needing_fix: HashSet<Vec<u8>> = HashSet::new();
     let mut txids_to_validate: HashSet<(Vec<u8>, i32)> = HashSet::new();
-    
+
     const BATCH_SIZE: usize = 10_000;
-    
+
     let iter = db.iterator_cf(&cf_transactions, IteratorMode::Start);
-    
+
     for item in iter {
         match item {
             Ok((key, value)) => {
                 // Only process 't' prefix entries (transaction data)
-                if key.is_empty() || key[0] != b't' { continue; }
+                if key.is_empty() || key[0] != b't' {
+                    continue;
+                }
 
                 // Parse current transaction data
                 if value.len() < 8 {
                     continue;
                 }
-                
+
                 let current_height = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
-                
+
                 if current_height == HEIGHT_GENESIS || current_height == HEIGHT_UNRESOLVED {
                     // Store txid (skip 't' prefix) for later fixing
                     txids_needing_fix.insert(key[1..].to_vec());
@@ -106,22 +113,24 @@ pub async fn resolve_heights_from_block_index(
             }
         }
     }
-    
+
     let fixed_count = txids_needing_fix.len();
     let validate_count = txids_to_validate.len();
-    
+
     // Early exit if nothing to fix or validate
     if fixed_count == 0 && validate_count == 0 {
         info!("All transaction heights already correct");
         return Ok((0, 0));
     }
-    
+
     // 5. Build the canonical height -> hash map from chain_metadata (already in
     // the DB from the parse-phase resolve). Only the height KEY set is consulted
     // below (a presence test); the stored value is never read, so any byte is
     // fine. Falls back to a one-off leveldb re-import only if chain_metadata is
     // unexpectedly empty (it is validated complete+contiguous before parse).
-    let cf_metadata = db.cf_handle("chain_metadata").ok_or("chain_metadata CF not found")?;
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
     let mut height_to_blockhash: HashMap<i64, Vec<u8>> = HashMap::new();
     for item in db.iterator_cf(&cf_metadata, IteratorMode::Start) {
         if let Ok((key, value)) = item {
@@ -142,14 +151,17 @@ pub async fn resolve_heights_from_block_index(
             .args(["-R", &block_index_src, block_index_copy])
             .output()?;
         if !copy_result.status.success() {
-            return Err(format!("Failed to copy block index: {}",
-                String::from_utf8_lossy(&copy_result.stderr)).into());
+            return Err(format!(
+                "Failed to copy block index: {}",
+                String::from_utf8_lossy(&copy_result.stderr)
+            )
+            .into());
         }
         for (height, block_hash, _, _) in &build_canonical_chain_from_leveldb(block_index_copy)? {
             height_to_blockhash.insert(*height, block_hash.clone());
         }
     }
-    
+
     // 5a. [C] The previous code materialised a full 'B'-key index here
     //     (`HashSet<(i32, txid_bytes)>`, one entry per ~12.3M block-tx record —
     //     several GB) purely to answer, for each positive-height tx in
@@ -230,13 +242,13 @@ pub async fn resolve_heights_from_block_index(
     // Initialize counters
     let mut updated = 0;
     let mut newly_orphaned = 0;
-    
+
     // 5b. Validate positive heights against canonical chain
     if !txids_to_validate.is_empty() {
         let mut validated_batch = WriteBatch::default();
         let mut validated_orphaned = 0;
         let mut orphaned_txids_from_validation: Vec<Vec<u8>> = Vec::new();
-        
+
         for (txid_internal, current_height) in txids_to_validate {
             // CRITICAL FIX: Check if transaction has a 'B' key (block index entry)
             // A transaction should ONLY be marked as orphaned if it has NO 'B' key
@@ -291,18 +303,24 @@ pub async fn resolve_heights_from_block_index(
                 }
             }
         }
-        
+
         // Write final validation batch
         if !validated_batch.is_empty() {
             commit_batch(&db, validated_batch, &wo, bulk)?;
         }
-        
-        info!(orphaned = validated_orphaned, "Marked transactions with non-canonical heights as orphaned");
+
+        info!(
+            orphaned = validated_orphaned,
+            "Marked transactions with non-canonical heights as orphaned"
+        );
         newly_orphaned += validated_orphaned;
-        
+
         // CRITICAL FIX: Clean address index for newly orphaned transactions
         if validated_orphaned > 0 {
-            info!(count = orphaned_txids_from_validation.len(), "Cleaning address index for orphaned transactions");
+            info!(
+                count = orphaned_txids_from_validation.len(),
+                "Cleaning address index for orphaned transactions"
+            );
             // TODO: Re-enable when orphan_cleanup module is available
             // match remove_orphaned_txs_batch(&db, &orphaned_txids_from_validation).await {
             //     Ok((cleaned, errors)) => {
@@ -314,82 +332,92 @@ pub async fn resolve_heights_from_block_index(
             // }
         }
     }
-    
+
     // 6. Efficiently update ONLY the transactions that need fixing
-    info!(count = fixed_count, "Updating transaction heights from block index");
+    info!(
+        count = fixed_count,
+        "Updating transaction heights from block index"
+    );
 
     let mut batch = WriteBatch::default();
     let _not_found_in_index = 0;
-    
+
     // Read 'B' entries and update ONLY if txid is in our HashSet
     // Format: 'B' + height(4) + tx_index(8) -> txid_hex
     let block_tx_iter = db.iterator_cf(&cf_transactions, IteratorMode::Start);
-    
+
     for item in block_tx_iter {
         match item {
             Ok((key, value)) => {
-                if key.is_empty() || key[0] != b'B' { continue; }
-                
+                if key.is_empty() || key[0] != b'B' {
+                    continue;
+                }
+
                 // Extract height from key
                 if key.len() >= 5 {
                     let height_bytes = [key[1], key[2], key[3], key[4]];
                     let height = i32::from_le_bytes(height_bytes);
-                    
+
                     // Value is txid as hex string
                     if let Ok(txid_hex) = String::from_utf8(value.to_vec()) {
                         if let Ok(txid_display) = hex::decode(&txid_hex) {
                             // Reverse to get internal format
-                            let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
-                            
+                            let txid_internal: Vec<u8> =
+                                txid_display.iter().rev().cloned().collect();
+
                             // ONLY process if this txid needs fixing
                             if !txids_needing_fix.contains(&txid_internal) {
                                 continue;
                             }
-                            
+
                             // Build transaction key
                             let mut tx_key = vec![b't'];
                             tx_key.extend_from_slice(&txid_internal);
-                            
+
                             // Read current transaction
                             if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
                                 // Verify it still needs fixing (height=0, -1, or -2)
                                 let current_height = i32::from_le_bytes([
-                                    tx_data[4], tx_data[5], tx_data[6], tx_data[7]
+                                    tx_data[4], tx_data[5], tx_data[6], tx_data[7],
                                 ]);
-                                
+
                                 // CRITICAL FIX: Also fix HEIGHT_ORPHAN (-1) transactions
                                 // These may have been incorrectly marked as orphaned but have valid 'B' keys
-                                if current_height == 0 || current_height == HEIGHT_UNRESOLVED || current_height == HEIGHT_ORPHAN {
+                                if current_height == 0
+                                    || current_height == HEIGHT_UNRESOLVED
+                                    || current_height == HEIGHT_ORPHAN
+                                {
                                     // Check if this height is in canonical chain
-                                    if let Some(_block_hash) = height_to_blockhash.get(&(height as i64)) {
+                                    if let Some(_block_hash) =
+                                        height_to_blockhash.get(&(height as i64))
+                                    {
                                         // Block is in canonical chain - use its height
                                         let mut new_value = tx_data[0..4].to_vec(); // version
                                         new_value.extend(&height.to_le_bytes());
                                         new_value.extend(&tx_data[8..]); // rest of data
-                                        
+
                                         batch.put_cf(&cf_transactions, &tx_key, &new_value);
                                         updated += 1;
 
                                         // Remove from set so we don't process it again
                                         txids_needing_fix.remove(&txid_internal);
-                                        
+
                                         if updated % BATCH_SIZE == 0 {
                                             commit_batch(&db, batch, &wo, bulk)?;
                                             batch = WriteBatch::default();
-
                                         }
                                     } else {
                                         // Height not in canonical chain - mark as orphaned
                                         let mut new_value = tx_data[0..4].to_vec(); // version
                                         new_value.extend(&(-1i32).to_le_bytes());
                                         new_value.extend(&tx_data[8..]); // rest of data
-                                        
+
                                         batch.put_cf(&cf_transactions, &tx_key, &new_value);
                                         newly_orphaned += 1;
-                                        
+
                                         // Remove from set
                                         txids_needing_fix.remove(&txid_internal);
-                                        
+
                                         if (updated + newly_orphaned) % BATCH_SIZE == 0 {
                                             commit_batch(&db, batch, &wo, bulk)?;
                                             batch = WriteBatch::default();
@@ -407,7 +435,7 @@ pub async fn resolve_heights_from_block_index(
             }
         }
     }
-    
+
     // Write final batch
     if !batch.is_empty() {
         commit_batch(&db, batch, &wo, bulk)?;
@@ -415,36 +443,35 @@ pub async fn resolve_heights_from_block_index(
 
     // Mark any remaining transactions (not found in block index) as orphaned
     let mut all_orphaned_txids: Vec<Vec<u8>> = Vec::new();
-    
+
     if !txids_needing_fix.is_empty() {
         info!(
             count = txids_needing_fix.len(),
             "Transactions not found in block index - marking as orphaned"
         );
-        
+
         let mut orphan_batch = WriteBatch::default();
         let mut marked_orphan = 0;
-        
+
         for txid_internal in &txids_needing_fix {
             let mut tx_key = vec![b't'];
             tx_key.extend_from_slice(txid_internal);
-            
+
             if let Ok(Some(tx_data)) = db.get_cf(&cf_transactions, &tx_key) {
                 if tx_data.len() >= 8 {
-                    let current_height = i32::from_le_bytes([
-                        tx_data[4], tx_data[5], tx_data[6], tx_data[7]
-                    ]);
-                    
+                    let current_height =
+                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+
                     // Only mark as orphan if still has height=0 or HEIGHT_UNRESOLVED
                     if current_height == HEIGHT_GENESIS || current_height == HEIGHT_UNRESOLVED {
                         let mut new_value = tx_data[0..4].to_vec(); // version
                         new_value.extend(&HEIGHT_ORPHAN.to_le_bytes());
                         new_value.extend(&tx_data[8..]); // rest of data
-                        
+
                         orphan_batch.put_cf(&cf_transactions, &tx_key, &new_value);
                         marked_orphan += 1;
                         all_orphaned_txids.push(txid_internal.clone());
-                        
+
                         if marked_orphan % BATCH_SIZE == 0 {
                             commit_batch(&db, orphan_batch, &wo, bulk)?;
                             orphan_batch = WriteBatch::default();
@@ -453,18 +480,24 @@ pub async fn resolve_heights_from_block_index(
                 }
             }
         }
-        
+
         if !orphan_batch.is_empty() {
             commit_batch(&db, orphan_batch, &wo, bulk)?;
         }
 
         newly_orphaned += marked_orphan;
-        info!(marked = marked_orphan, "Marked additional transactions as HEIGHT_ORPHAN");
+        info!(
+            marked = marked_orphan,
+            "Marked additional transactions as HEIGHT_ORPHAN"
+        );
     }
-    
+
     // CRITICAL FIX: Clean address index for ALL newly orphaned transactions
     if !all_orphaned_txids.is_empty() {
-        info!(count = all_orphaned_txids.len(), "Cleaning address index for orphaned transactions");
+        info!(
+            count = all_orphaned_txids.len(),
+            "Cleaning address index for orphaned transactions"
+        );
         // TODO: Re-enable when orphan_cleanup module is available
         // match remove_orphaned_txs_batch(&db, &all_orphaned_txids).await {
         //     Ok((cleaned, errors)) => {
@@ -475,16 +508,15 @@ pub async fn resolve_heights_from_block_index(
         //     }
         // }
     }
-    
+
     info!(updated, newly_orphaned, "Height resolution complete");
-    
+
     Ok((updated, newly_orphaned))
 }
 
 #[cfg(test)]
 mod tests {
-    
-    
+
     #[tokio::test]
     async fn test_resolve_heights() {
         // This would require a test database

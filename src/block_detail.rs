@@ -1,15 +1,15 @@
-/// Block Detail API
-/// Comprehensive block information with transactions
-use std::sync::Arc;
-use rocksdb::DB;
-use serde::{Serialize, Deserialize};
+use crate::emission::era_block_reward;
 use axum::{
-    extract::{Path, Extension},
+    extract::{Extension, Path},
     http::StatusCode,
     Json,
 };
+use rocksdb::DB;
+use serde::{Deserialize, Serialize};
+/// Block Detail API
+/// Comprehensive block information with transactions
+use std::sync::Arc;
 use tracing::warn;
-use crate::emission::era_block_reward;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockDetail {
@@ -57,20 +57,20 @@ pub struct SaplingInfo {
     /// Positive: unshielding (shield → transparent)
     /// Negative: shielding (transparent → shield)
     pub value_balance: f64,
-    
+
     /// Number of shielded spends (inputs from shielded pool)
     pub shielded_spend_count: u64,
-    
+
     /// Number of shielded outputs (new notes in shielded pool)
     pub shielded_output_count: u64,
-    
+
     /// Binding signature proving balance (hex)
     pub binding_sig: String,
-    
+
     /// Detailed spend descriptions (optional, for full tx details)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spends: Option<Vec<SpendInfo>>,
-    
+
     /// Detailed output descriptions (optional, for full tx details)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outputs: Option<Vec<OutputInfo>>,
@@ -81,19 +81,19 @@ pub struct SaplingInfo {
 pub struct SpendInfo {
     /// Value commitment (hex) - commitment to the value being spent
     pub cv: String,
-    
+
     /// Merkle tree anchor (hex) - root at some past block height
     pub anchor: String,
-    
+
     /// Nullifier (hex) - prevents double-spending
     pub nullifier: String,
-    
+
     /// Randomized public key (hex) - for signature verification
     pub rk: String,
-    
+
     /// Zero-knowledge proof (hex) - Groth16 proof (192 bytes)
     pub zkproof: String,
-    
+
     /// Spend authorization signature (hex) - authorizes this spend
     pub spend_auth_sig: String,
 }
@@ -103,23 +103,22 @@ pub struct SpendInfo {
 pub struct OutputInfo {
     /// Value commitment (hex) - commitment to output value
     pub cv: String,
-    
+
     /// Note commitment u-coordinate (hex) - commitment to the new note
     pub cmu: String,
-    
+
     /// Ephemeral public key (hex) - for note encryption
     pub ephemeral_key: String,
-    
+
     /// Encrypted note for recipient (hex) - 580 bytes
     pub enc_ciphertext: String,
-    
+
     /// Encrypted note for sender (hex) - 80 bytes  
     pub out_ciphertext: String,
-    
+
     /// Zero-knowledge proof (hex) - Groth16 proof (192 bytes)
     pub zkproof: String,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxInput {
@@ -149,23 +148,24 @@ pub async fn block_detail_v2(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<BlockDetail>, StatusCode> {
     let db_clone = Arc::clone(&db);
-    
-    tokio::task::spawn_blocking(move || {
-        get_block_detail(&db_clone, height)
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+
+    tokio::task::spawn_blocking(move || get_block_detail(&db_clone, height))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, StatusCode> {
     // Get chain metadata CF
-    let cf_metadata = db.cf_handle("chain_metadata")
+    let cf_metadata = db
+        .cf_handle("chain_metadata")
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     // Get current network height for confirmations
-    let cf_chain_state = db.cf_handle("chain_state")
+    let cf_chain_state = db
+        .cf_handle("chain_state")
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let network_height = db.get_cf(&cf_chain_state, b"network_height")
+    let network_height = db
+        .get_cf(&cf_chain_state, b"network_height")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .and_then(|bytes| {
             if bytes.len() >= 4 {
@@ -175,38 +175,41 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
             }
         })
         .unwrap_or(height);
-    
+
     let confirmations = if network_height >= height {
         network_height - height + 1
     } else {
         0
     };
-    
+
     // Get block hash from height
     let height_key = height.to_le_bytes();
-    let block_hash_bytes = db.get_cf(&cf_metadata, height_key)
+    let block_hash_bytes = db
+        .get_cf(&cf_metadata, height_key)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    
+
     // Hash is stored in display format (reversed), so use directly
     let hash = hex::encode(&block_hash_bytes);
-    
+
     // Get block header from blocks CF
-    let cf_blocks = db.cf_handle("blocks")
+    let cf_blocks = db
+        .cf_handle("blocks")
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     // Reverse back for internal lookup
     let internal_hash: Vec<u8> = block_hash_bytes.iter().rev().cloned().collect();
-    let block_header_bytes = db.get_cf(&cf_blocks, &internal_hash)
+    let block_header_bytes = db
+        .get_cf(&cf_blocks, &internal_hash)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    
+
     // Parse block header
     let header = parse_block_header(&block_header_bytes)?;
-    
+
     // Get transactions for this block
     let transactions = get_block_transactions(db, height)?;
-    
+
     // Get previous block hash
     let previousblockhash = if height > 0 {
         let prev_height = (height - 1).to_le_bytes();
@@ -217,7 +220,7 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
     } else {
         None
     };
-    
+
     // Get next block hash
     let nextblockhash = {
         let next_height = (height + 1).to_le_bytes();
@@ -226,7 +229,7 @@ fn get_block_detail(db: &Arc<DB>, height: i32) -> Result<Json<BlockDetail>, Stat
             .flatten()
             .map(|bytes| hex::encode(&bytes))
     };
-    
+
     let block_detail = BlockDetail {
         height,
         hash,
@@ -261,41 +264,45 @@ fn parse_block_header(data: &[u8]) -> Result<BlockHeader, StatusCode> {
     if data.len() < 80 {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
-    
+
     // Parse version (4 bytes)
     let version = u32::from_le_bytes(
-        data[0..4].try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        data[0..4]
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
-    
+
     // Skip prev block hash (32 bytes)
-    
+
     // Parse merkle root (32 bytes at offset 36)
     let merkle_bytes = &data[36..68];
     let merkleroot = hex::encode(merkle_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-    
+
     // Parse time (4 bytes at offset 68)
     let time = u32::from_le_bytes(
-        data[68..72].try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        data[68..72]
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
-    
+
     // Parse bits (4 bytes at offset 72)
     let bits_value = u32::from_le_bytes(
-        data[72..76].try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        data[72..76]
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
     let bits = format!("{bits_value:08x}");
-    
+
     // Parse nonce (4 bytes at offset 76)
     let nonce = u32::from_le_bytes(
-        data[76..80].try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        data[76..80]
+            .try_into()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     );
-    
+
     // Calculate difficulty from bits
     let difficulty = bits_to_difficulty(bits_value);
-    
+
     Ok(BlockHeader {
         version,
         merkleroot,
@@ -317,19 +324,23 @@ fn bits_to_difficulty(bits: u32) -> f64 {
     (65535.0 * 256_f64.powi(0x1d - 3)) / (mantissa * 256_f64.powi(exponent - 3))
 }
 
-fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSummary>, StatusCode> {
-    let cf_transactions = db.cf_handle("transactions")
+fn get_block_transactions(
+    db: &Arc<DB>,
+    height: i32,
+) -> Result<Vec<TransactionSummary>, StatusCode> {
+    let cf_transactions = db
+        .cf_handle("transactions")
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     let mut transactions = Vec::new();
-    
+
     // Create prefix for this block's transaction index: 'B' + height
     let mut prefix = vec![b'B'];
     prefix.extend(&height.to_le_bytes());
-    
+
     // Iterate through block transaction index entries
     let iter = db.prefix_iterator_cf(&cf_transactions, &prefix);
-    
+
     for item in iter {
         match item {
             Ok((key, value)) => {
@@ -337,17 +348,17 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                 if !key.starts_with(&prefix) {
                     break;
                 }
-                
+
                 // Value is the txid in hex format (display format)
                 if let Ok(txid_str) = std::str::from_utf8(&value) {
                     // Look up the full transaction data
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
                         // Try reversed format first (new/correct format)
                         let reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-                        
+
                         let mut tx_key = vec![b't'];
                         tx_key.extend_from_slice(&reversed);
-                        
+
                         let tx_data = if let Ok(Some(data)) = db.get_cf(&cf_transactions, &tx_key) {
                             Some(data)
                         } else {
@@ -356,7 +367,7 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
                             tx_key_display.extend_from_slice(&txid_bytes);
                             db.get_cf(&cf_transactions, &tx_key_display).ok().flatten()
                         };
-                        
+
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
                                 // Enrich inputs with values and addresses
@@ -376,19 +387,22 @@ fn get_block_transactions(db: &Arc<DB>, height: i32) -> Result<Vec<TransactionSu
             }
         }
     }
-    
+
     Ok(transactions)
 }
 
-fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFamily, tx: &mut TransactionSummary, height: i32) {
-    
-    
+fn enrich_transaction_inputs(
+    db: &Arc<DB>,
+    cf_transactions: &rocksdb::ColumnFamily,
+    tx: &mut TransactionSummary,
+    height: i32,
+) {
     for input in &mut tx.vin {
         // Skip coinbase inputs
         if input.coinbase.is_some() {
             continue;
         }
-        
+
         // Get the previous transaction if we have txid
         if let Some(ref prev_txid) = input.txid {
             if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
@@ -396,7 +410,7 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
                 let reversed: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
                 let mut prev_key = vec![b't'];
                 prev_key.extend_from_slice(&reversed);
-                
+
                 let prev_data = if let Ok(Some(data)) = db.get_cf(cf_transactions, &prev_key) {
                     Some(data)
                 } else {
@@ -405,29 +419,31 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
                     prev_key_display.extend_from_slice(&prev_txid_bytes);
                     db.get_cf(cf_transactions, &prev_key_display).ok().flatten()
                 };
-                
+
                 if let Some(prev_data) = prev_data {
                     if prev_data.len() >= 8 {
                         let prev_tx_data = &prev_data[8..]; // Skip block_version + height
-                        
+
                         // Prepend dummy header for parser
                         let mut data_with_header = vec![0u8; 4];
                         data_with_header.extend_from_slice(prev_tx_data);
-                        
+
                         // Parse the previous transaction
-                                                if let Ok(prev_tx) = crate::parser::deserialize_transaction_blocking(&data_with_header) {
+                        if let Ok(prev_tx) =
+                            crate::parser::deserialize_transaction_blocking(&data_with_header)
+                        {
                             // Extract the output at vout index
                             if let Some(vout_idx) = input.vout {
                                 if let Some(output) = prev_tx.outputs.get(vout_idx as usize) {
                                     // Add value from the output (in satoshis)
                                     input.value = Some(output.value as f64);
-                                    
+
                                     // Add address(es) from the output
                                     if !output.address.is_empty() {
                                         input.address = output.address.first().cloned();
                                         input.addresses = Some(output.address.clone());
                                     }
-                                    
+
                                     // Add script type from the output
                                     use crate::parser::get_script_type;
                                     let script_type = get_script_type(&output.script_pubkey.script);
@@ -440,12 +456,10 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
             }
         }
     }
-    
+
     // Recalculate value_in and fees after enrichment (convert satoshis to PIV)
-    tx.value_in = tx.vin.iter()
-        .filter_map(|i| i.value)
-        .sum::<f64>() / 100_000_000.0;
-    
+    tx.value_in = tx.vin.iter().filter_map(|i| i.value).sum::<f64>() / 100_000_000.0;
+
     // Calculate fees and rewards based on transaction type
     if let Some(ref tx_type) = tx.tx_type {
         if tx_type == "coinstake" {
@@ -476,7 +490,11 @@ fn enrich_transaction_inputs(db: &Arc<DB>, cf_transactions: &rocksdb::ColumnFami
         if tx.value_in > 0.0 {
             let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
             let calculated_fee = tx.value_in + value_balance - tx.value_out;
-            tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) { 0.0 } else { calculated_fee };
+            tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) {
+                0.0
+            } else {
+                calculated_fee
+            };
         } else {
             tx.fees = 0.0;
         }
@@ -488,25 +506,27 @@ fn parse_transaction(data: &[u8]) -> Result<TransactionSummary, Box<dyn std::err
     if data.len() < 8 {
         return Err("Transaction data too short".into());
     }
-    
+
     // Skip the block_version and block_height
     let tx_data = &data[8..];
-    
+
     // Try to parse as JSON first (for RPC-indexed blocks)
     if let Ok(json_tx) = serde_json::from_slice::<serde_json::Value>(tx_data) {
         return parse_transaction_from_json(&json_tx);
     }
-    
+
     // Otherwise parse binary format
     parse_transaction_binary(tx_data)
 }
 
-fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
+fn parse_transaction_from_json(
+    json: &serde_json::Value,
+) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
     let txid = json["txid"].as_str().unwrap_or("").to_string();
     let version = json["version"].as_i64().unwrap_or(1) as i16;
     let locktime = json["locktime"].as_u64().unwrap_or(0) as u32;
     let size = json["size"].as_u64().unwrap_or(0) as usize;
-    
+
     let mut vin = Vec::new();
     if let Some(inputs) = json["vin"].as_array() {
         for input in inputs {
@@ -533,26 +553,27 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
             }
         }
     }
-    
+
     let mut vout = Vec::new();
     let mut value_out = 0.0;
     if let Some(outputs) = json["vout"].as_array() {
         for (n, output) in outputs.iter().enumerate() {
             let value = output["value"].as_f64().unwrap_or(0.0);
             value_out += value;
-            
+
             let mut addresses = Vec::new();
             if let Some(addrs) = output["scriptPubKey"]["addresses"].as_array() {
-                addresses = addrs.iter()
+                addresses = addrs
+                    .iter()
                     .filter_map(|a| a.as_str().map(|s| s.to_string()))
                     .collect();
             }
-            
+
             // Get script type if available
             let script_type = output["scriptPubKey"]["type"]
                 .as_str()
                 .map(|s| s.to_string());
-            
+
             vout.push(TxOutput {
                 n: n as u64,
                 value,
@@ -562,18 +583,18 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
             });
         }
     }
-    
-    let value_in = vin.iter()
-        .filter_map(|i| i.value)
-        .sum::<f64>();
-    
+
+    let value_in = vin.iter().filter_map(|i| i.value).sum::<f64>();
+
     // Calculate fees and identify transaction type (fallback parsing)
     // For coinstake transactions (value_out > value_in), the "fee" would be negative
     // because the output includes staking rewards. We should report 0 fee for these.
     // For regular transactions and coinbase, calculate normally.
     let has_coinbase_input = vin.iter().any(|i| i.coinbase.is_some());
-    let first_output_empty = vout.first().is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
-    
+    let first_output_empty = vout
+        .first()
+        .is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
+
     let (tx_type, reward, fees) = if has_coinbase_input {
         if first_output_empty && vout.len() > 1 {
             // Coinstake: reward is output - input
@@ -587,13 +608,17 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
         // Normal transaction
         let calculated_fee = if value_in > 0.0 {
             let fee = value_in - value_out;
-            if fee < 0.0 { 0.0 } else { fee }
+            if fee < 0.0 {
+                0.0
+            } else {
+                fee
+            }
         } else {
             0.0
         };
         (None, None, calculated_fee)
     };
-    
+
     Ok(TransactionSummary {
         txid,
         version,
@@ -606,24 +631,22 @@ fn parse_transaction_from_json(json: &serde_json::Value) -> Result<TransactionSu
         fees,
         tx_type,
         reward,
-        sapling: None,  // JSON-based parsing doesn't include Sapling details
+        sapling: None, // JSON-based parsing doesn't include Sapling details
     })
 }
 
 fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
     use crate::parser::deserialize_transaction;
-    
+
     // Parse using the binary parser
     // Need to prepend 4-byte dummy block_version header since parser expects it
     let mut data_with_header = vec![0u8; 4]; // Dummy block_version
     data_with_header.extend_from_slice(data);
-    
+
     // Use blocking runtime since this is called from a blocking context
     let tx = tokio::runtime::Handle::current()
-        .block_on(async {
-            deserialize_transaction(&data_with_header).await
-        })?;
-    
+        .block_on(async { deserialize_transaction(&data_with_header).await })?;
+
     // Convert inputs
     let mut vin = Vec::new();
     for input in &tx.inputs {
@@ -641,45 +664,45 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
             vin.push(TxInput {
                 txid: Some(prevout.hash.clone()),
                 vout: Some(prevout.n),
-                address: None, // Will be enriched later
+                address: None,   // Will be enriched later
                 addresses: None, // Will be enriched later
-                value: None,   // Will be enriched later
+                value: None,     // Will be enriched later
                 coinbase: None,
                 script_type: None, // Will be enriched later
             });
         }
     }
-    
+
     // Convert outputs
     let mut vout = Vec::new();
     let mut value_out = 0.0;
-    
+
     use crate::parser::get_script_type;
-    
+
     for (idx, output) in tx.outputs.iter().enumerate() {
         let value_satoshis = output.value as f64;
-        value_out += value_satoshis / 100_000_000.0;  // Still calculate PIV totals for backward compatibility
-        
+        value_out += value_satoshis / 100_000_000.0; // Still calculate PIV totals for backward compatibility
+
         let script_type = get_script_type(&output.script_pubkey.script);
-        
+
         vout.push(TxOutput {
             n: idx as u64,
-            value: value_satoshis,  // Return raw satoshis, not PIV
+            value: value_satoshis, // Return raw satoshis, not PIV
             addresses: output.address.clone(),
             spent: false,
             script_type: Some(script_type.to_string()),
         });
     }
-    
+
     // Identify transaction type based on PIVX rules:
     // - Coinbase: first input has coinbase data, first output has value (standard mining reward)
     // - Coinstake: first output is empty (0 value, 0-length script), has regular inputs
     // - Normal: regular transaction
     let has_coinbase_input = vin.first().is_some_and(|i| i.coinbase.is_some());
-    let first_output_empty = vout.first().is_some_and(|o| 
-        o.value == 0.0 && o.addresses.is_empty()
-    );
-    
+    let first_output_empty = vout
+        .first()
+        .is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
+
     let (tx_type, reward) = if has_coinbase_input {
         // Has coinbase input
         if first_output_empty && vout.len() > 1 {
@@ -697,29 +720,37 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
         // Normal transaction
         (None, None)
     };
-    
+
     // Convert Sapling data if present
     let sapling = tx.sapling_data.as_ref().map(|sap| {
         // Convert spends to API format
-        let spends = sap.vshielded_spend.iter().map(|spend| SpendInfo {
-            cv: hex::encode(spend.cv),
-            anchor: hex::encode(spend.anchor),
-            nullifier: hex::encode(spend.nullifier),
-            rk: hex::encode(spend.rk),
-            zkproof: hex::encode(spend.zkproof),
-            spend_auth_sig: hex::encode(spend.spend_auth_sig),
-        }).collect();
-        
+        let spends = sap
+            .vshielded_spend
+            .iter()
+            .map(|spend| SpendInfo {
+                cv: hex::encode(spend.cv),
+                anchor: hex::encode(spend.anchor),
+                nullifier: hex::encode(spend.nullifier),
+                rk: hex::encode(spend.rk),
+                zkproof: hex::encode(spend.zkproof),
+                spend_auth_sig: hex::encode(spend.spend_auth_sig),
+            })
+            .collect();
+
         // Convert outputs to API format
-        let outputs = sap.vshielded_output.iter().map(|output| OutputInfo {
-            cv: hex::encode(output.cv),
-            cmu: hex::encode(output.cmu),
-            ephemeral_key: hex::encode(output.ephemeral_key),
-            enc_ciphertext: hex::encode(output.enc_ciphertext),
-            out_ciphertext: hex::encode(output.out_ciphertext),
-            zkproof: hex::encode(output.zkproof),
-        }).collect();
-        
+        let outputs = sap
+            .vshielded_output
+            .iter()
+            .map(|output| OutputInfo {
+                cv: hex::encode(output.cv),
+                cmu: hex::encode(output.cmu),
+                ephemeral_key: hex::encode(output.ephemeral_key),
+                enc_ciphertext: hex::encode(output.enc_ciphertext),
+                out_ciphertext: hex::encode(output.out_ciphertext),
+                zkproof: hex::encode(output.zkproof),
+            })
+            .collect();
+
         SaplingInfo {
             value_balance: sap.value_balance as f64 / 100_000_000.0, // Convert satoshis to PIV
             shielded_spend_count: sap.vshielded_spend.len() as u64,
@@ -729,7 +760,7 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
             outputs: Some(outputs),
         }
     });
-    
+
     Ok(TransactionSummary {
         txid: tx.txid.clone(),
         version: tx.version,
@@ -739,10 +770,9 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
         vout,
         value_in: 0.0, // Will be calculated after enrichment
         value_out,
-        fees: 0.0,     // Will be calculated after enrichment
+        fees: 0.0, // Will be calculated after enrichment
         tx_type,
         reward,
         sapling,
     })
 }
-

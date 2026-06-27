@@ -1,5 +1,5 @@
-use rocksdb::{DB, Options};
-use rustyblox::config::{load_config, get_db_path};
+use rocksdb::{Options, DB};
+use rustyblox::config::{get_db_path, load_config};
 use std::error::Error;
 
 fn deserialize_tx_height(data: &[u8]) -> Result<i32, Box<dyn Error>> {
@@ -20,16 +20,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = load_config()?;
     let db_path = get_db_path(&config)?;
     let opts = Options::default();
-    let db = DB::open_cf_for_read_only(
-        &opts,
-        &db_path,
-        vec!["transactions", "addr_index"],
-        false
-    )?;
-    
+    let db = DB::open_cf_for_read_only(&opts, &db_path, vec!["transactions", "addr_index"], false)?;
+
     let tx_cf = db.cf_handle("transactions").unwrap();
     let addr_cf = db.cf_handle("addr_index").unwrap();
-    
+
     // Get transaction list for this address
     let addr_txs_key = format!("t{test_address}");
     let txids = if let Some(data) = db.get_cf(addr_cf, addr_txs_key.as_bytes())? {
@@ -43,18 +38,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Vec::new()
     };
-    
+
     println!("Total transactions in addr_index: {}", txids.len());
-    
+
     let mut orphan_count = 0;
     let mut valid_count = 0;
-    
+
     for txid in &txids {
         let tx_key = [b"t".as_slice(), &txid[..]].concat();
-        
+
         if let Some(tx_data) = db.get_cf(tx_cf, &tx_key)? {
             let height = deserialize_tx_height(&tx_data)?;
-            
+
             if height == -1 {
                 orphan_count += 1;
             } else {
@@ -62,12 +57,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    
+
     println!("Valid transactions (height >= 0): {valid_count}");
     println!("Orphaned transactions (height == -1): {orphan_count}");
     println!("\nExpected from PIVX Core: 2445 transactions");
     println!("Our valid count: {valid_count}");
     println!("Difference: {}", 2445 - valid_count);
-    
+
     Ok(())
 }

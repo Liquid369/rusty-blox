@@ -1,5 +1,5 @@
-use bitcoin::util::address::Address;
 use bitcoin::network::constants::Network;
+use bitcoin::util::address::Address;
 
 /// Script utilities: attempt to extract an Address from a scriptPubKey. This
 /// uses the `bitcoin` crate's helper which knows P2PKH/P2SH/P2WPKH/P2WSH

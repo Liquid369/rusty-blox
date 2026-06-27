@@ -1,6 +1,6 @@
 extern crate sha2;
 
-use sha2::{Sha512, Digest};
+use sha2::{Digest, Sha512};
 use std::ffi::c_void;
 
 /// The authoritative set of RocksDB column families this database creates and
@@ -23,69 +23,68 @@ pub const COLUMN_FAMILIES: &[&str] = &[
     "chain_metadata",
     "pubkey",
     "chain_state",
-    "utxo_undo", // spent-UTXO tracking for reorg handling + input-value calc
+    "utxo_undo",   // spent-UTXO tracking for reorg handling + input-value calc
     "tail_blocks", // private: live orphan-tail block records (opt-in)
     "tail_meta",   // private: tail cursor/anchor + (claimed_height,state) index
 ];
 
-pub mod chainwork;
+pub mod address;
+pub mod atomic_writer;
+pub mod batch_writer;
+pub mod blocks;
+pub mod cache;
 pub mod canonical_chain;
+pub mod chain_state;
+pub mod chainwork;
 pub mod config;
 pub mod constants;
-pub mod emission;
 pub mod db_handles;
-pub mod tx_keys;
+pub mod db_sampler;
+pub mod db_utils;
+pub mod emission;
 pub mod enrich_addresses;
 pub mod enrich_from_chainstate;
-pub mod address;
-pub mod parallel;
 pub mod monitor;
-pub mod websocket;
-pub mod chain_state;
-pub mod cache;
-pub mod blocks;
-pub mod db_utils;
-pub mod batch_writer;
-pub mod atomic_writer;
+pub mod parallel;
 pub mod transactions;
-pub mod db_sampler;
+pub mod tx_keys;
+pub mod websocket;
 
-pub mod leveldb_index;
-pub mod block_index;
-pub mod offset_indexer;
-pub mod blk_tail;
-pub mod analytics_live;
-pub mod pivx_copy;
-pub mod api;
-pub mod mempool;
-pub mod block_detail;
-pub mod chainstate_leveldb;
-pub mod chainstate;
-pub mod script_utils;
-pub mod utxo;
-pub mod forks;
-pub mod sync;
-pub mod parser;
-pub mod search;
-pub mod repair;
-pub mod height_resolver;
-pub mod types;
-pub mod tx_type;
-pub mod maturity;
-pub mod reorg;
-pub mod crash_recovery;
-pub mod spent_utxo;
-pub mod pos_validation;
-pub mod telemetry;
-pub mod metrics;
 pub mod address_rollback;
+pub mod analytics_live;
+pub mod api;
+pub mod blk_tail;
+pub mod block_detail;
+pub mod block_index;
 pub mod build_address_undo;
+pub mod chainstate;
+pub mod chainstate_leveldb;
+pub mod crash_recovery;
 pub mod fee_calculation;
+pub mod forks;
+pub mod height_resolver;
+pub mod leveldb_index;
+pub mod maturity;
+pub mod mempool;
+pub mod metrics;
+pub mod offset_indexer;
+pub mod parser;
+pub mod pivx_copy;
+pub mod pos_validation;
+pub mod reorg;
+pub mod repair;
+pub mod script_utils;
+pub mod search;
+pub mod spent_utxo;
+pub mod sync;
+pub mod telemetry;
+pub mod tx_type;
+pub mod types;
+pub mod utxo;
 
 #[repr(C)]
 #[allow(non_snake_case)] // C FFI struct - must match quark hash C implementation
 pub struct sph_blake_big_context {
-
     buf: [u8; 128],
     ptr: usize,
     H: [u64; 8],

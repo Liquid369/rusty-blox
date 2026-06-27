@@ -1,14 +1,13 @@
 /// WebSocket Support - Real-time blockchain event streaming
-/// 
+///
 /// Provides:
 /// - /ws/blocks - Subscribe to new block events
 /// - /ws/transactions - Subscribe to new transaction events
 /// - /ws/mempool - Subscribe to mempool updates
-/// 
+///
 /// Uses tokio broadcast channels for pub/sub pattern
-
 use axum::{
-    extract::ws::{WebSocketUpgrade, WebSocket, Message},
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension,
@@ -68,7 +67,10 @@ fn ws_allowed_origins() -> &'static Vec<String> {
 ///   origins (localhost / 127.0.0.1 / [::1], any port) so local dev works, and
 ///   allow when the request's `Host` matches the origin's host (same-origin).
 fn origin_allowed(headers: &HeaderMap) -> bool {
-    let origin = match headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
+    let origin = match headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
         Some(o) => o.trim().trim_end_matches('/').to_ascii_lowercase(),
         None => return true, // no Origin (non-browser client) — allow
     };
@@ -84,14 +86,22 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
     let host_only = host_part.split(':').next().unwrap_or(host_part);
 
     // Always allow loopback for local development.
-    if host_only == "localhost" || host_only == "127.0.0.1" || host_only == "[::1]" || host_only == "::1" {
+    if host_only == "localhost"
+        || host_only == "127.0.0.1"
+        || host_only == "[::1]"
+        || host_only == "::1"
+    {
         return true;
     }
 
     // Otherwise require same-origin: the Origin host must equal the request Host.
-    if let Some(req_host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()) {
+    if let Some(req_host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
         let req_host = req_host.trim().to_ascii_lowercase();
-        return host_part == req_host || host_only == req_host.split(':').next().unwrap_or(&req_host);
+        return host_part == req_host
+            || host_only == req_host.split(':').next().unwrap_or(&req_host);
     }
 
     false
@@ -104,10 +114,13 @@ fn ws_guard(headers: &HeaderMap) -> Result<OwnedSemaphorePermit, Response> {
     if !origin_allowed(headers) {
         return Err((StatusCode::FORBIDDEN, "origin not allowed").into_response());
     }
-    ws_semaphore()
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "websocket connection limit reached").into_response())
+    ws_semaphore().clone().try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "websocket connection limit reached",
+        )
+            .into_response()
+    })
 }
 
 /// Event types that can be broadcast to WebSocket clients
@@ -175,7 +188,12 @@ impl EventBroadcaster {
     }
 
     /// Broadcast a new transaction event
-    pub fn broadcast_transaction(&self, txid: String, block_height: Option<i32>, value: Option<f64>) {
+    pub fn broadcast_transaction(
+        &self,
+        txid: String,
+        block_height: Option<i32>,
+        value: Option<f64>,
+    ) {
         let event = BlockchainEvent::NewTransaction {
             txid,
             block_height,
@@ -247,7 +265,14 @@ async fn handle_block_socket(
     permit: OwnedSemaphorePermit,
 ) {
     let rx = broadcaster.block_tx.subscribe();
-    serve_socket(socket, rx, "blocks", "Subscribed to new block events", permit).await;
+    serve_socket(
+        socket,
+        rx,
+        "blocks",
+        "Subscribed to new block events",
+        permit,
+    )
+    .await;
 }
 
 /// Handle WebSocket connection for transaction events.
@@ -257,7 +282,14 @@ async fn handle_transaction_socket(
     permit: OwnedSemaphorePermit,
 ) {
     let rx = broadcaster.transaction_tx.subscribe();
-    serve_socket(socket, rx, "transactions", "Subscribed to new transaction events", permit).await;
+    serve_socket(
+        socket,
+        rx,
+        "transactions",
+        "Subscribed to new transaction events",
+        permit,
+    )
+    .await;
 }
 
 /// Handle WebSocket connection for mempool events.
@@ -267,7 +299,14 @@ async fn handle_mempool_socket(
     permit: OwnedSemaphorePermit,
 ) {
     let rx = broadcaster.mempool_tx.subscribe();
-    serve_socket(socket, rx, "mempool", "Subscribed to mempool events", permit).await;
+    serve_socket(
+        socket,
+        rx,
+        "mempool",
+        "Subscribed to mempool events",
+        permit,
+    )
+    .await;
 }
 
 /// Shared per-connection event loop for every channel.
@@ -291,7 +330,11 @@ async fn serve_socket(
         "channel": channel,
         "message": welcome_message,
     });
-    if sender.send(Message::Text(welcome.to_string().into())).await.is_err() {
+    if sender
+        .send(Message::Text(welcome.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
 

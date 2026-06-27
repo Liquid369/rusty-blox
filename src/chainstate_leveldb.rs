@@ -1,6 +1,6 @@
-use rusty_leveldb::{DB, Options, LdbIterator};
-use std::path::Path;
+use rusty_leveldb::{LdbIterator, Options, DB};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// Lightweight chainstate LevelDB reader.
 ///
@@ -17,7 +17,9 @@ pub type ChainstateRawEntry = (Vec<u8>, Vec<u8>);
 
 /// Iterate the LevelDB at `chainstate_path` and collect all entries whose key
 /// starts with 'C' (the UTXO/coin prefix in Bitcoin-derived clients).
-pub fn read_chainstate_raw(chainstate_path: &str) -> Result<Vec<ChainstateRawEntry>, Box<dyn std::error::Error>> {
+pub fn read_chainstate_raw(
+    chainstate_path: &str,
+) -> Result<Vec<ChainstateRawEntry>, Box<dyn std::error::Error>> {
     let opts = Options::default();
     let mut db = DB::open(Path::new(chainstate_path), opts)?;
     let mut iter = db.new_iter()?;
@@ -25,8 +27,12 @@ pub fn read_chainstate_raw(chainstate_path: &str) -> Result<Vec<ChainstateRawEnt
     let mut entries: Vec<ChainstateRawEntry> = Vec::new();
 
     while let Some((key, value)) = LdbIterator::next(&mut iter) {
-        if key.is_empty() { continue; }
-        if key[0] != b'C' { continue; }
+        if key.is_empty() {
+            continue;
+        }
+        if key[0] != b'C' {
+            continue;
+        }
 
         // Store key without the prefix (convenience)
         let outpoint_key = key[1..].to_vec();
@@ -39,7 +45,9 @@ pub fn read_chainstate_raw(chainstate_path: &str) -> Result<Vec<ChainstateRawEnt
 /// A convenience function to map raw entries to a simple hash map keyed by the
 /// hex representation of the raw key. This is useful for quick lookups and for
 /// passing into UTXO aggregation logic.
-pub fn read_chainstate_map(chainstate_path: &str) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
+pub fn read_chainstate_map(
+    chainstate_path: &str,
+) -> Result<HashMap<String, Vec<u8>>, Box<dyn std::error::Error>> {
     let raw = read_chainstate_raw(chainstate_path)?;
     let mut map = HashMap::new();
     for (k, v) in raw {

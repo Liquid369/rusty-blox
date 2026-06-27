@@ -3,22 +3,22 @@
 // Endpoints for querying and broadcasting transactions.
 // Confirmed transactions are immutable and cached heavily.
 
-use axum::{Json, Extension, http::StatusCode};
+use axum::{http::StatusCode, Extension, Json};
 use rocksdb::DB;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutput};
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::parser::deserialize_transaction_blocking;
-use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutput};
 
 pub use axum::extract::Path as AxumPath;
 
 /// GET /api/v2/tx/{txid}
 /// Returns full transaction details with inputs, outputs, and Sapling data.
-/// 
+///
 /// **CACHED**: 300 second TTL (confirmed transactions are immutable)
 pub async fn tx_v2(
     AxumPath(txid): AxumPath<String>,
@@ -28,32 +28,28 @@ pub async fn tx_v2(
     let cache_key = format!("tx:{txid}");
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
-    
+
     let result = cache
-        .get_or_compute(
-            &cache_key,
-            Duration::from_secs(300),
-            || async move {
-                compute_transaction_details(&db_clone, &txid_clone).await
-            }
-        )
+        .get_or_compute(&cache_key, Duration::from_secs(300), || async move {
+            compute_transaction_details(&db_clone, &txid_clone).await
+        })
         .await;
-    
+
     match result {
         Ok(tx) => Ok(Json(tx)),
         Err(e) => Err((
             StatusCode::NOT_FOUND,
-            Json(BlockbookError::new(e.to_string()))
+            Json(BlockbookError::new(e.to_string())),
         )),
     }
 }
 
 /// Build Transaction struct from raw DB data
-/// 
+///
 /// This is a public helper used by:
 /// - tx_v2 endpoint (single transaction)
 /// - address/xpub endpoints (batch transaction fetching for details=txs)
-/// 
+///
 /// Returns Transaction struct compatible with Blockbook API schema
 pub(crate) async fn build_transaction_from_db(
     db: &Arc<DB>,
@@ -61,20 +57,20 @@ pub(crate) async fn build_transaction_from_db(
 ) -> Result<Transaction, Box<dyn std::error::Error + Send + Sync>> {
     let db_clone = Arc::clone(db);
     let txid_clone = txid.to_string();
-    
+
     tokio::task::spawn_blocking(move || {
         // Transaction key: 't' + txid_bytes_reversed (internal format)
         let txid_bytes = hex::decode(&txid_clone)?;
-        
+
         // Try reversed format first (new/correct format)
         let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
         let mut key = vec![b't'];
         key.extend_from_slice(&txid_reversed);
-        
+
         let cf_transactions = db_clone
             .cf_handle("transactions")
             .ok_or("transactions CF not found")?;
-        
+
         let data = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &key) {
             d
         } else {
@@ -85,35 +81,35 @@ pub(crate) async fn build_transaction_from_db(
                 .get_cf(&cf_transactions, &key_display)?
                 .ok_or("Transaction not found")?
         };
-        
+
         // Data format: block_version (4 bytes) + height (4 bytes) + raw_tx_bytes
         if data.len() < 8 {
             return Err("Invalid transaction data".into());
         }
-        
+
         if data.len() > 10_000_000 {
             return Err("Transaction data too large".into());
         }
-        
+
         let _block_version = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4]));
         let block_height = i32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
-        
+
         let tx_data_len = data.len() - 8;
         if tx_data_len == 0 {
             return Err("Empty transaction data".into());
         }
-        
+
         let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
         tx_data_with_header.extend_from_slice(&[0u8; 4]); // Dummy block_version
         tx_data_with_header.extend_from_slice(&data[8..]); // Actual tx data
-        
+
         // Parse the binary transaction data
         let tx = deserialize_transaction_blocking(&tx_data_with_header)?;
-        
+
         // Build vin (inputs)
         let mut vin = Vec::new();
         let mut value_in: i64 = 0;
-        
+
         for (idx, input) in tx.inputs.iter().enumerate() {
             if let Some(coinbase_data) = &input.coinbase {
                 // Coinbase transaction
@@ -139,13 +135,13 @@ pub(crate) async fn build_transaction_from_db(
                     value: None,
                     hex: None,
                 };
-                
+
                 // Try to get value and address from previous transaction
                 if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
                     let reversed: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
                     let mut prev_key = vec![b't'];
                     prev_key.extend_from_slice(&reversed);
-                    
+
                     let prev_data_opt = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &prev_key) {
                         Some(d)
                     } else {
@@ -154,7 +150,7 @@ pub(crate) async fn build_transaction_from_db(
                         prev_key_display.extend_from_slice(&prev_txid_bytes);
                         db_clone.get_cf(&cf_transactions, &prev_key_display).ok().flatten()
                     };
-                    
+
                     if let Some(prev_data) = prev_data_opt {
                         if prev_data.len() > 10_000_000 {
                             warn!(prevout_hash = %prevout.hash, size_bytes = prev_data.len(), "Previous transaction data too large");
@@ -164,7 +160,7 @@ pub(crate) async fn build_transaction_from_db(
                                 let mut prev_tx_data_with_header = Vec::with_capacity(4 + prev_tx_data_len);
                                 prev_tx_data_with_header.extend_from_slice(&[0u8; 4]);
                                 prev_tx_data_with_header.extend_from_slice(&prev_data[8..]);
-                            
+
                                 if let Ok(prev_tx) = deserialize_transaction_blocking(&prev_tx_data_with_header) {
                                     if let Some(output) = prev_tx.outputs.get(prevout.n as usize) {
                                         tx_input.value = Some(output.value.to_string());
@@ -179,11 +175,11 @@ pub(crate) async fn build_transaction_from_db(
                         }
                     }
                 }
-                
+
                 vin.push(tx_input);
             }
         }
-        
+
         // Build vout (outputs)
         //
         // P2-D: per-output spent/unspent status. The authoritative live-UTXO
@@ -276,17 +272,17 @@ pub(crate) async fn build_transaction_from_db(
                 spent,
             });
         }
-        
+
         let tx_size = data.len() - 8;
-        
+
         // Get block hash and time if we have a valid height
         let (block_hash, block_time) = if block_height > 0 {
             let height_key = (block_height as u32).to_le_bytes().to_vec();
-            
+
             if let Some(cf_metadata) = db_clone.cf_handle("chain_metadata") {
                 if let Ok(Some(hash_bytes)) = db_clone.get_cf(&cf_metadata, &height_key) {
                     let hash_hex = hex::encode(&hash_bytes);
-                    
+
                     if let Some(cf_blocks) = db_clone.cf_handle("blocks") {
                         let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
                         if let Ok(Some(header_bytes)) = db_clone.get_cf(&cf_blocks, &internal_hash) {
@@ -313,17 +309,17 @@ pub(crate) async fn build_transaction_from_db(
         } else {
             (String::new(), 0)
         };
-        
+
         // Get current height for confirmations
         let chain_state = get_chain_state(&db_clone).ok();
         let current_height = chain_state.as_ref().map(|cs| cs.height).unwrap_or(0);
-        
+
         let confirmations = if block_height > 0 && current_height > 0 {
             (current_height - block_height + 1).max(0) as u32
         } else {
             0
         };
-        
+
         // Calculate fees (for non-coinbase)
         let fees = if value_in > 0 && value_in >= value_out {
             value_in - value_out
@@ -390,7 +386,7 @@ async fn compute_transaction_details(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     // Use the shared transaction builder
     let tx = build_transaction_from_db(db, txid).await?;
-    
+
     // Convert to JSON for current endpoint compatibility
     // TODO: Eventually return Transaction struct directly
     Ok(serde_json::to_value(tx)?)
@@ -398,10 +394,10 @@ async fn compute_transaction_details(
 
 /// GET /api/v2/sendtx/{hex}
 /// Legacy endpoint for broadcasting raw transactions.
-/// 
+///
 /// **NO CACHE**: Write operation
 pub async fn send_tx_v2(
-    AxumPath(param): AxumPath<String>
+    AxumPath(param): AxumPath<String>,
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
     send_transaction_internal(param).await
 }
@@ -409,32 +405,31 @@ pub async fn send_tx_v2(
 /// POST /api/v2/sendtx
 /// Blockbook-compatible endpoint for broadcasting transactions.
 /// Accepts raw transaction hex in request body (plain text or JSON).
-/// 
+///
 /// **NO CACHE**: Write operation
 pub async fn send_tx_post_v2(
-    body: String
+    body: String,
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
     // Body can be either plain hex or JSON {"hex": "..."}
     let tx_hex = if body.trim().starts_with('{') {
         match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(json) => {
-                json.get("hex")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&body)
-                    .trim()
-                    .to_string()
-            },
+            Ok(json) => json
+                .get("hex")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&body)
+                .trim()
+                .to_string(),
             Err(_) => body.trim().to_string(),
         }
     } else {
         body.trim().to_string()
     };
-    
+
     send_transaction_internal(tx_hex).await
 }
 
 async fn send_transaction_internal(
-    tx_hex: String
+    tx_hex: String,
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
     // Validate input BEFORE touching the node: must be hex and within PIVX's
     // 2 MB block size limit (4M hex chars). Previously arbitrary input was
@@ -455,9 +450,14 @@ async fn send_transaction_internal(
     }
 
     // Async RPC call with the shared client (15s hard timeout, no thread spawn)
-    match super::helpers::rpc_call_json("sendrawtransaction", serde_json::json!([tx_hex, false])).await {
+    match super::helpers::rpc_call_json("sendrawtransaction", serde_json::json!([tx_hex, false]))
+        .await
+    {
         Ok(txid) => {
-            let txid_str = txid.as_str().map(|s| s.to_string()).unwrap_or_else(|| txid.to_string());
+            let txid_str = txid
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| txid.to_string());
             Ok(Json(SendTxResponse {
                 result: Some(txid_str),
                 error: None,
@@ -467,30 +467,30 @@ async fn send_transaction_internal(
             StatusCode::BAD_REQUEST,
             // Node rejection reasons (e.g. "bad-txns-inputs-spent") are part of the
             // Blockbook contract — wallets rely on them.
-            Json(BlockbookError::new(format!("Failed to send transaction: {e}"))),
+            Json(BlockbookError::new(format!(
+                "Failed to send transaction: {e}"
+            ))),
         )),
     }
 }
 
 /// Batch fetch multiple transactions efficiently with parallel processing
-/// 
+///
 /// Used by address/xpub endpoints when details=txs is requested
 /// Processes transactions in batches to avoid overwhelming the system
-pub(crate) async fn fetch_transactions_batch(
-    db: &Arc<DB>,
-    txids: &[String],
-) -> Vec<Transaction> {
+pub(crate) async fn fetch_transactions_batch(db: &Arc<DB>, txids: &[String]) -> Vec<Transaction> {
     const BATCH_SIZE: usize = 50;
     let mut results = Vec::with_capacity(txids.len());
-    
+
     for chunk in txids.chunks(BATCH_SIZE) {
-        let futures: Vec<_> = chunk.iter()
+        let futures: Vec<_> = chunk
+            .iter()
             .map(|txid| build_transaction_from_db(db, txid))
             .collect();
-        
+
         let batch_results = futures::future::join_all(futures).await;
         results.extend(batch_results.into_iter().filter_map(|r| r.ok()));
     }
-    
+
     results
 }

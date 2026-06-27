@@ -19,7 +19,10 @@ pub fn active_set(chain_active: &Vec<Vec<u8>>) -> HashMap<Vec<u8>, usize> {
 /// of side-chain tips (hashes that are present in by_hash but not on the
 /// active chain). This is a simple helper; callers can walk each tip back to
 /// the main chain using prev_hash references stored in BlockIndexEntry.
-pub fn find_sidechain_tips(by_hash: &HashMap<Vec<u8>, super::block_index::BlockIndexEntry>, chain_active: &Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+pub fn find_sidechain_tips(
+    by_hash: &HashMap<Vec<u8>, super::block_index::BlockIndexEntry>,
+    chain_active: &Vec<Vec<u8>>,
+) -> Vec<Vec<u8>> {
     let active = active_set(chain_active);
     let mut tips = Vec::new();
 

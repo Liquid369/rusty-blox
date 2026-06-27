@@ -19,10 +19,15 @@ pub struct BlockIndexEntry {
 /// Build `by_hash` and `children` maps by reusing the canonical chain and
 /// re-scanning the leveldb index. This is intentionally conservative and
 /// mirrors PIVX Core where the LevelDB block index is the source of truth.
-pub fn build_block_index(leveldb_path: &str) -> Result<(
-    HashMap<Vec<u8>, BlockIndexEntry>,
-    HashMap<Vec<u8>, Vec<Vec<u8>>>,
-), Box<dyn std::error::Error>> {
+pub fn build_block_index(
+    leveldb_path: &str,
+) -> Result<
+    (
+        HashMap<Vec<u8>, BlockIndexEntry>,
+        HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
     // Use existing leveldb_index builder to get canonical chain (height, hash)
     let chain = leveldb_index::build_canonical_chain_from_leveldb(leveldb_path)?;
 
@@ -49,7 +54,9 @@ pub fn build_block_index(leveldb_path: &str) -> Result<(
     let mut iter = db.new_iter()?;
 
     while let Some((key, _value)) = rusty_leveldb::LdbIterator::next(&mut iter) {
-        if key.len() != 33 || key[0] != b'b' { continue; }
+        if key.len() != 33 || key[0] != b'b' {
+            continue;
+        }
         let block_hash = key[1..].to_vec();
 
         // Attempt to parse the prev hash from the CDiskBlockIndex blob similarly
@@ -65,7 +72,7 @@ pub fn build_block_index(leveldb_path: &str) -> Result<(
 
         // If a block from leveldb is part of `by_hash`, link it to its parent
         // if possible (we don't know parent here so skip precise parent linking).
-    children.entry(block_hash.clone()).or_default();
+        children.entry(block_hash.clone()).or_default();
     }
 
     // Ensure that every block in by_hash has at least an empty children vec

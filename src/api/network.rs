@@ -3,7 +3,7 @@
 // Endpoints that provide network-wide statistics and status information.
 // These are frequently accessed and use caching for performance.
 
-use axum::{Json, Extension, http::StatusCode};
+use axum::{http::StatusCode, Extension, Json};
 use rocksdb::DB;
 use serde::Serialize;
 use std::sync::Arc;
@@ -12,43 +12,37 @@ use std::time::Duration;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+use super::types::{BlockbookError, MoneySupply};
 use crate::cache::CacheManager;
 use crate::chain_state::{get_chain_state, ChainState};
 use crate::config::get_global_config;
-use super::types::{BlockbookError, MoneySupply};
 
 /// GET /api/v2/status
 /// Returns the current status of the blockchain and explorer.
-/// 
+///
 /// **CACHED**: 5 second TTL (polled frequently by frontend)
 pub async fn status_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<ChainState>, (StatusCode, Json<BlockbookError>)> {
     let db_clone = Arc::clone(&db);
-    
+
     let result = cache
-        .get_or_compute(
-            "status:latest",
-            Duration::from_secs(5),
-            || async move {
-                get_chain_state(&db_clone)
-                    .map_err(|e| Box::new(std::io::Error::other(
-                        format!("Failed to get chain state: {e}")
-                    )) as Box<dyn std::error::Error + Send + Sync>)
-            }
-        )
+        .get_or_compute("status:latest", Duration::from_secs(5), || async move {
+            get_chain_state(&db_clone).map_err(|e| {
+                Box::new(std::io::Error::other(format!(
+                    "Failed to get chain state: {e}"
+                ))) as Box<dyn std::error::Error + Send + Sync>
+            })
+        })
         .await;
-    
+
     match result {
         Ok(state) => Ok(Json(state)),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            {
-                tracing::error!(error = %e, "status endpoint failed");
-                Json(BlockbookError::new("Internal error"))
-            }
-        ))
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, {
+            tracing::error!(error = %e, "status endpoint failed");
+            Json(BlockbookError::new("Internal error"))
+        })),
     }
 }
 
@@ -66,7 +60,7 @@ pub struct HealthStatus {
 
 /// GET /api/v2/health
 /// Health check endpoint - shows database and sync status.
-/// 
+///
 /// **NO CACHE**: Real-time health checks should not be cached
 pub async fn health_check_v2(
     Extension(db): Extension<Arc<DB>>,
@@ -118,7 +112,7 @@ pub async fn health_check_v2(
             warnings,
         })
     }).await;
-    
+
     match result {
         Ok(Ok(status)) => Ok(Json(status)),
         _ => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -127,21 +121,17 @@ pub async fn health_check_v2(
 
 /// GET /api/v2/moneysupply
 /// Returns money supply statistics from RPC.
-/// 
+///
 /// **CACHED**: 300 second TTL (changes slowly)
 pub async fn money_supply_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<MoneySupply>, StatusCode> {
     let result = cache
-        .get_or_compute(
-            "supply:latest",
-            Duration::from_secs(300),
-            || async {
-                compute_money_supply().await
-            }
-        )
+        .get_or_compute("supply:latest", Duration::from_secs(300), || async {
+            compute_money_supply().await
+        })
         .await;
-    
+
     match result {
         Ok(supply) => Ok(Json(supply)),
         Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
@@ -149,20 +139,31 @@ pub async fn money_supply_v2(
 }
 
 /// Compute money supply from PIVX RPC (async, non-blocking)
-pub async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn compute_money_supply() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>>
+{
     // Unforced (fForceUpdate=false): the node maintains supply as it syncs, so this
     // returns the up-to-date figures in ~20ms. Passing [true] forces a full
     // chainstate recomputation (~17s) on every call and blew the RPC timeout.
     let result = super::helpers::rpc_call_json("getsupplyinfo", serde_json::json!([false])).await?;
     Ok(MoneySupply {
-        moneysupply: result.get("totalsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        transparentsupply: result.get("transparentsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        shieldsupply: result.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        moneysupply: result
+            .get("totalsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        transparentsupply: result
+            .get("transparentsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        shieldsupply: result
+            .get("shieldsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
     })
 }
 
 /// Blocking version of compute_money_supply for use in spawn_blocking contexts
-pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
+pub fn compute_money_supply_blocking(
+) -> Result<MoneySupply, Box<dyn std::error::Error + Send + Sync>> {
     let config = get_global_config();
     let rpc_host = config
         .get_string("rpc.host")
@@ -173,18 +174,16 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
     let rpc_user = config.get_string("rpc.user").unwrap_or_default();
     let rpc_pass = config.get_string("rpc.pass").unwrap_or_default();
 
-    let host_port = rpc_host
-        .replace("http://", "")
-        .replace("https://", "");
-    
+    let host_port = rpc_host.replace("http://", "").replace("https://", "");
+
     let mut stream = TcpStream::connect(&host_port)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    
+
     let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[false]}"#;
     let auth = format!("{rpc_user}:{rpc_pass}");
     let auth_b64 = base64::encode(auth);
-    
+
     let http_request = format!(
         "POST / HTTP/1.1\r\n\
          Host: {}\r\n\
@@ -195,25 +194,37 @@ pub fn compute_money_supply_blocking() -> Result<MoneySupply, Box<dyn std::error
          Connection: close\r\n\
          \r\n\
          {}",
-        host_port, auth_b64, json_body.len(), json_body
+        host_port,
+        auth_b64,
+        json_body.len(),
+        json_body
     );
-    
+
     stream.write_all(http_request.as_bytes())?;
-    
+
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
-    
+
     // Parse response - find JSON after headers
     let json_start = response.find("{").ok_or("Invalid response format")?;
     let json_str = &response[json_start..];
-    
+
     let json: serde_json::Value = serde_json::from_str(json_str)?;
     let result = json.get("result").ok_or("No result in RPC response")?;
-    
+
     Ok(MoneySupply {
-        moneysupply: result.get("totalsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        transparentsupply: result.get("transparentsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
-        shieldsupply: result.get("shieldsupply").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        moneysupply: result
+            .get("totalsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        transparentsupply: result
+            .get("transparentsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        shieldsupply: result
+            .get("shieldsupply")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
     })
 }
 

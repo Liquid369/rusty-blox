@@ -2,7 +2,7 @@
 //! from the existing blocks CF + tail_blocks, then rewrite every analytics_tx_day
 //! blob's orphan_blocks from the persistent count. RUN ONCE WITH THE BACKEND
 //! STOPPED. After this, the live tail-only path maintains the index — no resync.
-use rustyblox::config::{load_config, get_db_path};
+use rustyblox::config::{get_db_path, load_config};
 use rustyblox::enrich_addresses::{mark_orphans, orphan_count, TxDayAgg};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -45,8 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for date in &dates {
         let mut k = b"analytics_tx_day:".to_vec();
         k.extend_from_slice(date.as_bytes());
-        let Some(b) = db.get_cf(&cf_state, &k)? else { continue };
-        let Ok(mut agg) = bincode::deserialize::<TxDayAgg>(&b) else { continue };
+        let Some(b) = db.get_cf(&cf_state, &k)? else {
+            continue;
+        };
+        let Ok(mut agg) = bincode::deserialize::<TxDayAgg>(&b) else {
+            continue;
+        };
         let count = orphan_count(&db, date);
         if agg.orphan_blocks != count {
             agg.orphan_blocks = count;
@@ -55,6 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     db.write(batch)?;
-    println!("done — {updated}/{} day blobs updated. restart the backend.", dates.len());
+    println!(
+        "done — {updated}/{} day blobs updated. restart the backend.",
+        dates.len()
+    );
     Ok(())
 }

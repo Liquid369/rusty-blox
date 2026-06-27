@@ -1,29 +1,28 @@
-/// PIVX Data Copy Utilities
-/// 
-/// Safely copies PIVX Core data files to avoid read locks when the daemon is running.
-/// This allows us to read block index, chainstate, and blk files without conflicts.
-
-use std::path::{Path, PathBuf};
 use std::fs;
 use std::io;
-use tracing::{info, debug};
+/// PIVX Data Copy Utilities
+///
+/// Safely copies PIVX Core data files to avoid read locks when the daemon is running.
+/// This allows us to read block index, chainstate, and blk files without conflicts.
+use std::path::{Path, PathBuf};
+use tracing::{debug, info};
 
 /// Copy a directory recursively
 pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
     let src = src.as_ref();
     let dst = dst.as_ref();
-    
+
     if !dst.exists() {
         fs::create_dir_all(dst)?;
     }
-    
+
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let src_path = entry.path();
         let file_name = entry.file_name();
         let dst_path = dst.join(&file_name);
-        
+
         if ty.is_dir() {
             copy_dir_all(&src_path, &dst_path)?;
         } else {
@@ -39,7 +38,7 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<
             fs::copy(&src_path, &dst_path)?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -50,7 +49,7 @@ pub fn copy_block_index(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let src_index = PathBuf::from(pivx_blocks_dir).join("index");
     let dest = PathBuf::from(dest_dir);
-    
+
     info!(src = %src_index.display(), dst = %dest.display(), "Copying PIVX block index");
 
     // Remove old copy if exists
@@ -58,15 +57,15 @@ pub fn copy_block_index(
         debug!("Removing old block index copy");
         fs::remove_dir_all(&dest)?;
     }
-    
+
     // Create destination
     fs::create_dir_all(&dest)?;
-    
+
     // Copy the index directory
     copy_dir_all(&src_index, &dest)?;
-    
+
     info!("Block index copied successfully");
-    
+
     Ok(dest)
 }
 
@@ -77,7 +76,7 @@ pub fn copy_chainstate(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let src_chainstate = PathBuf::from(pivx_data_dir).join("chainstate");
     let dest = PathBuf::from(dest_dir);
-    
+
     info!(src = %src_chainstate.display(), dst = %dest.display(), "Copying PIVX chainstate");
 
     // Remove old copy if exists
@@ -85,15 +84,15 @@ pub fn copy_chainstate(
         debug!("Removing old chainstate copy");
         fs::remove_dir_all(&dest)?;
     }
-    
+
     // Create destination
     fs::create_dir_all(&dest)?;
-    
+
     // Copy the chainstate directory
     copy_dir_all(&src_chainstate, &dest)?;
-    
+
     info!("Chainstate copied successfully");
-    
+
     Ok(dest)
 }
 
@@ -104,7 +103,7 @@ pub fn copy_blk_files(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let src = PathBuf::from(pivx_blocks_dir);
     let dest = PathBuf::from(dest_dir);
-    
+
     info!(src = %src.display(), dst = %dest.display(), "Copying blk*.dat files");
 
     // Remove old copy if exists
@@ -112,15 +111,15 @@ pub fn copy_blk_files(
         debug!("Removing old blk files copy");
         fs::remove_dir_all(&dest)?;
     }
-    
+
     // Create destination
     fs::create_dir_all(&dest)?;
-    
+
     // Copy only blk*.dat files
     for entry in fs::read_dir(&src)? {
         let entry = entry?;
         let path = entry.path();
-        
+
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with("blk") && name.ends_with(".dat") {
                 let dest_path = dest.join(name);
@@ -129,9 +128,9 @@ pub fn copy_blk_files(
             }
         }
     }
-    
+
     info!("Blk files copied successfully");
-    
+
     Ok(dest)
 }
 
@@ -146,7 +145,7 @@ pub fn get_block_index_path(
             return Ok(copied.to_string_lossy().to_string());
         }
     }
-    
+
     // Use original path
     let path = PathBuf::from(pivx_blocks_dir).join("index");
     Ok(path.to_string_lossy().to_string())
@@ -163,7 +162,7 @@ pub fn get_chainstate_path(
             return Ok(copied.to_string_lossy().to_string());
         }
     }
-    
+
     // Use original path
     let path = PathBuf::from(pivx_data_dir).join("chainstate");
     Ok(path.to_string_lossy().to_string())
@@ -180,7 +179,7 @@ pub fn get_blk_dir_path(
             return Ok(copied.to_string_lossy().to_string());
         }
     }
-    
+
     // Use original path
     Ok(pivx_blocks_dir.to_string())
 }

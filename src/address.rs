@@ -9,10 +9,10 @@ pub fn address_type_to_string_blocking(address: Option<AddressType>) -> Vec<Stri
 }
 // address.rs
 
-use sha2::{Sha256, Digest};
-use ripemd160::{Ripemd160};
+use crate::types::{AddressType, CScript};
 use bs58;
-use crate::types::{CScript, AddressType};
+use ripemd160::Ripemd160;
+use sha2::{Digest, Sha256};
 
 pub async fn compute_address_hash(data: &[u8]) -> Vec<u8> {
     let sha = Sha256::digest(data);
@@ -87,10 +87,7 @@ async fn extract_pubkey_from_script(script: &[u8]) -> Option<&[u8]> {
     // P2PK: <PUSH33> <33-byte compressed key> OP_CHECKSIG  (35 bytes)
     //       <PUSH65> <65-byte uncompressed key> OP_CHECKSIG (67 bytes)
     match script.len() {
-        67 if script[0] == 0x41
-            && script[66] == OP_CHECKSIG
-            && script[1] == 0x04 =>
-        {
+        67 if script[0] == 0x41 && script[66] == OP_CHECKSIG && script[1] == 0x04 => {
             Some(&script[1..66])
         }
         35 if script[0] == 0x21
@@ -136,7 +133,8 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
         && s[27] == 0x14
         && s[48] == 0x68 // OP_ENDIF
         && s[49] == 0x88 // OP_EQUALVERIFY
-        && s[50] == 0xac // OP_CHECKSIG
+        && s[50] == 0xac
+    // OP_CHECKSIG
     {
         let staker_key_hash = &s[6..26];
         let owner_key_hash = &s[28..48];
@@ -228,11 +226,11 @@ pub async fn address_type_to_string(address: Option<AddressType>) -> Vec<String>
         Some(AddressType::ZerocoinSpend) => vec!["ZerocoinSpend".to_string()],
         Some(AddressType::ZerocoinPublicSpend) => vec!["ZerocoinPublicSpend".to_string()],
         Some(AddressType::Staking(staker, owner)) => {
-                // Return both the staker (delegated stake address, usually S-prefixed)
-                // and the owner (actual coin owner, usually D-prefixed) separately so
-                // callers (frontend/indexers) can show delegation relationships.
-                vec![staker, owner]
-            }
+            // Return both the staker (delegated stake address, usually S-prefixed)
+            // and the owner (actual coin owner, usually D-prefixed) separately so
+            // callers (frontend/indexers) can show delegation relationships.
+            vec![staker, owner]
+        }
         Some(AddressType::Sapling) => vec!["Sapling".to_string()],
         None => vec!["None".to_string()],
     }

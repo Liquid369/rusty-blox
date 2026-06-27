@@ -1,9 +1,12 @@
-use std::io::{Cursor, Read};
-use byteorder::{LittleEndian, ReadBytesExt};
-use crate::types::{CTransaction, CTxIn, CTxOut, COutPoint, CScript, SaplingTxData, SpendDescription, OutputDescription};
-use sha2::{Sha256, Digest};
-use ripemd160::{Ripemd160};
+use crate::types::{
+    COutPoint, CScript, CTransaction, CTxIn, CTxOut, OutputDescription, SaplingTxData,
+    SpendDescription,
+};
 use bs58;
+use byteorder::{LittleEndian, ReadBytesExt};
+use ripemd160::Ripemd160;
+use sha2::{Digest, Sha256};
+use std::io::{Cursor, Read};
 use tracing::warn;
 
 // Consensus limits to prevent DoS attacks via massive transactions
@@ -34,7 +37,7 @@ pub async fn serialize_utxos_with_spent(utxos: &Vec<(Vec<u8>, u64, bool)>) -> Ve
     let mut buffer = Vec::new();
     // Write count
     buffer.extend(&(utxos.len() as u32).to_le_bytes());
-    
+
     for (txid, vout, is_spent) in utxos {
         // Write txid length and txid
         buffer.extend(&(txid.len() as u32).to_le_bytes());
@@ -66,116 +69,123 @@ pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, boo
     if data.len() < 4 {
         return utxos;
     }
-    
+
     let mut cursor = std::io::Cursor::new(data);
     use byteorder::ReadBytesExt;
-    
+
     // Read count
     let count = match cursor.read_u32::<byteorder::LittleEndian>() {
         Ok(c) => c,
         Err(_) => return utxos,
     };
-    
+
     // CRITICAL: Validate count to prevent memory exhaustion
     // A reasonable maximum is 1 million UTXOs per address
     if count > 1_000_000 {
-        warn!(count = count, "Invalid UTXO count (too large, data likely corrupted)");
+        warn!(
+            count = count,
+            "Invalid UTXO count (too large, data likely corrupted)"
+        );
         return utxos;
     }
-    
+
     for _ in 0..count {
         // Read txid length
         let txid_len = match cursor.read_u32::<byteorder::LittleEndian>() {
             Ok(len) => len as usize,
             Err(_) => break,
         };
-        
+
         // CRITICAL: Validate txid_len before allocation to prevent memory exhaustion
         // TXID should always be 32 bytes for Bitcoin-derived chains
         if txid_len == 0 || txid_len > 64 {
-            warn!(txid_len = txid_len, "Invalid txid length (expected 32, data likely corrupted)");
+            warn!(
+                txid_len = txid_len,
+                "Invalid txid length (expected 32, data likely corrupted)"
+            );
             break;
         }
-        
+
         // Read txid
         let mut txid = vec![0u8; txid_len];
         if std::io::Read::read_exact(&mut cursor, &mut txid).is_err() {
             break;
         }
-        
+
         // Read vout
         let vout = match cursor.read_u64::<byteorder::LittleEndian>() {
             Ok(v) => v,
             Err(_) => break,
         };
-        
+
         // Read spent flag
         let is_spent = match cursor.read_u8() {
             Ok(flag) => flag == 1,
             Err(_) => break,
         };
-        
+
         utxos.push((txid, vout, is_spent));
     }
-    
+
     utxos
 }
 
-pub async fn deserialize_transaction(
-    data: &[u8],
-) -> Result<CTransaction, std::io::Error> {
+pub async fn deserialize_transaction(data: &[u8]) -> Result<CTransaction, std::io::Error> {
     let txid = hash_txid(&data[4..]).await;
     let mut cursor = Cursor::new(data);
     let block_version = cursor.read_u32::<LittleEndian>()?;
 
     let version = cursor.read_u16::<LittleEndian>()?;
     let tx_type = cursor.read_u16::<LittleEndian>()?;
-    
+
     let input_count = read_varint(&mut cursor).await?;
     if input_count > MAX_TX_INPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}")
+            format!("Transaction input count {input_count} exceeds maximum {MAX_TX_INPUTS}"),
         ));
     }
     // [M1] Optimize: Pre-allocate with known capacity to avoid reallocations
     let mut inputs = Vec::with_capacity(input_count as usize);
-    
+
     // Determine transaction type based on PIVX rules
     // Coinbase: 1 input with prev_hash all zeros, 1 output
     // Coinstake: 1+ inputs with first prev_hash all zeros, 2+ outputs (first output is empty)
     // Normal: regular transaction
     // Sapling: version >= 3
-    
+
     let is_sapling = version >= 3;
-    
+
     for i in 0..input_count {
-        inputs.push(deserialize_tx_in(
-            &mut cursor,
-            version as u32,
-            block_version,
-            i == 0, // is_first_input
-        ).await?);
+        inputs.push(
+            deserialize_tx_in(
+                &mut cursor,
+                version as u32,
+                block_version,
+                i == 0, // is_first_input
+            )
+            .await?,
+        );
     }
 
     let output_count = read_varint(&mut cursor).await?;
     if output_count > MAX_TX_OUTPUTS {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}")
+            format!("Transaction output count {output_count} exceeds maximum {MAX_TX_OUTPUTS}"),
         ));
     }
-    
+
     // Identify transaction type based on PIVX rules:
     // - Coinbase: first input has coinbase data (prev_hash all zeros), typically has multiple outputs
     // - Coinstake: first input has coinstake data, first output is ALWAYS empty (0 value, empty script)
     // - Normal: regular transaction with no coinbase/coinstake inputs
-    
+
     // [M1] Optimize: Pre-allocate with known capacity
     let mut outputs = Vec::with_capacity(output_count as usize);
     for i in 0..output_count {
         let mut output = deserialize_tx_out(&mut cursor, false).await?;
-        output.index = i;  // Set the correct vout index
+        output.index = i; // Set the correct vout index
         outputs.push(output);
     }
 
@@ -184,119 +194,120 @@ pub async fn deserialize_transaction(
     // For Sapling transactions (version >= 3), parse the Sapling-specific data.
     // PIVX Core serializes sapData as Optional<SaplingTxData>: a 1-byte discriminant
     // (0x00 = absent, 0x01 = present) followed by the payload when present.
-    let sapling_data = if is_sapling {
-        let has_sap_data = cursor.read_u8()? != 0;
-        if !has_sap_data {
-            // Optional discriminant 0x00 — no sapling payload. extraPayload (if any)
-            // is handled below.
-            read_extra_payload(&mut cursor, tx_type, data.len()).await?;
-            None
-        } else {
-        // Read valueBalance (net value of spends - outputs)
-        let value_balance = cursor.read_i64::<LittleEndian>()?;
-        
-        // Read vShieldedSpend count and parse each spend (384 bytes each)
-        let spend_count = read_varint(&mut cursor).await?;
-        if spend_count > MAX_SAPLING_SPENDS {
-            return Err(std::io::Error::new(
+    let sapling_data =
+        if is_sapling {
+            let has_sap_data = cursor.read_u8()? != 0;
+            if !has_sap_data {
+                // Optional discriminant 0x00 — no sapling payload. extraPayload (if any)
+                // is handled below.
+                read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+                None
+            } else {
+                // Read valueBalance (net value of spends - outputs)
+                let value_balance = cursor.read_i64::<LittleEndian>()?;
+
+                // Read vShieldedSpend count and parse each spend (384 bytes each)
+                let spend_count = read_varint(&mut cursor).await?;
+                if spend_count > MAX_SAPLING_SPENDS {
+                    return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Sapling spend count {spend_count} exceeds maximum {MAX_SAPLING_SPENDS}")
             ));
-        }
-        // [M1] Optimize: Pre-allocate for Sapling spends
-        let mut vshielded_spend = Vec::with_capacity(spend_count as usize);
-        for _ in 0..spend_count {
-            // Read each spend field (SPENDDESCRIPTION_SIZE = 384 bytes)
-            let mut cv = [0u8; 32];           // Value commitment
-            let mut anchor = [0u8; 32];       // Merkle tree root
-            let mut nullifier = [0u8; 32];    // Prevents double-spending
-            let mut rk = [0u8; 32];           // Randomized public key
-            let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
-            let mut spend_auth_sig = [0u8; 64]; // Spend authorization signature
-            
-            cursor.read_exact(&mut cv)?;
-            cursor.read_exact(&mut anchor)?;
-            cursor.read_exact(&mut nullifier)?;
-            cursor.read_exact(&mut rk)?;
-            cursor.read_exact(&mut zkproof)?;
-            cursor.read_exact(&mut spend_auth_sig)?;
-            
-            // Reverse byte order for hash fields (network -> display format)
-            cv.reverse();
-            anchor.reverse();
-            nullifier.reverse();
-            rk.reverse();
-            // Note: zkproof and spend_auth_sig are NOT reversed (kept in original order)
-            
-            vshielded_spend.push(SpendDescription {
-                cv,
-                anchor,
-                nullifier,
-                rk,
-                zkproof,
-                spend_auth_sig,
-            });
-        }
-        
-        // Read vShieldedOutput count and parse each output (948 bytes each)
-        let output_count = read_varint(&mut cursor).await?;
-        if output_count > MAX_SAPLING_OUTPUTS {
-            return Err(std::io::Error::new(
+                }
+                // [M1] Optimize: Pre-allocate for Sapling spends
+                let mut vshielded_spend = Vec::with_capacity(spend_count as usize);
+                for _ in 0..spend_count {
+                    // Read each spend field (SPENDDESCRIPTION_SIZE = 384 bytes)
+                    let mut cv = [0u8; 32]; // Value commitment
+                    let mut anchor = [0u8; 32]; // Merkle tree root
+                    let mut nullifier = [0u8; 32]; // Prevents double-spending
+                    let mut rk = [0u8; 32]; // Randomized public key
+                    let mut zkproof = [0u8; 192]; // Groth16 zero-knowledge proof
+                    let mut spend_auth_sig = [0u8; 64]; // Spend authorization signature
+
+                    cursor.read_exact(&mut cv)?;
+                    cursor.read_exact(&mut anchor)?;
+                    cursor.read_exact(&mut nullifier)?;
+                    cursor.read_exact(&mut rk)?;
+                    cursor.read_exact(&mut zkproof)?;
+                    cursor.read_exact(&mut spend_auth_sig)?;
+
+                    // Reverse byte order for hash fields (network -> display format)
+                    cv.reverse();
+                    anchor.reverse();
+                    nullifier.reverse();
+                    rk.reverse();
+                    // Note: zkproof and spend_auth_sig are NOT reversed (kept in original order)
+
+                    vshielded_spend.push(SpendDescription {
+                        cv,
+                        anchor,
+                        nullifier,
+                        rk,
+                        zkproof,
+                        spend_auth_sig,
+                    });
+                }
+
+                // Read vShieldedOutput count and parse each output (948 bytes each)
+                let output_count = read_varint(&mut cursor).await?;
+                if output_count > MAX_SAPLING_OUTPUTS {
+                    return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Sapling output count {output_count} exceeds maximum {MAX_SAPLING_OUTPUTS}")
             ));
-        }
-        // [M1] Optimize: Pre-allocate for Sapling outputs
-        let mut vshielded_output = Vec::with_capacity(output_count as usize);
-        for _ in 0..output_count {
-            // Read each output field (OUTPUTDESCRIPTION_SIZE = 948 bytes)
-            let mut cv = [0u8; 32];           // Value commitment
-            let mut cmu = [0u8; 32];          // Note commitment u-coordinate
-            let mut ephemeral_key = [0u8; 32]; // Ephemeral Jubjub public key
-            let mut enc_ciphertext = [0u8; 580]; // Encrypted note for recipient
-            let mut out_ciphertext = [0u8; 80];  // Encrypted note for sender OVK
-            let mut zkproof = [0u8; 192];     // Groth16 zero-knowledge proof
-            
-            cursor.read_exact(&mut cv)?;
-            cursor.read_exact(&mut cmu)?;
-            cursor.read_exact(&mut ephemeral_key)?;
-            cursor.read_exact(&mut enc_ciphertext)?;
-            cursor.read_exact(&mut out_ciphertext)?;
-            cursor.read_exact(&mut zkproof)?;
-            
-            // Reverse byte order for hash fields (network -> display format)
-            cv.reverse();
-            cmu.reverse();
-            ephemeral_key.reverse();
-            // Note: ciphertexts and zkproof are NOT reversed (kept in original order)
-            
-            vshielded_output.push(OutputDescription {
-                cv,
-                cmu,
-                ephemeral_key,
-                enc_ciphertext,
-                out_ciphertext,
-                zkproof,
-            });
-        }
-        
-        // Read bindingSig (BINDINGSIG_SIZE = 64 bytes)
-        let mut binding_sig = [0u8; 64];
-        cursor.read_exact(&mut binding_sig)?;
+                }
+                // [M1] Optimize: Pre-allocate for Sapling outputs
+                let mut vshielded_output = Vec::with_capacity(output_count as usize);
+                for _ in 0..output_count {
+                    // Read each output field (OUTPUTDESCRIPTION_SIZE = 948 bytes)
+                    let mut cv = [0u8; 32]; // Value commitment
+                    let mut cmu = [0u8; 32]; // Note commitment u-coordinate
+                    let mut ephemeral_key = [0u8; 32]; // Ephemeral Jubjub public key
+                    let mut enc_ciphertext = [0u8; 580]; // Encrypted note for recipient
+                    let mut out_ciphertext = [0u8; 80]; // Encrypted note for sender OVK
+                    let mut zkproof = [0u8; 192]; // Groth16 zero-knowledge proof
 
-        // For special transaction types (nType != 0), consume extraPayload
-        read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+                    cursor.read_exact(&mut cv)?;
+                    cursor.read_exact(&mut cmu)?;
+                    cursor.read_exact(&mut ephemeral_key)?;
+                    cursor.read_exact(&mut enc_ciphertext)?;
+                    cursor.read_exact(&mut out_ciphertext)?;
+                    cursor.read_exact(&mut zkproof)?;
 
-        Some(SaplingTxData {
-            value_balance,
-            vshielded_spend,
-            vshielded_output,
-            binding_sig,
-        })
-        }
-    } else {
-        None
-    };
+                    // Reverse byte order for hash fields (network -> display format)
+                    cv.reverse();
+                    cmu.reverse();
+                    ephemeral_key.reverse();
+                    // Note: ciphertexts and zkproof are NOT reversed (kept in original order)
+
+                    vshielded_output.push(OutputDescription {
+                        cv,
+                        cmu,
+                        ephemeral_key,
+                        enc_ciphertext,
+                        out_ciphertext,
+                        zkproof,
+                    });
+                }
+
+                // Read bindingSig (BINDINGSIG_SIZE = 64 bytes)
+                let mut binding_sig = [0u8; 64];
+                cursor.read_exact(&mut binding_sig)?;
+
+                // For special transaction types (nType != 0), consume extraPayload
+                read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+
+                Some(SaplingTxData {
+                    value_balance,
+                    vshielded_spend,
+                    vshielded_output,
+                    binding_sig,
+                })
+            }
+        } else {
+            None
+        };
 
     Ok(CTransaction {
         txid,
@@ -326,13 +337,12 @@ async fn read_extra_payload(
     let has_payload = cursor.read_u8()? != 0;
     if has_payload {
         let payload_size = read_varint(cursor).await?;
-        let new_pos = cursor
-            .position()
-            .checked_add(payload_size)
-            .ok_or_else(|| std::io::Error::new(
+        let new_pos = cursor.position().checked_add(payload_size).ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "extraPayload size overflow",
-            ))?;
+            )
+        })?;
         if new_pos > data_len as u64 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -353,8 +363,8 @@ pub fn deserialize_transaction_blocking(data: &[u8]) -> Result<CTransaction, std
 }
 
 pub async fn deserialize_tx_in(
-    cursor: &mut Cursor<&[u8]>, 
-    _tx_ver_out: u32, 
+    cursor: &mut Cursor<&[u8]>,
+    _tx_ver_out: u32,
     _block_version: u32,
     _is_first_input: bool,
 ) -> Result<CTxIn, std::io::Error> {
@@ -364,14 +374,14 @@ pub async fn deserialize_tx_in(
     // - script_sig_len (varint)
     // - script_sig (variable)
     // - sequence (4 bytes)
-    
+
     let mut prev_hash = [0u8; 32];
     cursor.read_exact(&mut prev_hash)?;
     let prev_index = cursor.read_u32::<LittleEndian>()?;
-    
+
     let script_sig = read_script(cursor).await?;
     let sequence = cursor.read_u32::<LittleEndian>()?;
-    
+
     // Check if this is TRULY coinbase: prev_hash is all zeros AND prev_index is 0xffffffff,
     // AND the scriptSig is not a zerocoin spend. PIVX Core: zerocoin spends (OP_ZEROCOINSPEND
     // 0xc2 / OP_ZEROCOINPUBLICSPEND 0xc3) carry a null prevout but are NOT coinbase
@@ -407,20 +417,23 @@ pub async fn deserialize_tx_in(
             script_sig: CScript { script: script_sig },
             sequence,
             index: 0,
-            coinbase: None,  // NOT coinbase - has real prevout
+            coinbase: None, // NOT coinbase - has real prevout
         })
     }
 }
 
-pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty: bool) -> Result<CTxOut, std::io::Error> {
+pub async fn deserialize_tx_out(
+    cursor: &mut Cursor<&[u8]>,
+    _is_coinstake_empty: bool,
+) -> Result<CTxOut, std::io::Error> {
     // Standard Bitcoin/PIVX transaction output format:
     // - value (8 bytes, i64)
     // - script_pubkey_len (varint)
     // - script_pubkey (variable)
-    
+
     let value = cursor.read_i64::<LittleEndian>()?;
     let script_pubkey = read_script(cursor).await?;
-    
+
     // Extract address from script if it's not empty
     let address = if script_pubkey.is_empty() {
         Vec::new()
@@ -431,7 +444,9 @@ pub async fn deserialize_tx_out(cursor: &mut Cursor<&[u8]>, _is_coinstake_empty:
     Ok(CTxOut {
         value,
         script_length: script_pubkey.len() as i32,
-        script_pubkey: CScript { script: script_pubkey },
+        script_pubkey: CScript {
+            script: script_pubkey,
+        },
         index: 0,
         address,
     })
@@ -443,11 +458,19 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     // PUSH20 <staker> OP_ELSE PUSH20 <owner> OP_ENDIF OP_EQUALVERIFY OP_CHECKSIG
     // 0xd2 is what GetScriptForStakeDelegation emits since v5.2 (mainnet ~2,927,000);
     // 0xd1 is the original "last-output-free" variant. Both must be recognized.
-    if script.len() == 51 &&
-       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b &&
-       script[3] == 0x63 && (script[4] == 0xd1 || script[4] == 0xd2) && script[5] == 0x14 &&
-       script[26] == 0x67 && script[27] == 0x14 &&
-       script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
+    if script.len() == 51
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x7b
+        && script[3] == 0x63
+        && (script[4] == 0xd1 || script[4] == 0xd2)
+        && script[5] == 0x14
+        && script[26] == 0x67
+        && script[27] == 0x14
+        && script[48] == 0x68
+        && script[49] == 0x88
+        && script[50] == 0xac
+    {
         let staker_hash = &script[6..26];
         let owner_hash = &script[28..48];
 
@@ -466,8 +489,13 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     }
 
     // P2PKH: 76a914{20 byte pubkey hash}88ac
-    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14
-        && script[23] == 0x88 && script[24] == 0xac {
+    if script.len() == 25
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x14
+        && script[23] == 0x88
+        && script[24] == 0xac
+    {
         let pubkey_hash = &script[3..23];
         if let Some(address) = encode_pivx_address(pubkey_hash, 30) {
             return vec![address];
@@ -475,9 +503,14 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     }
     // Exchange address (TX_EXCHANGEADDR): OP_EXCHANGEADDR(0xe0)-prefixed P2PKH → EXM.
     // PIVX Core requires the 0xe0 opcode; any other leading byte is nonstandard.
-    if script.len() == 26 && script[0] == 0xe0
-        && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
-        && script[24] == 0x88 && script[25] == 0xac {
+    if script.len() == 26
+        && script[0] == 0xe0
+        && script[1] == 0x76
+        && script[2] == 0xa9
+        && script[3] == 0x14
+        && script[24] == 0x88
+        && script[25] == 0xac
+    {
         let pubkey_hash = &script[4..24];
         if let Some(address) = encode_pivx_exchange_address(pubkey_hash) {
             return vec![address];
@@ -498,22 +531,22 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     // Uncompressed pubkey: 0x41 (push 65) + 65 bytes + 0xac = 67 bytes total
     if script.len() == 35 && script[0] == 0x21 && script[34] == 0xac {
         let pubkey = &script[1..34];
-        
+
         // Hash the public key: RIPEMD160(SHA256(pubkey))
         let sha_hash = Sha256::digest(pubkey);
         let ripemd_hash = Ripemd160::digest(&sha_hash);
-        
+
         if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
             return vec![address];
         }
     }
     if script.len() == 67 && script[0] == 0x41 && script[66] == 0xac {
         let pubkey = &script[1..66];
-        
+
         // Hash the public key: RIPEMD160(SHA256(pubkey))
         let sha_hash = Sha256::digest(pubkey);
         let ripemd_hash = Ripemd160::digest(&sha_hash);
-        
+
         if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
             return vec![address];
         }
@@ -523,24 +556,42 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
 
 pub fn get_script_type(script: &[u8]) -> &str {
     // P2CS (Cold Stake) — both OP_CHECKCOLDSTAKEVERIFY (0xd2) and the LOF variant (0xd1)
-    if script.len() == 51 &&
-       script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x7b &&
-       script[3] == 0x63 && (script[4] == 0xd1 || script[4] == 0xd2) && script[5] == 0x14 &&
-       script[26] == 0x67 && script[27] == 0x14 &&
-       script[48] == 0x68 && script[49] == 0x88 && script[50] == 0xac {
+    if script.len() == 51
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x7b
+        && script[3] == 0x63
+        && (script[4] == 0xd1 || script[4] == 0xd2)
+        && script[5] == 0x14
+        && script[26] == 0x67
+        && script[27] == 0x14
+        && script[48] == 0x68
+        && script[49] == 0x88
+        && script[50] == 0xac
+    {
         return "coldstake";
     }
 
     // P2PKH (Pay to Public Key Hash)
-    if script.len() == 25 && script[0] == 0x76 && script[1] == 0xa9 && script[2] == 0x14
-        && script[23] == 0x88 && script[24] == 0xac {
+    if script.len() == 25
+        && script[0] == 0x76
+        && script[1] == 0xa9
+        && script[2] == 0x14
+        && script[23] == 0x88
+        && script[24] == 0xac
+    {
         return "pubkeyhash";
     }
 
     // Exchange address (TX_EXCHANGEADDR): OP_EXCHANGEADDR(0xe0) + standard P2PKH
-    if script.len() == 26 && script[0] == 0xe0
-        && script[1] == 0x76 && script[2] == 0xa9 && script[3] == 0x14
-        && script[24] == 0x88 && script[25] == 0xac {
+    if script.len() == 26
+        && script[0] == 0xe0
+        && script[1] == 0x76
+        && script[2] == 0xa9
+        && script[3] == 0x14
+        && script[24] == 0x88
+        && script[25] == 0xac
+    {
         return "exchangeaddress";
     }
 
@@ -550,8 +601,9 @@ pub fn get_script_type(script: &[u8]) -> &str {
     }
 
     // P2PK (Pay to Public Key)
-    if (script.len() == 35 && script[0] == 0x21 && script[34] == 0xac) ||
-       (script.len() == 67 && script[0] == 0x41 && script[66] == 0xac) {
+    if (script.len() == 35 && script[0] == 0x21 && script[34] == 0xac)
+        || (script.len() == 67 && script[0] == 0x41 && script[66] == 0xac)
+    {
         return "pubkey";
     }
 
@@ -580,12 +632,12 @@ pub fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
     let mut data = Vec::with_capacity(25);
     data.push(version);
     data.extend_from_slice(hash);
-    
+
     // Calculate checksum: first 4 bytes of SHA256(SHA256(version + hash))
     let first_hash = Sha256::digest(&data);
     let second_hash = Sha256::digest(&first_hash);
     data.extend_from_slice(&second_hash[..4]);
-    
+
     // Encode to base58
     Some(bs58::encode(&data).into_string())
 }
@@ -597,12 +649,12 @@ pub fn encode_pivx_exchange_address(hash: &[u8]) -> Option<String> {
     let mut data = Vec::with_capacity(27);
     data.extend_from_slice(&[0x01, 0xb9, 0xa2]); // EXCHANGE_ADDRESS prefix
     data.extend_from_slice(hash);
-    
+
     // Calculate checksum: first 4 bytes of SHA256(SHA256(prefix + hash))
     let first_hash = Sha256::digest(&data);
     let second_hash = Sha256::digest(&first_hash);
     data.extend_from_slice(&second_hash[..4]);
-    
+
     // Encode to base58
     Some(bs58::encode(&data).into_string())
 }
@@ -610,14 +662,14 @@ pub fn encode_pivx_exchange_address(hash: &[u8]) -> Option<String> {
 pub async fn deserialize_out_point(cursor: &mut Cursor<&[u8]>) -> COutPoint {
     let mut hash_bytes = [0u8; 32];
     let _ = cursor.read_exact(&mut hash_bytes); // Ignore errors
-    
+
     // Reverse hash for display (match blocks.rs and transactions.rs behavior)
     // Database keys use reversed/display format: 't' + reversed_txid
     let reversed_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     let hash = hex::encode(&reversed_hash);
-    
+
     let n = cursor.read_u32::<LittleEndian>().unwrap_or(0);
-    
+
     COutPoint { hash, n }
 }
 
@@ -723,7 +775,8 @@ mod golden_script_tests {
     /// P2PK compressed — Core decodescript hashes the RAW 33 bytes
     #[test]
     fn p2pk_compressed_matches_core() {
-        let script = hex_script("2102b463185b1f1d24b25e0eff8a8e61f4f5bfcbef423e9be20393eef1ada303b6cdac");
+        let script =
+            hex_script("2102b463185b1f1d24b25e0eff8a8e61f4f5bfcbef423e9be20393eef1ada303b6cdac");
         assert_eq!(get_script_type(&script), "pubkey");
         assert_eq!(
             extract_address_from_script(&script),
