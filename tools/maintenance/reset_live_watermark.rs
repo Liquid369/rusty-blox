@@ -49,15 +49,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut h_first = tip;
     let mut h = tip;
     while h > 0 {
-        match header_date(&db, h) {
-            Some(d) => {
-                if !redo.contains(&d) && redo.len() == days {
-                    break; // d is an older date beyond the window
-                }
-                redo.insert(d);
-                h_first = h;
+        if let Some(d) = header_date(&db, h) {
+            if !redo.contains(&d) && redo.len() == days {
+                break; // d is an older date beyond the window
             }
-            None => {}
+            redo.insert(d);
+            h_first = h;
         }
         h -= 1;
     }
@@ -97,9 +94,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     batch.put_cf(&cf, b"analytics_live_height", (h_first - 1).to_le_bytes());
     db.write(batch)?;
 
-    println!(
-        "done — restart the backend; Lane I will rebuild those days from {}.",
-        h_first
-    );
+    println!("done — restart the backend; Lane I will rebuild those days from {h_first}.");
     Ok(())
 }

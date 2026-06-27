@@ -51,8 +51,7 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-      # Advisory for now: ~135 outstanding warnings. Tighten to `-- -D warnings`
-      # and drop continue-on-error once they're cleared.
-      - name: Clippy (advisory)
+      # Hard gate. The clippy policy lives in Cargo.toml [lints.clippy] (clippy::all
+      # denied, with a documented baseline allow-list), so this fails on any new lint.
+      - name: Clippy
         run: cargo clippy --locked --lib --bins
-        continue-on-error: true

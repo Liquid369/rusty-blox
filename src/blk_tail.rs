@@ -130,7 +130,7 @@ pub fn parse_record(
         return Err(RecordError::BadMagic(m));
     }
     let size = u32::from_le_bytes([window[4], window[5], window[6], window[7]]);
-    if size < MIN_BLK || size > MAX_BLK {
+    if !(MIN_BLK..=MAX_BLK).contains(&size) {
         return Err(RecordError::BadSize(size));
     }
     let end = 8usize + size as usize;
@@ -833,9 +833,12 @@ impl TailStore {
                 Some(c) if c == rec.block_hash => TailState::Canonical,
                 Some(_) => TailState::Orphan,
                 None => {
-                    if rec.state == TailState::Unresolved {
-                        TailState::Unresolved
-                    } else if now.saturating_sub(rec.first_seen) > MAX_PENDING_AGE_SECS {
+                    // Unresolved if it was already unresolved OR it has aged past the
+                    // pending window; otherwise still Pending. (Two identical Unresolved
+                    // arms collapsed into one condition.)
+                    if rec.state == TailState::Unresolved
+                        || now.saturating_sub(rec.first_seen) > MAX_PENDING_AGE_SECS
+                    {
                         TailState::Unresolved
                     } else {
                         TailState::Pending

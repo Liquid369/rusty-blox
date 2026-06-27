@@ -465,10 +465,9 @@ pub fn aggregate_chainstate_with_coinbase_opts(
                             let entry = coinbase_balances.entry(a.clone()).or_insert(0);
                             *entry = entry.saturating_add(amount);
                         }
-                        if !is_coinbase_output {
-                            let entry = balances.entry(a.clone()).or_insert(0);
-                            *entry = entry.saturating_add(amount);
-                        } else if coinbase_accepted_for_balances {
+                        // A non-coinbase output always counts toward spendable balance;
+                        // a coinbase output counts only once mature.
+                        if !is_coinbase_output || coinbase_accepted_for_balances {
                             let entry = balances.entry(a.clone()).or_insert(0);
                             *entry = entry.saturating_add(amount);
                         }

@@ -41,6 +41,9 @@ const MAX_TX_OUTPUTS: u64 = 100_000;
 /// in which the legacy BigUint path was itself buggy (it kept the HIGH 32 bytes
 /// of a 33-byte result). Verified exhaustively over tens of millions of random
 /// non-overflowing pairs (see `test_add_chainwork_be_matches_bigint`).
+// `i` indexes the limbs AND drives the big-endian byte offset 32-(i+1)*8; an
+// enumerate() rewrite would obscure the consensus byte math. Keep it explicit.
+#[allow(clippy::needless_range_loop)]
 fn add_chainwork_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     // Big-endian [u8;32] -> little-endian limbs [u64;4] (limb[0] = least sig).
     let to_limbs = |be: &[u8; 32]| -> [u64; 4] {

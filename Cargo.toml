@@ -153,3 +153,35 @@ cc = "1.0"
 
 [dev-dependencies]
 tempfile = "3.8"
+
+# Clippy policy (enforced by `cargo clippy` locally AND in CI). Every clippy::all
+# lint is denied by default, so any NEW violation -- including the entire
+# correctness/suspicious/perf set, which currently has zero hits -- fails the build.
+# The allow-list is the reviewed baseline (2026-06-27): existing style/complexity
+# nits across battle-tested consensus + sync code, exempted because a cosmetic
+# rewrite of byte-exact paths risks more than the lint saves. Remove an entry here
+# once its sites are cleaned up, to ratchet strictness upward over time.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# Structural / deliberate API shapes (not bugs):
+too_many_arguments = "allow" # consensus + sync entry points genuinely take many params
+type_complexity = "allow"    # explicit iterator/closure types kept inline on purpose
+result_large_err = "allow"   # large error enums by value; boxing is a churny API change
+ptr_arg = "allow"            # &PathBuf/&Vec params; not worth re-typing signatures + callers
+
+# Cosmetic style nits (no behavior impact, multi-site):
+uninlined_format_args = "allow"
+manual_flatten = "allow"
+needless_borrows_for_generic_args = "allow"
+len_zero = "allow"
+unnecessary_cast = "allow"
+useless_conversion = "allow"
+wildcard_in_or_patterns = "allow"
+nonminimal_bool = "allow"
+inconsistent_digit_grouping = "allow"
+
+# Doc-comment formatting nits:
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+empty_line_after_doc_comments = "allow"
