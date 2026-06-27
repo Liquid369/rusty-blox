@@ -106,7 +106,7 @@ tikv-jemallocator = "=0.6.0"
 # Direct handle to jemalloc's mallctl (already in the lock via jemallocator) so
 # the sync can force an arena purge at the parse->enrich phase boundary, handing
 # freed-but-retained parse/resolve pages back to the OS.
-tikv-jemalloc-sys = "=0.6.0"
+tikv-jemalloc-sys = "=0.6.1"
 hex = "0.4.3"
 rocksdb = "0.21.0"
 byteorder = "1.3"
