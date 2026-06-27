@@ -1,0 +1,12 @@
+# Commits listed here are skipped by `git blame`, so a bulk, behavior-neutral
+# reformat doesn't bury real authorship. GitHub honors this file automatically;
+# enable it locally with:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Append the full 40-char SHA of the one-time `cargo fmt --all` reformat commit
+# below (one SHA per line) once that commit exists. Keep the reformat as its own
+# commit, separate from logic changes, so only formatting is ignored here.
+
+# style: adopt rustfmt across the codebase (cargo fmt --all)
+22420eb3a33082befe2be61de7b84b5d04f730d5

@@ -1,6 +1,7 @@
 # Multi-stage build for rusty-blox
-# Cargo >= 1.85 required: the lockfile pins edition2024 crates (time-core 0.1.8)
-FROM rust:1.93-bookworm AS builder
+# Rust 1.88 matches rust-toolchain.toml, the repo-wide pin (>= 1.85 is required
+# because the lockfile pins edition2024 crates, e.g. time-core 0.1.8).
+FROM rust:1.88-bookworm AS builder
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -13,8 +14,8 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /app
 
-# Copy manifest files
-COPY Cargo.toml Cargo.lock ./
+# Copy manifest files (rust-toolchain.toml so the build uses the pinned compiler)
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY build.rs ./
 
 # Copy source code

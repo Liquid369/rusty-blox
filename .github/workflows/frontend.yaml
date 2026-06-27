@@ -1,0 +1,45 @@
+name: Frontend
+
+# frontend-legacy is the shipping UI. This guards it the way the backend job
+# guards Rust: a clean, lockfile-faithful install + production build, which is
+# exactly what catches a missing dependency before it reaches the server.
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'frontend-legacy/**'
+      - '.github/workflows/frontend.yaml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'frontend-legacy/**'
+      - '.github/workflows/frontend.yaml'
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (frontend-legacy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-legacy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend-legacy/package-lock.json
+
+      # `npm ci` installs strictly from package-lock.json and fails if a declared
+      # dependency is missing -- the check that would have caught the @fontsource break.
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build

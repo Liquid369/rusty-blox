@@ -2,16 +2,17 @@
 //
 // Shared utilities used across API modules.
 
-use pivx_rpc_rs::PivxRpcClient;
-use crate::config::get_global_config;
-use axum::{Json, http::StatusCode};
-use std::sync::Arc;
 use super::types::BlockbookError;
+use crate::config::get_global_config;
+use axum::{http::StatusCode, Json};
+use pivx_rpc_rs::PivxRpcClient;
+use std::sync::Arc;
 
 /// Format atomic PIVX units (satoshis) to human-readable PIV with 8 decimals.
-/// 
+///
 /// # Examples
 /// ```
+/// use rustyblox::api::helpers::format_piv_amount;
 /// assert_eq!(format_piv_amount(100_000_000), "1.00000000");
 /// assert_eq!(format_piv_amount(-50_000_000), "-0.50000000");
 /// ```
@@ -28,24 +29,20 @@ pub fn format_piv_amount(amount: i64) -> String {
 }
 
 /// Create an RPC client from global configuration.
-/// 
+///
 /// Reads from config keys:
 /// - `rpc.host` (default: "127.0.0.1:51472")
 /// - `rpc.user`
 /// - `rpc.pass`
 pub fn create_rpc_client() -> Result<Arc<PivxRpcClient>, String> {
     let config = get_global_config();
-    
+
     let rpc_host = config
         .get_string("rpc.host")
         .unwrap_or_else(|_| "127.0.0.1:51472".to_string());
-    let rpc_user = config
-        .get_string("rpc.user")
-        .unwrap_or_default();
-    let rpc_pass = config
-        .get_string("rpc.pass")
-        .unwrap_or_default();
-    
+    let rpc_user = config.get_string("rpc.user").unwrap_or_default();
+    let rpc_pass = config.get_string("rpc.pass").unwrap_or_default();
+
     Ok(PivxRpcClient::new(
         rpc_host,
         Some(rpc_user),
@@ -81,8 +78,12 @@ pub async fn rpc_call_json(
         .get_string("rpc.host")
         .unwrap_or_else(|_| "http://127.0.0.1:51472".to_string());
     // Fail closed: no hardcoded credential fallbacks.
-    let rpc_user = config.get_string("rpc.user").map_err(|_| "rpc.user not configured")?;
-    let rpc_pass = config.get_string("rpc.pass").map_err(|_| "rpc.pass not configured")?;
+    let rpc_user = config
+        .get_string("rpc.user")
+        .map_err(|_| "rpc.user not configured")?;
+    let rpc_pass = config
+        .get_string("rpc.pass")
+        .map_err(|_| "rpc.pass not configured")?;
     let url = if rpc_host.starts_with("http://") || rpc_host.starts_with("https://") {
         rpc_host
     } else {
@@ -116,10 +117,7 @@ pub type ApiResult<T> = Result<Json<T>, (StatusCode, Json<BlockbookError>)>;
 
 /// Helper to create a 404 Not Found error response
 pub fn not_found(message: impl Into<String>) -> (StatusCode, Json<BlockbookError>) {
-    (
-        StatusCode::NOT_FOUND,
-        Json(BlockbookError::new(message)),
-    )
+    (StatusCode::NOT_FOUND, Json(BlockbookError::new(message)))
 }
 
 /// Helper to create a 500 Internal Server Error response
@@ -132,10 +130,7 @@ pub fn internal_error(message: impl Into<String>) -> (StatusCode, Json<Blockbook
 
 /// Helper to create a 400 Bad Request error response
 pub fn bad_request(message: impl Into<String>) -> (StatusCode, Json<BlockbookError>) {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(BlockbookError::new(message)),
-    )
+    (StatusCode::BAD_REQUEST, Json(BlockbookError::new(message)))
 }
 
 #[cfg(test)]

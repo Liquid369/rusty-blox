@@ -1,4 +1,4 @@
-name: Rust Test Build
+name: CI
 
 on:
   push:
@@ -6,26 +6,53 @@ on:
   pull_request:
     branches: [ master ]
 
+# A new push to the same branch/PR cancels the in-flight run, so CI minutes
+# aren't spent finishing a commit that's already been superseded.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  build:
+  backend:
+    name: Backend (test, lint)
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code (with submodules)
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive   
-        fetch-depth: 0          
+      - uses: actions/checkout@v4
 
-    - name: Install Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
+      # bindgen/quark FFI needs clang+libclang; openssl-sys needs pkg-config+headers.
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libssl-dev
 
-    - name: Build
-      uses: actions-rs/cargo@v1
-      with:
-        command: build
-        args: --verbose
+      # Toolchain version comes from rust-toolchain.toml (single source of truth);
+      # @1.88.0 here just matches it so the action installs the right one up front.
+      - name: Install Rust toolchain
+        # Pinned to the commit SHA of the action's 1.88.0 branch (supply-chain
+        # hardening); that branch installs Rust 1.88.0 to match rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@98e1b82157cd469e843cb7f524c1313b4ad9492c # 1.88.0
+        with:
+          components: rustfmt, clippy
+
+      # Restores target/ + the registry keyed on Cargo.lock, so unchanged
+      # dependencies are not recompiled on every run.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      # The real gate: unit tests across the lib + all bins, plus doctests.
+      - name: Test
+        run: cargo test --locked
+
+      # Hard gate: the repo is rustfmt-clean as of the one-time reformat recorded
+      # in .git-blame-ignore-revs. Any formatting drift now fails the build.
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # Advisory for now: ~135 outstanding warnings. Tighten to `-- -D warnings`
+      # and drop continue-on-error once they're cleared.
+      - name: Clippy (advisory)
+        run: cargo clippy --locked --lib --bins
+        continue-on-error: true

@@ -1,0 +1,12 @@
+# Single source of truth for the Rust compiler version.
+#
+# Read automatically by `cargo` (via rustup) for every command run in this repo,
+# by CI (.github/workflows/build.yaml), and by the Docker build (Dockerfile COPYs
+# this file). Pinning here is what keeps "builds in CI" == "builds in Docker" ==
+# "builds on my machine".
+#
+# 1.88.0 is the known-good floor: the lockfile pulls edition2024 crates
+# (e.g. time-core 0.1.8) that require cargo >= 1.85, and 1.83 is too old.
+[toolchain]
+channel = "1.88.0"
+profile = "minimal"
