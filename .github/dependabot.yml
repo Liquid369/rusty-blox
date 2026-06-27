@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Rust backend
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Wait 7 days before proposing a newly published version (gives a window for
+    # a compromised/yanked release to be caught before it lands in a PR).
+    cooldown:
+      default-days: 7
+    groups:
+      # Batch patch/minor bumps into one PR to cut review noise.
+      cargo-minor:
+        update-types: [minor, patch]
+
+  # Shipping frontend (frontend-legacy)
+  - package-ecosystem: npm
+    directory: "/frontend-legacy"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  # The workflow actions themselves -- keeps the SHA pins current (Dependabot
+  # understands `uses: owner/repo@<sha> # vX` and bumps both SHA and comment).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
