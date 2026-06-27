@@ -119,7 +119,7 @@
         </Card>
 
         <!-- Table -->
-        <Card class="table-card">
+        <Card variant="data" class="table-card">
           <div class="table-container">
             <table class="mn-table">
               <thead>
@@ -676,6 +676,8 @@ onMounted(() => {
 
 .table-container {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
 }
 
 .mn-table {
@@ -684,7 +686,7 @@ onMounted(() => {
 }
 
 .mn-table thead th {
-  background: rgba(var(--rgb-purple-darkest), 0.92);
+  background: var(--surface-data);
   color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
@@ -695,7 +697,7 @@ onMounted(() => {
   border-bottom: 1px solid var(--border-primary);
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
 }
 
 .mn-table thead th.sortable {
@@ -715,6 +717,10 @@ onMounted(() => {
 .mn-table tbody tr {
   border-bottom: 1px solid var(--border-subtle);
   transition: background-color var(--transition-fast);
+}
+
+.mn-table tbody tr:nth-child(even):not(:hover) {
+  background: var(--zebra);
 }
 
 .mn-table tbody tr:hover {

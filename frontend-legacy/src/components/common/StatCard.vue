@@ -128,7 +128,8 @@ defineProps({
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   margin-bottom: var(--space-2);
-  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  /* No base drop-shadow on the number itself — keep glows meaningful (state
+     variants below + the card's hover glow), so plain values read clean/premium. */
   word-break: break-all;
   display: flex;
   align-items: baseline;

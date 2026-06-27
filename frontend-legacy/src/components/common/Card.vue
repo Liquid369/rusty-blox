@@ -2,6 +2,7 @@
   <div
     :class="[
       'card',
+      `card--${variant}`,
       { 'card-hover': hover, 'card-clickable': clickable }
     ]"
     @click="handleClick"
@@ -31,6 +32,12 @@ const props = defineProps({
   clickable: {
     type: Boolean,
     default: false
+  },
+  // 'glass' (default, hero/elevated) | 'data' (flat opaque surface for dense
+  // tables/grids — sharper to scan, cheaper to render than glass-on-glass)
+  variant: {
+    type: String,
+    default: 'glass'
   }
 })
 
@@ -99,6 +106,20 @@ const handleClick = (event) => {
   outline-offset: 2px;
 }
 
+/* Data variant: flat opaque surface for dense tables/grids. Reserves the glass
+   blur for hero/elevated cards and avoids muddy glass-on-glass nesting. */
+.card.card--data {
+  background: var(--surface-data);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border-color: var(--border-subtle);
+  box-shadow: var(--shadow-xs);
+}
+
+.card.card--data::before {
+  display: none; /* no luminous hero top-edge on data surfaces */
+}
+
 .card-header {
   padding: var(--space-5) var(--space-6);
   border-bottom: 1px solid var(--glass-border);
@@ -106,6 +127,11 @@ const handleClick = (event) => {
   font-size: var(--text-lg);
   background: rgba(var(--rgb-purple-main), 0.16);
   position: relative;
+}
+
+.card.card--data .card-header {
+  background: rgba(var(--rgb-purple-main), 0.10);
+  border-bottom-color: var(--border-subtle);
 }
 
 .card-body {

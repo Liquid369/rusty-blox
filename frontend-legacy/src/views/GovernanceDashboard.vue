@@ -107,6 +107,30 @@
           </div>
         </Card>
 
+        <!-- View mode toggle -->
+        <div class="mode-toggle" role="tablist" aria-label="Governance view">
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'overview'"
+            :class="['mode-tab', { active: viewMode === 'overview' }]"
+            @click="viewMode = 'overview'"
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'simulator'"
+            :class="['mode-tab', { active: viewMode === 'simulator' }]"
+            @click="viewMode = 'simulator'"
+          >
+            <Icon name="scale" :size="14" /> Budget Simulator
+          </button>
+        </div>
+
+        <!-- ===== Overview mode ===== -->
+        <template v-if="viewMode === 'overview'">
         <!-- Filter Tabs -->
         <div class="filter-tabs">
           <button
@@ -267,6 +291,15 @@
           title="No Proposals"
           message="No proposals match your filter"
         />
+        </template>
+
+        <!-- ===== Simulator mode ===== -->
+        <BudgetSimulator
+          v-if="viewMode === 'simulator'"
+          :candidates="activeProposals"
+          :actual-funded="passingProposals"
+          :passing-threshold="passingThreshold"
+        />
       </div>
     </div>
   </AppLayout>
@@ -298,6 +331,7 @@ import InfoRow from '@/components/common/InfoRow.vue'
 import HashDisplay from '@/components/common/HashDisplay.vue'
 import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import BudgetSimulator from '@/components/governance/BudgetSimulator.vue'
 
 const router = useRouter()
 const chainStore = useChainStore()
@@ -308,6 +342,8 @@ const mnCount = ref(null)
 const loading = ref(false)
 const error = ref('')
 const statusFilter = ref('all')
+// 'overview' = the read-only dashboard; 'simulator' = the interactive budget sandbox
+const viewMode = ref('overview')
 
 // Current blockchain height (reactive)
 const currentBlockHeight = computed(() => {
@@ -701,6 +737,41 @@ onMounted(() => {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   font-weight: var(--weight-bold);
+}
+
+/* Segmented control: Overview vs Budget Simulator */
+.mode-toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  margin-bottom: var(--space-6);
+  padding: var(--space-1);
+  background: var(--surface-data);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+}
+.mode-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  background: none;
+  border: none;
+  border-radius: var(--radius-full);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: color var(--transition-fast), background-color var(--transition-fast);
+}
+.mode-tab:hover { color: var(--text-secondary); }
+.mode-tab.active {
+  background: var(--purple-main);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+.mode-tab:focus-visible {
+  outline: 2px solid var(--focus-ring-color);
+  outline-offset: 2px;
 }
 
 .filter-tabs {

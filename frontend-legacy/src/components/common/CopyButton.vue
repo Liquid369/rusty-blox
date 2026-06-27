@@ -102,4 +102,14 @@ const handleCopy = async () => {
   font-size: 11px;
   letter-spacing: 0.5px;
 }
+
+/* Touch devices: meet the 44px WCAG target-size minimum without inflating the
+   desktop control. */
+@media (pointer: coarse) {
+  .copy-button {
+    min-height: 44px;
+    min-width: 44px;
+    justify-content: center;
+  }
+}
 </style>

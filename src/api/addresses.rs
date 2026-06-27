@@ -102,10 +102,14 @@ pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
     }
 }
 
-/// Per-request work cap for compute_address_info's full-history loops (P1-3).
-/// Addresses with more than this many txs skip the O(history) recompute/sort and
-/// serve the persisted 'r'/'s' aggregates instead. Configurable via
-/// RUSTYBLOX_ADDR_MAX_TX_SCAN; defaults to 50_000 (well above any normal address).
+/// Per-request cap for compute_address_info's one remaining O(history) scan:
+/// the newest-first height-sort. Balances/totals are now always served from the
+/// persisted 'r'/'s' aggregates (O(1)), so this no longer gates any value
+/// recompute — only ordering. Addresses with more than this many txs skip the
+/// height read and serve the stored txid order (unchanged prior over_cap
+/// behavior). Configurable via RUSTYBLOX_ADDR_MAX_TX_SCAN; defaults to 50_000
+/// (well above any normal address; the sort is now a single batched blocking
+/// pass, so this is a safety bound on pathological addresses, not the hot path).
 fn address_recompute_cap() -> usize {
     std::env::var("RUSTYBLOX_ADDR_MAX_TX_SCAN")
         .ok()
@@ -204,26 +208,12 @@ async fn compute_address_info(
     address: &str,
     params: &AddressQuery,
 ) -> Result<AddressInfo, Box<dyn std::error::Error + Send + Sync>> {
-    let key = format!("a{address}");
-    let key_bytes = key.as_bytes().to_vec();
-    let db_clone = Arc::clone(db);
-    
-    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-        let cf_addr_index = db_clone.cf_handle("addr_index")
-            .ok_or_else(|| "addr_index CF not found".to_string())?;
-        db_clone.get_cf(&cf_addr_index, &key_bytes)
-            .map_err(|e| e.to_string())
-            .map(|opt| opt.unwrap_or_default())
-    })
-    .await??;
-    
-    let unspent_utxos = deserialize_utxos(&result).await;
-    
-    // Get transaction list
+    // Per-address tx list ('t' + address): the authoritative tx set written by
+    // enrichment, stored in canonical display order (see the P1-1 note below).
     let tx_list_key = format!("t{address}");
     let tx_list_key_bytes = tx_list_key.as_bytes().to_vec();
     let db_clone = Arc::clone(db);
-    
+
     let tx_list_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let cf_addr_index = db_clone.cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
@@ -232,161 +222,99 @@ async fn compute_address_info(
             .map(|opt| opt.unwrap_or_default())
     })
     .await??;
-    
+
     let all_txids: Vec<Vec<u8>> = tx_list_data.chunks_exact(32)
         .map(|chunk| chunk.to_vec())
         .collect();
-    
-    // Blockbook parity: balance INCLUDES immature coinbase/coinstake outputs.
-    // (Maturity filtering here made balances diverge from the reference explorer
-    // by every coinstake output under 100 confirmations.)
-    let spendable_utxos = unspent_utxos.clone();
 
-    let mut balance: i64 = 0;
-
-    for (txid_hash, output_index) in &spendable_utxos {
-        let mut key = vec![b't'];
-        key.extend(txid_hash);
-        let key_clone = key.clone();
-        let db_clone = Arc::clone(db);
-        
-        let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-            let cf_transactions = db_clone.cf_handle("transactions")?;
-            db_clone.get_cf(&cf_transactions, &key_clone).ok()?
-        })
-        .await
-        .ok()
-        .flatten();
-        
-        if let Some(tx_data) = tx_data {
-            if tx_data.len() >= 8 {
-                let tx_data_len = tx_data.len() - 8;
-                if tx_data_len > 0 {
-                    let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                    tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                    tx_data_with_header.extend_from_slice(&tx_data[8..]);
-                
-                    if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                        if let Some(output) = tx.outputs.get(*output_index as usize) {
-                            balance += output.value;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // P1-3 interim DoS cap: compute_address_info does full-history loops (the
-    // total_received recompute below and the per-txid height-sort further down).
-    // On a huge address (e.g. 325k txs) those scans cost ~11-21s each and a
-    // handful of concurrent requests saturate the blocking pool to HTTP 408.
-    // The full fix is persisted per-address aggregates (fast-follow); for now we
-    // bound worst-case work per request: above address_recompute_cap() we DO NOT
-    // do the unbounded recompute/sort. The balance loop above is already bounded by the
-    // unspent UTXO count and matches the reference explorer, so it always runs.
+    // Balance and lifetime totals come straight from the aggregates enrichment
+    // already persisted: 'r'+address = totalReceived, 's'+address = totalSent
+    // (both i64 LE). By the UTXO-accounting identity, confirmed
+    //     balance == totalReceived - totalSent
+    // and this INCLUDES immature coinbase/coinstake outputs (both 'r' and the
+    // unspent set count them, so the identity still holds — the prior balance
+    // loop deliberately included immature outputs for Blockbook parity).
     //
-    // The enrichment phase already persists exact per-address totals under
-    // 'r'+address (totalReceived) and 's'+address (totalSent) as i64 LE, so the
-    // capped path stays EXACT rather than approximate — it just trades the
-    // O(history) scan for two point lookups.
-    let recompute_cap = address_recompute_cap();
-    let over_cap = all_txids.len() > recompute_cap;
+    // This replaces the former per-UTXO balance loop AND the per-tx
+    // total_received rescan — together ~2x len(txs) sequential
+    // spawn_blocking().await round-trips whose scheduling overhead (~0.65ms
+    // each) pushed 5k-50k-tx addresses past the 30s HTTP timeout — with two
+    // point lookups. The >50k-tx ("over_cap") path already served these exact
+    // aggregates in production; this just makes them the path for every address
+    // size, so the values are unchanged while the work drops from O(history) to
+    // O(1). Missing keys read as 0 (an unenriched-but-indexed address shows
+    // 0/0/0 rather than erroring — same as the prior fallback).
+    let (total_received, total_sent) = read_address_totals(db, address).await;
+    let balance = total_received - total_sent;
 
-    let (total_received, total_sent) = if over_cap {
-        read_address_totals(db, address).await
-    } else {
-        let mut total_received: i64 = 0;
-        for txid_internal in &all_txids {
-            let mut key = vec![b't'];
-            key.extend(txid_internal);
-            let key_clone = key.clone();
-            let db_clone = Arc::clone(db);
-            let address_clone = address.to_string();
-
-            let tx_data = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
-                let cf_transactions = db_clone.cf_handle("transactions")?;
-                db_clone.get_cf(&cf_transactions, &key_clone).ok()?
-            })
-            .await
-            .ok()
-            .flatten();
-
-            if let Some(tx_data) = tx_data {
-                if tx_data.len() >= 8 {
-                    // Filter hardening: only skip genuinely orphaned (-1) txs. A
-                    // transient HEIGHT_UNRESOLVED read must not drop a tx that the
-                    // 't' index attributes to this address — that would diverge
-                    // total_received from the (no-filter) balance loop. On the clean
-                    // DB nothing reads orphan/unresolved, so this is unchanged.
-                    let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                    if block_height == HEIGHT_ORPHAN {
-                        continue;
-                    }
-                    let tx_data_len = tx_data.len() - 8;
-                    if tx_data_len > 0 {
-                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
-
-                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                            for output in &tx.outputs {
-                                if output.address.contains(&address_clone) {
-                                    total_received += output.value;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        (total_received, total_received - balance)
-    };
-    
     // P1-1: the stored 't'-index bytes are ALREADY canonical display order
     // (parser.rs hash_txid reverses to display, and the tx CF is keyed by
-    // 't' + display bytes). Emit them directly — the prior extra .reverse()
+    // 't' + display bytes). Emit them directly — a prior extra .reverse()
     // flipped txids to a non-canonical order that the node, duddino, and every
     // other explorer reject (broke Blockbook compat on /address.txids[]).
     let unique_txids: Vec<String> = all_txids.iter()
         .map(hex::encode)
         .collect();
 
-    // Sort transactions by block height (descending = newest first).
-    // P1-3 cap: the per-txid height fetch is the second full-history scan, so for
-    // over-cap addresses we skip it and serve the stored 't'-index order (txid
-    // sorted, from enrichment) — bounded work instead of O(history) DB reads.
-    let all_txids: Vec<String> = if over_cap {
+    // Order newest-first by block height. This is the only history-sized step
+    // left, so do it as ONE blocking pass: a single get_cf per txid that reads
+    // the 4-byte height at offset 4..8 (no full-tx deserialization; one tx blob
+    // in memory at a time, freed each iteration) instead of one spawn_blocking
+    // task per txid. That removes the per-item async scheduling overhead that
+    // made this the second O(history) scan, while keeping the result
+    // byte-identical (same stable sort, same height source). Above the cap we
+    // serve the stored txid order, preserving the prior over_cap behavior
+    // exactly (no height reads at all).
+    let order_cap = address_recompute_cap();
+    let all_txids: Vec<String> = if unique_txids.len() > order_cap {
         unique_txids
     } else {
-        let mut txid_heights: Vec<(String, i32)> = Vec::new();
-        for txid in &unique_txids {
-            if let Ok(txid_bytes) = hex::decode(txid) {
-                // tx CF is keyed by 't' + canonical display-order bytes, so use
-                // the decoded txid directly (the prior reverse made the key miss).
-                let mut key = vec![b't'];
-                key.extend(&txid_bytes);
-                let db_clone = db.clone();
-                let height = tokio::task::spawn_blocking(move || -> i32 {
-                    if let Some(cf) = db_clone.cf_handle("transactions") {
-                        if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
-                            if tx_data.len() >= 8 {
-                                return i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                            }
-                        }
-                    }
-                    0
-                })
-                .await
-                .unwrap_or(0);
-                txid_heights.push((txid.clone(), height));
+        // Clone for the blocking pass so a JoinError (task panic / runtime
+        // shutdown) falls back to the stored order instead of dropping txids
+        // (no-silent-failure rule). The clone is at most ~4MB at the 50k cap (a
+        // few hundred KB for typical addresses) — negligible against the
+        // thousands of full-tx deserializations this commit removes.
+        let txids_for_sort = unique_txids.clone();
+        let db_clone = Arc::clone(db);
+        let sorted = tokio::task::spawn_blocking(move || -> Vec<String> {
+            let cf = match db_clone.cf_handle("transactions") {
+                Some(cf) => cf,
+                None => return txids_for_sort,
+            };
+            let mut txid_heights: Vec<(String, i32)> = Vec::with_capacity(txids_for_sort.len());
+            for txid in txids_for_sort {
+                // tx CF is keyed by 't' + canonical display-order bytes (exactly
+                // the bytes we just hex-encoded), so decode straight back to it.
+                let height = hex::decode(&txid).ok()
+                    .and_then(|txid_bytes| {
+                        let mut key = vec![b't'];
+                        key.extend(&txid_bytes);
+                        db_clone.get_cf(&cf, &key).ok().flatten()
+                    })
+                    .filter(|tx_data| tx_data.len() >= 8)
+                    .map(|tx_data| i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]))
+                    .unwrap_or(0);
+                txid_heights.push((txid, height));
+            }
+            // Sort by height descending (newest first = highest block). Stable
+            // sort keeps stored order within a height, matching the old loop.
+            txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+            txid_heights.into_iter().map(|(txid, _)| txid).collect()
+        })
+        .await;
+        match sorted {
+            Ok(ordered) => ordered,
+            // spawn_blocking only JoinErrors on a task panic or runtime shutdown.
+            // Serve the stored txid order rather than dropping txids, but make the
+            // rare degraded (unsorted) response observable instead of silent.
+            Err(e) => {
+                warn!(address = %address, error = %e,
+                    "address height-sort task failed; serving stored txid order");
+                unique_txids
             }
         }
-
-        // Sort by height descending (newest first = highest block)
-        txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
-        txid_heights.into_iter().map(|(txid, _)| txid).collect()
     };
-    
+
     // === PAGINATION LOGIC ===
     // Validate and clamp parameters
     const MAX_PAGE_SIZE: u32 = 1000;
@@ -1263,5 +1191,81 @@ mod tests {
         assert!(!is_valid_xpub(bad), "typo'd xpub must be invalid");
         // A transparent address is not an xpub.
         assert!(!is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"), "address is not an xpub");
+    }
+
+    /// Option-① regression: compute_address_info must (a) serve balance/totals
+    /// from the persisted 'r'/'s' aggregates with balance == r - s, and (b) order
+    /// txids newest-first by block height via the single batched blocking pass —
+    /// without recomputing from full history. Builds a tiny addr_index +
+    /// transactions DB and asserts both.
+    #[tokio::test]
+    async fn compute_address_info_serves_persisted_and_orders_by_height() {
+        use rocksdb::{DB, Options};
+        use super::compute_address_info;
+        use crate::api::types::AddressQuery;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = std::sync::Arc::new(
+            DB::open_cf(&opts, temp.path(), ["addr_index", "transactions"]).unwrap(),
+        );
+        let cf_ai = db.cf_handle("addr_index").unwrap();
+        let cf_tx = db.cf_handle("transactions").unwrap();
+
+        let address = "DUnitTestAddressXXXXXXXXXXXXXXXXXXX";
+
+        // Three txids with distinct heights; the 't'-list order is deliberately
+        // NOT height order, so a correct sort must reorder them.
+        let mk = |b: u8| -> [u8; 32] { [b; 32] };
+        let (a, b, c) = (mk(0xAA), mk(0xBB), mk(0xCC));
+        let heights = [(a, 300i32), (b, 100i32), (c, 200i32)];
+
+        // tx CF value layout: 8-byte header, block height as i32 LE at bytes 4..8.
+        let tx_value = |h: i32| -> Vec<u8> {
+            let mut v = vec![0u8; 8];
+            v[4..8].copy_from_slice(&h.to_le_bytes());
+            v
+        };
+        for (txid, h) in heights {
+            let mut k = vec![b't'];
+            k.extend_from_slice(&txid);
+            db.put_cf(&cf_tx, &k, tx_value(h)).unwrap();
+        }
+
+        // 't'+address = concatenated 32-byte txids, in NON-height order (a,b,c).
+        let mut t_key = vec![b't'];
+        t_key.extend_from_slice(address.as_bytes());
+        let mut t_val = Vec::new();
+        for txid in [a, b, c] {
+            t_val.extend_from_slice(&txid);
+        }
+        db.put_cf(&cf_ai, &t_key, &t_val).unwrap();
+
+        // Persisted aggregates: r=1000, s=300  => balance must be exactly 700.
+        let mut r_key = vec![b'r'];
+        r_key.extend_from_slice(address.as_bytes());
+        db.put_cf(&cf_ai, &r_key, 1000i64.to_le_bytes()).unwrap();
+        let mut s_key = vec![b's'];
+        s_key.extend_from_slice(address.as_bytes());
+        db.put_cf(&cf_ai, &s_key, 300i64.to_le_bytes()).unwrap();
+
+        let params: AddressQuery = serde_json::from_str("{}").unwrap();
+        let info = compute_address_info(&db, address, &params).await.unwrap();
+
+        // (a) values served straight from r/s, balance = r - s (no recompute).
+        assert_eq!(info.total_received, "1000", "totalReceived must come from 'r'");
+        assert_eq!(info.total_sent, "300", "totalSent must come from 's'");
+        assert_eq!(info.balance, "700", "balance must be r - s exactly");
+        assert_eq!(info.txs, 3, "tx count from the 't' list");
+
+        // (b) newest-first ordering by height: 300 (a), 200 (c), 100 (b).
+        let txids = info.txids.expect("details=txids returns the txid list");
+        assert_eq!(
+            txids,
+            vec![hex::encode(a), hex::encode(c), hex::encode(b)],
+            "txids must be ordered by block height descending",
+        );
     }
 }

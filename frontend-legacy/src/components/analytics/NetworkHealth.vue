@@ -89,6 +89,7 @@ import StatCard from '@/components/common/StatCard.vue'
 import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
+import { CHART } from '@/utils/chartTheme'
 
 const { getLineChartOption, getBarChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
@@ -163,11 +164,11 @@ const orphanRateOption = computed(() => {
     data: dates.map(() => 2),
     lineStyle: {
       type: 'dashed',
-      color: '#f6ff78',
+      color: CHART.warning,
       width: 2
     },
     itemStyle: {
-      color: '#f6ff78'
+      color: CHART.warning
     },
     symbol: 'none'
   })
@@ -193,11 +194,11 @@ const blocksPerDayOption = computed(() => {
     data: dates.map(() => 1440),
     lineStyle: {
       type: 'dashed',
-      color: '#B359FC',
+      color: CHART.purpleAccent,
       width: 2
     },
     itemStyle: {
-      color: '#B359FC'
+      color: CHART.purpleAccent
     },
     symbol: 'none'
   })

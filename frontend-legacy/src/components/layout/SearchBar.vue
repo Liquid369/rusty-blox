@@ -339,4 +339,14 @@ const hideSuggestions = () => {
     font-size: 16px;
   }
 }
+
+/* Touch devices: the search submit is a primary action — keep it at the 44px
+   WCAG target-size minimum (overrides the 40px/36px visual sizes above). Gated to
+   coarse pointers so the desktop layout is unchanged. */
+@media (pointer: coarse) {
+  .search-button {
+    width: 44px;
+    height: 44px;
+  }
+}
 </style>

@@ -67,6 +67,7 @@ import Button from '@/components/common/Button.vue'
 import StatCard from '@/components/common/StatCard.vue'
 import api from '@/services/api'
 import { useChartConfig, useChartExport } from '@/composables/useCharts'
+import { CHART } from '@/utils/chartTheme'
 
 const { colors, getBaseOption } = useChartConfig()
 const { exportToCSV } = useChartExport()
@@ -131,7 +132,7 @@ const trendOption = computed(() => {
       data: ['Delegated Balance', 'Created (incl. re-stakes)', 'Spent (incl. re-stakes)'],
       top: 0,
       textStyle: {
-        color: '#9B93A8'
+        color: CHART.axisText
       }
     },
     xAxis: {
@@ -143,12 +144,12 @@ const trendOption = computed(() => {
       {
         ...base.yAxis,
         name: 'Delegated (PIV)',
-        nameTextStyle: { color: '#9B93A8' }
+        nameTextStyle: { color: CHART.axisText }
       },
       {
         ...base.yAxis,
         name: 'Daily Turnover (PIV)',
-        nameTextStyle: { color: '#9B93A8' },
+        nameTextStyle: { color: CHART.axisText },
         splitLine: { show: false }
       }
     ],

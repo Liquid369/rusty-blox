@@ -101,4 +101,17 @@ defineProps({
     flex-wrap: wrap;
   }
 }
+
+/* Touch devices: the inline copy icon-button is well under 44px — expand its tap
+   area to the WCAG minimum (the hash router-link beside it is an inline-text link,
+   which is exempt, so it is left as-is to avoid disrupting the inline layout). */
+@media (pointer: coarse) {
+  .hash-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
 </style>

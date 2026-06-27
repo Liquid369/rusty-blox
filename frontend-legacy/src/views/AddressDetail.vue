@@ -264,6 +264,7 @@ import SkeletonLoader from '@/components/common/SkeletonLoader.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import Modal from '@/components/common/Modal.vue'
 import QRCode from 'qrcode'
+import { CHART } from '@/utils/chartTheme'
 
 const route = useRoute()
 const router = useRouter()
@@ -567,7 +568,7 @@ const generateQR = async (canvas) => {
       width: 256,
       margin: 2,
       color: {
-        dark: '#662D91',
+        dark: CHART.purple,
         light: '#FFFFFF'
       }
     })
@@ -762,14 +763,17 @@ onMounted(() => {
 
 .utxos-table {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
   margin-bottom: var(--space-6);
 }
 
 .utxos-table table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--glass-bg-subtle);
-  border: 1px solid var(--border-secondary);
+  background: var(--surface-data);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-xs);
   border-radius: var(--radius-md);
 }
 
@@ -781,11 +785,11 @@ onMounted(() => {
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: var(--tracking-wide);
-  background: rgba(var(--rgb-purple-darkest), 0.92);
+  background: var(--surface-data);
   border-bottom: 1px solid var(--border-primary);
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
 }
 
 .utxos-table th:nth-child(3),
@@ -809,6 +813,10 @@ onMounted(() => {
 
 .utxos-table tbody tr:hover {
   background: var(--bg-hover);
+}
+
+.utxos-table tbody tr:nth-child(even):not(:hover) {
+  background: var(--zebra);
 }
 
 .amount {

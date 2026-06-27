@@ -513,7 +513,14 @@ async fn index_block_from_rpc(
     
     let mut tx_count = 0;
     let mut tx_errors = 0;
-    
+    // Address-index undo for this block, captured INLINE as we apply each r/s/a/t
+    // write below. Recording exactly what we write (instead of recomputing from the
+    // block afterwards) makes the undo byte-exact — a reorg then reverses to the
+    // precise pre-block state — and adds zero extra DB reads/deserializes. Stored
+    // after the loop, only for live blocks past the enrichment watermark. See
+    // address_rollback::reverse_address_block for the consumer.
+    let mut block_undo = crate::address_rollback::AddressBlockUndo::new(height);
+
     for (tx_index, tx_val) in tx_array.iter().enumerate() {
         // With verbosity=2, tx_val could be:
         // - A string (just txid) - older PIVX versions
@@ -789,7 +796,9 @@ async fn index_block_from_rpc(
                     
                     // Add new UTXO: (txid_bytes, output_index)
                     existing_utxos.push((txid_bytes.clone(), output_idx as u64));
-                
+                    // Reorg-undo capture: record exactly the UTXO we add to 'a'.
+                    block_undo.add_utxo_created(address.clone(), txid_bytes.clone(), output_idx as u64);
+
                     // Store updated UTXO list
                     let serialized = serialize_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
@@ -1014,6 +1023,17 @@ async fn index_block_from_rpc(
                             None => Vec::new(),
                         };
                         
+                        // Reorg-undo capture: only record the spend if the UTXO was
+                        // actually present in 'a'. A born-and-die output (created and
+                        // spent within this same batch) never entered 'a', so capturing
+                        // it would make reverse restore a phantom UTXO.
+                        let was_present = existing_utxos.iter().any(|(stored_txid, stored_idx)| {
+                            stored_txid == &prev_txid_bytes && *stored_idx == prev_output_idx as u64
+                        });
+                        if was_present {
+                            block_undo.add_utxo_spent(address.clone(), prev_txid_bytes.clone(), prev_output_idx as u64);
+                        }
+
                         // Remove the spent UTXO (match by txid and index)
                         let updated_utxos: Vec<_> = existing_utxos.into_iter()
                             .filter(|(stored_txid, stored_idx)| {
@@ -1055,7 +1075,9 @@ async fn index_block_from_rpc(
                 // Add this transaction (if not already present)
                 if !tx_list.iter().any(|t| t == &txid_bytes) {
                     tx_list.push(txid_bytes.clone());
-                    
+                    // Reorg-undo capture: record exactly the txid we add to 't'.
+                    block_undo.add_tx(address.clone(), txid_bytes.clone());
+
                     // Serialize transaction list (just concatenate txids)
                     let mut serialized = Vec::new();
                     for tx in &tx_list {
@@ -1097,6 +1119,8 @@ async fn index_block_from_rpc(
                     
                     let new_total = current_total + received_delta;
                     db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())?;
+                    // Reorg-undo capture: record exactly the amount we add to 'r'.
+                    block_undo.add_received(address.clone(), received_delta);
                 }
                 
                 // Calculate sent amount (inputs spending from this address)
@@ -1153,6 +1177,8 @@ async fn index_block_from_rpc(
                     
                     let new_total = current_total + sent_delta;
                     db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())?;
+                    // Reorg-undo capture: record exactly the amount we add to 's'.
+                    block_undo.add_sent(address.clone(), sent_delta);
                 }
             }
         }
@@ -1167,11 +1193,36 @@ async fn index_block_from_rpc(
         debug!(height = height, tx_count = tx_count, "Block indexed");
     }
     // Debug logging reduced for performance - only log every 1000 blocks or on errors
-    
+
+    // Persist the inline-captured address-index undo so a future chain reorg can
+    // reverse r/s/a/t exactly (rollback_address_index -> reverse_address_block).
+    // Only for blocks this monitor actually indexed (live blocks past the enrichment
+    // watermark); enrichment-owned blocks are repaired by re-enrichment, not reorg
+    // undo, and reorgs only ever hit the recent live tip. Stored before the
+    // sync_height/H-marker writes so a block marked done always has its undo.
+    if should_update_address_index {
+        if let Err(e) = crate::address_rollback::store_address_undo(db.clone(), &block_undo).await {
+            warn!(height, error = %e,
+                "Failed to store address undo; reorg r/s reversal degraded for this block");
+        }
+        // Prune undo older than the reorg window so chain_state does not grow
+        // unbounded. PIVX PoS reorgs are shallow; 200 blocks is a generous margin.
+        // Run unconditionally for live heights (not gated on this block having any
+        // captured deltas) so a coinbase-only/empty block can't leak its
+        // predecessor's record.
+        const REORG_UNDO_WINDOW: i32 = 200;
+        let prune_below = height - REORG_UNDO_WINDOW;
+        if prune_below > 0 {
+            if let Err(e) = crate::address_rollback::delete_address_undo(db.clone(), prune_below).await {
+                debug!(height = prune_below, error = %e, "Failed to prune old address undo");
+            }
+        }
+    }
+
     // Update sync height
     let cf_state = db.cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
-    
+
     db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
     
     // CRITICAL FIX: Store block hash for deduplication
@@ -1283,6 +1334,52 @@ fn detect_reorg(
     Ok(None)
 }
 
+/// One-shot startup self-heal: a leftover 'P' (processing) marker means a previous
+/// run died mid-block-connect (a hard crash skips the RAII guard that clears it).
+/// Re-apply each such block (the 't'/'a' indexes are idempotent) and recompute r/s
+/// for its addresses, since the r/s totals are NOT idempotent and re-applying would
+/// otherwise leave them double-counted. No-op on a clean shutdown (no markers).
+async fn recover_crashed_blocks(
+    db: &Arc<DB>,
+    rpc_client: &Arc<PivxRpcClient>,
+    broadcaster: &Option<Arc<EventBroadcaster>>,
+) {
+    let dirty = crate::crash_recovery::scan_processing_markers(db);
+    if dirty.is_empty() {
+        return;
+    }
+    warn!(count = dirty.len(), heights = ?dirty,
+        "Leftover processing markers from a previous crash; recovering r/s for affected blocks");
+
+    let cf_state = match db.cf_handle("chain_state") {
+        Some(cf) => cf,
+        None => return,
+    };
+    for height in dirty {
+        // Clear the stale marker so index_block_from_rpc's reservation check does not
+        // skip the re-apply. (It sets and clears its own marker around processing.)
+        let mut pkey = vec![b'P'];
+        pkey.extend(&height.to_le_bytes());
+        let _ = db.delete_cf(&cf_state, &pkey);
+
+        // Re-apply to complete t/a/undo (double-counts the non-idempotent r/s). If
+        // the block already finished before the crash (H-marker present), this is a
+        // no-op skip — the recompute below is still idempotent and harmless.
+        if let Err(e) = index_block_from_rpc(rpc_client, height, db, broadcaster, None).await {
+            warn!(height, error = %e,
+                "Failed to re-apply crashed block during recovery; leaving for normal catchup/reorg");
+            continue;
+        }
+
+        // Recompute r/s for the block's addresses from the authoritative t/a indexes,
+        // correcting any double-count.
+        match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
+            Ok(n) => info!(height, addresses = n, "Recovered r/s after crash-interrupted block"),
+            Err(e) => warn!(height, error = %e, "Failed to repair r/s after re-applying crashed block"),
+        }
+    }
+}
+
 /// Main block monitoring loop
 pub async fn run_block_monitor(
     db: Arc<DB>,
@@ -1361,7 +1458,12 @@ pub async fn run_block_monitor(
             }
         }
     };
-    
+
+    // One-shot crash recovery before any new work: repair r/s for a block that a
+    // previous run died partway through applying (detected via a leftover 'P'
+    // marker). Runs only when such a marker exists.
+    recover_crashed_blocks(&db, &rpc_client, &broadcaster).await;
+
     // Surface the live daily-analytics gate state at startup. It activates only
     // after a FULL enrich flips the ready gate; a degraded restart rebuild (zeroed
     // join fields) keeps it dark until a full re-enrich.

@@ -199,4 +199,14 @@ const handleClick = (event) => {
     min-height: 44px;
   }
 }
+
+/* Touch devices: raise small/medium buttons to the 44px WCAG target-size minimum
+   (covers Pagination, which renders size="sm"). Gated to coarse pointers so mouse
+   users keep the denser desktop sizing. */
+@media (pointer: coarse) {
+  .btn-sm,
+  .btn-md {
+    min-height: 44px;
+  }
+}
 </style>

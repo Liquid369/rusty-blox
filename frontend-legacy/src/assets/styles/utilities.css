@@ -13,11 +13,24 @@
   position: relative;
   display: inline-block;
   color: var(--text-primary);
-  background: linear-gradient(100deg, #FFFFFF 30%, var(--purple-accent) 85%);
+  /* Mostly white with a subtle muted-purple fade at the tail — premium, not the
+     bright bicolor "crypto gradient" cliché (was #FFFFFF -> bright --purple-accent). */
+  background: linear-gradient(100deg, var(--text-primary) 60%, var(--text-purple) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
   padding-bottom: var(--space-2);
+}
+
+/* Forced-colors / Windows High Contrast: the clipped-gradient text relies on a
+   transparent fill, which can render the title INVISIBLE. Restore a solid color. */
+@media (forced-colors: active) {
+  .page-header h1,
+  .page-title {
+    background: none;
+    -webkit-text-fill-color: CanvasText;
+    color: CanvasText;
+  }
 }
 
 .page-header h1::after,

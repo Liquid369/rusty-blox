@@ -68,6 +68,7 @@ import StatCard from '@/components/common/StatCard.vue'
 import { analyticsService } from '@/services/analyticsService'
 import { useChartOptions, useChartExport } from '@/composables/useCharts'
 import { formatNumber, formatPercentage } from '@/utils/formatters'
+import { CHART } from '@/utils/chartTheme'
 
 const { getLineChartOption } = useChartOptions()
 const { exportToCSV } = useChartExport()
@@ -135,11 +136,11 @@ const blockTimeOption = computed(() => {
     data: dates.map(() => 60),
     lineStyle: {
       type: 'dashed',
-      color: '#f6ff78',
+      color: CHART.warning,
       width: 2
     },
     itemStyle: {
-      color: '#f6ff78'
+      color: CHART.warning
     },
     symbol: 'none'
   })

@@ -49,7 +49,7 @@
     />
 
     <!-- Recent Payouts Table -->
-    <Card class="table-card">
+    <Card class="table-card" variant="data">
       <div class="table-header">
         <h3>Recent Treasury Payouts</h3>
       </div>
@@ -346,6 +346,8 @@ onMounted(() => {
 
 .table-container {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
 }
 
 .treasury-table {
@@ -365,7 +367,10 @@ onMounted(() => {
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: var(--tracking-wide);
-  background: rgba(var(--rgb-purple-darkest), 0.92);
+  background: var(--surface-data);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .treasury-table td {
@@ -381,6 +386,10 @@ onMounted(() => {
 
 .table-row:hover {
   background: var(--bg-hover);
+}
+
+.treasury-table tbody tr:nth-child(even):not(:hover) {
+  background: var(--zebra);
 }
 
 .height-link {

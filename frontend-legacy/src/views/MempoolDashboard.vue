@@ -54,7 +54,7 @@
         </div>
 
         <!-- Transaction List -->
-        <Card class="mempool-card">
+        <Card class="mempool-card" variant="data">
           <template #header>
             <div class="card-header-row">
               <span>Pending Transactions</span>
@@ -288,6 +288,8 @@ onUnmounted(() => {
 
 .mempool-table-container {
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
 }
 
 .mempool-table {
@@ -303,8 +305,11 @@ onUnmounted(() => {
   color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: var(--tracking-wide);
-  background: rgba(var(--rgb-purple-darkest), 0.92);
+  background: var(--surface-data);
   border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  z-index: 2;
 }
 
 .mempool-table td {
@@ -325,6 +330,10 @@ onUnmounted(() => {
 
 .mempool-table tbody tr:hover {
   background: var(--bg-hover);
+}
+
+.mempool-table tbody tr:nth-child(even):not(:hover) {
+  background: var(--zebra);
 }
 
 .amount {
