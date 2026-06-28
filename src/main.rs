@@ -315,8 +315,12 @@ async fn start_web_server(
         .layer(middleware::from_fn(security_headers))
         .layer(cors)
         // Hard ceiling on request duration: a wedged handler can no longer pin
-        // a connection forever (returns 408 on expiry)
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        // a connection forever (returns 408 on expiry). tower-http 0.7 deprecated
+        // TimeoutLayer::new; with_status_code keeps the same 408 behavior explicitly.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
         // GLOBAL in-flight cap (P1-2). Outermost limiter so we shed load before
         // doing any per-request work; the broadcast routes carry an additional
         // tighter cap layered on their sub-router above. 503 + Retry-After once
