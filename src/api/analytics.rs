@@ -10,8 +10,7 @@
 use axum::{extract::Query, http::StatusCode, Extension, Json};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -585,12 +584,11 @@ pub async fn rich_list(
     }
 }
 
-/// Read the precomputed rich-list snapshot from chain_state and shape it into
 /// Honest "% of supply" denominator: the HODL snapshot's deduped-outpoint
-/// circulating total. The wealth snapshot's total_balance is a SUM of
-/// per-address balances, which double-counts cold-staked coins (credited to
-/// both staker and owner for per-address parity), inflating it ~7% and biasing
-/// every share low. Falls back to total_balance if the HODL blob is absent.
+/// circulating total. The wealth snapshot's total_balance is a SUM of per-address
+/// balances, which double-counts cold-staked coins (credited to both staker and
+/// owner for per-address parity), inflating it ~7% and biasing every share low.
+/// Falls back to total_balance if the HODL blob is absent.
 fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
     let from_hodl = db
         .cf_handle("chain_state")
@@ -606,7 +604,8 @@ fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
     }
 }
 
-/// the API response. Percentages are relative to the total tracked balance.
+/// Read the precomputed rich-list snapshot and shape it into the API response.
+/// Percentages are relative to `supply_denominator` (the deduped circulating total).
 fn read_richlist_snapshot(db: &Arc<DB>, limit: u32) -> Option<Vec<RichListEntry>> {
     let cf_state = db.cf_handle("chain_state")?;
     let rl_bytes = db.get_cf(&cf_state, b"analytics_richlist").ok()??;
@@ -615,22 +614,31 @@ fn read_richlist_snapshot(db: &Arc<DB>, limit: u32) -> Option<Vec<RichListEntry>
         bincode::deserialize(&rl_bytes).ok()?;
     let wealth: crate::enrich_addresses::WealthSnapshot =
         bincode::deserialize(&wealth_bytes).ok()?;
-    let denom = supply_denominator(db, wealth.total_balance);
+    Some(shape_rich_list(db, entries, wealth.total_balance, limit))
+}
 
-    Some(
-        entries
-            .into_iter()
-            .take(limit as usize)
-            .enumerate()
-            .map(|(i, e)| RichListEntry {
-                rank: (i + 1) as u32,
-                address: e.address,
-                balance: e.balance.to_string(),
-                percentage: (e.balance as f64 / denom) * 100.0,
-                tx_count: e.tx_count,
-            })
-            .collect(),
-    )
+/// Shape rich-list entries + the wealth total into the API response. Shared by the
+/// snapshot path AND the live recompute fallback so the two can never diverge
+/// (same ranks, same percentage denominator).
+fn shape_rich_list(
+    db: &Arc<DB>,
+    entries: Vec<crate::enrich_addresses::RichListSnapshotEntry>,
+    wealth_total: i64,
+    limit: u32,
+) -> Vec<RichListEntry> {
+    let denom = supply_denominator(db, wealth_total);
+    entries
+        .into_iter()
+        .take(limit as usize)
+        .enumerate()
+        .map(|(i, e)| RichListEntry {
+            rank: (i + 1) as u32,
+            address: e.address,
+            balance: e.balance.to_string(),
+            percentage: (e.balance as f64 / denom) * 100.0,
+            tx_count: e.tx_count,
+        })
+        .collect()
 }
 
 /// GET /api/v2/analytics/wealth-distribution
@@ -662,6 +670,12 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
     let cf_state = db.cf_handle("chain_state")?;
     let bytes = db.get_cf(&cf_state, b"analytics_wealth").ok()??;
     let w: crate::enrich_addresses::WealthSnapshot = bincode::deserialize(&bytes).ok()?;
+    Some(shape_wealth(db, w))
+}
+
+/// Shape a wealth snapshot into the API response. Shared by the snapshot path AND
+/// the live recompute fallback so the two never diverge.
+fn shape_wealth(db: &Arc<DB>, w: crate::enrich_addresses::WealthSnapshot) -> WealthDistribution {
     let denom = supply_denominator(db, w.total_balance);
     let pct = |v: i64| (v as f64 / denom) * 100.0;
     let total_holders = if w.address_count > 0 {
@@ -670,7 +684,7 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
         1.0
     };
 
-    Some(WealthDistribution {
+    WealthDistribution {
         top_10: pct(w.top_10),
         top_50: pct(w.top_50),
         top_100: pct(w.top_100),
@@ -686,7 +700,7 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
                 percentage: (count as f64 / total_holders) * 100.0,
             })
             .collect(),
-    })
+    }
 }
 
 // ========================================
@@ -1292,216 +1306,29 @@ fn compute_network_health_analytics(
     Ok(data_points)
 }
 
-// Helper struct for maintaining top N addresses with a min-heap
-#[derive(Debug)]
-struct AddressBalance {
-    address: String,
-    balance: i64,
-}
-
-impl Eq for AddressBalance {}
-
-impl PartialEq for AddressBalance {
-    fn eq(&self, other: &Self) -> bool {
-        self.balance == other.balance
-    }
-}
-
-impl PartialOrd for AddressBalance {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for AddressBalance {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap (we want to evict smallest)
-        other.balance.cmp(&self.balance)
-    }
-}
-
 fn compute_rich_list(
     db: &Arc<DB>,
     limit: u32,
 ) -> Result<Vec<RichListEntry>, Box<dyn std::error::Error + Send + Sync>> {
-    let addr_cf = db
-        .cf_handle("addr_index")
-        .ok_or("addr_index CF not found")?;
-
-    // Use a bounded min-heap to efficiently track top N addresses
-    let mut top_addresses: BinaryHeap<AddressBalance> = BinaryHeap::new();
-    let limit = limit.clamp(1, 1000); // DoS guard: bound requested result size
-    let max_candidates = limit.saturating_mul(2); // Scan 2x the limit for good results
-
-    let mut scanned = 0;
-    let max_scan = 10000; // Scan up to 10K addresses
-
-    // Threshold to stop early if we have strong candidates
-    let mut min_threshold = 0i64;
-
-    let iter = db.iterator_cf(addr_cf, rocksdb::IteratorMode::Start);
-    for item in iter {
-        let (key, value) = item?;
-
-        // Skip non-address UTXO keys (keys starting with 'a')
-        if key.first() != Some(&b'a') {
-            continue;
-        }
-
-        // Skip addresses with no UTXOs
-        if value.is_empty() {
-            continue;
-        }
-
-        scanned += 1;
-
-        // Skip addresses with too many UTXOs (likely dust/spam)
-        let utxo_count = value.len() / 40;
-        if utxo_count > 200 {
-            continue;
-        }
-
-        // Early bailout: if we have full heap and scanned enough, check if worth continuing
-        if scanned > max_scan {
-            break;
-        }
-
-        // Extract address
-        let address = String::from_utf8_lossy(&key[1..]).to_string();
-
-        // Calculate balance by looking up each UTXO
-        let balance = calculate_address_balance(db, &value);
-
-        if balance <= 0 {
-            continue;
-        }
-
-        // Add to heap if it's in top N
-        if top_addresses.len() < max_candidates as usize {
-            top_addresses.push(AddressBalance { address, balance });
-            // Update minimum threshold
-            if let Some(min) = top_addresses.peek() {
-                min_threshold = min.balance;
-            }
-        } else if balance > min_threshold {
-            top_addresses.pop();
-            top_addresses.push(AddressBalance { address, balance });
-            // Update minimum threshold
-            if let Some(min) = top_addresses.peek() {
-                min_threshold = min.balance;
-            }
-        }
-    }
-
-    // Convert heap to sorted vector (descending by balance)
-    let mut sorted_addresses: Vec<AddressBalance> = top_addresses.into_vec();
-    sorted_addresses.sort_by(|a, b| b.balance.cmp(&a.balance));
-
-    // Take only the requested limit
-    sorted_addresses.truncate(limit as usize);
-
-    // Get total supply for percentage calculations
-    let chain_state = get_chain_state(db).map_err(|e| e.to_string())?;
-    let total_supply = calculate_total_supply_at_height(chain_state.height);
-
-    // Build final rich list entries
-    let rich_list: Vec<RichListEntry> = sorted_addresses
-        .into_iter()
-        .enumerate()
-        .map(|(i, addr_bal)| {
-            let percentage = (addr_bal.balance as f64 / total_supply as f64) * 100.0;
-            RichListEntry {
-                rank: (i + 1) as u32,
-                address: addr_bal.address,
-                balance: addr_bal.balance.to_string(), // Raw satoshis
-                percentage,
-                tx_count: 0, // Would need to count from transaction history
-            }
-        })
-        .collect();
-
-    Ok(rich_list)
+    // Live fallback — used only when the snapshot blob is absent (e.g. before the
+    // first enrich completes). Compute from the SAME addr_index r/s totals the
+    // snapshot + periodic recompute use, so the result is a correct full top-N (no
+    // 10k-address / >200-UTXO cap) and is consistent with both the snapshot path
+    // and the per-address pages.
+    let limit = limit.clamp(1, 1000);
+    let (entries, wealth) = crate::analytics_recompute::recompute_wealth_richlist_from_index(db)?;
+    Ok(shape_rich_list(db, entries, wealth.total_balance, limit))
 }
 
 fn compute_wealth_distribution(
     db: &Arc<DB>,
 ) -> Result<WealthDistribution, Box<dyn std::error::Error + Send + Sync>> {
-    let addr_cf = db
-        .cf_handle("addr_index")
-        .ok_or("addr_index CF not found")?;
-
-    // Collect balances
-    let mut balances: Vec<i64> = Vec::new();
-    let mut total_balance = 0i64;
-
-    let iter = db.iterator_cf(addr_cf, rocksdb::IteratorMode::Start);
-    for item in iter {
-        let (key, value) = item?;
-
-        if key.first() != Some(&b'a') {
-            continue;
-        }
-
-        let balance = calculate_address_balance(db, &value);
-        if balance > 0 {
-            balances.push(balance);
-            total_balance += balance;
-        }
-
-        if balances.len() > 10000 {
-            break;
-        }
-    }
-
-    // Sort descending
-    balances.sort_by(|a, b| b.cmp(a));
-
-    // Calculate top percentages
-    let top_10_balance: i64 = balances.iter().take(10).sum();
-    let top_50_balance: i64 = balances.iter().take(50).sum();
-    let top_100_balance: i64 = balances.iter().take(100).sum();
-    let top_1000_balance: i64 = balances.iter().take(1000).sum();
-
-    let top_10 = (top_10_balance as f64 / total_balance as f64) * 100.0;
-    let top_50 = (top_50_balance as f64 / total_balance as f64) * 100.0;
-    let top_100 = (top_100_balance as f64 / total_balance as f64) * 100.0;
-    let top_1000 = (top_1000_balance as f64 / total_balance as f64) * 100.0;
-
-    // Create histogram
-    let histogram = create_balance_histogram(&balances);
-
-    // Gini coefficient over ascending balances (balances is sorted descending).
-    let n = balances.len();
-    let gini = if n > 0 && total_balance > 0 {
-        let mut weighted = 0.0f64;
-        for (i, b) in balances.iter().rev().enumerate() {
-            weighted += (i as f64 + 1.0) * (*b as f64);
-        }
-        (2.0 * weighted) / (n as f64 * total_balance as f64) - (n as f64 + 1.0) / n as f64
-    } else {
-        0.0
-    };
-
-    // Nakamoto coefficient: minimum holders summing to >50% of total balance.
-    let mut nakamoto_coefficient: u32 = 0;
-    let mut acc: i64 = 0;
-    for b in &balances {
-        acc = acc.saturating_add(*b);
-        nakamoto_coefficient += 1;
-        if (acc as f64) > total_balance as f64 / 2.0 {
-            break;
-        }
-    }
-
-    Ok(WealthDistribution {
-        top_10,
-        top_50,
-        top_100,
-        top_1000,
-        histogram,
-        gini,
-        nakamoto_coefficient,
-    })
+    // Live fallback — used only when the snapshot blob is absent. Compute from the
+    // same addr_index r/s totals the snapshot + periodic recompute use, so it is a
+    // correct full-set distribution (no 10k-address cap) consistent with the
+    // snapshot path. Shares `shape_wealth` so the output is identical.
+    let (_, wealth) = crate::analytics_recompute::recompute_wealth_richlist_from_index(db)?;
+    Ok(shape_wealth(db, wealth))
 }
 
 // ========================================
@@ -1529,118 +1356,6 @@ fn parse_time_range(range: &str) -> i64 {
         "all" => 3650,
         _ => 30,
     }
-}
-
-fn calculate_total_supply_at_height(height: i32) -> i64 {
-    const GENESIS_SUPPLY: i64 = 60_000_00000000;
-
-    if height <= 0 {
-        return GENESIS_SUPPLY;
-    }
-
-    let block_reward = if height < 259200 {
-        500_00000000
-    } else if height < 518400 {
-        450_00000000
-    } else if height < 777600 {
-        400_00000000
-    } else if height < 1036800 {
-        350_00000000
-    } else {
-        300_00000000
-    };
-
-    let estimated_mined = (height as i64) * block_reward;
-    GENESIS_SUPPLY + estimated_mined
-}
-
-fn calculate_address_balance(db: &Arc<DB>, utxo_data: &[u8]) -> i64 {
-    if utxo_data.is_empty() {
-        return 0;
-    }
-
-    if utxo_data.len() % 40 != 0 {
-        return 0;
-    }
-
-    let mut balance = 0i64;
-    let tx_cf = match db.cf_handle("transactions") {
-        Some(cf) => cf,
-        None => return 0,
-    };
-
-    // Limit UTXOs processed per address to 50 for performance
-    let max_utxos = 50;
-    let utxo_count = (utxo_data.len() / 40).min(max_utxos);
-
-    for chunk in utxo_data.chunks_exact(40).take(utxo_count) {
-        let txid = &chunk[0..32];
-
-        let vout_bytes: [u8; 8] = match chunk[32..40].try_into() {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let vout = u64::from_le_bytes(vout_bytes);
-
-        let mut tx_key = vec![b't'];
-        tx_key.extend_from_slice(txid);
-
-        let tx_data = match db.get_cf(&tx_cf, &tx_key) {
-            Ok(Some(data)) => data,
-            _ => continue,
-        };
-
-        if tx_data.len() < 8 {
-            continue;
-        }
-
-        let tx_bytes = &tx_data[8..];
-        if tx_bytes.is_empty() {
-            continue;
-        }
-
-        let mut tx_data_with_header = Vec::with_capacity(4 + tx_bytes.len());
-        tx_data_with_header.extend_from_slice(&[0u8; 4]);
-        tx_data_with_header.extend_from_slice(tx_bytes);
-
-        match deserialize_transaction_blocking(&tx_data_with_header) {
-            Ok(tx) => {
-                if let Some(output) = tx.outputs.get(vout as usize) {
-                    balance += output.value;
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-
-    balance
-}
-
-fn create_balance_histogram(balances: &[i64]) -> Vec<WealthBucket> {
-    let ranges = [
-        (0, 1_00000000, "0-1 PIV"),
-        (1_00000000, 10_00000000, "1-10 PIV"),
-        (10_00000000, 100_00000000, "10-100 PIV"),
-        (100_00000000, 1000_00000000, "100-1K PIV"),
-        (1000_00000000, 10000_00000000, "1K-10K PIV"),
-        (10000_00000000, 100000_00000000, "10K-100K PIV"),
-        (100000_00000000, i64::MAX, "100K+ PIV"),
-    ];
-
-    let total_count = balances.len() as f64;
-
-    ranges
-        .iter()
-        .map(|(min, max, label)| {
-            let count = balances.iter().filter(|&&b| b >= *min && b < *max).count();
-
-            WealthBucket {
-                range: label.to_string(),
-                count: count as u64,
-                percentage: (count as f64 / total_count) * 100.0,
-            }
-        })
-        .collect()
 }
 
 fn format_timestamp(timestamp: u64) -> String {

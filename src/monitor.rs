@@ -1268,8 +1268,9 @@ async fn index_block_from_rpc(
         // Run unconditionally for live heights (not gated on this block having any
         // captured deltas) so a coinbase-only/empty block can't leak its
         // predecessor's record.
-        const REORG_UNDO_WINDOW: i32 = 200;
-        let prune_below = height - REORG_UNDO_WINDOW;
+        // Single source of truth shared with the analytics recompute's reorg gate,
+        // so the prune horizon and the "index may be reorg-stale" threshold can't drift.
+        let prune_below = height - crate::analytics_recompute::ADDR_INDEX_UNDO_WINDOW;
         if prune_below > 0 {
             if let Err(e) =
                 crate::address_rollback::delete_address_undo(db.clone(), prune_below).await
@@ -1673,6 +1674,11 @@ pub async fn run_block_monitor(
                         reorg_info.orphaned_blocks,
                     );
 
+                    // Pause the richlist/wealth recompute if this reorg is deeper
+                    // than the addr_index undo window (r/s/a may be left
+                    // un-reversed); a full re-enrich rebuilds the index + clears it.
+                    crate::analytics_recompute::on_reorg(&db, reorg_info.orphaned_blocks);
+
                     // Continue to re-index from the rollback point
                     // The normal sync logic below will pick up from the new chain tip
                 }
@@ -1911,5 +1917,11 @@ pub async fn run_block_monitor(
         // full enrich has set the live-ready gate. Steady-state only (this is the
         // post-enrich monitor; the pre-enrich bulk sync lives in sync.rs).
         crate::analytics_live::tick(&db).await;
+
+        // Periodic richlist/wealth recompute from the live addr_index. Opt-in
+        // (no-ops unless sync.analytics_recompute_enabled); decoupled from the
+        // heavy full enrich so the frozen snapshots stay fresh between enriches.
+        // Detaches its scan onto a blocking worker, so this returns immediately.
+        crate::analytics_recompute::maybe_recompute(&db);
     }
 }
