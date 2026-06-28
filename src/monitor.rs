@@ -1409,6 +1409,30 @@ fn detect_reorg(
 /// Re-apply each such block (the 't'/'a' indexes are idempotent) and recompute r/s
 /// for its addresses, since the r/s totals are NOT idempotent and re-applying would
 /// otherwise leave them double-counted. No-op on a clean shutdown (no markers).
+/// After crash recovery, never let `sync_height` regress below where it was before
+/// recovery ran. A stale (below-tip) `'P'` marker re-applied via `index_block_from_rpc`
+/// rewrites `sync_height` to that lower block height; left as-is, the monitor would
+/// then re-catch-up — and on any bulk-synced range re-apply, double-counting r/s —
+/// thousands of already-indexed blocks. The recovered blocks are all <= the
+/// pre-recovery tip, so lifting the watermark back to `saved` is always safe.
+/// Returns true if it restored.
+fn restore_sync_height_if_regressed(db: &Arc<DB>, saved: i32) -> bool {
+    let current = crate::chain_state::get_sync_height(db).unwrap_or(0);
+    if current < saved {
+        match crate::chain_state::set_sync_height(db, saved) {
+            Ok(()) => true,
+            Err(e) => {
+                // Report the restore truthfully: if the write itself failed, the
+                // watermark is still regressed (the caller must not log "restored").
+                error!(error = %e, saved, "Failed to restore sync_height after crash recovery");
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
 async fn recover_crashed_blocks(
     db: &Arc<DB>,
     rpc_client: &Arc<PivxRpcClient>,
@@ -1420,6 +1444,11 @@ async fn recover_crashed_blocks(
     }
     warn!(count = dirty.len(), heights = ?dirty,
         "Leftover processing markers from a previous crash; recovering r/s for affected blocks");
+
+    // Snapshot the committed watermark before recovery: re-applying a stale below-tip
+    // marker rewrites sync_height to that lower height (index_block_from_rpc writes it
+    // unconditionally), and that regression must be undone afterwards.
+    let saved_height = crate::chain_state::get_sync_height(db).unwrap_or(0);
 
     let cf_state = match db.cf_handle("chain_state") {
         Some(cf) => cf,
@@ -1453,6 +1482,15 @@ async fn recover_crashed_blocks(
                 warn!(height, error = %e, "Failed to repair r/s after re-applying crashed block")
             }
         }
+    }
+
+    // Undo any watermark regression caused by re-applying a below-tip marker, so the
+    // monitor doesn't re-catch-up an already-indexed range from the rolled-back height.
+    if restore_sync_height_if_regressed(db, saved_height) {
+        warn!(
+            restored = saved_height,
+            "Crash recovery re-applied a below-tip block; restored sync_height to the pre-recovery tip"
+        );
     }
 }
 
@@ -1923,5 +1961,40 @@ pub async fn run_block_monitor(
         // heavy full enrich so the frozen snapshots stay fresh between enriches.
         // Detaches its scan onto a blocking worker, so this returns immediately.
         crate::analytics_recompute::maybe_recompute(&db);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocksdb::{Options, DB};
+    use std::sync::Arc;
+
+    fn open_db() -> (tempfile::TempDir, Arc<DB>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state"]).unwrap());
+        (temp, db)
+    }
+
+    #[test]
+    fn restore_sync_height_lifts_a_regressed_watermark() {
+        // Crash recovery re-applied a stale below-tip marker, rolling sync_height
+        // back; restore it to the pre-recovery tip.
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 5463188).unwrap();
+        assert!(restore_sync_height_if_regressed(&db, 5474276));
+        assert_eq!(crate::chain_state::get_sync_height(&db).unwrap(), 5474276);
+    }
+
+    #[test]
+    fn restore_sync_height_leaves_an_advanced_watermark() {
+        // A legitimate tip-block recovery advanced the watermark past `saved`; leave it.
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 5474300).unwrap();
+        assert!(!restore_sync_height_if_regressed(&db, 5474276));
+        assert_eq!(crate::chain_state::get_sync_height(&db).unwrap(), 5474300);
     }
 }
