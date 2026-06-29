@@ -1,5 +1,8 @@
 use crate::atomic_writer::AtomicBatchWriter;
-use crate::parser::{deserialize_transaction, deserialize_utxos, serialize_utxos};
+use crate::parser::{
+    deserialize_addr_txs, deserialize_addr_utxos, deserialize_transaction, serialize_addr_txs,
+    serialize_addr_utxos,
+};
 use rocksdb::DB;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -15,11 +18,11 @@ use std::collections::{HashMap, HashSet};
 ///
 /// The addr_index CF stores 4 types of keys per address:
 ///
-/// 1. **UTXO List** - `'a' + address` -> serialized [(txid, vout), ...]
+/// 1. **UTXO List** - `'a' + address` -> v2 49-byte records [txid(32)+vout(8)+value(8)+kind(1), ...]
 ///    - Unspent outputs only
 ///    - Used by /api/address/{address}/utxos
 ///
-/// 2. **Transaction List** - `'t' + address` -> concatenated txids (32 bytes each)
+/// 2. **Transaction List** - `'t' + address` -> v2 36-byte records [txid(32)+height(4), ...]
 ///    - All transactions involving this address (sent OR received)
 ///    - Used by /api/address/{address}/txs
 ///
@@ -77,8 +80,9 @@ pub struct AddressBlockUndo {
     pub address_utxos_created: HashMap<String, Vec<(Vec<u8>, u64)>>,
 
     /// Map of address -> UTXOs spent in this block
-    /// Key: address string, Value: list of (txid, vout) tuples
-    pub address_utxos_spent: HashMap<String, Vec<(Vec<u8>, u64)>>,
+    /// Key: address string, Value: list of (txid, vout, value, kind) tuples — value
+    /// + kind are captured so a reorg disconnect restores the full 49B 'a' record.
+    pub address_utxos_spent: HashMap<String, Vec<(Vec<u8>, u64, i64, u8)>>,
 
     /// Map of address -> amount received in this block
     /// Key: address string, Value: satoshis received
@@ -115,12 +119,22 @@ impl AddressBlockUndo {
             .push((txid, vout));
     }
 
-    /// Add a spent UTXO
-    pub fn add_utxo_spent(&mut self, address: String, txid: Vec<u8>, vout: u64) {
+    /// Add a spent UTXO, capturing its value + kind so a reorg disconnect can restore
+    /// the record's fields. SET-exact (same UTXO + value + kind), not insertion-order:
+    /// a reorg may order 'a' differently from a fresh enrich — harmless, the served set
+    /// is order-independent.
+    pub fn add_utxo_spent(
+        &mut self,
+        address: String,
+        txid: Vec<u8>,
+        vout: u64,
+        value: i64,
+        kind: u8,
+    ) {
         self.address_utxos_spent
             .entry(address)
             .or_default()
-            .push((txid, vout));
+            .push((txid, vout, value, kind));
     }
 
     /// Add received amount
@@ -342,12 +356,22 @@ pub async fn build_address_undo_from_block(
                                                 // Add spending transaction to address history
                                                 undo.add_tx(address.clone(), txid_internal.clone());
 
-                                                // Track UTXO spend (display-order
-                                                // txid, matching the 'a' set keys)
+                                                // Track UTXO spend (display-order txid,
+                                                // matching the 'a' set keys). DEAD:
+                                                // build_address_undo_from_block has no
+                                                // runtime caller (build_address_undo_for_range
+                                                // is unwired); value/kind filled only to
+                                                // compile against the widened tuple.
                                                 undo.add_utxo_spent(
                                                     address.clone(),
                                                     prev_txid_display.clone(),
                                                     prevout.n as u64,
+                                                    prev_output.value,
+                                                    crate::tx_type::ty_to_u8(
+                                                        crate::tx_type::detect_transaction_type(
+                                                            &prev_tx,
+                                                        ),
+                                                    ),
                                                 );
 
                                                 // Track sent amount
@@ -484,26 +508,25 @@ async fn reverse_address_block(
             .await??;
 
             if let Some(current_bytes) = current_txs {
-                // Parse current list (32 bytes per txid)
-                let mut current_list: Vec<Vec<u8>> = Vec::new();
-                for chunk in current_bytes.chunks_exact(32) {
-                    current_list.push(chunk.to_vec());
-                }
-
-                // Remove txids from this block
+                // v2 't' list = 36-byte records (txid + inline height). Remove this
+                // block's txids by their 32-byte id; retained records keep their inline
+                // height verbatim (set-exact; like 'a', storage order is enrich-
+                // deterministic only for a fresh sync, harmless for serving).
+                let current_list = deserialize_addr_txs(&current_bytes).await?;
                 let txids_set: HashSet<Vec<u8>> = txids.iter().cloned().collect();
-                current_list.retain(|txid| !txids_set.contains(txid));
+                let retained: Vec<(Vec<u8>, i32)> = current_list
+                    .into_iter()
+                    .filter(|(txid, _)| !txids_set.contains(txid))
+                    .collect();
 
-                // Serialize and write back
-                let mut new_bytes = Vec::with_capacity(current_list.len() * 32);
-                for txid in current_list {
-                    new_bytes.extend_from_slice(&txid);
-                }
-
-                if new_bytes.is_empty() {
+                if retained.is_empty() {
                     writer.delete("addr_index", tx_list_key);
                 } else {
-                    writer.put("addr_index", tx_list_key, new_bytes);
+                    writer.put(
+                        "addr_index",
+                        tx_list_key,
+                        serialize_addr_txs(&retained).await,
+                    );
                 }
             }
         }
@@ -527,7 +550,7 @@ async fn reverse_address_block(
         .await??;
 
         let mut utxo_list = if let Some(bytes) = current_utxos {
-            deserialize_utxos(&bytes).await
+            deserialize_addr_utxos(&bytes).await?
         } else {
             Vec::new()
         };
@@ -547,18 +570,23 @@ async fn reverse_address_block(
 
         // Remove created UTXOs
         if !created_set.is_empty() {
-            utxo_list.retain(|(txid, vout)| !created_set.contains(&(txid.clone(), *vout)));
+            utxo_list.retain(|(txid, vout, _, _)| !created_set.contains(&(txid.clone(), *vout)));
         }
 
         // Restore spent UTXOs, except any also created in the reversed range.
         if let Some(spent) = undo.address_utxos_spent.get(&address) {
-            for (txid, vout) in spent {
+            for (txid, vout, value, kind) in spent {
                 if created_set.contains(&(txid.clone(), *vout)) {
                     continue; // created-then-spent within the range → stays absent
                 }
-                // Only add if not already in list
-                if !utxo_list.iter().any(|(t, v)| t == txid && v == vout) {
-                    utxo_list.push((txid.clone(), *vout));
+                // Restore the spent record with its captured value+kind if not already
+                // present. SET-exact (same UTXO + value + kind), NOT byte-order-exact: a
+                // tail-append may order 'a' differently from a fresh enrich after a reorg
+                // — harmless (served UTXOs sort by confirmations; balances/totals and 't'
+                // pagination are order-independent; the enrich-vs-enrich byte-exact gate
+                // is unaffected since a fresh sync has no reorg).
+                if !utxo_list.iter().any(|(t, v, _, _)| t == txid && v == vout) {
+                    utxo_list.push((txid.clone(), *vout, *value, *kind));
                 }
             }
         }
@@ -567,7 +595,7 @@ async fn reverse_address_block(
         if utxo_list.is_empty() {
             writer.delete("addr_index", utxo_key);
         } else {
-            let serialized = serialize_utxos(&utxo_list).await;
+            let serialized = serialize_addr_utxos(&utxo_list).await;
             writer.put("addr_index", utxo_key, serialized);
         }
 
@@ -755,7 +783,9 @@ mod tests {
     #[tokio::test]
     async fn rollback_reverses_addr_index_r_s_a_t() {
         use crate::atomic_writer::AtomicBatchWriter;
-        use crate::parser::{deserialize_utxos, serialize_utxos};
+        use crate::parser::{
+            deserialize_addr_txs, deserialize_addr_utxos, serialize_addr_txs, serialize_addr_utxos,
+        };
         use rocksdb::{Options, DB};
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -787,11 +817,11 @@ mod tests {
         db.put_cf(&cf_ai, &key(b'r'), 1500i64.to_le_bytes())
             .unwrap();
         db.put_cf(&cf_ai, &key(b's'), 350i64.to_le_bytes()).unwrap();
-        let mut tlist = Vec::new();
-        tlist.extend_from_slice(&tx0);
-        tlist.extend_from_slice(&tx1);
+        // v2: 't' = 36B records (tx0 created @900, tx1 @1000); 'a' = the new UTXO
+        // (tx1,0) worth 500.
+        let tlist = serialize_addr_txs(&[(tx0.clone(), 900i32), (tx1.clone(), 1000i32)]).await;
         db.put_cf(&cf_ai, &key(b't'), &tlist).unwrap();
-        let a_post = serialize_utxos(&vec![(tx1.clone(), 0u64)]).await;
+        let a_post = serialize_addr_utxos(&[(tx1.clone(), 0u64, 500i64, 0u8)]).await;
         db.put_cf(&cf_ai, &key(b'a'), &a_post).unwrap();
 
         // The undo the connect path captured for height H (exactly what it applied).
@@ -801,7 +831,8 @@ mod tests {
         undo.add_sent(addr.to_string(), 150);
         undo.add_tx(addr.to_string(), tx1.clone());
         undo.add_utxo_created(addr.to_string(), tx1.clone(), 0);
-        undo.add_utxo_spent(addr.to_string(), tx0.clone(), 0);
+        // The spent capture carries (tx0,0)'s value=150 + kind=0 for byte-exact restore.
+        undo.add_utxo_spent(addr.to_string(), tx0.clone(), 0, 150, 0);
         store_address_undo(db.clone(), &undo).await.unwrap();
 
         // Reverse exactly one block via the real reorg entrypoint.
@@ -819,14 +850,26 @@ mod tests {
         assert_eq!(read_i64(b'r'), 1000, "r must reverse to 1500 - 500");
         assert_eq!(read_i64(b's'), 200, "s must reverse to 350 - 150");
 
-        let t_after = db.get_cf(&cf_ai, &key(b't')).unwrap().unwrap();
-        assert_eq!(t_after, tx0, "t must drop tx1, keep tx0");
+        // 't' drops tx1, keeps tx0 with its inline height (900) intact.
+        let t_after = deserialize_addr_txs(&db.get_cf(&cf_ai, &key(b't')).unwrap().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            t_after,
+            vec![(tx0.clone(), 900i32)],
+            "t must drop tx1, keep tx0 with its height"
+        );
 
-        let a_after = deserialize_utxos(&db.get_cf(&cf_ai, &key(b'a')).unwrap().unwrap()).await;
+        // 'a' drops (tx1,0) and restores (tx0,0) with its captured value=150 + kind=0
+        // — the whole reason the spent undo carries value/kind. (Single restored record
+        // here, so this case is also byte-order-exact; multi-record order is set-exact.)
+        let a_after = deserialize_addr_utxos(&db.get_cf(&cf_ai, &key(b'a')).unwrap().unwrap())
+            .await
+            .unwrap();
         assert_eq!(
             a_after,
-            vec![(tx0.clone(), 0u64)],
-            "a must drop (tx1,0) and restore (tx0,0)"
+            vec![(tx0.clone(), 0u64, 150i64, 0u8)],
+            "a must restore the full 49B record of the spent UTXO"
         );
 
         // The undo record must be consumed (deleted) after a successful rollback.
@@ -911,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_cross_block_create_spend_leaves_no_phantom_utxo() {
         use crate::atomic_writer::AtomicBatchWriter;
-        use crate::parser::deserialize_utxos;
+        use crate::parser::deserialize_addr_utxos;
         use rocksdb::{Options, DB};
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -943,7 +986,7 @@ mod tests {
         store_address_undo(db.clone(), &undo_h0).await.unwrap();
 
         let mut undo_h1 = AddressBlockUndo::new(h1);
-        undo_h1.add_utxo_spent(addr.to_string(), xtx.clone(), 0); // spent in H+1
+        undo_h1.add_utxo_spent(addr.to_string(), xtx.clone(), 0, 1000, 0); // spent in H+1
         store_address_undo(db.clone(), &undo_h1).await.unwrap();
 
         let mut writer = AtomicBatchWriter::new(db.clone(), 100_000);
@@ -956,7 +999,7 @@ mod tests {
         match db.get_cf(&cf_ai, &a_key).unwrap() {
             None => {} // empty (deleted) — correct
             Some(bytes) => {
-                let utxos = deserialize_utxos(&bytes).await;
+                let utxos = deserialize_addr_utxos(&bytes).await.unwrap();
                 assert!(
                     utxos.is_empty(),
                     "cross-block create-then-spend must leave no phantom UTXO, got {utxos:?}"

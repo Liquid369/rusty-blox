@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::constants::is_canonical_height;
-use crate::parser::{deserialize_transaction, deserialize_utxos};
+use crate::parser::deserialize_transaction;
 
 /// Per-address cap on the recovery recompute's full-history scan. A crashed block
 /// that touched a very high-volume address (exchange/treasury) would otherwise make
@@ -83,8 +83,9 @@ pub async fn recompute_address_rs(
     t_key.extend_from_slice(address.as_bytes());
     let t_list = db.get_cf(&cf_ai, &t_key)?.unwrap_or_default();
 
+    let t_entries = crate::parser::deserialize_addr_txs(&t_list).await?;
     let mut total_received: i64 = 0;
-    for txid in t_list.chunks_exact(32) {
+    for (txid, _height) in &t_entries {
         let mut tk = vec![b't'];
         tk.extend_from_slice(txid);
         if let Some(txd) = db.get_cf(&cf_tx, &tk)? {
@@ -114,24 +115,11 @@ pub async fn recompute_address_rs(
     let mut a_key = vec![b'a'];
     a_key.extend_from_slice(address.as_bytes());
     let a_data = db.get_cf(&cf_ai, &a_key)?.unwrap_or_default();
-    let utxos = deserialize_utxos(&a_data).await;
+    let utxos = crate::parser::deserialize_addr_utxos(&a_data).await?;
 
-    let mut balance: i64 = 0;
-    for (txid, vout) in &utxos {
-        let mut tk = vec![b't'];
-        tk.extend_from_slice(txid);
-        if let Some(txd) = db.get_cf(&cf_tx, &tk)? {
-            if txd.len() >= 8 {
-                let mut with_header = vec![0u8; 4];
-                with_header.extend_from_slice(&txd[8..]);
-                if let Ok(tx) = deserialize_transaction(&with_header).await {
-                    if let Some(out) = tx.outputs.get(*vout as usize) {
-                        balance += out.value;
-                    }
-                }
-            }
-        }
-    }
+    // balance = sum of inline 'a' values (the inline value IS the unspent output
+    // value), so no per-UTXO tx-CF read + parse is needed.
+    let balance: i64 = utxos.iter().map(|(_, _, value, _)| *value).sum();
 
     Ok((total_received, total_received - balance))
 }
@@ -238,7 +226,7 @@ pub async fn repair_block_addresses_rs(
         t_key.extend_from_slice(address.as_bytes());
         let tx_count = db
             .get_cf(&cf_ai, &t_key)?
-            .map(|v| v.len() / 32)
+            .map(|v| v.len() / crate::parser::ADDR_TX_STRIDE)
             .unwrap_or(0);
         if tx_count > cap {
             tracing::warn!(address = %address, txs = tx_count, cap,
@@ -261,7 +249,7 @@ pub async fn repair_block_addresses_rs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::serialize_utxos;
+    use crate::parser::{serialize_addr_txs, serialize_addr_utxos};
     use rocksdb::{Options, DB};
 
     // The P2PKH address that the script below decodes to (see parser p2pkh_matches_core).
@@ -329,13 +317,18 @@ mod tests {
         // 't' list = [txid]; 'a' set = [(txid,0)] unspent.
         let mut t_list_key = vec![b't'];
         t_list_key.extend_from_slice(ADDR.as_bytes());
-        db.put_cf(&cf_ai, &t_list_key, &txid).unwrap();
+        db.put_cf(
+            &cf_ai,
+            &t_list_key,
+            serialize_addr_txs(&[(txid.clone(), 7000i32)]).await,
+        )
+        .unwrap();
         let mut a_key = vec![b'a'];
         a_key.extend_from_slice(ADDR.as_bytes());
         db.put_cf(
             &cf_ai,
             &a_key,
-            serialize_utxos(&vec![(txid.clone(), 0u64)]).await,
+            serialize_addr_utxos(&[(txid.clone(), 0u64, 500_000_000i64, 0u8)]).await,
         )
         .unwrap();
 
@@ -371,13 +364,18 @@ mod tests {
         // Idempotent indexes are correct; r/s are DOUBLE-COUNTED (the crash symptom).
         let mut t_list_key = vec![b't'];
         t_list_key.extend_from_slice(ADDR.as_bytes());
-        db.put_cf(&cf_ai, &t_list_key, &txid).unwrap();
+        db.put_cf(
+            &cf_ai,
+            &t_list_key,
+            serialize_addr_txs(&[(txid.clone(), 7000i32)]).await,
+        )
+        .unwrap();
         let mut a_key = vec![b'a'];
         a_key.extend_from_slice(ADDR.as_bytes());
         db.put_cf(
             &cf_ai,
             &a_key,
-            serialize_utxos(&vec![(txid.clone(), 0u64)]).await,
+            serialize_addr_utxos(&[(txid.clone(), 0u64, 500_000_000i64, 0u8)]).await,
         )
         .unwrap();
         let mut rk = vec![b'r'];

@@ -93,6 +93,16 @@ live_analytics_shadow_validate_days = 0
 # reorg (default false — a full enrich is heavy, so default to logging + a manual
 # re-enrich). Only relevant when live_analytics = true.
 live_analytics_auto_reenrich = false
+# Periodic recompute of the richlist + wealth-distribution snapshots from the live
+# addr_index (balance = received - sent per address, the same value /address and
+# the full enrich use). Without this the three wealth snapshots refresh ONLY at
+# full-enrich time and otherwise stay frozen. Opt-in; default false. It pauses
+# automatically after a reorg deeper than the addr_index undo window (200 blocks)
+# until a full re-enrich rebuilds the index.
+analytics_recompute_enabled = false
+# Recompute cadence in blocks (default 60 ≈ hourly at ~1 block/min). Lower = fresher
+# richlist at the cost of a periodic O(addresses) addr_index scan.
+analytics_recompute_interval_blocks = 60
 
 [rocksdb]
 # Memtable RAM. db_write_buffer_size is a HARD global ceiling across ALL column

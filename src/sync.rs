@@ -696,6 +696,44 @@ fn purge_jemalloc() {
 /// so the WAL-heavy height-resolution writeback runs with the WAL disabled). On
 /// the live / existing-index / catch-up paths it is `false` so those writes stay
 /// WAL-recoverable.
+/// Wipe a legacy (pre-v2) addr_index so a clean v2 rebuild can't leave stale 40B/32B
+/// entries mixed with the new 49B 'a' / 36B 't' format. Deletes every addr_index key,
+/// the reorg undo records (their bincode layout changed when the spent tuple widened),
+/// and the completion/version markers so the subsequent enrich re-runs and re-stamps v2.
+fn wipe_legacy_addr_index(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_ai = db
+        .cf_handle("addr_index")
+        .ok_or("addr_index CF not found")?;
+    let mut n: u64 = 0;
+    for item in db.iterator_cf(&cf_ai, rocksdb::IteratorMode::Start) {
+        let (key, _) = item?;
+        db.delete_cf(&cf_ai, &key)?;
+        n += 1;
+    }
+    if let Some(cf_state) = db.cf_handle("chain_state") {
+        let mut batch = rocksdb::WriteBatch::default();
+        // Reorg undo records: bincode layout changed (address_utxos_spent widened).
+        for item in db.prefix_iterator_cf(&cf_state, b"addr_undo") {
+            let (key, _) = item?;
+            if !key.starts_with(b"addr_undo") {
+                break;
+            }
+            batch.delete_cf(&cf_state, &key[..]);
+        }
+        // Clear completion + version markers so the enrich re-runs and re-stamps v2.
+        batch.delete_cf(&cf_state, b"address_index_complete");
+        batch.delete_cf(&cf_state, b"analytics_complete");
+        batch.delete_cf(&cf_state, crate::chain_state::ADDR_INDEX_VERSION_KEY);
+        batch.delete_cf(&cf_state, crate::analytics_recompute::K_ADDR_INDEX_DIRTY);
+        db.write(batch)?;
+    }
+    warn!(
+        deleted = n,
+        "Wiped legacy addr_index for a clean v2 rebuild"
+    );
+    Ok(())
+}
+
 async fn run_post_sync_enrichment(
     db: &Arc<DB>,
     bulk: bool,
@@ -703,9 +741,20 @@ async fn run_post_sync_enrichment(
     let config = get_global_config();
     let enrich_addresses = config.get_bool("sync.enrich_addresses").unwrap_or(false);
     let fast_sync = config.get_bool("sync.fast_sync").unwrap_or(false);
-    let use_chainstate = config
+    let use_chainstate_requested = config
         .get_bool("sync.use_chainstate_for_utxos")
         .unwrap_or(false);
+    if use_chainstate_requested {
+        tracing::warn!(
+            "sync.use_chainstate_for_utxos is set but DISABLED for the v2 addr_index \
+             format: the chainstate path can't produce the 'kind' byte, so it would \
+             build a non-v2 index that never stamps the version (stuck at 503). The \
+             transaction-enrich path is used instead (MS-4)."
+        );
+    }
+    // MS-4: v2 requires the transaction-enrich path (the only writer that stamps the
+    // format version), so the chainstate path is force-disabled.
+    let use_chainstate = false;
     let _enrich_span = info_span!("post_sync_enrichment").entered();
     let use_block_index = config
         .get_bool("sync.use_block_index_for_heights")
@@ -730,10 +779,25 @@ async fn run_post_sync_enrichment(
             None => false,
         };
 
-    let address_index_complete = match db.get_cf(&cf_state, b"address_index_complete")? {
+    // Version-gated: an addr_index built by a pre-v2 binary (or by the chainstate /
+    // !fast_sync path, which never stamp the version) is NOT current-format. Treat it as
+    // incomplete so it is rebuilt, and — if a legacy index actually exists — WIPE it
+    // first so the rebuild can't leave stale 40B/32B entries mixed with v2.
+    let raw_address_index_complete = match db.get_cf(&cf_state, b"address_index_complete")? {
         Some(bytes) => bytes[0] == 1,
         None => false,
     };
+    let addr_index_version = crate::chain_state::get_addr_index_version(db);
+    let is_v2_addr_index = addr_index_version == crate::parser::ADDR_INDEX_FORMAT_VERSION;
+    if raw_address_index_complete && !is_v2_addr_index {
+        tracing::warn!(
+            found_version = addr_index_version,
+            need_version = crate::parser::ADDR_INDEX_FORMAT_VERSION,
+            "addr_index is a legacy (pre-v2) format — wiping it for a clean v2 rebuild"
+        );
+        wipe_legacy_addr_index(db)?;
+    }
+    let address_index_complete = raw_address_index_complete && is_v2_addr_index;
 
     let tx_block_index_complete = match db.get_cf(&cf_state, b"tx_block_index_complete")? {
         Some(bytes) => bytes[0] == 1,
@@ -1163,15 +1227,23 @@ async fn run_live_sync(
         // their transactions are stored heightless (and without 'B' entries),
         // and height resolution later orphans the entire catch-up range out of
         // the address index.
-        match refresh_canonical_metadata(&db) {
-            Ok(tip) => info!(tip = tip, "Canonical metadata refreshed from Core's index"),
+        let canonical_tip = match refresh_canonical_metadata(&db) {
+            Ok(tip) => {
+                info!(tip = tip, "Canonical metadata refreshed from Core's index");
+                tip
+            }
             Err(e) => {
                 warn!(error = %e, "Failed to refresh canonical metadata - falling back to RPC catchup");
                 info!("Switching to RPC monitoring (catchup fallback)");
                 run_block_monitor(db, 5, broadcaster).await?;
                 return Ok(());
             }
-        }
+        };
+
+        // The index's consistent tip BEFORE the parse advances sync_height. If the
+        // heightless-block backfill below can't complete, we rewind exactly here so the
+        // next catch-up re-does the whole range instead of stranding it above the tip.
+        let pre_catchup_height = crate::chain_state::get_sync_height(&db)?;
 
         let config = get_global_config();
         let max_concurrent = effective_parallel_files(config);
@@ -1257,6 +1329,45 @@ async fn run_live_sync(
             .await?;
 
             info!("Finished processing blk*.dat files");
+
+            // If Core's block-index leveldb lagged the blk-file tip when we refreshed
+            // (a freshly-restarted node flushes its on-disk index behind its RPC tip),
+            // the parse advanced sync_height past `canonical_tip` and the in-between
+            // blocks were stored heightless (tx height = -1) — which the re-enrich would
+            // orphan out of the address index (0-tx block-detail, missing UTXOs).
+            // Backfill those blocks via authoritative RPC heights FIRST, so the re-enrich
+            // below includes them.
+            let post_parse_height = crate::chain_state::get_sync_height(&db)?;
+            if canonical_tip >= 0 && canonical_tip < post_parse_height {
+                warn!(
+                    canonical_tip = canonical_tip,
+                    sync_height = post_parse_height,
+                    "Canonical metadata lagged the blk-file tip; backfilling heightless blocks via RPC"
+                );
+                // The backfill retries until every gap height is verified keyed (so the
+                // re-enrich below keeps them) or errors after its bounded attempts.
+                if let Err(e) = crate::monitor::backfill_heightless_catchup_range(
+                    &db,
+                    &broadcaster,
+                    canonical_tip + 1,
+                    post_parse_height,
+                )
+                .await
+                {
+                    // Couldn't re-key the gap (RPC unreachable). Do NOT proceed to the
+                    // re-enrich over a gap, and do NOT clear completion markers (that would
+                    // let the recovery boot re-resolve the gap against the still-stale
+                    // chain_metadata, orphan it, and re-mark complete). Instead rewind
+                    // sync_height to the pre-catch-up consistent tip: the prior complete
+                    // index keeps serving its correct (slightly-behind) state, and the
+                    // sync-thread retry loop (main.rs) re-runs the whole catch-up over the
+                    // range (blocks_behind is large again) and retries the backfill once RPC
+                    // is back — converging without a silent hole and without stranding the
+                    // canonical blocks below the gap.
+                    crate::chain_state::set_sync_height(&db, pre_catchup_height)?;
+                    return Err(e);
+                }
+            }
 
             // The blk fast-sync path stores transactions WITHOUT address data, and the
             // RPC monitor only address-indexes blocks above enrichment_height starting
@@ -1464,4 +1575,82 @@ pub async fn run_sync_service(
 
     info!("Sync pipeline complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use rocksdb::{Options, DB};
+
+    /// The forced v1→v2 wipe must clear EVERY addr_index entry, the reorg undo records
+    /// (whose bincode layout changed), and the completion/version markers — so the
+    /// rebuild can't leave stale 40B/32B bytes and the index is non-served (503) until
+    /// the re-enrich re-stamps v2.
+    #[test]
+    fn wipe_legacy_addr_index_clears_index_undo_and_markers() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(
+            DB::open_cf(
+                &opts,
+                temp.path(),
+                ["chain_state", "addr_index", "transactions"],
+            )
+            .unwrap(),
+        );
+        let cf_ai = db.cf_handle("addr_index").unwrap();
+        let cf_state = db.cf_handle("chain_state").unwrap();
+
+        // Seed a legacy (v1) index: a/r/s/t entries + a reorg undo + the markers.
+        db.put_cf(&cf_ai, b"aADDR", vec![0u8; 40]).unwrap();
+        db.put_cf(&cf_ai, b"tADDR", vec![0u8; 32]).unwrap();
+        db.put_cf(&cf_ai, b"rADDR", 1i64.to_le_bytes()).unwrap();
+        db.put_cf(&cf_ai, b"sADDR", 2i64.to_le_bytes()).unwrap();
+        let mut undo_key = b"addr_undo".to_vec();
+        undo_key.extend_from_slice(&1000i32.to_le_bytes());
+        db.put_cf(&cf_state, &undo_key, b"x").unwrap();
+        db.put_cf(&cf_state, b"address_index_complete", [1u8])
+            .unwrap();
+        db.put_cf(&cf_state, b"analytics_complete", [1u8]).unwrap();
+        db.put_cf(
+            &cf_state,
+            crate::chain_state::ADDR_INDEX_VERSION_KEY,
+            1u32.to_le_bytes(),
+        )
+        .unwrap();
+
+        wipe_legacy_addr_index(&db).unwrap();
+
+        // addr_index CF is fully emptied.
+        assert!(
+            db.iterator_cf(&cf_ai, rocksdb::IteratorMode::Start)
+                .next()
+                .is_none(),
+            "addr_index must be empty after wipe"
+        );
+        // Undo record + completion/version markers cleared.
+        assert!(
+            db.get_cf(&cf_state, &undo_key).unwrap().is_none(),
+            "addr_undo must be cleared"
+        );
+        assert!(
+            db.get_cf(&cf_state, b"address_index_complete")
+                .unwrap()
+                .is_none(),
+            "address_index_complete must be cleared"
+        );
+        assert!(
+            db.get_cf(&cf_state, crate::chain_state::ADDR_INDEX_VERSION_KEY)
+                .unwrap()
+                .is_none(),
+            "version stamp must be cleared so the rebuild re-stamps"
+        );
+        // A wiped index is non-served until the re-enrich re-stamps v2.
+        assert!(
+            !crate::chain_state::addr_index_ready(&db),
+            "wiped index must 503"
+        );
+    }
 }

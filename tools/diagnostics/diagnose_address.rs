@@ -52,14 +52,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   TX data size: {} bytes", data.len());
     }
 
-    // Parse transaction list (stored as concatenated 32-byte txids, no count prefix)
+    // Parse transaction list (v2: concatenated 36-byte records = txid(32)+height(4)).
     let mut our_txs: Vec<(Vec<u8>, i32)> = Vec::new();
     if let Some(txs_bytes) = txs_data_ref {
-        let tx_count = txs_bytes.len() / 32;
+        let stride = rustyblox::parser::ADDR_TX_STRIDE;
+        let tx_count = txs_bytes.len() / stride;
         println!("   Transaction count: {tx_count}");
 
         for i in 0..tx_count {
-            let offset = i * 32;
+            let offset = i * stride;
             if offset + 32 <= txs_bytes.len() {
                 let txid = txs_bytes[offset..offset + 32].to_vec();
 

@@ -80,8 +80,16 @@ pub async fn health_check_v2(
 
         // Cheap liveness probe: a point read against chain_state
         let state_cf = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
-        let addr_complete = db.get_cf(state_cf, b"address_index_complete")?;
-        let address_index_complete = addr_complete.is_some();
+        // Align /health with the data endpoints' 503 gate (LSM-2): "complete" means
+        // complete AND in the current (v2) on-disk format, not just the raw marker —
+        // otherwise /health reports healthy during the v1 pre-wipe window (when every
+        // data endpoint 503s) and during a v2 re-enrich.
+        let raw_complete = db
+            .get_cf(state_cf, b"address_index_complete")?
+            .map(|v| v.first() == Some(&1u8))
+            .unwrap_or(false);
+        let addr_version = crate::chain_state::get_addr_index_version(&db);
+        let address_index_complete = crate::chain_state::addr_index_ready(&db);
 
         // Address count persisted by the sync pipeline (metric_total_addresses)
         let indexed_addresses = db
@@ -91,7 +99,17 @@ pub async fn health_check_v2(
             .unwrap_or(0);
 
         if !address_index_complete && total_txs > 0 {
-            warnings.push("Address index not marked as complete. Run rebuild_address_index if sync is done.".to_string());
+            if raw_complete && addr_version != crate::parser::ADDR_INDEX_FORMAT_VERSION {
+                warnings.push(format!(
+                    "Address index is a legacy format (v{addr_version}); it will be wiped and rebuilt to v{} automatically on the next sync. Data endpoints return 503 until then.",
+                    crate::parser::ADDR_INDEX_FORMAT_VERSION
+                ));
+            } else {
+                warnings.push(
+                    "Address index is (re)building; data endpoints return 503 until it completes."
+                        .to_string(),
+                );
+            }
         }
         if indexed_addresses == 0 && total_txs > 100_000 {
             warnings.push("Address index is empty but many transactions exist. Run rebuild_address_index.".to_string());

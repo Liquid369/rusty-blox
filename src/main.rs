@@ -315,8 +315,12 @@ async fn start_web_server(
         .layer(middleware::from_fn(security_headers))
         .layer(cors)
         // Hard ceiling on request duration: a wedged handler can no longer pin
-        // a connection forever (returns 408 on expiry)
-        .layer(TimeoutLayer::new(std::time::Duration::from_secs(30)))
+        // a connection forever (returns 408 on expiry). tower-http 0.7 deprecated
+        // TimeoutLayer::new; with_status_code keeps the same 408 behavior explicitly.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
         // GLOBAL in-flight cap (P1-2). Outermost limiter so we shed load before
         // doing any per-request work; the broadcast routes carry an additional
         // tighter cap layered on their sub-router above. 503 + Retry-After once
@@ -669,10 +673,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("Failed to build runtime");
 
-            if let Err(e) = rt.block_on(async {
-                run_sync_service(blk_dir_clone, sync_db, Some(sync_broadcaster)).await
-            }) {
-                error!(error = ?e, "Sync service error");
+            // Retry the sync service on a fatal error with capped backoff instead of
+            // letting the thread die. A prolonged RPC outage can abort a catch-up — the
+            // heightless-block backfill rewinds sync_height for re-detection and returns
+            // Err — and the web server keeps the process alive, so without this loop the
+            // explorer would serve a frozen tip even after RPC recovers (no supervisor
+            // restart fires). The rewound sync_height makes each retry re-run the whole
+            // catch-up + backfill, so it self-heals once RPC is back.
+            let mut backoff_secs = 5u64;
+            loop {
+                let result = rt.block_on(run_sync_service(
+                    blk_dir_clone.clone(),
+                    Arc::clone(&sync_db),
+                    Some(Arc::clone(&sync_broadcaster)),
+                ));
+                match result {
+                    Ok(()) => break, // clean completion (e.g. read-only / auto_start=false)
+                    Err(e) => {
+                        error!(error = ?e, retry_secs = backoff_secs, "Sync service error - retrying");
+                        std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
+                        backoff_secs = (backoff_secs * 2).min(120);
+                    }
+                }
             }
         });
 

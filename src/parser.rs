@@ -63,6 +63,111 @@ pub async fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
     utxos
 }
 
+// ============================================================================
+// addr_index v2 codecs: inline value/kind into 'a' and height into 't' so the
+// /address page needs one sequential blob read instead of N random transactions-CF
+// point lookups. Fixed-width, length-validated (no silent truncation).
+// ============================================================================
+
+/// Error from the addr_index `'a'`/`'t'` codecs. A buffer whose length is not an
+/// exact multiple of the entry stride is a HARD error (a stale legacy-format blob
+/// or corruption) — NEVER silently truncated. Once the version-readiness gate lands
+/// (migration Step 9), readers will turn this into a uniform "reindexing" (503)
+/// response; until then it surfaces as an endpoint error, never garbage.
+#[derive(Debug)]
+pub enum AddrCodecError {
+    /// Buffer length is not a whole number of fixed-width entries.
+    StrideMismatch { len: usize, stride: usize },
+}
+
+impl std::fmt::Display for AddrCodecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AddrCodecError::StrideMismatch { len, stride } => write!(
+                f,
+                "addr_index blob length {len} is not a multiple of the {stride}-byte entry stride"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AddrCodecError {}
+
+/// addr_index `'a'` unspent-UTXO record stride (v2): txid(32)+vout(8)+value(8)+kind(1).
+pub const ADDR_UTXO_STRIDE: usize = 49;
+/// addr_index `'t'` txid-history record stride (v2): txid(32)+height(4).
+pub const ADDR_TX_STRIDE: usize = 36;
+/// addr_index on-disk format version stamped in chain_state. v2 = inline value+kind
+/// in 'a' (49B) + inline height in 't' (36B). A DB whose stamp != this is a legacy
+/// (40B 'a' / 32B 't') index that must be rebuilt before it can be served.
+pub const ADDR_INDEX_FORMAT_VERSION: u32 = 2;
+
+/// Serialize the v2 `'a'` unspent set: `txid(32) + vout(u64 LE,8) + value(i64 LE,8)
+/// + kind(u8,1)` per entry (49 bytes), order preserved verbatim. Every field is an
+/// immutable function of the source tx, so two enriches of the same chain produce
+/// identical bytes.
+pub async fn serialize_addr_utxos(utxos: &[(Vec<u8>, u64, i64, u8)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(utxos.len() * ADDR_UTXO_STRIDE);
+    for (txid, vout, value, kind) in utxos {
+        out.extend_from_slice(txid);
+        out.extend_from_slice(&vout.to_le_bytes());
+        out.extend_from_slice(&value.to_le_bytes());
+        out.push(*kind);
+    }
+    out
+}
+
+/// Deserialize the v2 `'a'` unspent set. A non-multiple-of-49 length is a hard error
+/// (NOT a bare `chunks_exact`, which would silently drop a trailing partial entry /
+/// mask a stale legacy 40-byte blob).
+pub async fn deserialize_addr_utxos(
+    data: &[u8],
+) -> Result<Vec<(Vec<u8>, u64, i64, u8)>, AddrCodecError> {
+    if data.len() % ADDR_UTXO_STRIDE != 0 {
+        return Err(AddrCodecError::StrideMismatch {
+            len: data.len(),
+            stride: ADDR_UTXO_STRIDE,
+        });
+    }
+    let mut utxos = Vec::with_capacity(data.len() / ADDR_UTXO_STRIDE);
+    for chunk in data.chunks_exact(ADDR_UTXO_STRIDE) {
+        let txid = chunk[0..32].to_vec();
+        let vout = u64::from_le_bytes(chunk[32..40].try_into().unwrap());
+        let value = i64::from_le_bytes(chunk[40..48].try_into().unwrap());
+        let kind = chunk[48];
+        utxos.push((txid, vout, value, kind));
+    }
+    Ok(utxos)
+}
+
+/// Serialize the v2 `'t'` history list: `txid(32) + height(i32 LE,4)` per entry
+/// (36 bytes), order preserved verbatim.
+pub async fn serialize_addr_txs(txs: &[(Vec<u8>, i32)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(txs.len() * ADDR_TX_STRIDE);
+    for (txid, height) in txs {
+        out.extend_from_slice(txid);
+        out.extend_from_slice(&height.to_le_bytes());
+    }
+    out
+}
+
+/// Deserialize the v2 `'t'` history list. A non-multiple-of-36 length is a hard error.
+pub async fn deserialize_addr_txs(data: &[u8]) -> Result<Vec<(Vec<u8>, i32)>, AddrCodecError> {
+    if data.len() % ADDR_TX_STRIDE != 0 {
+        return Err(AddrCodecError::StrideMismatch {
+            len: data.len(),
+            stride: ADDR_TX_STRIDE,
+        });
+    }
+    let mut txs = Vec::with_capacity(data.len() / ADDR_TX_STRIDE);
+    for chunk in data.chunks_exact(ADDR_TX_STRIDE) {
+        let txid = chunk[0..32].to_vec();
+        let height = i32::from_le_bytes(chunk[32..36].try_into().unwrap());
+        txs.push((txid, height));
+    }
+    Ok(txs)
+}
+
 // Deserialize UTXOs with spent flags
 pub async fn deserialize_utxos_with_spent(data: &[u8]) -> Vec<(Vec<u8>, u64, bool)> {
     let mut utxos = Vec::new();
@@ -812,5 +917,49 @@ mod golden_script_tests {
     fn bogus_wrapped_p2sh_is_nonstandard() {
         let script = hex_script("c0a91403d3f3e2a851686bbd533a497b9dab0373303b6087");
         assert_eq!(extract_address_from_script(&script), Vec::<String>::new());
+    }
+}
+
+#[cfg(test)]
+mod addr_codec_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn addr_utxos_roundtrip_49b() {
+        let utxos = vec![
+            (vec![1u8; 32], 0u64, 123_456i64, 0u8),
+            (vec![2u8; 32], 7u64, 805_030_000_000_000i64, 2u8),
+        ];
+        let bytes = serialize_addr_utxos(&utxos).await;
+        assert_eq!(bytes.len(), 2 * 49);
+        let back = deserialize_addr_utxos(&bytes).await.unwrap();
+        assert_eq!(back, utxos);
+    }
+
+    #[tokio::test]
+    async fn addr_utxos_rejects_non_multiple_of_49() {
+        // The 40-byte legacy stride must be a hard error, never silently truncated.
+        assert!(deserialize_addr_utxos(&[0u8; 40]).await.is_err());
+        assert!(deserialize_addr_utxos(&[0u8; 50]).await.is_err());
+        // Empty = zero entries (valid).
+        assert!(deserialize_addr_utxos(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn addr_txs_roundtrip_36b() {
+        // -1 (HEIGHT_ORPHAN) must round-trip as a signed i32.
+        let txs = vec![(vec![9u8; 32], 5_474_276i32), (vec![3u8; 32], -1i32)];
+        let bytes = serialize_addr_txs(&txs).await;
+        assert_eq!(bytes.len(), 2 * 36);
+        let back = deserialize_addr_txs(&bytes).await.unwrap();
+        assert_eq!(back, txs);
+    }
+
+    #[tokio::test]
+    async fn addr_txs_rejects_non_multiple_of_36() {
+        // The 32-byte legacy stride must be a hard error, never silently truncated.
+        assert!(deserialize_addr_txs(&[0u8; 32]).await.is_err());
+        assert!(deserialize_addr_txs(&[0u8; 35]).await.is_err());
+        assert!(deserialize_addr_txs(&[]).await.unwrap().is_empty());
     }
 }

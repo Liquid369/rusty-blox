@@ -52,6 +52,7 @@ pub mod websocket;
 
 pub mod address_rollback;
 pub mod analytics_live;
+pub mod analytics_recompute;
 pub mod api;
 pub mod blk_tail;
 pub mod block_detail;

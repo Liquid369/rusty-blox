@@ -15,7 +15,10 @@
 /// - Works with our own database (no dependency on PIVX Core)
 use crate::constants::should_index_transaction;
 use crate::metrics;
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, serialize_utxos};
+use crate::parser::{
+    deserialize_transaction, deserialize_transaction_blocking, serialize_addr_txs,
+    serialize_addr_utxos,
+};
 use crate::tx_keys::{txid_from_hex, txid_from_key};
 use crate::types::{CTransaction, CTxOut, ScriptClassification};
 use rocksdb::DB;
@@ -124,25 +127,6 @@ struct PackedTx {
 /// Sentinel "no address" interned id (PackedOut.addr_a / addr_b when absent).
 const NO_ADDR: u32 = u32::MAX;
 
-/// Encode a detected transaction type as the PackedTx.ty u8.
-/// 1 == Coinstake is load-bearing: Pass 2 / Pass 2b test `ty == 1` for coinstake.
-fn ty_to_u8(t: crate::tx_type::TransactionType) -> u8 {
-    match t {
-        crate::tx_type::TransactionType::Normal => 0,
-        crate::tx_type::TransactionType::Coinstake => 1,
-        crate::tx_type::TransactionType::Coinbase => 2,
-    }
-}
-
-/// Decode a PackedTx.ty u8 back to the transaction type (inverse of `ty_to_u8`).
-fn u8_to_ty(b: u8) -> crate::tx_type::TransactionType {
-    match b {
-        1 => crate::tx_type::TransactionType::Coinstake,
-        2 => crate::tx_type::TransactionType::Coinbase,
-        _ => crate::tx_type::TransactionType::Normal,
-    }
-}
-
 /// Pack a single output: run the SAME `classify_output` logic Pass 2 used to run,
 /// intern the resulting address string(s) to u32 ids, and copy value/vout verbatim.
 /// This is the one site that maps a classification to a (kind, addr_a, addr_b):
@@ -224,7 +208,7 @@ struct Pass1Shard {
 fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i32) {
     // INVARIANT #2: detect the type while inputs[0]'s null/zerocoin prevout is
     // still alive. INVARIANT #4: carry the SIGNED Sapling net value forward.
-    let ty = ty_to_u8(crate::tx_type::detect_transaction_type(tx));
+    let ty = crate::tx_type::ty_to_u8(crate::tx_type::detect_transaction_type(tx));
     let value_balance = tx
         .sapling_data
         .as_ref()
@@ -619,7 +603,7 @@ fn pass2b_process_tx(
         let contrib = compute_tx_join(
             &TxJoinInputs {
                 height,
-                ty: u8_to_ty(cur.ty),
+                ty: crate::tx_type::u8_to_ty(cur.ty),
                 out_sum,
                 p2cs_created,
                 value_balance: cur.value_balance,
@@ -1412,8 +1396,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let mut key = vec![b'a'];
         key.extend_from_slice(address.as_bytes());
 
-        // Build canonical UTXO list (only unspent entries) to match serialize_utxos format
-        let mut utxos_unspent: Vec<(Vec<u8>, u64)> = Vec::new();
+        // Build the v2 'a' record: txid(32)+vout(8)+value(8)+kind(1)=49B per unspent
+        // entry. value/kind are immutable functions of the source tx (the frozen
+        // packed store), so the on-disk bytes are reproducible across enriches.
+        let mut utxos_unspent: Vec<(Vec<u8>, u64, i64, u8)> = Vec::new();
 
         for (slot, vout) in utxos.iter() {
             total_utxos_checked += 1;
@@ -1429,14 +1415,16 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
 
             if !is_spent {
-                // serialize_utxos expects (txid Vec<u8>, vout u64); resolve here so
-                // the on-disk format is byte-identical (txid(32) + vout u64 LE).
-                utxos_unspent.push((txid32.to_vec(), *vout as u64));
+                // Source value + kind from the frozen packed tx (the same store HODL
+                // reads). kind = PackedTx.ty (already the ty_to_u8 byte). Defensive
+                // None on an out-of-range vout (never expected) -> value 0.
+                let ptx = &packed[*slot as usize];
+                let value = ptx.outs.get(*vout as usize).map(|o| o.value).unwrap_or(0);
+                utxos_unspent.push((txid32.to_vec(), *vout as u64, value, ptx.ty));
 
                 // HODL: bucket this UTXO's value by coin age, counting each
                 // outpoint exactly once (pure in-memory lookups; no DB reads).
                 if tip > 0 && hodl_seen.insert((txid32, *vout)) {
-                    let ptx = &packed[*slot as usize];
                     let h = ptx.height;
                     if h >= 0 && h <= tip {
                         // Parser sets output.index == position, so direct indexing
@@ -1452,25 +1440,34 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         }
 
-        // Serialize UTXOs in canonical format used by the API (txid(32) + vout(u64) per entry)
-        let serialized_utxos = serialize_utxos(&utxos_unspent).await;
+        // Serialize the v2 49-byte 'a' records (txid+vout+value+kind).
+        let serialized_utxos = serialize_addr_utxos(&utxos_unspent).await;
         batch.put_cf(&cf_addr_index, &key, &serialized_utxos);
 
         // Get pre-calculated totals from Pass 2 and 2b (MUCH faster than recalculating!)
         let total_received = *totals_received.get(&id).unwrap_or(&0);
         let total_sent = *totals_sent.get(&id).unwrap_or(&0);
 
-        // Write transaction list ('t' + address)
+        // Write transaction list ('t' + address) as v2 36-byte records:
+        // txid(32) + canonical height(i32 LE). Height resolved via the frozen
+        // tx_index -> packed[slot].height. The inline height is AUTHORITATIVE (it is
+        // not re-read from the tx CF), which is what makes /address O(page) on read.
         if let Some(txids) = txs_map.get(&id) {
             let mut unique_txids = txids.clone();
             unique_txids.sort();
             unique_txids.dedup();
 
-            // Serialize transaction list
-            let mut txs_serialized: Vec<u8> = Vec::with_capacity(unique_txids.len() * 32);
+            let mut tx_entries: Vec<(Vec<u8>, i32)> = Vec::with_capacity(unique_txids.len());
             for txid in unique_txids {
-                txs_serialized.extend_from_slice(&txid);
+                // Resolve the txid to its canonical height (missing -> 0, never expected).
+                let height = <[u8; 32]>::try_from(txid.as_slice())
+                    .ok()
+                    .and_then(|t| tx_index.get(&t).copied())
+                    .map(|slot| packed[slot as usize].height)
+                    .unwrap_or(0);
+                tx_entries.push((txid, height));
             }
+            let txs_serialized = serialize_addr_txs(&tx_entries).await;
             let mut tx_list_key = vec![b't'];
             tx_list_key.extend_from_slice(address.as_bytes());
             batch.put_cf(&cf_addr_index, &tx_list_key, &txs_serialized);
@@ -1554,11 +1551,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Blockbook), so this needs no extra DB reads and produces the TRUE top
     // holders — replacing the old O(addresses) full-scan endpoints that only
     // sampled the first 10k addresses.
-    if let Err(e) =
-        persist_wealth_analytics(&db, &totals_received, &totals_sent, &txs_map, &addr_rev)
-    {
-        warn!(error = %e, "Failed to persist wealth analytics");
-    }
+    let wealth_ok = match persist_wealth_analytics(&db, &totals_received, &totals_sent, &addr_rev) {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(error = %e, "Failed to persist wealth analytics");
+            false
+        }
+    };
 
     // HODL / dormancy snapshot: value of the final unspent UTXO set bucketed
     // by coin age, accumulated above from the same deduped unspent sets that
@@ -1566,6 +1565,17 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // explorer — see the comment at the accumulators).
     if let Err(e) = persist_hodl_snapshot(&db, &hodl_sums, hodl_total, tip) {
         warn!(error = %e, "Failed to persist HODL snapshot");
+    }
+
+    // The full enrich rebuilt a/r/s/t, so durably (in the MAIN pass, not the
+    // crash-prone detached daily-series tail) clear any reorg-stale flag — the
+    // periodic recompute can resume. Advance its watermark to this tip ONLY if the
+    // fresh richlist/wealth blob actually wrote; otherwise just clear the flag and
+    // let the next recompute refresh the blob (never let the watermark outrun it).
+    if wealth_ok {
+        crate::analytics_recompute::mark_index_clean(&db, tip);
+    } else {
+        crate::analytics_recompute::clear_dirty_only(&db);
     }
 
     // [Lever 2] Defer the daily transaction time-series (~56 min -- a full
@@ -2343,60 +2353,51 @@ pub struct WealthSnapshot {
 }
 
 /// Number of rich-list entries to retain (API serves a clamped slice of this).
-const RICHLIST_KEEP: usize = 1000;
+pub(crate) const RICHLIST_KEEP: usize = 1000;
 
-fn persist_wealth_analytics(
-    db: &Arc<DB>,
-    totals_received: &HashMap<u32, i64>,
-    totals_sent: &HashMap<u32, i64>,
-    txs_map: &HashMap<u32, Vec<Vec<u8>>>,
-    addr_rev: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let cf_state = db
-        .cf_handle("chain_state")
-        .ok_or("chain_state CF not found")?;
+/// Pure, deterministic computation of the rich list + wealth snapshot from a set
+/// of per-address balances (satoshis). The caller supplies the FINAL balance per
+/// address (owner-attributed / deduped upstream — this function performs no
+/// cross-address dedup); it then:
+///   * keeps only strictly-positive balances (zero/negative is never a holder; a
+///     negative would signal an upstream accounting bug, never a top-N entry);
+///   * sorts by (balance DESC, address ASC) so ties — and richlist membership at
+///     the `keep` cutoff — are reproducible regardless of input iteration order
+///     (the previous HashMap-ordered, balance-only sort was nondeterministic);
+///   * accumulates totals / top-N sums / the Gini weighted sum in i128, removing
+///     the i64 intermediate-overflow footgun;
+///   * derives the Nakamoto coefficient from an exact integer threshold
+///     (`2*acc > total`) rather than an f64 compare that rounds above 2^53.
+/// `tx_count_of` is invoked only for the kept top-N entries (cheap).
+pub fn compute_wealth_richlist(
+    mut balances: Vec<(String, i64)>,
+    keep: usize,
+    tx_count_of: impl Fn(&str) -> u64,
+) -> (Vec<RichListSnapshotEntry>, WealthSnapshot) {
+    balances.retain(|(_, b)| *b > 0);
 
-    // Compute balance per address (by interned id); keep only positive balances.
-    let mut balances: Vec<(u32, i64)> = Vec::with_capacity(totals_received.len());
-    let mut total_balance: i64 = 0;
-    for (&id, recv) in totals_received {
-        let sent = *totals_sent.get(&id).unwrap_or(&0);
-        let bal = recv - sent;
-        if bal > 0 {
-            balances.push((id, bal));
-            total_balance += bal;
-        }
-    }
-
-    // Sort descending by balance for both the rich list and the top-N sums.
-    balances.sort_by(|a, b| b.1.cmp(&a.1));
+    // Deterministic TOTAL order: balance descending, address ascending on ties.
+    balances.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let richlist: Vec<RichListSnapshotEntry> = balances
         .iter()
-        .take(RICHLIST_KEEP)
-        .map(|(id, bal)| {
-            // Unique tx count (txs_map may list a txid twice when an address is
-            // both an input and an output of the same transaction). Deduping
-            // only the kept top-N keeps this cheap.
-            let tx_count = txs_map
-                .get(id)
-                .map(|v| {
-                    let mut t = v.clone();
-                    t.sort();
-                    t.dedup();
-                    t.len() as u64
-                })
-                .unwrap_or(0);
-            RichListSnapshotEntry {
-                // Resolve the interned id back to its exact base58 string only here.
-                address: addr_rev[*id as usize].clone(),
-                balance: *bal,
-                tx_count,
-            }
+        .take(keep)
+        .map(|(address, balance)| RichListSnapshotEntry {
+            address: address.clone(),
+            balance: *balance,
+            tx_count: tx_count_of(address),
         })
         .collect();
 
-    let sum_take = |n: usize| balances.iter().take(n).map(|(_, b)| *b).sum::<i64>();
+    // Totals + top-N sums in i128, then saturate back to i64. PIVX supply fits i64
+    // comfortably; the wider accumulator only removes the overflow footgun.
+    let total_i128: i128 = balances.iter().map(|(_, b)| *b as i128).sum();
+    let total_balance = total_i128.min(i64::MAX as i128) as i64;
+    let sum_take = |n: usize| -> i64 {
+        let s: i128 = balances.iter().take(n).map(|(_, b)| *b as i128).sum();
+        s.min(i64::MAX as i128) as i64
+    };
+
     let histogram_ranges: [(i64, i64, &str); 7] = [
         (0, 1_00000000, "0-1 PIV"),
         (1_00000000, 10_00000000, "1-10 PIV"),
@@ -2417,27 +2418,28 @@ fn persist_wealth_analytics(
         })
         .collect();
 
-    // Gini coefficient (standard formula over ascending balances):
-    //   G = 2 * Σ(i * x_i) / (n * Σx) - (n + 1) / n
-    // balances is sorted DESCENDING, so iterate in reverse for ascending order.
+    // Gini (standard formula over ASCENDING balances):
+    //   G = 2*Σ(i*x_i) / (n*Σx) - (n+1)/n   (i = 1-based ascending rank)
+    // balances is sorted DESCENDING, so iterate in reverse for ascending order;
+    // the weighted sum is accumulated exactly in i128 and cast once at the end.
     let n = balances.len();
-    let gini = if n > 0 && total_balance > 0 {
-        let mut weighted = 0.0f64;
+    let gini = if n > 0 && total_i128 > 0 {
+        let mut weighted: i128 = 0;
         for (i, (_, b)) in balances.iter().rev().enumerate() {
-            weighted += (i as f64 + 1.0) * (*b as f64);
+            weighted += (i as i128 + 1) * (*b as i128);
         }
-        (2.0 * weighted) / (n as f64 * total_balance as f64) - (n as f64 + 1.0) / n as f64
+        (2.0 * weighted as f64) / (n as f64 * total_i128 as f64) - (n as f64 + 1.0) / n as f64
     } else {
         0.0
     };
 
-    // Nakamoto coefficient: minimum holders summing to >50% of total balance.
+    // Nakamoto: minimum holders summing to >50% of total, exact integer test.
     let mut nakamoto_coefficient: u32 = 0;
-    let mut acc: i64 = 0;
+    let mut acc: i128 = 0;
     for (_, b) in &balances {
-        acc = acc.saturating_add(*b);
+        acc += *b as i128;
         nakamoto_coefficient += 1;
-        if (acc as f64) > total_balance as f64 / 2.0 {
+        if 2 * acc > total_i128 {
             break;
         }
     }
@@ -2453,6 +2455,52 @@ fn persist_wealth_analytics(
         gini,
         nakamoto_coefficient,
     };
+
+    (richlist, wealth)
+}
+
+fn persist_wealth_analytics(
+    db: &Arc<DB>,
+    totals_received: &HashMap<u32, i64>,
+    totals_sent: &HashMap<u32, i64>,
+    addr_rev: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    let cf_addr = db
+        .cf_handle("addr_index")
+        .ok_or("addr_index CF not found")?;
+
+    // Per-address balance = received - sent (the same value `/address` serves and
+    // the periodic recompute uses). `compute_wealth_richlist` filters >0, applies
+    // the deterministic (balance DESC, address ASC) order, and computes the
+    // aggregates in i128 with an exact-integer Nakamoto threshold.
+    let balances: Vec<(String, i64)> = totals_received
+        .iter()
+        .filter_map(|(&id, recv)| {
+            let bal = recv - *totals_sent.get(&id).unwrap_or(&0);
+            // Resolve (clone) the address string only for actual holders, so the
+            // transient Vec stays bounded to positive balances during enrich.
+            (bal > 0).then(|| (addr_rev[id as usize].clone(), bal))
+        })
+        .collect();
+
+    // tx_count for the kept top-N from the deduped on-disk 't' list (already
+    // written by the address-index batch above) — the SAME source the periodic
+    // recompute reads, so the enrich and recompute snapshots agree at the same tip.
+    let tx_count_of = |address: &str| -> u64 {
+        let mut t_key = Vec::with_capacity(address.len() + 1);
+        t_key.push(b't');
+        t_key.extend_from_slice(address.as_bytes());
+        db.get_cf(&cf_addr, &t_key)
+            .ok()
+            .flatten()
+            .map(|b| (b.len() / crate::parser::ADDR_TX_STRIDE) as u64)
+            .unwrap_or(0)
+    };
+
+    let (richlist, wealth) = compute_wealth_richlist(balances, RICHLIST_KEEP, tx_count_of);
 
     db.put_cf(
         &cf_state,
@@ -2532,6 +2580,132 @@ fn persist_hodl_snapshot(
 mod tests {
     use super::*;
     use crate::types::CScript;
+
+    // ---- Step 1: pure compute_wealth_richlist (deterministic snapshot math) ----
+
+    fn bal(addr: &str, sats: i64) -> (String, i64) {
+        (addr.to_string(), sats)
+    }
+
+    #[test]
+    fn wealth_richlist_ties_broken_by_address_ascending_order_independent() {
+        // Four holders with the SAME balance, fed in two different orders. The
+        // richlist must come out identical and address-ascending, so the persisted
+        // bytes are reproducible regardless of (HashMap) input iteration order.
+        let order_a = vec![
+            bal("zeta", 100),
+            bal("alpha", 100),
+            bal("mike", 100),
+            bal("bravo", 100),
+        ];
+        let order_b = vec![
+            bal("bravo", 100),
+            bal("zeta", 100),
+            bal("alpha", 100),
+            bal("mike", 100),
+        ];
+        let (rl_a, _) = compute_wealth_richlist(order_a, 1000, |_| 0);
+        let (rl_b, _) = compute_wealth_richlist(order_b, 1000, |_| 0);
+        let addrs_a: Vec<String> = rl_a.iter().map(|e| e.address.clone()).collect();
+        assert_eq!(addrs_a, vec!["alpha", "bravo", "mike", "zeta"]);
+        let addrs_b: Vec<String> = rl_b.iter().map(|e| e.address.clone()).collect();
+        assert_eq!(addrs_a, addrs_b);
+    }
+
+    #[test]
+    fn wealth_richlist_tie_at_cutoff_is_deterministic() {
+        // keep=2, three equal balances: address-ascending decides which two are
+        // kept, independent of input order.
+        let in1 = vec![bal("c", 50), bal("a", 50), bal("b", 50)];
+        let in2 = vec![bal("b", 50), bal("c", 50), bal("a", 50)];
+        let (rl1, _) = compute_wealth_richlist(in1, 2, |_| 0);
+        let (rl2, _) = compute_wealth_richlist(in2, 2, |_| 0);
+        let kept1: Vec<String> = rl1.iter().map(|e| e.address.clone()).collect();
+        assert_eq!(kept1, vec!["a", "b"]);
+        let kept2: Vec<String> = rl2.iter().map(|e| e.address.clone()).collect();
+        assert_eq!(kept1, kept2);
+    }
+
+    #[test]
+    fn wealth_richlist_keeps_top_n_by_balance_with_tx_counts() {
+        let balances = vec![bal("a", 10), bal("b", 500), bal("c", 250), bal("d", 1)];
+        let tx = |addr: &str| match addr {
+            "b" => 7u64,
+            "c" => 3,
+            _ => 0,
+        };
+        let (rl, w) = compute_wealth_richlist(balances, 2, tx);
+        assert_eq!(rl.len(), 2);
+        assert_eq!(rl[0].address, "b");
+        assert_eq!(rl[0].balance, 500);
+        assert_eq!(rl[0].tx_count, 7);
+        assert_eq!(rl[1].address, "c");
+        assert_eq!(rl[1].tx_count, 3);
+        assert_eq!(w.address_count, 4);
+        assert_eq!(w.total_balance, 761);
+    }
+
+    #[test]
+    fn wealth_total_and_topn_use_i128_without_overflow() {
+        // Two holders each at i64::MAX/2: the i128 accumulation must yield the
+        // exact total and a correct Nakamoto coefficient via the exact integer
+        // threshold (an i64 sum here is on the edge; an f64 compare would round).
+        let half = i64::MAX / 2;
+        let balances = vec![bal("a", half), bal("b", half)];
+        let (_, w) = compute_wealth_richlist(balances, 1000, |_| 0);
+        assert_eq!(w.total_balance, half * 2);
+        assert_eq!(w.top_10, half * 2);
+        // 2*acc after the first holder == total (not strictly >), so it takes both.
+        assert_eq!(w.nakamoto_coefficient, 2);
+    }
+
+    #[test]
+    fn wealth_nakamoto_single_dominant_holder() {
+        let balances = vec![
+            bal("whale", 1_000_000),
+            bal("a", 1),
+            bal("b", 1),
+            bal("c", 1),
+        ];
+        let (_, w) = compute_wealth_richlist(balances, 1000, |_| 0);
+        assert_eq!(w.nakamoto_coefficient, 1);
+    }
+
+    #[test]
+    fn wealth_histogram_buckets_and_positive_filter() {
+        // 0.5 / 5 / 50 PIV, plus a zero and a negative that MUST be dropped.
+        let balances = vec![
+            bal("half", 50_000_000),
+            bal("five", 5_00000000),
+            bal("fifty", 50_00000000),
+            bal("zero", 0),
+            bal("neg", -10),
+        ];
+        let (_, w) = compute_wealth_richlist(balances, 1000, |_| 0);
+        assert_eq!(w.address_count, 3);
+        assert_eq!(w.total_balance, 50_000_000 + 5_00000000 + 50_00000000);
+        let count = |label: &str| {
+            w.histogram
+                .iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, c)| *c)
+                .unwrap()
+        };
+        assert_eq!(count("0-1 PIV"), 1);
+        assert_eq!(count("1-10 PIV"), 1);
+        assert_eq!(count("10-100 PIV"), 1);
+        assert_eq!(count("100-1K PIV"), 0);
+    }
+
+    #[test]
+    fn wealth_empty_input_is_all_zero() {
+        let (rl, w) = compute_wealth_richlist(vec![], 1000, |_| 0);
+        assert!(rl.is_empty());
+        assert_eq!(w.total_balance, 0);
+        assert_eq!(w.address_count, 0);
+        assert_eq!(w.nakamoto_coefficient, 0);
+        assert_eq!(w.gini, 0.0);
+    }
 
     /// The shard bounds must form an EXACT partition of the 't' keyspace: floor
     /// at the prefix, ceiling past it, contiguous (no gap), disjoint (no overlap),
@@ -2700,17 +2874,6 @@ mod tests {
             addr_rev[packed[1].addr_a as usize],
             "DStakerOrPayee1111111111111111111"
         );
-    }
-
-    /// ty_to_u8 / u8_to_ty round-trip, with 1 == Coinstake load-bearing for the
-    /// Pass 2 / Pass 2b coinstake test.
-    #[test]
-    fn ty_u8_roundtrip() {
-        use crate::tx_type::TransactionType::*;
-        assert_eq!(ty_to_u8(Coinstake), 1);
-        for t in [Normal, Coinstake, Coinbase] {
-            assert_eq!(u8_to_ty(ty_to_u8(t)), t);
-        }
     }
 
     // ---- compute_tx_join: the shared join arithmetic (live == enrich) ----
