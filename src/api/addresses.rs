@@ -17,7 +17,7 @@ use super::types::{AddressInfo, AddressQuery, UtxoQuery, XPubInfo, UTXO};
 use crate::cache::CacheManager;
 use crate::constants::{is_canonical_height, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 use crate::maturity::get_current_height;
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, deserialize_utxos};
+use crate::parser::{deserialize_transaction, deserialize_transaction_blocking};
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
@@ -167,6 +167,19 @@ pub async fn addr_v2(
         ));
     }
 
+    // 503 while the addr_index is reindexing or not in the current (v2) on-disk format.
+    // The web server is released independently of the enrich, so without this gate a
+    // v1->v2 in-place upgrade would serve old-stride bytes / divergent StrideMismatch
+    // errors (CR-1) until the rebuild finishes.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(super::types::BlockbookError::new(
+                "Address index is reindexing; please retry shortly",
+            )),
+        ));
+    }
+
     let cache_key = format!("addr:{}:{}:{}", address, params.page, params.details);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
@@ -224,10 +237,11 @@ async fn compute_address_info(
     })
     .await??;
 
-    let all_txids: Vec<Vec<u8>> = tx_list_data
-        .chunks_exact(32)
-        .map(|chunk| chunk.to_vec())
-        .collect();
+    // v2 't' records are 36 bytes (txid(32) + height(i32 LE)). The inline height is
+    // authoritative, so newest-first ordering needs NO per-txid tx-CF lookup. A
+    // stride mismatch (stale/legacy blob) is a hard error, surfaced — not silently
+    // truncated.
+    let tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
 
     // Balance and lifetime totals come straight from the aggregates enrichment
     // already persisted: 'r'+address = totalReceived, 's'+address = totalSent
@@ -249,73 +263,22 @@ async fn compute_address_info(
     let (total_received, total_sent) = read_address_totals(db, address).await;
     let balance = total_received - total_sent;
 
-    // P1-1: the stored 't'-index bytes are ALREADY canonical display order
-    // (parser.rs hash_txid reverses to display, and the tx CF is keyed by
-    // 't' + display bytes). Emit them directly — a prior extra .reverse()
-    // flipped txids to a non-canonical order that the node, duddino, and every
-    // other explorer reject (broke Blockbook compat on /address.txids[]).
-    let unique_txids: Vec<String> = all_txids.iter().map(hex::encode).collect();
-
-    // Order newest-first by block height. This is the only history-sized step
-    // left, so do it as ONE blocking pass: a single get_cf per txid that reads
-    // the 4-byte height at offset 4..8 (no full-tx deserialization; one tx blob
-    // in memory at a time, freed each iteration) instead of one spawn_blocking
-    // task per txid. That removes the per-item async scheduling overhead that
-    // made this the second O(history) scan, while keeping the result
-    // byte-identical (same stable sort, same height source). Above the cap we
-    // serve the stored txid order, preserving the prior over_cap behavior
-    // exactly (no height reads at all).
+    // P1-1: the stored 't' txids are ALREADY canonical display order (parser.rs
+    // hash_txid reverses to display; the tx CF is keyed by 't' + display bytes), so
+    // they are emitted verbatim.
+    //
+    // Order newest-first by the INLINE block height — no tx-CF lookups, no
+    // spawn_blocking; an O(N log N) in-memory sort on data already loaded. This is
+    // the O(history) cold-load fix (was one get_cf per txid). Above the order cap,
+    // serve the stored order unchanged (preserves the prior over_cap behavior).
+    // Stable sort keeps stored order within an equal height.
     let order_cap = address_recompute_cap();
-    let all_txids: Vec<String> = if unique_txids.len() > order_cap {
-        unique_txids
+    let all_txids: Vec<String> = if tx_entries.len() > order_cap {
+        tx_entries.iter().map(|(t, _)| hex::encode(t)).collect()
     } else {
-        // Clone for the blocking pass so a JoinError (task panic / runtime
-        // shutdown) falls back to the stored order instead of dropping txids
-        // (no-silent-failure rule). The clone is at most ~4MB at the 50k cap (a
-        // few hundred KB for typical addresses) — negligible against the
-        // thousands of full-tx deserializations this commit removes.
-        let txids_for_sort = unique_txids.clone();
-        let db_clone = Arc::clone(db);
-        let sorted = tokio::task::spawn_blocking(move || -> Vec<String> {
-            let cf = match db_clone.cf_handle("transactions") {
-                Some(cf) => cf,
-                None => return txids_for_sort,
-            };
-            let mut txid_heights: Vec<(String, i32)> = Vec::with_capacity(txids_for_sort.len());
-            for txid in txids_for_sort {
-                // tx CF is keyed by 't' + canonical display-order bytes (exactly
-                // the bytes we just hex-encoded), so decode straight back to it.
-                let height = hex::decode(&txid)
-                    .ok()
-                    .and_then(|txid_bytes| {
-                        let mut key = vec![b't'];
-                        key.extend(&txid_bytes);
-                        db_clone.get_cf(&cf, &key).ok().flatten()
-                    })
-                    .filter(|tx_data| tx_data.len() >= 8)
-                    .map(|tx_data| {
-                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]])
-                    })
-                    .unwrap_or(0);
-                txid_heights.push((txid, height));
-            }
-            // Sort by height descending (newest first = highest block). Stable
-            // sort keeps stored order within a height, matching the old loop.
-            txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
-            txid_heights.into_iter().map(|(txid, _)| txid).collect()
-        })
-        .await;
-        match sorted {
-            Ok(ordered) => ordered,
-            // spawn_blocking only JoinErrors on a task panic or runtime shutdown.
-            // Serve the stored txid order rather than dropping txids, but make the
-            // rare degraded (unsorted) response observable instead of silent.
-            Err(e) => {
-                warn!(address = %address, error = %e,
-                    "address height-sort task failed; serving stored txid order");
-                unique_txids
-            }
-        }
+        let mut ordered = tx_entries.clone();
+        ordered.sort_by(|a, b| b.1.cmp(&a.1));
+        ordered.into_iter().map(|(t, _)| hex::encode(t)).collect()
     };
 
     // === PAGINATION LOGIC ===
@@ -405,6 +368,16 @@ pub async fn xpub_v2(
             axum::http::StatusCode::BAD_REQUEST,
             Json(super::types::BlockbookError::new(
                 "Invalid xpub: not a valid base58check BIP32 extended public key",
+            )),
+        ));
+    }
+
+    // 503 while the addr_index is reindexing / not the current (v2) format (see addr_v2).
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(super::types::BlockbookError::new(
+                "Address index is reindexing; please retry shortly",
             )),
         ));
     }
@@ -685,49 +658,12 @@ async fn aggregate_xpub_data(
             .cloned()
             .unwrap_or_default();
 
-        let utxos = deserialize_utxos(&utxo_data).await;
+        let utxos = crate::parser::deserialize_addr_utxos(&utxo_data).await?;
 
-        // Blockbook parity: include immature outputs in xpub balances
-        let spendable_utxos = utxos.clone();
-
-        // Calculate balance for this address
-        let mut address_balance: i64 = 0;
-        for (txid_hash, output_index) in &spendable_utxos {
-            let mut key = vec![b't'];
-            key.extend(txid_hash);
-            let key_clone = key.clone();
-            let db_clone = db.clone();
-
-            let tx_data =
-                tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-                    let cf_transactions = db_clone
-                        .cf_handle("transactions")
-                        .ok_or_else(|| "transactions CF not found".to_string())?;
-                    db_clone
-                        .get_cf(&cf_transactions, &key_clone)
-                        .map_err(|e| e.to_string())
-                })
-                .await
-                .map_err(|e| format!("Task join error: {e}"))?
-                .map_err(|e| e.to_string())?;
-
-            if let Some(tx_data) = tx_data {
-                if tx_data.len() >= 8 {
-                    let tx_data_len = tx_data.len() - 8;
-                    if tx_data_len > 0 {
-                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
-
-                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                            if let Some(output) = tx.outputs.get(*output_index as usize) {
-                                address_balance += output.value;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Blockbook parity: include immature outputs in xpub balances. Balance is the
+        // sum of the inline 'a' values — the inline value IS the unspent output value,
+        // so the result is unchanged while the per-UTXO tx-CF parse is eliminated.
+        let address_balance: i64 = utxos.iter().map(|(_, _, value, _)| *value).sum();
 
         // Get transaction list from pre-fetched batch data
         let tx_list_data = tx_list_results
@@ -736,11 +672,9 @@ async fn aggregate_xpub_data(
             .cloned()
             .unwrap_or_default();
 
-        // Parse transaction list (32 bytes per txid)
-        let txids: Vec<Vec<u8>> = tx_list_data
-            .chunks_exact(32)
-            .map(|chunk| chunk.to_vec())
-            .collect();
+        // v2 't' list = 36-byte records (txid + height); only the txids are needed here.
+        let tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
+        let txids: Vec<Vec<u8>> = tx_entries.iter().map(|(t, _)| t.clone()).collect();
 
         // Calculate total received for this address
         let mut total_received: i64 = 0;
@@ -1073,6 +1007,16 @@ pub async fn utxo_v2(
         ));
     }
 
+    // 503 while the addr_index is reindexing / not the current (v2) format (see addr_v2).
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(super::types::BlockbookError::new(
+                "Address index is reindexing; please retry shortly",
+            )),
+        ));
+    }
+
     let cache_key = format!("utxo:{}:{}", address, query.confirmed);
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
@@ -1108,7 +1052,7 @@ async fn compute_utxos(
     })
     .await??;
 
-    let unspent_utxos = deserialize_utxos(&result).await;
+    let unspent_utxos = crate::parser::deserialize_addr_utxos(&result).await?;
     let current_height = get_current_height(db).unwrap_or(0);
     // Blockbook parity: the UTXO list includes immature coinbase/coinstake outputs
     // (Blockbook flags them rather than hiding them; wallets handle maturity).
@@ -1116,7 +1060,7 @@ async fn compute_utxos(
 
     let mut utxo_list = Vec::new();
 
-    for (txid_hash, vout) in &spendable_utxos {
+    for (txid_hash, vout, value, kind) in &spendable_utxos {
         // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
         // (the same bytes that key the tx CF below), so emit them directly. The
         // earlier .reverse() produced a non-canonical txid that the node,
@@ -1147,58 +1091,56 @@ async fn compute_utxos(
                 let block_height =
                     i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
 
-                // Filter hardening: a UTXO present in the 'a' unspent set is
-                // canonical by construction (the balance loop trusts it with no
-                // height filter). Only drop entries with a definitive orphan
-                // determination (-1); a transient HEIGHT_UNRESOLVED read must NOT
-                // silently drop a canonical UTXO (that under-reported /utxo 98%
-                // on a degraded DB). On the clean DB nothing is orphan/unresolved,
-                // so the set is unchanged.
+                // A UTXO present in the 'a' unspent set is canonical by construction;
+                // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
+                // read must NOT silently drop a canonical UTXO. Height/orphan are
+                // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
+                // before — only the expensive full-tx parse is removed.
                 if block_height == HEIGHT_ORPHAN {
                     continue;
                 }
 
-                // Parse transaction to get output value
-                let tx_data_len = tx_data.len() - 8;
-                let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                let confirmations =
+                    if is_canonical_height(block_height) && is_canonical_height(current_height) {
+                        ((current_height - block_height) + 1).max(0) as u32
+                    } else {
+                        0
+                    };
 
-                if let Ok(tx) = deserialize_transaction_blocking(&tx_data_with_header) {
-                    if let Some(output) = tx.outputs.get(*vout as usize) {
-                        let confirmations = if is_canonical_height(block_height)
-                            && is_canonical_height(current_height)
-                        {
-                            ((current_height - block_height) + 1).max(0) as u32
-                        } else {
-                            0
-                        };
+                // value + coinbase/coinstake come from the inline 'a' record (49B):
+                // no deserialize_transaction on the hot (confirmed) path. lock_time is
+                // only ever emitted when confirmations == 0, so parse the tx ONLY in
+                // that rare degraded/unconfirmed case to preserve exact prior output.
+                let tx_type = crate::tx_type::u8_to_ty(*kind);
+                let lock_time = if confirmations == 0 {
+                    let tx_data_len = tx_data.len() - 8;
+                    let mut tx_with_header = Vec::with_capacity(4 + tx_data_len);
+                    tx_with_header.extend_from_slice(&[0u8; 4]);
+                    tx_with_header.extend_from_slice(&tx_data[8..]);
+                    deserialize_transaction_blocking(&tx_with_header)
+                        .ok()
+                        .filter(|tx| tx.lock_time > 0)
+                        .map(|tx| tx.lock_time)
+                } else {
+                    None
+                };
 
-                        use crate::tx_type::detect_transaction_type;
-                        let tx_type = detect_transaction_type(&tx);
-
-                        utxo_list.push(UTXO {
-                            txid: txid_display,
-                            vout: *vout as u32,
-                            value: output.value.to_string(),
-                            confirmations,
-                            lock_time: if confirmations == 0 && tx.lock_time > 0 {
-                                Some(tx.lock_time)
-                            } else {
-                                None
-                            },
-                            height: if block_height > 0 {
-                                Some(block_height as u32)
-                            } else {
-                                None
-                            },
-                            coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
-                            coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
-                            spendable: Some(true),
-                            blocks_until_spendable: None,
-                        });
-                    }
-                }
+                utxo_list.push(UTXO {
+                    txid: txid_display,
+                    vout: *vout as u32,
+                    value: value.to_string(),
+                    confirmations,
+                    lock_time,
+                    height: if block_height > 0 {
+                        Some(block_height as u32)
+                    } else {
+                        None
+                    },
+                    coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
+                    coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
+                    spendable: Some(true),
+                    blocks_until_spendable: None,
+                });
             }
         }
     }
@@ -1298,7 +1240,6 @@ mod tests {
             DB::open_cf(&opts, temp.path(), ["addr_index", "transactions"]).unwrap(),
         );
         let cf_ai = db.cf_handle("addr_index").unwrap();
-        let cf_tx = db.cf_handle("transactions").unwrap();
 
         let address = "DUnitTestAddressXXXXXXXXXXXXXXXXXXX";
 
@@ -1308,24 +1249,22 @@ mod tests {
         let (a, b, c) = (mk(0xAA), mk(0xBB), mk(0xCC));
         let heights = [(a, 300i32), (b, 100i32), (c, 200i32)];
 
-        // tx CF value layout: 8-byte header, block height as i32 LE at bytes 4..8.
-        let tx_value = |h: i32| -> Vec<u8> {
-            let mut v = vec![0u8; 8];
-            v[4..8].copy_from_slice(&h.to_le_bytes());
-            v
+        // 't'+address = v2 36-byte records (txid + inline height i32 LE), written in
+        // NON-height order (a,b,c). NO tx-CF height entries are written, so this also
+        // proves the reader sorts on the inline height, not a tx-CF lookup.
+        let height_of = |txid: [u8; 32]| -> i32 {
+            heights
+                .iter()
+                .find(|(t, _)| *t == txid)
+                .map(|(_, h)| *h)
+                .unwrap()
         };
-        for (txid, h) in heights {
-            let mut k = vec![b't'];
-            k.extend_from_slice(&txid);
-            db.put_cf(&cf_tx, &k, tx_value(h)).unwrap();
-        }
-
-        // 't'+address = concatenated 32-byte txids, in NON-height order (a,b,c).
         let mut t_key = vec![b't'];
         t_key.extend_from_slice(address.as_bytes());
         let mut t_val = Vec::new();
         for txid in [a, b, c] {
             t_val.extend_from_slice(&txid);
+            t_val.extend_from_slice(&height_of(txid).to_le_bytes());
         }
         db.put_cf(&cf_ai, &t_key, &t_val).unwrap();
 

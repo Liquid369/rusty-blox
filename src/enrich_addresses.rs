@@ -15,7 +15,10 @@
 /// - Works with our own database (no dependency on PIVX Core)
 use crate::constants::should_index_transaction;
 use crate::metrics;
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking, serialize_utxos};
+use crate::parser::{
+    deserialize_transaction, deserialize_transaction_blocking, serialize_addr_txs,
+    serialize_addr_utxos,
+};
 use crate::tx_keys::{txid_from_hex, txid_from_key};
 use crate::types::{CTransaction, CTxOut, ScriptClassification};
 use rocksdb::DB;
@@ -124,25 +127,6 @@ struct PackedTx {
 /// Sentinel "no address" interned id (PackedOut.addr_a / addr_b when absent).
 const NO_ADDR: u32 = u32::MAX;
 
-/// Encode a detected transaction type as the PackedTx.ty u8.
-/// 1 == Coinstake is load-bearing: Pass 2 / Pass 2b test `ty == 1` for coinstake.
-fn ty_to_u8(t: crate::tx_type::TransactionType) -> u8 {
-    match t {
-        crate::tx_type::TransactionType::Normal => 0,
-        crate::tx_type::TransactionType::Coinstake => 1,
-        crate::tx_type::TransactionType::Coinbase => 2,
-    }
-}
-
-/// Decode a PackedTx.ty u8 back to the transaction type (inverse of `ty_to_u8`).
-fn u8_to_ty(b: u8) -> crate::tx_type::TransactionType {
-    match b {
-        1 => crate::tx_type::TransactionType::Coinstake,
-        2 => crate::tx_type::TransactionType::Coinbase,
-        _ => crate::tx_type::TransactionType::Normal,
-    }
-}
-
 /// Pack a single output: run the SAME `classify_output` logic Pass 2 used to run,
 /// intern the resulting address string(s) to u32 ids, and copy value/vout verbatim.
 /// This is the one site that maps a classification to a (kind, addr_a, addr_b):
@@ -224,7 +208,7 @@ struct Pass1Shard {
 fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i32) {
     // INVARIANT #2: detect the type while inputs[0]'s null/zerocoin prevout is
     // still alive. INVARIANT #4: carry the SIGNED Sapling net value forward.
-    let ty = ty_to_u8(crate::tx_type::detect_transaction_type(tx));
+    let ty = crate::tx_type::ty_to_u8(crate::tx_type::detect_transaction_type(tx));
     let value_balance = tx
         .sapling_data
         .as_ref()
@@ -619,7 +603,7 @@ fn pass2b_process_tx(
         let contrib = compute_tx_join(
             &TxJoinInputs {
                 height,
-                ty: u8_to_ty(cur.ty),
+                ty: crate::tx_type::u8_to_ty(cur.ty),
                 out_sum,
                 p2cs_created,
                 value_balance: cur.value_balance,
@@ -1412,8 +1396,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let mut key = vec![b'a'];
         key.extend_from_slice(address.as_bytes());
 
-        // Build canonical UTXO list (only unspent entries) to match serialize_utxos format
-        let mut utxos_unspent: Vec<(Vec<u8>, u64)> = Vec::new();
+        // Build the v2 'a' record: txid(32)+vout(8)+value(8)+kind(1)=49B per unspent
+        // entry. value/kind are immutable functions of the source tx (the frozen
+        // packed store), so the on-disk bytes are reproducible across enriches.
+        let mut utxos_unspent: Vec<(Vec<u8>, u64, i64, u8)> = Vec::new();
 
         for (slot, vout) in utxos.iter() {
             total_utxos_checked += 1;
@@ -1429,14 +1415,16 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
 
             if !is_spent {
-                // serialize_utxos expects (txid Vec<u8>, vout u64); resolve here so
-                // the on-disk format is byte-identical (txid(32) + vout u64 LE).
-                utxos_unspent.push((txid32.to_vec(), *vout as u64));
+                // Source value + kind from the frozen packed tx (the same store HODL
+                // reads). kind = PackedTx.ty (already the ty_to_u8 byte). Defensive
+                // None on an out-of-range vout (never expected) -> value 0.
+                let ptx = &packed[*slot as usize];
+                let value = ptx.outs.get(*vout as usize).map(|o| o.value).unwrap_or(0);
+                utxos_unspent.push((txid32.to_vec(), *vout as u64, value, ptx.ty));
 
                 // HODL: bucket this UTXO's value by coin age, counting each
                 // outpoint exactly once (pure in-memory lookups; no DB reads).
                 if tip > 0 && hodl_seen.insert((txid32, *vout)) {
-                    let ptx = &packed[*slot as usize];
                     let h = ptx.height;
                     if h >= 0 && h <= tip {
                         // Parser sets output.index == position, so direct indexing
@@ -1452,25 +1440,34 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             }
         }
 
-        // Serialize UTXOs in canonical format used by the API (txid(32) + vout(u64) per entry)
-        let serialized_utxos = serialize_utxos(&utxos_unspent).await;
+        // Serialize the v2 49-byte 'a' records (txid+vout+value+kind).
+        let serialized_utxos = serialize_addr_utxos(&utxos_unspent).await;
         batch.put_cf(&cf_addr_index, &key, &serialized_utxos);
 
         // Get pre-calculated totals from Pass 2 and 2b (MUCH faster than recalculating!)
         let total_received = *totals_received.get(&id).unwrap_or(&0);
         let total_sent = *totals_sent.get(&id).unwrap_or(&0);
 
-        // Write transaction list ('t' + address)
+        // Write transaction list ('t' + address) as v2 36-byte records:
+        // txid(32) + canonical height(i32 LE). Height resolved via the frozen
+        // tx_index -> packed[slot].height. The inline height is AUTHORITATIVE (it is
+        // not re-read from the tx CF), which is what makes /address O(page) on read.
         if let Some(txids) = txs_map.get(&id) {
             let mut unique_txids = txids.clone();
             unique_txids.sort();
             unique_txids.dedup();
 
-            // Serialize transaction list
-            let mut txs_serialized: Vec<u8> = Vec::with_capacity(unique_txids.len() * 32);
+            let mut tx_entries: Vec<(Vec<u8>, i32)> = Vec::with_capacity(unique_txids.len());
             for txid in unique_txids {
-                txs_serialized.extend_from_slice(&txid);
+                // Resolve the txid to its canonical height (missing -> 0, never expected).
+                let height = <[u8; 32]>::try_from(txid.as_slice())
+                    .ok()
+                    .and_then(|t| tx_index.get(&t).copied())
+                    .map(|slot| packed[slot as usize].height)
+                    .unwrap_or(0);
+                tx_entries.push((txid, height));
             }
+            let txs_serialized = serialize_addr_txs(&tx_entries).await;
             let mut tx_list_key = vec![b't'];
             tx_list_key.extend_from_slice(address.as_bytes());
             batch.put_cf(&cf_addr_index, &tx_list_key, &txs_serialized);
@@ -2499,7 +2496,7 @@ fn persist_wealth_analytics(
         db.get_cf(&cf_addr, &t_key)
             .ok()
             .flatten()
-            .map(|b| (b.len() / 32) as u64)
+            .map(|b| (b.len() / crate::parser::ADDR_TX_STRIDE) as u64)
             .unwrap_or(0)
     };
 
@@ -2877,17 +2874,6 @@ mod tests {
             addr_rev[packed[1].addr_a as usize],
             "DStakerOrPayee1111111111111111111"
         );
-    }
-
-    /// ty_to_u8 / u8_to_ty round-trip, with 1 == Coinstake load-bearing for the
-    /// Pass 2 / Pass 2b coinstake test.
-    #[test]
-    fn ty_u8_roundtrip() {
-        use crate::tx_type::TransactionType::*;
-        assert_eq!(ty_to_u8(Coinstake), 1);
-        for t in [Normal, Coinstake, Coinbase] {
-            assert_eq!(u8_to_ty(ty_to_u8(t)), t);
-        }
     }
 
     // ---- compute_tx_join: the shared join arithmetic (live == enrich) ----

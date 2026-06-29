@@ -29,9 +29,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let addr_txs_key = format!("t{test_address}");
     let txids = if let Some(data) = db.get_cf(addr_cf, addr_txs_key.as_bytes())? {
         let mut txids = Vec::new();
-        for chunk in data.chunks(32) {
-            if chunk.len() == 32 {
-                txids.push(chunk.to_vec());
+        for chunk in data.chunks(rustyblox::parser::ADDR_TX_STRIDE) {
+            if chunk.len() == rustyblox::parser::ADDR_TX_STRIDE {
+                txids.push(chunk[..32].to_vec());
             }
         }
         txids

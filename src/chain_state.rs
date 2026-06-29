@@ -102,6 +102,33 @@ pub fn get_sync_height(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::Error>> 
     }
 }
 
+/// chain_state key: the addr_index on-disk format version. Stamped to
+/// `parser::ADDR_INDEX_FORMAT_VERSION` ONLY by a successful leveldb-backed full enrich
+/// (never the chainstate or !fast_sync paths). Absent / < CURRENT ⇒ a legacy index.
+pub const ADDR_INDEX_VERSION_KEY: &[u8] = b"addr_index_format_version";
+
+/// Read the persisted addr_index format version (0 if unset/legacy).
+pub fn get_addr_index_version(db: &Arc<DB>) -> u32 {
+    db.cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, ADDR_INDEX_VERSION_KEY).ok().flatten())
+        .filter(|v| v.len() == 4)
+        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+        .unwrap_or(0)
+}
+
+/// Is the addr_index complete AND in the current on-disk format — i.e. safe to serve?
+/// The API data handlers gate on this (return 503 "reindexing" while false), because
+/// the web server is released independently of the sync/enrich thread, so an in-place
+/// v1→v2 upgrade would otherwise serve old-stride bytes at HTTP 200.
+pub fn addr_index_ready(db: &Arc<DB>) -> bool {
+    let complete = db
+        .cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"address_index_complete").ok().flatten())
+        .map(|v| v.first() == Some(&1u8))
+        .unwrap_or(false);
+    complete && get_addr_index_version(db) == crate::parser::ADDR_INDEX_FORMAT_VERSION
+}
+
 /// Mark reorg point
 pub fn mark_reorg(
     db: &Arc<DB>,
@@ -120,4 +147,76 @@ pub fn mark_reorg(
     warn!(height = height, reason = %reason, "REORG marked in chain state");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocksdb::{Options, DB};
+
+    fn open_db() -> (tempfile::TempDir, Arc<DB>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(
+            DB::open_cf(
+                &opts,
+                temp.path(),
+                ["chain_state", "addr_index", "transactions"],
+            )
+            .unwrap(),
+        );
+        (temp, db)
+    }
+
+    fn set_complete(db: &Arc<DB>) {
+        let cf = db.cf_handle("chain_state").unwrap();
+        db.put_cf(&cf, b"address_index_complete", [1u8]).unwrap();
+    }
+
+    fn stamp_version(db: &Arc<DB>, v: u32) {
+        let cf = db.cf_handle("chain_state").unwrap();
+        db.put_cf(&cf, ADDR_INDEX_VERSION_KEY, v.to_le_bytes())
+            .unwrap();
+    }
+
+    /// MS-1: the API 503-gate decision matrix. addr_index_ready is true ONLY when the
+    /// index is both complete AND stamped with the current format version — so a legacy
+    /// (unstamped or older-version) index, or an in-progress rebuild, returns 503.
+    #[test]
+    fn addr_index_ready_requires_complete_and_current_version() {
+        let (_t, db) = open_db();
+
+        // Fresh DB: nothing set → not ready; absent version reads as 0.
+        assert!(!addr_index_ready(&db), "empty DB must not be ready");
+        assert_eq!(get_addr_index_version(&db), 0, "absent version reads as 0");
+
+        // Complete but UNSTAMPED (a legacy v1 index, or chainstate/!fast_sync) → 503.
+        set_complete(&db);
+        assert!(
+            !addr_index_ready(&db),
+            "complete but unstamped (legacy) must 503"
+        );
+
+        // Complete + a WRONG (older) version → 503.
+        stamp_version(&db, 1);
+        assert_eq!(get_addr_index_version(&db), 1);
+        assert!(!addr_index_ready(&db), "complete but v1 must 503");
+
+        // Complete + the CURRENT version → ready (serve).
+        stamp_version(&db, crate::parser::ADDR_INDEX_FORMAT_VERSION);
+        assert!(
+            addr_index_ready(&db),
+            "complete + current version must serve"
+        );
+
+        // Version current but NOT complete (mid-rebuild) → 503.
+        let cf = db.cf_handle("chain_state").unwrap();
+        db.delete_cf(&cf, b"address_index_complete").unwrap();
+        assert!(
+            !addr_index_ready(&db),
+            "current version but incomplete must 503"
+        );
+    }
 }

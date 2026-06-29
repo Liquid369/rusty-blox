@@ -66,7 +66,7 @@ pub fn recompute_wealth_richlist_from_index(
         }
     }
 
-    // tx_count for the kept top-N only: length of the deduped 't' list / 32.
+    // tx_count for the kept top-N only: length of the deduped 't' list / 36 (v2 stride).
     let tx_count_of = |address: &str| -> u64 {
         let mut t_key = Vec::with_capacity(address.len() + 1);
         t_key.push(b't');
@@ -74,7 +74,7 @@ pub fn recompute_wealth_richlist_from_index(
         db.get_cf(&cf, &t_key)
             .ok()
             .flatten()
-            .map(|b| (b.len() / 32) as u64)
+            .map(|b| (b.len() / crate::parser::ADDR_TX_STRIDE) as u64)
             .unwrap_or(0)
     };
 
@@ -170,7 +170,18 @@ pub fn mark_index_clean(db: &Arc<DB>, tip: i32) {
         let mut batch = WriteBatch::default();
         batch.delete_cf(&cf, K_ADDR_INDEX_DIRTY);
         batch.put_cf(&cf, K_RECOMPUTE_HEIGHT, tip.to_le_bytes());
-        let _ = db.write(batch);
+        // Stamp the addr_index format version. This runs ONLY inside the v2
+        // transaction-enrich (enrich_all_addresses), so a successful enrich marks the
+        // index v2-ready; the chainstate / !fast_sync writers never reach here, so they
+        // never stamp and the API 503-gate keeps them non-served (MS-4 / BE-3).
+        batch.put_cf(
+            &cf,
+            crate::chain_state::ADDR_INDEX_VERSION_KEY,
+            crate::parser::ADDR_INDEX_FORMAT_VERSION.to_le_bytes(),
+        );
+        if let Err(e) = db.write(batch) {
+            tracing::error!(error = %e, "failed to persist addr_index clean + version markers; the index stays 503 and re-enriches on next boot (fail-closed)");
+        }
     }
 }
 
@@ -180,7 +191,18 @@ pub fn mark_index_clean(db: &Arc<DB>, tip: i32) {
 /// recompute still runs to refresh it.
 pub fn clear_dirty_only(db: &Arc<DB>) {
     if let Some(cf) = db.cf_handle("chain_state") {
-        let _ = db.delete_cf(&cf, K_ADDR_INDEX_DIRTY);
+        // The a/r/s/t index is v2-complete even when the wealth snapshot write failed,
+        // so stamp the version (so it can serve) while clearing the dirty flag.
+        let mut batch = WriteBatch::default();
+        batch.delete_cf(&cf, K_ADDR_INDEX_DIRTY);
+        batch.put_cf(
+            &cf,
+            crate::chain_state::ADDR_INDEX_VERSION_KEY,
+            crate::parser::ADDR_INDEX_FORMAT_VERSION.to_le_bytes(),
+        );
+        if let Err(e) = db.write(batch) {
+            tracing::error!(error = %e, "failed to persist addr_index clean + version markers; the index stays 503 and re-enriches on next boot (fail-closed)");
+        }
     }
 }
 
@@ -297,8 +319,8 @@ mod tests {
             .unwrap();
         db.put_cf(&cf, format!("s{addr}").as_bytes(), sent.to_le_bytes())
             .unwrap();
-        // 't' list = n_txs * 32 bytes; only the length matters for tx_count.
-        db.put_cf(&cf, format!("t{addr}").as_bytes(), vec![0u8; n_txs * 32])
+        // v2 't' list = n_txs * 36-byte records; only the length matters for tx_count.
+        db.put_cf(&cf, format!("t{addr}").as_bytes(), vec![0u8; n_txs * 36])
             .unwrap();
     }
 

@@ -162,10 +162,44 @@ pub fn is_output_spendable(
     current_height >= required_height
 }
 
+/// Encode a detected transaction type as the `PackedTx.ty` u8 used by enrichment
+/// and as the addr_index 'a'-record `kind` byte. 1 == Coinstake is load-bearing:
+/// enrich Pass 2 / Pass 2b test `ty == 1` for coinstake.
+pub fn ty_to_u8(t: TransactionType) -> u8 {
+    match t {
+        TransactionType::Normal => 0,
+        TransactionType::Coinstake => 1,
+        TransactionType::Coinbase => 2,
+    }
+}
+
+/// Decode a `PackedTx.ty` / addr_index `kind` u8 back to the transaction type
+/// (inverse of `ty_to_u8`).
+pub fn u8_to_ty(b: u8) -> TransactionType {
+    match b {
+        1 => TransactionType::Coinstake,
+        2 => TransactionType::Coinbase,
+        _ => TransactionType::Normal,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{COutPoint, CScript};
+
+    #[test]
+    fn ty_u8_roundtrip() {
+        // 1 == Coinstake is load-bearing (enrich Pass 2/2b + addr_index 'a' kind).
+        assert_eq!(ty_to_u8(TransactionType::Coinstake), 1);
+        for t in [
+            TransactionType::Normal,
+            TransactionType::Coinstake,
+            TransactionType::Coinbase,
+        ] {
+            assert_eq!(u8_to_ty(ty_to_u8(t)), t);
+        }
+    }
 
     #[test]
     fn test_coinbase_detection() {

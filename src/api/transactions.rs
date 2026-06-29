@@ -198,6 +198,13 @@ pub(crate) async fn build_transaction_from_db(
         // The txid in DISPLAY order, decoded once, matched against the 'a' set.
         let txid_display_bytes = hex::decode(&tx.txid).unwrap_or_default();
         let cf_addr_index = db_clone.cf_handle("addr_index");
+        // GL-1 / 503 for the addr_index-derived `spent` flag: while the index is
+        // reindexing or not yet the current (v2) format, the 'a' blobs may be legacy 40B
+        // bytes a 49B stride can mis-parse (a UTXO-count multiple of 49 even passes the
+        // modulo check), so do NOT read them. `spent` goes uniformly null; the rest of
+        // the tx (hash/vin/vout/confirmations, from the transactions CF) stays available,
+        // so /tx is never 503'd wholesale — only this one annotation is withheld.
+        let addr_index_serveable = crate::chain_state::addr_index_ready(&db_clone);
 
         // Synchronous probe of the 'a'+address unspent set (we are inside a
         // spawn_blocking closure, so no .await). Returns Some(true) if this exact
@@ -205,6 +212,9 @@ pub(crate) async fn build_transaction_from_db(
         // is indexed but this output is absent (spent), None if the address has no
         // 'a' entry at all (can't determine from this address).
         let probe_unspent = |address: &str, vout_idx: u64| -> Option<bool> {
+            if !addr_index_serveable {
+                return None;
+            }
             let cf = cf_addr_index.as_ref()?;
             if txid_display_bytes.len() != 32 {
                 return None;
@@ -212,12 +222,13 @@ pub(crate) async fn build_transaction_from_db(
             let mut key = vec![b'a'];
             key.extend_from_slice(address.as_bytes());
             let data = db_clone.get_cf(cf, &key).ok().flatten()?;
-            // Format: repeated [txid(32) + vout(8 LE)] — same as parser::deserialize_utxos.
-            if data.is_empty() || data.len() % 40 != 0 {
+            // v2 'a' format: repeated 49-byte [txid(32)+vout(8 LE)+value(8)+kind(1)].
+            // Only txid+vout (the first 40 bytes) matter here; ignore the trailing 9.
+            if data.is_empty() || data.len() % crate::parser::ADDR_UTXO_STRIDE != 0 {
                 return None;
             }
             let mut found = false;
-            for chunk in data.chunks_exact(40) {
+            for chunk in data.chunks_exact(crate::parser::ADDR_UTXO_STRIDE) {
                 if chunk[0..32] == txid_display_bytes[..] {
                     let v = u64::from_le_bytes(chunk[32..40].try_into().unwrap_or([0u8; 8]));
                     if v == vout_idx {

@@ -253,6 +253,18 @@ fn search_transaction(
 
 /// Search for address
 fn search_address(db: &Arc<DB>, address: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
+    // During a v1→v2 rebuild the addr_index is wiped, so an existence check would wrongly
+    // report a real, address-classified query as NotFound. While the index isn't ready,
+    // route it to its address page instead (which serves the authoritative 503
+    // "reindexing" / 400-invalid / real data) rather than a misleading NotFound. The 'a'
+    // key is byte-identical across v1/v2, so the steady-state existence check is correct.
+    if !crate::chain_state::addr_index_ready(db) {
+        return Ok(SearchResult::Address {
+            address: address.to_string(),
+            balance: None,
+        });
+    }
+
     let cf_addr = db
         .cf_handle("addr_index")
         .ok_or("addr_index CF not found")?;

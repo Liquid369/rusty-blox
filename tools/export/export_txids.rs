@@ -18,9 +18,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let addr_txs_key = format!("t{test_address}");
     let indexed_txids: Vec<Vec<u8>> =
         if let Some(data) = db.get_cf(addr_cf, addr_txs_key.as_bytes())? {
-            data.chunks(32)
-                .filter(|c| c.len() == 32)
-                .map(|c| c.to_vec())
+            data.chunks(rustyblox::parser::ADDR_TX_STRIDE)
+                .filter(|c| c.len() == rustyblox::parser::ADDR_TX_STRIDE)
+                .map(|c| c[..32].to_vec())
                 .collect()
         } else {
             Vec::new()

@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Get our count
     let our_key = format!("t{test_address}");
     let our_count = match db.get_cf(addr_cf, our_key.as_bytes())? {
-        Some(data) => data.len() / 32,
+        Some(data) => data.len() / rustyblox::parser::ADDR_TX_STRIDE,
         None => 0,
     };
 

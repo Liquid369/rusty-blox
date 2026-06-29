@@ -298,9 +298,7 @@ fn build_spent_set_from_blocks(blocks: &[FetchedBlock]) -> HashSet<(Vec<u8>, u64
 ///   is done via HashSet lookup instead of on-demand RPC fetching. This ensures
 ///   100% accurate spend detection matching the initial sync two-pass algorithm.
 async fn index_block_from_rpc(
-    // Block hashes now come from the async `rpc_call_json` helper (no thread
-    // leak); the blocking client is no longer needed here.
-    _rpc_client: &Arc<PivxRpcClient>,
+    // Block hashes come from the async `rpc_call_json` helper (no blocking client).
     height: i32,
     db: &Arc<DB>,
     broadcaster: &Option<Arc<EventBroadcaster>>,
@@ -528,8 +526,9 @@ async fn index_block_from_rpc(
     let mut tx_errors = 0;
     // Address-index undo for this block, captured INLINE as we apply each r/s/a/t
     // write below. Recording exactly what we write (instead of recomputing from the
-    // block afterwards) makes the undo byte-exact — a reorg then reverses to the
-    // precise pre-block state — and adds zero extra DB reads/deserializes. Stored
+    // block afterwards) reverses r/s exactly and restores the spent UTXOs' fields
+    // (set/value-exact; 'a'/'t' insertion order may differ from a fresh enrich after a
+    // reorg, harmless) — and adds zero extra DB reads/deserializes. Stored
     // after the loop, only for live blocks past the enrichment watermark. See
     // address_rollback::reverse_address_block for the consumer.
     let mut block_undo = crate::address_rollback::AddressBlockUndo::new(height);
@@ -729,7 +728,7 @@ async fn index_block_from_rpc(
         tx_data_with_header.extend_from_slice(&raw_tx_bytes);
 
         // Parse the transaction
-        use crate::parser::{deserialize_transaction, deserialize_utxos, serialize_utxos};
+        use crate::parser::deserialize_transaction;
 
         let parsed_tx = match deserialize_transaction(&tx_data_with_header).await {
             Ok(tx) => tx,
@@ -760,6 +759,10 @@ async fn index_block_from_rpc(
 
         // Add outputs as UTXOs ONLY for new blocks
         if should_update_address_index {
+            // Source-tx type once per tx — the SAME byte enrich stores as packed.ty,
+            // so catch-up 'a' records are byte-identical to enrich.
+            let tx_kind =
+                crate::tx_type::ty_to_u8(crate::tx_type::detect_transaction_type(&parsed_tx));
             for (output_idx, output) in parsed_tx.outputs.iter().enumerate() {
                 for address in &output.address {
                     if address.is_empty() {
@@ -782,29 +785,26 @@ async fn index_block_from_rpc(
                     let mut addr_key = vec![b'a'];
                     addr_key.extend_from_slice(address.as_bytes());
 
-                    // Get existing UTXOs for this address
+                    // No size cap: enrich writes 'a' UNCAPPED, so a >100k-UTXO address
+                    // (exchange/treasury) is legitimate and must round-trip. On an
+                    // unreadable blob (legacy/corrupt — never a v2 blob), SKIP this
+                    // address: never overwrite a non-empty-but-unreadable record with a
+                    // one-entry list, which would destroy the entire UTXO set (MBX-1).
                     let mut existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
-                        Some(data) => {
-                            // Validate data size before deserialization
-                            // Each UTXO is 40 bytes (32 byte txid + 8 byte vout)
-                            // Limit to 100k UTXOs = 4MB
-                            if data.len() > 4_000_000 {
-                                warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
-                                Vec::new()
-                            } else if data.len() % 40 != 0 {
-                                warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
-                                Vec::new()
-                            } else {
-                                deserialize_utxos(&data).await
+                        Some(data) => match crate::parser::deserialize_addr_utxos(&data).await {
+                            Ok(u) => u,
+                            Err(e) => {
+                                warn!(address = %address, error = %e, "Invalid 'a' record; skipping (not overwriting)");
+                                continue;
                             }
-                        }
+                        },
                         None => Vec::new(),
                     };
 
                     // CRITICAL FIX: Check if UTXO already exists (idempotent)
                     let already_exists = existing_utxos
                         .iter()
-                        .any(|(t, i)| t == &txid_bytes && *i == output_idx as u64);
+                        .any(|(t, i, _, _)| t == &txid_bytes && *i == output_idx as u64);
 
                     if already_exists {
                         // Already indexed - skip (prevents duplicates from reorg/reindex)
@@ -814,9 +814,14 @@ async fn index_block_from_rpc(
                         continue;
                     }
 
-                    // Add new UTXO: (txid_bytes, output_index)
-                    existing_utxos.push((txid_bytes.clone(), output_idx as u64));
-                    // Reorg-undo capture: record exactly the UTXO we add to 'a'.
+                    // Add the new v2 49-byte UTXO record (txid+vout+value+kind).
+                    existing_utxos.push((
+                        txid_bytes.clone(),
+                        output_idx as u64,
+                        output.value,
+                        tx_kind,
+                    ));
+                    // Reorg-undo capture records the created (txid,vout) only.
                     block_undo.add_utxo_created(
                         address.clone(),
                         txid_bytes.clone(),
@@ -824,7 +829,7 @@ async fn index_block_from_rpc(
                     );
 
                     // Store updated UTXO list
-                    let serialized = serialize_utxos(&existing_utxos).await;
+                    let serialized = crate::parser::serialize_addr_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
                         warn!(address = %address, txid = %txid, error = %e, "Failed to index address for tx");
                     }
@@ -1041,42 +1046,47 @@ async fn index_block_from_rpc(
                         let mut addr_key = vec![b'a'];
                         addr_key.extend_from_slice(address.as_bytes());
 
-                        // Get existing UTXOs
+                        // Get existing UTXOs. No size cap (enrich is uncapped). On an
+                        // unreadable blob, SKIP this spend — never delete_cf / overwrite
+                        // a record that failed to read (MBX-1: that would wipe the set).
                         let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
                             Some(data) => {
-                                // Validate data size before deserialization
-                                if data.len() > 4_000_000 {
-                                    warn!(address = %address, bytes = data.len(), "Address has suspiciously large UTXO data, skipping deserialization");
-                                    Vec::new()
-                                } else if data.len() % 40 != 0 {
-                                    warn!(address = %address, bytes = data.len(), "Address has invalid UTXO data size (not multiple of 40)");
-                                    Vec::new()
-                                } else {
-                                    deserialize_utxos(&data).await
+                                match crate::parser::deserialize_addr_utxos(&data).await {
+                                    Ok(u) => u,
+                                    Err(e) => {
+                                        warn!(address = %address, error = %e, "Invalid 'a' record; skipping (not deleting)");
+                                        continue;
+                                    }
                                 }
                             }
                             None => Vec::new(),
                         };
 
                         // Reorg-undo capture: only record the spend if the UTXO was
-                        // actually present in 'a'. A born-and-die output (created and
-                        // spent within this same batch) never entered 'a', so capturing
-                        // it would make reverse restore a phantom UTXO.
-                        let was_present = existing_utxos.iter().any(|(stored_txid, stored_idx)| {
-                            stored_txid == &prev_txid_bytes && *stored_idx == prev_output_idx as u64
-                        });
-                        if was_present {
+                        // actually present in 'a' (a born-and-die output never entered
+                        // it). Capture value+kind from the matched 49-byte record so a
+                        // reorg disconnect restores it byte-exactly.
+                        if let Some((_, _, value, kind)) =
+                            existing_utxos
+                                .iter()
+                                .find(|(stored_txid, stored_idx, _, _)| {
+                                    stored_txid == &prev_txid_bytes
+                                        && *stored_idx == prev_output_idx as u64
+                                })
+                        {
                             block_undo.add_utxo_spent(
                                 address.clone(),
                                 prev_txid_bytes.clone(),
                                 prev_output_idx as u64,
+                                *value,
+                                *kind,
                             );
                         }
 
                         // Remove the spent UTXO (match by txid and index)
                         let updated_utxos: Vec<_> = existing_utxos
                             .into_iter()
-                            .filter(|(stored_txid, stored_idx)| {
+                            .filter(|(stored_txid, stored_idx, _, _)| {
                                 !(stored_txid == &prev_txid_bytes
                                     && *stored_idx == prev_output_idx as u64)
                             })
@@ -1084,7 +1094,8 @@ async fn index_block_from_rpc(
 
                         // Update or delete
                         if !updated_utxos.is_empty() {
-                            let serialized = serialize_utxos(&updated_utxos).await;
+                            let serialized =
+                                crate::parser::serialize_addr_utxos(&updated_utxos).await;
                             let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
                         } else {
                             let _ = db.delete_cf(&cf_addr_index, &addr_key);
@@ -1104,26 +1115,29 @@ async fn index_block_from_rpc(
 
                 // Get existing transaction list
                 let mut tx_list = match db.get_cf(&cf_addr_index, &tx_list_key)? {
-                    Some(data) => {
-                        // Deserialize as list of txids (32 bytes each, reversed format)
-                        data.chunks_exact(32)
-                            .map(|chunk| chunk.to_vec())
-                            .collect::<Vec<Vec<u8>>>()
-                    }
+                    Some(data) => match crate::parser::deserialize_addr_txs(&data).await {
+                        Ok(list) => list,
+                        Err(e) => {
+                            // MBX-1 (same as the 'a' paths): an unreadable 't' blob must
+                            // NOT be overwritten with a one-entry list — 't' is the
+                            // non-reconstructable tx history. Skip this address.
+                            warn!(address = %address, error = %e, "Invalid 't' record; skipping (not overwriting)");
+                            continue;
+                        }
+                    },
                     None => Vec::new(),
                 };
 
-                // Add this transaction (if not already present)
-                if !tx_list.iter().any(|t| t == &txid_bytes) {
-                    tx_list.push(txid_bytes.clone());
+                // Add this transaction if not already present. Compare the 32-byte txid
+                // against each 36-byte record's txid field (a 36B record can never equal
+                // a 32B txid — the dedup trap that would otherwise append unboundedly).
+                if !tx_list.iter().any(|(t, _)| t == &txid_bytes) {
+                    tx_list.push((txid_bytes.clone(), height));
                     // Reorg-undo capture: record exactly the txid we add to 't'.
                     block_undo.add_tx(address.clone(), txid_bytes.clone());
 
-                    // Serialize transaction list (just concatenate txids)
-                    let mut serialized = Vec::new();
-                    for tx in &tx_list {
-                        serialized.extend(tx);
-                    }
+                    // Serialize the v2 36-byte 't' records (txid + inline height).
+                    let serialized = crate::parser::serialize_addr_txs(&tx_list).await;
 
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
                         warn!(address = %address, error = %e, "Failed to update tx list for address");
@@ -1334,17 +1348,17 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
                     address_count += 1;
 
                     // Count UTXOs for this address
-                    // Each UTXO is 40 bytes: txid(32) + vout(8)
+                    // Each v2 'a' record is 49 bytes: txid(32)+vout(8)+value(8)+kind(1)
                     if !value.is_empty() {
-                        if value.len() % 40 == 0 {
-                            let utxos_for_address = value.len() / 40;
+                        if value.len() % crate::parser::ADDR_UTXO_STRIDE == 0 {
+                            let utxos_for_address = value.len() / crate::parser::ADDR_UTXO_STRIDE;
                             utxo_count += utxos_for_address as u64;
                         } else if sample_checked < 5 {
                             // Log first few addresses with unexpected format for debugging
                             debug!(
                                 address_key_len = key.len(),
                                 value_len = value.len(),
-                                "Address value length not multiple of 40"
+                                "Address value length not multiple of 49"
                             );
                             sample_checked += 1;
                         }
@@ -1433,11 +1447,7 @@ fn restore_sync_height_if_regressed(db: &Arc<DB>, saved: i32) -> bool {
     }
 }
 
-async fn recover_crashed_blocks(
-    db: &Arc<DB>,
-    rpc_client: &Arc<PivxRpcClient>,
-    broadcaster: &Option<Arc<EventBroadcaster>>,
-) {
+async fn recover_crashed_blocks(db: &Arc<DB>, broadcaster: &Option<Arc<EventBroadcaster>>) {
     let dirty = crate::crash_recovery::scan_processing_markers(db);
     if dirty.is_empty() {
         return;
@@ -1464,7 +1474,7 @@ async fn recover_crashed_blocks(
         // Re-apply to complete t/a/undo (double-counts the non-idempotent r/s). If
         // the block already finished before the crash (H-marker present), this is a
         // no-op skip — the recompute below is still idempotent and harmless.
-        if let Err(e) = index_block_from_rpc(rpc_client, height, db, broadcaster, None).await {
+        if let Err(e) = index_block_from_rpc(height, db, broadcaster, None).await {
             warn!(height, error = %e,
                 "Failed to re-apply crashed block during recovery; leaving for normal catchup/reorg");
             continue;
@@ -1495,6 +1505,100 @@ async fn recover_crashed_blocks(
 }
 
 /// Main block monitoring loop
+/// Backfill catch-up blocks that were stored heightless (tx height = -1).
+///
+/// When the blk-scan catch-up parses blocks newer than the canonical-metadata
+/// (Core leveldb) refresh — because the freshly-(re)started node's on-disk block
+/// index lagged its blk-file/RPC tip — those transactions are written heightless and
+/// then orphaned out of the address index (0-tx block-detail, missing UTXOs, balances
+/// behind by the gap). This re-processes `[from..=to]` through `index_block_from_rpc`,
+/// which for each block, from the AUTHORITATIVE RPC block height:
+///   1. writes the canonical 4-byte `height→hash` key into chain_metadata (~line 444) —
+///      so the re-enrich's height resolver finds the height in `height_to_blockhash`
+///      (`contains_key` true) and KEEPS it rather than orphaning it (height_resolver.rs
+///      ~270); this is why the gap survives the re-enrich's height re-validation;
+///   2. rewrites each tx's height via its `needs_update` path (existing height < 0) and
+///      the `'B'` block→tx index.
+/// The blk-parse never writes the `'H'` "already-indexed" marker, so the idempotency
+/// early-return (~line 354) does not fire for these heightless blocks and the
+/// chain_metadata write is reached. Run it BEFORE the catch-up re-enrich so the
+/// re-enrich then includes the now-resolved, chain_metadata-backed range.
+///
+/// Durability: this retries IN PLACE until every height in the range has its 4-byte
+/// chain_metadata key (re-processing only the still-missing ones each pass — RPC heights
+/// are authoritative and `index_block_from_rpc` is idempotent, so this converges
+/// regardless of how stale Core's leveldb is). It returns `Ok` ONLY when the whole range
+/// is verified keyed, and `Err` after `MAX_ATTEMPTS`. The caller just `?`s and, on `Err`,
+/// aborts the catch-up WITHOUT clearing completion markers — leaving the prior (correct,
+/// slightly-behind) index served and the gap to be re-detected on retry — rather than
+/// clearing markers, which would re-orphan the gap against the still-stale chain_metadata
+/// and re-mark it complete (the broken recovery the prior FE-1 attempt had).
+///
+/// Cost: one `getblockhash` + `getblock` round-trip per still-missing block.
+pub(crate) async fn backfill_heightless_catchup_range(
+    db: &Arc<DB>,
+    broadcaster: &Option<Arc<EventBroadcaster>>,
+    from: i32,
+    to: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if from > to {
+        return Ok(());
+    }
+    // Clear any stale 'P'+height processing markers in the range (left by a prior hard
+    // kill between claiming a height at ~:376 and finishing it). Without this,
+    // index_block_from_rpc's idempotency early-return (~:369) would skip the block BEFORE
+    // writing its 4-byte chain_metadata height key. Safe: the backfill is single-threaded.
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    for h in from..=to {
+        let mut pkey = vec![b'P'];
+        pkey.extend_from_slice(&h.to_le_bytes());
+        db.delete_cf(&cf_state, &pkey).ok();
+    }
+    let cf_meta = db
+        .cf_handle("chain_metadata")
+        .ok_or("chain_metadata CF not found")?;
+    info!(
+        from,
+        to,
+        blocks = to - from + 1,
+        "Backfilling heightless catch-up blocks via RPC (canonical metadata lagged the blk-file tip)"
+    );
+    const MAX_ATTEMPTS: u32 = 5;
+    for attempt in 1..=MAX_ATTEMPTS {
+        // Process only heights that still lack their canonical 4-byte chain_metadata key.
+        for h in from..=to {
+            if db.get_cf(&cf_meta, h.to_le_bytes())?.is_some() {
+                continue; // already keyed — idempotent re-run skips it
+            }
+            if let Err(e) = index_block_from_rpc(h, db, broadcaster, None).await {
+                warn!(height = h, attempt, error = %e, "Backfill: block re-resolve failed, will retry");
+            }
+        }
+        // Verify the OUTCOME (not Ok-counts): every height must now have its key.
+        let mut missing = 0u32;
+        for h in from..=to {
+            if db.get_cf(&cf_meta, h.to_le_bytes())?.is_none() {
+                missing += 1;
+            }
+        }
+        if missing == 0 {
+            info!(attempt, "Heightless catch-up backfill complete + verified");
+            return Ok(());
+        }
+        warn!(
+            attempt,
+            missing, "Backfill pass incomplete; retrying the still-missing heights"
+        );
+    }
+    Err(format!(
+        "catch-up backfill could not re-key heightless range [{from}..={to}] after \
+         {MAX_ATTEMPTS} attempts (RPC unreachable?); aborting the catch-up to retry"
+    )
+    .into())
+}
+
 pub async fn run_block_monitor(
     db: Arc<DB>,
     poll_interval_secs: u64,
@@ -1540,37 +1644,28 @@ pub async fn run_block_monitor(
         Ok(Ok(Err(e))) => {
             error!(error = %e, "RPC connection failed - ensure PIVX node is running with RPC enabled");
             metrics::set_rpc_connected(false);
-
-            // Just poll database for changes
-            loop {
-                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-            }
+            // Return (instead of parking in a no-op sleep loop) so the sync-thread retry
+            // loop (main.rs) re-drives the whole sync — re-detect, re-catch-up, reconnect —
+            // with backoff, and the tip self-heals once RPC recovers rather than freezing.
+            return Err(format!("RPC connection failed at monitor startup: {e}").into());
         }
         Ok(Err(e)) => {
             // spawn_blocking task panicked/was cancelled.
             error!(error = %e, "RPC connection task failed");
             metrics::set_rpc_connected(false);
-
-            // Just poll database for changes
-            loop {
-                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-            }
+            return Err(format!("RPC connection task failed at monitor startup: {e}").into());
         }
         Err(_) => {
             error!("RPC connection timed out");
             metrics::set_rpc_connected(false);
-
-            // Just poll database for changes
-            loop {
-                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-            }
+            return Err("RPC connection timed out at monitor startup".into());
         }
     };
 
     // One-shot crash recovery before any new work: repair r/s for a block that a
     // previous run died partway through applying (detected via a leftover 'P'
     // marker). Runs only when such a marker exists.
-    recover_crashed_blocks(&db, &rpc_client, &broadcaster).await;
+    recover_crashed_blocks(&db, &broadcaster).await;
 
     // Surface the live daily-analytics gate state at startup. It activates only
     // after a FULL enrich flips the ready gate; a degraded restart rebuild (zeroed
@@ -1859,14 +1954,7 @@ pub async fn run_block_monitor(
                 }
 
                 // Index this block with spent set available
-                match index_block_from_rpc(
-                    &rpc_client,
-                    block.height,
-                    &db,
-                    &broadcaster,
-                    Some(&spent_set),
-                )
-                .await
+                match index_block_from_rpc(block.height, &db, &broadcaster, Some(&spent_set)).await
                 {
                     Ok(_) => {
                         indexed += 1;
