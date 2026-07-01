@@ -147,3 +147,14 @@ ws_allowed_origins = ""
 
 # Web server worker threads (string).
 worker_threads = "4"
+
+[repair]
+# One-shot heal for historic "stuck heightless" transactions — confirmed txs whose
+# stored height was left at -1 by an earlier reorg/catch-up bug (now fixed forward),
+# so /tx and /address served them as unconfirmed. When true, on startup (before the
+# address enrichment) it re-resolves each affected block's canonical tx list from the
+# node via RPC and promotes the stuck records to their real height. Idempotent and
+# orphan-safe (it only rewrites txs the node reports as canonical for that height).
+# Set true for ONE run to heal an existing DB, then set back to false — while enabled
+# it does a full transactions-CF scan on every startup. Default: false.
+reresolve_heightless = false

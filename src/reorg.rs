@@ -257,8 +257,14 @@ async fn get_block_transactions(
         for item in iter {
             let (key, value) = item?;
 
-            // Key format: 'B' + height(4) + index(8)
-            if key.len() == 13 && key[0] == b'B' {
+            // Key format: 'B' + height(4) + index(8). The transactions CF uses a
+            // fixed_prefix(1) extractor (main.rs:534), so prefix_iterator_cf over-scans
+            // EVERY 'B' key past the seek — and LE heights are not numerically ordered,
+            // so those foreign keys belong to scattered other heights. Bound to THIS
+            // height's exact 5-byte prefix and break at the first non-match (the run is
+            // contiguous); otherwise disconnect_transaction would orphan-mark unrelated
+            // canonical txs on every reorg.
+            if key.len() == 13 && key[0] == b'B' && key[1..5] == height_bytes[..] {
                 // Value is the txid hex string
                 let txid_hex = String::from_utf8_lossy(&value).to_string();
 
@@ -271,6 +277,8 @@ async fn get_block_transactions(
                 if let Ok(txid_display) = hex::decode(&txid_hex) {
                     txids.push(txid_display);
                 }
+            } else {
+                break; // sorted keys: first non-match ends this height's contiguous run
             }
         }
 
@@ -430,6 +438,25 @@ fn delete_block_metadata(
             let mut h_internal = vec![b'h'];
             h_internal.extend_from_slice(&internal_hash);
             writer.delete("chain_metadata", h_internal);
+        }
+    }
+
+    // Delete the block-transaction index ('B' + height(4) + tx_index(8) -> txid).
+    // Reorg previously left these — so 'B' membership meant "was ever a tip" rather
+    // than "is canonical now", polluting block-detail (which reads 'B') and any
+    // height repair that trusts it. Remove them so 'B'+height reflects only the
+    // current canonical block (the replacement block re-writes its own on connect).
+    // Bounded to THIS height's exact 5-byte prefix — a delete must never over-scan.
+    if let Some(cf_transactions) = db.cf_handle("transactions") {
+        let mut prefix = vec![b'B'];
+        prefix.extend_from_slice(&height_key);
+        for item in db.prefix_iterator_cf(&cf_transactions, &prefix) {
+            let (key, _) = item?;
+            if key.len() == 13 && key[0] == b'B' && key[1..5] == height_key[..] {
+                writer.delete("transactions", key.to_vec());
+            } else {
+                break; // sorted keys: first non-match ends this height's range
+            }
         }
     }
 
@@ -714,5 +741,90 @@ mod tests {
             db.get_cf(&cf_tx, &tkey_internal).unwrap().is_none(),
             "no phantom orphan stub at the internal key",
         );
+    }
+
+    /// Reorg rollback must DELETE the disconnected block's 'B' (block-tx) index
+    /// entries, not just orphan-mark the tx records. Leaving them makes 'B'
+    /// membership mean "was ever a tip", not "is canonical now" — polluting
+    /// block-detail (which reads 'B') and any height repair that trusts it. Only
+    /// THIS height's entries may be removed; a neighbour's must survive.
+    #[tokio::test]
+    async fn delete_block_metadata_removes_b_index_for_height_only() {
+        use rocksdb::{Options, SliceTransform, DB};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        // Match production (main.rs:534): fixed_prefix(1) makes prefix_iterator_cf
+        // over-scan every 'B' key past the seek — so the neighbour survives ONLY if
+        // the height guard + break actually bound the delete.
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(1));
+        let db =
+            Arc::new(DB::open_cf(&opts, temp.path(), &["transactions", "chain_metadata"]).unwrap());
+        let cf = db.cf_handle("transactions").unwrap();
+
+        let height: i32 = 5000;
+        let bkey = |h: i32, idx: u64| {
+            let mut k = vec![b'B'];
+            k.extend(&h.to_le_bytes());
+            k.extend(&idx.to_le_bytes());
+            k
+        };
+        let (b0, b1, b2) = (bkey(height, 0), bkey(height, 1), bkey(height, 2));
+        let neighbour = bkey(height + 1, 0); // a different block's entry must survive
+        for k in [&b0, &b1, &b2, &neighbour] {
+            db.put_cf(&cf, k, b"deadbeefcafe").unwrap();
+        }
+
+        let mut writer = AtomicBatchWriter::new(db.clone(), 1000);
+        delete_block_metadata(&mut writer, &db, height).unwrap();
+        writer.flush().await.unwrap();
+
+        assert!(db.get_cf(&cf, &b0).unwrap().is_none(), "'B'+H+0 leaked");
+        assert!(db.get_cf(&cf, &b1).unwrap().is_none(), "'B'+H+1 leaked");
+        assert!(db.get_cf(&cf, &b2).unwrap().is_none(), "'B'+H+2 leaked");
+        assert!(
+            db.get_cf(&cf, &neighbour).unwrap().is_some(),
+            "neighbouring height's 'B' entry must NOT be deleted"
+        );
+    }
+
+    /// get_block_transactions(H) must return ONLY height H's txids. Under the
+    /// production fixed_prefix(1) extractor, prefix_iterator_cf over-scans every
+    /// 'B' key past the seek (LE heights are not numerically ordered), so without a
+    /// height guard it returns foreign heights' txids — which disconnect_transaction
+    /// would then orphan-mark, corrupting unrelated canonical blocks on every reorg.
+    #[tokio::test]
+    async fn get_block_transactions_does_not_overscan_other_heights() {
+        use rocksdb::{Options, SliceTransform, DB};
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(1));
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["transactions"]).unwrap());
+        let cf = db.cf_handle("transactions").unwrap();
+
+        // 5001's LE key ([0x89,0x13,..]) sorts AFTER 5000's ([0x88,0x13,..]), so a
+        // seek at 5000 over-scans into 5001.
+        let (target, foreign) = (5000i32, 5001i32);
+        let txid_target = "aa".repeat(32);
+        let txid_foreign = "bb".repeat(32);
+        let bput = |h: i32, hex_txid: &str| {
+            let mut k = vec![b'B'];
+            k.extend(&h.to_le_bytes());
+            k.extend(&0u64.to_le_bytes());
+            db.put_cf(&cf, &k, hex_txid.as_bytes()).unwrap();
+        };
+        bput(target, &txid_target);
+        bput(foreign, &txid_foreign);
+
+        let txids = get_block_transactions(&db, target).await.unwrap();
+        assert_eq!(txids.len(), 1, "must not over-scan into height {foreign}");
+        assert_eq!(hex::encode(&txids[0]), txid_target);
     }
 }
