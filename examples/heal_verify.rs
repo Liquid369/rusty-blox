@@ -22,7 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db_opts.create_if_missing(false);
     let mut cfds = vec![ColumnFamilyDescriptor::new("default", Options::default())];
     for name in rustyblox::COLUMN_FAMILIES {
-        cfds.push(ColumnFamilyDescriptor::new(name.to_string(), Options::default()));
+        cfds.push(ColumnFamilyDescriptor::new(
+            name.to_string(),
+            Options::default(),
+        ));
     }
     let db = Arc::new(DB::open_cf_descriptors(&db_opts, &db_path, cfds)?);
     let cf = db.cf_handle("transactions").unwrap();
@@ -53,7 +56,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let orig = db.get_cf(&cf, &key)?.unwrap();
     let orig_h = i32::from_le_bytes([orig[4], orig[5], orig[6], orig[7]]);
     println!("[1] original stored height = {orig_h}");
-    assert!(orig_h > 0, "need a canonical tx to inject into (got {orig_h})");
+    assert!(
+        orig_h > 0,
+        "need a canonical tx to inject into (got {orig_h})"
+    );
 
     // Inject the production stuck state: height -> -1.
     let mut broken = orig[0..4].to_vec();

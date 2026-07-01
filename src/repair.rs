@@ -388,15 +388,18 @@ pub async fn reresolve_heightless_blocks(
                 continue;
             }
         };
-        let block =
-            match crate::api::helpers::rpc_call_json("getblock", serde_json::json!([hash, 1])).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(height, error = %e, "getblock failed; skipping");
-                    continue;
-                }
-            };
+        let block = match crate::api::helpers::rpc_call_json(
+            "getblock",
+            serde_json::json!([hash, 1]),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(height, error = %e, "getblock failed; skipping");
+                continue;
+            }
+        };
         let txids: Vec<String> = block
             .get("tx")
             .and_then(|t| t.as_array())
@@ -473,7 +476,8 @@ mod tests {
     fn promotes_stuck_internal_keyed_tx() {
         let (_t, db) = seed_db();
         let cf = db.cf_handle("transactions").unwrap();
-        db.put_cf(&cf, tkey(TXA, true), rec(-1, &[0xde, 0xad])).unwrap();
+        db.put_cf(&cf, tkey(TXA, true), rec(-1, &[0xde, 0xad]))
+            .unwrap();
         let n = promote_block_txs_to_height(&db, 5_465_071, &[TXA.to_string()]).unwrap();
         assert_eq!(n, 1);
         assert_eq!(height_at(&db, &tkey(TXA, true)), 5_465_071);
@@ -495,7 +499,8 @@ mod tests {
     fn noop_when_already_correct() {
         let (_t, db) = seed_db();
         let cf = db.cf_handle("transactions").unwrap();
-        db.put_cf(&cf, tkey(TXA, true), rec(5_465_071, &[0x02])).unwrap();
+        db.put_cf(&cf, tkey(TXA, true), rec(5_465_071, &[0x02]))
+            .unwrap();
         let n = promote_block_txs_to_height(&db, 5_465_071, &[TXA.to_string()]).unwrap();
         assert_eq!(n, 0);
     }
@@ -534,7 +539,8 @@ mod tests {
         let (_t, db) = seed_db();
         let cf = db.cf_handle("transactions").unwrap();
         db.put_cf(&cf, tkey(TXA, true), rec(-1, &[0x01])).unwrap(); // stuck
-        db.put_cf(&cf, tkey(TXB, true), rec(5_000, &[0x02])).unwrap(); // canonical
+        db.put_cf(&cf, tkey(TXB, true), rec(5_000, &[0x02]))
+            .unwrap(); // canonical
         let bput = |h: i32, display_hex: &str| {
             let mut k = vec![b'B'];
             k.extend(&h.to_le_bytes());

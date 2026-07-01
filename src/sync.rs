@@ -887,11 +887,18 @@ async fn run_post_sync_enrichment(
     // canonical tx list from the node and promotes the stuck 't' records. Config-gated
     // (repair.reresolve_heightless); runs before the live monitor, only touches buried
     // historic heights, idempotent (already-correct heights are no-ops).
-    if config.get_bool("repair.reresolve_heightless").unwrap_or(false) {
+    if config
+        .get_bool("repair.reresolve_heightless")
+        .unwrap_or(false)
+    {
         info!("Re-resolving historic heightless transactions from the node (pre-enrich)");
         match repair::reresolve_heightless_blocks(db).await {
             Ok((blocks, txs)) => {
-                info!(blocks, txs_promoted = txs, "Heightless re-resolution complete")
+                info!(
+                    blocks,
+                    txs_promoted = txs,
+                    "Heightless re-resolution complete"
+                )
             }
             Err(e) => warn!(error = ?e, "Heightless re-resolution failed, continuing"),
         }
