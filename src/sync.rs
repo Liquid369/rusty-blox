@@ -572,84 +572,6 @@ async fn run_initial_sync_leveldb(
     Ok(final_height)
 }
 
-/// Run initial sync from .dat files (OLD METHOD - kept as fallback)
-async fn run_initial_sync(
-    blk_dir: PathBuf,
-    db: Arc<DB>,
-    state: AppState,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = get_global_config();
-    let max_concurrent = effective_parallel_files(config);
-
-    // Read all .dat files
-    let mut dir_entries = fs::read_dir(&blk_dir).await?;
-    let mut entries = Vec::new();
-
-    while let Ok(Some(entry)) = dir_entries.next_entry().await {
-        entries.push(entry.path());
-    }
-
-    // Process files in parallel
-    // bulk=true: this is the initial-sync fallback (from-scratch reindex).
-    // already_validated=false: this path writes NO canonical metadata first and
-    // relies on [F3]'s height_count==0 "assign dynamically" branch (Lever G).
-    process_files_parallel(
-        entries,
-        Arc::clone(&db),
-        state.clone(),
-        max_concurrent,
-        true,
-        false,
-    )
-    .await?;
-
-    // Find highest block height
-    let cf_metadata = db
-        .cf_handle("chain_metadata")
-        .ok_or("chain_metadata CF not found")?;
-
-    let mut height: i32 = 0;
-    loop {
-        let height_key = height.to_le_bytes().to_vec();
-        match db.get_cf(&cf_metadata, &height_key)? {
-            Some(_) => height += 1,
-            None => break,
-        }
-
-        // Safety limit
-        if height > 10_000_000 {
-            break;
-        }
-    }
-
-    let final_height = height - 1;
-
-    // DURABILITY: the bulk path ran WAL-disabled; flush memtables to disk before
-    // marking the DB synced so the imported state survives a later crash.
-    {
-        let db_flush = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || -> Result<(), String> {
-            for cf_name in ["blocks", "transactions", "chain_metadata"] {
-                if let Some(cf) = db_flush.cf_handle(cf_name) {
-                    db_flush
-                        .flush_cf(&cf)
-                        .map_err(|e| format!("{cf_name}: {e}"))?;
-                }
-            }
-            db_flush.flush().map_err(|e| e.to_string())?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?
-        .map_err(Box::<dyn std::error::Error>::from)?;
-    }
-
-    // Mark sync complete
-    set_sync_height(&db, final_height).await?;
-
-    Ok(())
-}
-
 /// Hand freed-but-retained jemalloc pages back to the OS.
 ///
 /// The block-parse and height-resolution phases allocate and free several GB of
@@ -1493,45 +1415,31 @@ pub async fn run_sync_service(
             info!("Sync stage: leveldb_import");
 
             // Try leveldb-based sync first (MUCH faster!)
-            let final_height = match run_initial_sync_leveldb(
-                blk_dir.clone(),
-                Arc::clone(&db),
-                state.clone(),
-            )
-            .await
-            {
-                Ok(height) => {
-                    info!(height = height, "LevelDB-based sync succeeded");
-                    height
-                }
-                Err(e) => {
-                    warn!(error = %e, "LevelDB sync failed - falling back to traditional blk file scan");
-
-                    metrics::set_pipeline_stage("current", 2); // Stage 2: Parallel blk file processing
-                    info!("Sync stage: parallel_processing (fallback)");
-
-                    // Fallback to traditional method
-                    run_initial_sync(blk_dir.clone(), Arc::clone(&db), state.clone()).await?;
-
-                    // Find final height
-                    let cf_metadata = db
-                        .cf_handle("chain_metadata")
-                        .ok_or("chain_metadata CF not found")?;
-
-                    let mut height: i32 = 0;
-                    loop {
-                        let key = height.to_le_bytes().to_vec();
-                        match db.get_cf(&cf_metadata, &key)? {
-                            Some(_) => height += 1,
-                            None => break,
-                        }
-                        if height > 10_000_000 {
-                            break;
-                        }
+            let final_height =
+                match run_initial_sync_leveldb(blk_dir.clone(), Arc::clone(&db), state.clone())
+                    .await
+                {
+                    Ok(height) => {
+                        info!(height = height, "LevelDB-based sync succeeded");
+                        height
                     }
-                    height - 1
-                }
-            };
+                    Err(e) => {
+                        // The blk-file-only fallback cannot assign transaction heights: without
+                        // leveldb, chain_metadata is never populated and resolve_heights has no
+                        // source, so it silently produced a height-less index (the 6.2M-tx
+                        // corruption). Fail loud instead of corrupting — leveldb is the required
+                        // height source and a failure here is almost always a fixable path/copy
+                        // issue.
+                        return Err(format!(
+                            "LevelDB block-index import failed: {e}. The blk-file-only fallback \
+                         cannot assign transaction heights and would produce a broken \
+                         (heightless) index, so it has been removed — refusing to proceed \
+                         rather than corrupt silently. Ensure PIVX Core's block index is \
+                         readable (paths.pivx_data_dir / paths.block_index_copy_dir) and retry."
+                        )
+                        .into());
+                    }
+                };
 
             metrics::set_indexed_height("block_index", final_height as i64);
             metrics::set_pipeline_stage("current", 3); // Stage 3: Post-sync enrichment
