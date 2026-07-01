@@ -158,3 +158,9 @@ worker_threads = "4"
 # Set true for ONE run to heal an existing DB, then set back to false — while enabled
 # it does a full transactions-CF scan on every startup. Default: false.
 reresolve_heightless = false
+
+# One-shot cleanup of malformed "phantom stub" 't'+txid records (< 8-byte values that
+# can't hold a real tx) which shadow the valid record at the other key order and make
+# /tx 404 a transaction that exists. Safe + idempotent. Set true for one run, then false.
+# Default: false.
+delete_stub_txs = false

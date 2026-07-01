@@ -44,6 +44,29 @@ pub async fn tx_v2(
     }
 }
 
+/// Read a transaction's stored record (`version(4) ++ height(4) ++ raw_tx`), preferring a
+/// VALID record over a malformed "phantom stub". A tx may be keyed INTERNAL (reversed
+/// display) or DISPLAY; a short (<8-byte) stub at one key must NOT shadow the real record
+/// at the other (that shadowing is the `/tx` 404 bug). Returns the first record with
+/// `len() >= 8`, or None.
+pub(crate) fn read_valid_tx_record(
+    db: &DB,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    display_txid_bytes: &[u8],
+) -> Option<Vec<u8>> {
+    let internal: Vec<u8> = display_txid_bytes.iter().rev().cloned().collect();
+    for txid in [internal.as_slice(), display_txid_bytes] {
+        let mut key = vec![b't'];
+        key.extend_from_slice(txid);
+        if let Ok(Some(d)) = db.get_cf(cf, &key) {
+            if d.len() >= 8 {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
 /// Build Transaction struct from raw DB data
 ///
 /// This is a public helper used by:
@@ -59,33 +82,17 @@ pub(crate) async fn build_transaction_from_db(
     let txid_clone = txid.to_string();
 
     tokio::task::spawn_blocking(move || {
-        // Transaction key: 't' + txid_bytes_reversed (internal format)
         let txid_bytes = hex::decode(&txid_clone)?;
-
-        // Try reversed format first (new/correct format)
-        let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-        let mut key = vec![b't'];
-        key.extend_from_slice(&txid_reversed);
 
         let cf_transactions = db_clone
             .cf_handle("transactions")
             .ok_or("transactions CF not found")?;
 
-        let data = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &key) {
-            d
-        } else {
-            // Fallback: try display format (old/incorrect format for migration)
-            let mut key_display = vec![b't'];
-            key_display.extend_from_slice(&txid_bytes);
-            db_clone
-                .get_cf(&cf_transactions, &key_display)?
-                .ok_or("Transaction not found")?
-        };
-
-        // Data format: block_version (4 bytes) + height (4 bytes) + raw_tx_bytes
-        if data.len() < 8 {
-            return Err("Invalid transaction data".into());
-        }
+        // Prefer a VALID record over a malformed "phantom stub": the record may be stored
+        // internal-keyed (reversed) or display-keyed, and a short (<8-byte) stub at one key
+        // must not shadow the real record at the other (otherwise /tx 404s a tx that exists).
+        let data = read_valid_tx_record(&db_clone, &cf_transactions, &txid_bytes)
+            .ok_or("Transaction not found")?;
 
         if data.len() > 10_000_000 {
             return Err("Transaction data too large".into());
@@ -504,4 +511,60 @@ pub(crate) async fn fetch_transactions_batch(db: &Arc<DB>, txids: &[String]) -> 
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocksdb::{Options, DB};
+
+    fn seed() -> (tempfile::TempDir, DB, Vec<u8>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = DB::open_cf(&opts, temp.path(), ["transactions"]).unwrap();
+        (temp, db, (0u8..32).collect())
+    }
+    fn put(db: &DB, txid: &[u8], val: &[u8]) {
+        let cf = db.cf_handle("transactions").unwrap();
+        let mut k = vec![b't'];
+        k.extend_from_slice(txid);
+        db.put_cf(&cf, &k, val).unwrap();
+    }
+
+    // A short stub at the internal key must NOT shadow the valid record at the display key.
+    #[test]
+    fn prefers_valid_display_over_internal_stub() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        put(&db, &internal, &[0u8, 1, 2]); // 3-byte stub
+        let valid = vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xAA, 0xBB];
+        put(&db, &display, &valid);
+        let cf = db.cf_handle("transactions").unwrap();
+        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+    }
+
+    // Valid at internal (the normal case) is returned; a display stub doesn't interfere.
+    #[test]
+    fn prefers_valid_internal() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        let valid = vec![1u8, 0, 0, 0, 9, 0, 0, 0, 0xCC];
+        put(&db, &internal, &valid);
+        put(&db, &display, &[0u8]); // 1-byte stub
+        let cf = db.cf_handle("transactions").unwrap();
+        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+    }
+
+    // Only stubs -> None (a genuine 404).
+    #[test]
+    fn none_when_only_stubs() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        put(&db, &internal, &[0u8, 1]);
+        put(&db, &display, &[0u8, 1, 2]);
+        let cf = db.cf_handle("transactions").unwrap();
+        assert_eq!(read_valid_tx_record(&db, &cf, &display), None);
+    }
 }

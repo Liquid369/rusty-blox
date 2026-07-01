@@ -826,6 +826,16 @@ async fn run_post_sync_enrichment(
         }
     }
 
+    // 0c. One-shot cleanup of malformed phantom-stub 't' records that shadow the real
+    // record at the other key order (the /tx 404). Config-gated (repair.delete_stub_txs);
+    // safe + idempotent (only removes < 8-byte 't'+txid entries, which carry no tx data).
+    if config.get_bool("repair.delete_stub_txs").unwrap_or(false) {
+        match repair::delete_stub_tx_records(db) {
+            Ok(n) => info!(deleted = n, "Phantom-stub tx cleanup complete"),
+            Err(e) => warn!(error = ?e, "Phantom-stub tx cleanup failed, continuing"),
+        }
+    }
+
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
         if use_chainstate {
