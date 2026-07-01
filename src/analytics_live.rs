@@ -1169,7 +1169,7 @@ mod tests {
         db.put_cf(&cf, b13(h_m, 0), hex::encode(d_m).as_bytes())
             .unwrap();
         // rebuild path: value = raw 32-byte display suffix (9-byte key)
-        db.put_cf(&cf, b9(h_r, 0), d_r.to_vec()).unwrap();
+        db.put_cf(&cf, b9(h_r, 0), d_r).unwrap();
 
         assert_eq!(
             block_tx_values(&db, &cf, h_p).unwrap(),

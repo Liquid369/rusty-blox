@@ -1344,7 +1344,8 @@ mod tests {
     fn retention_constants_are_consistent() {
         // K must cover the deepest reorg/lag we claim to handle exactly, + K_confirm.
         assert!(K_RETENTION >= EXPECTED_REORG_DEPTH.max(MAX_MONITOR_LAG) + K_CONFIRM);
-        assert!(MAX_BLK > MIN_BLK);
+        // Compile-time invariant (constants), so it can't silently regress.
+        const _: () = assert!(MAX_BLK > MIN_BLK);
     }
 
     // ---- 3b storage layer ----

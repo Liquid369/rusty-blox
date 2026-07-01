@@ -513,14 +513,3 @@ pub async fn resolve_heights_from_block_index(
 
     Ok((updated, newly_orphaned))
 }
-
-#[cfg(test)]
-mod tests {
-
-    #[tokio::test]
-    async fn test_resolve_heights() {
-        // This would require a test database
-        // For now, just ensure it compiles
-        assert!(true);
-    }
-}
