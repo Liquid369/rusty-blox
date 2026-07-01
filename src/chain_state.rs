@@ -70,6 +70,21 @@ pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::E
     })
 }
 
+/// A tip older than this (seconds) with a complete index means the monitor has
+/// stopped connecting blocks — a frozen tip (dead RPC / stalled sync). ~20 PIVX
+/// blocks at the 60s target. ponytail: tune to the chain's real block cadence.
+pub const STALE_TIP_THRESHOLD_SECS: i64 = 1200;
+
+/// Age of the indexed tip in seconds, or `None` when no staleness judgement can
+/// be made — the index is still building (so a slow initial sync isn't reported
+/// "stale") or no block time has been recorded yet. Clamped at 0 for clock skew.
+pub fn tip_age_seconds(last_block_time: i64, now: i64, index_complete: bool) -> Option<i64> {
+    if !index_complete || last_block_time <= 0 {
+        return None;
+    }
+    Some((now - last_block_time).max(0))
+}
+
 /// Update network height (from RPC)
 pub fn set_network_height(db: &Arc<DB>, height: i32) -> Result<(), Box<dyn std::error::Error>> {
     let cf_state = db
@@ -179,6 +194,23 @@ mod tests {
         let cf = db.cf_handle("chain_state").unwrap();
         db.put_cf(&cf, ADDR_INDEX_VERSION_KEY, v.to_le_bytes())
             .unwrap();
+    }
+
+    /// Tip-staleness gating: a still-building index or an unrecorded block time
+    /// yields no judgement (None) so a syncing node isn't reported "stale"; once
+    /// complete, age is now - tip_time, clamped at 0 for clock skew.
+    #[test]
+    fn tip_age_seconds_gates_and_clamps() {
+        // Index not complete yet → no staleness judgement.
+        assert_eq!(tip_age_seconds(1_000, 9_999, false), None);
+        // Complete but no block time recorded → None.
+        assert_eq!(tip_age_seconds(0, 9_999, true), None);
+        // Complete + recorded + caught up → small positive age.
+        assert_eq!(tip_age_seconds(1_000, 1_050, true), Some(50));
+        // Complete + frozen tip → large age (the stale case).
+        assert_eq!(tip_age_seconds(1_000, 5_000, true), Some(4_000));
+        // Clock skew (tip time ahead of now) → clamped to 0, not negative.
+        assert_eq!(tip_age_seconds(9_000, 1_000, true), Some(0));
     }
 
     /// MS-1: the API 503-gate decision matrix. addr_index_ready is true ONLY when the

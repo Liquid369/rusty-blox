@@ -1306,8 +1306,15 @@ async fn index_block_from_rpc(
     height_hash_key.extend(&height.to_le_bytes());
     db.put_cf(&cf_state, &height_hash_key, block_hash.as_bytes())?;
 
+    // Persist the tip block header time so /health can detect a frozen tip
+    // (now - tip_block_time) even across restarts and when network_height also
+    // froze because the same dead RPC stopped updating it.
+    db.put_cf(&cf_state, b"tip_block_time", (time as i64).to_le_bytes())?;
+
     // Update indexed height metric
     metrics::set_indexed_height("rpc_monitor", height as i64);
+    // Block header timestamp — lets an alert detect a frozen tip (now - ts > N).
+    metrics::set_last_block_timestamp(time as i64);
 
     // Processing marker will be cleaned up automatically by the guard's Drop impl
 
@@ -1759,6 +1766,9 @@ pub async fn run_block_monitor(
                     "RPC chain tip detected"
                 );
                 metrics::set_chain_tip_height("rpc", tip.height as i64);
+                // A successful poll clears a prior transient-failure state; without
+                // this, rpc_connected latches to 0 forever after the first blip.
+                metrics::set_rpc_connected(true);
                 tip
             }
             Err(e) => {

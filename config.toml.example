@@ -137,8 +137,12 @@ user = "your_rpc_username"
 pass = "your_secure_rpc_password"
 
 [server]
-# Web server bind address (0.0.0.0 = all interfaces, 127.0.0.1 = localhost only).
-host = "0.0.0.0"
+# Web server bind address. Default 127.0.0.1 = localhost only: the shipped
+# ops/nginx-rustyblox.conf reverse-proxies to 127.0.0.1:3005 and every edge control
+# (rate limits, method allow-list, /metrics + /cache/stats blocking) assumes the
+# backend is NOT directly reachable. Use 0.0.0.0 only if the host firewall blocks
+# this port and you intend to expose it (e.g. containerized without a proxy).
+host = "127.0.0.1"
 port = 3005
 
 # Allowed WebSocket origins, comma-separated (e.g. "https://explorer.example.com").

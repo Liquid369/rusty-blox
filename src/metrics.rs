@@ -622,6 +622,12 @@ pub fn set_rpc_connected(connected: bool) {
     RPC_CONNECTED.set(if connected { 1 } else { 0 });
 }
 
+/// Set the Unix timestamp (seconds) of the most recently indexed block.
+/// Source for the "no block in N minutes" staleness alert.
+pub fn set_last_block_timestamp(ts: i64) {
+    LAST_BLOCK_TIMESTAMP.set(ts);
+}
+
 // ============================================================================
 // NEW METRICS HELPERS - For the 4 missing metrics
 // ============================================================================
