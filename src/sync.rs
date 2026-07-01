@@ -881,6 +881,29 @@ async fn run_post_sync_enrichment(
         purge_jemalloc();
     }
 
+    // 0b. One-shot heal for historic stuck heightless (-1/-2) transactions, run BEFORE the
+    // address enrichment below so a single pass rebuilds the addr_index from the CORRECTED
+    // heights (/tx, /address, /utxo heal together). Re-resolves each affected block's
+    // canonical tx list from the node and promotes the stuck 't' records. Config-gated
+    // (repair.reresolve_heightless); runs before the live monitor, only touches buried
+    // historic heights, idempotent (already-correct heights are no-ops).
+    if config
+        .get_bool("repair.reresolve_heightless")
+        .unwrap_or(false)
+    {
+        info!("Re-resolving historic heightless transactions from the node (pre-enrich)");
+        match repair::reresolve_heightless_blocks(db).await {
+            Ok((blocks, txs)) => {
+                info!(
+                    blocks,
+                    txs_promoted = txs,
+                    "Heightless re-resolution complete"
+                )
+            }
+            Err(e) => warn!(error = ?e, "Heightless re-resolution failed, continuing"),
+        }
+    }
+
     // 1. Address enrichment (if fast_sync was used and not already done)
     if fast_sync && enrich_addresses && !address_index_complete {
         if use_chainstate {
