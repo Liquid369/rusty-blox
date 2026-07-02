@@ -234,7 +234,7 @@ const sankeyOption = computed(() => {
             <dd><Copyable v-if="sapling.binding_sig" :value="sapling.binding_sig">{{ truncateHash(sapling.binding_sig, 18, 14) }}</Copyable><span v-else class="dim">—</span></dd>
           </dl>
           <div class="split s-2" style="margin-top: var(--space-4)">
-            <div v-if="sapling.spends && sapling.spends.length">
+            <div v-if="sapling.spends && sapling.spends.length" style="overflow-x:auto">
               <div class="mono dim" style="margin-bottom:6px">SHIELDED SPENDS · {{ sapling.spends.length }} · click a value to copy</div>
               <table class="dtable">
                 <thead><tr><th>Nullifier</th><th>Anchor</th><th>Value commitment</th></tr></thead>
@@ -247,7 +247,7 @@ const sankeyOption = computed(() => {
                 </tbody>
               </table>
             </div>
-            <div v-if="sapling.outputs && sapling.outputs.length">
+            <div v-if="sapling.outputs && sapling.outputs.length" style="overflow-x:auto">
               <div class="mono dim" style="margin-bottom:6px">SHIELDED OUTPUTS · {{ sapling.outputs.length }} · click a value to copy</div>
               <table class="dtable">
                 <thead><tr><th>Commitment</th><th>Ephemeral key</th><th>Value commitment</th></tr></thead>

@@ -156,7 +156,8 @@ defineExpose({ show })
 .cmd-prompt { color: var(--neon); font-family: var(--font-mono); font-weight: 700; text-shadow: var(--glow-xs); }
 /* outline removed (not stripped to nothing): :focus-within frame above +
    the global :focus-visible cyan ring provide the visible focus state. */
-.cmd-input { flex: 1; background: transparent; border: none; color: var(--text); font-size: 16px; }
+/* min-width:0 lets the input shrink so the type badge + ESC never clip on narrow screens */
+.cmd-input { flex: 1; min-width: 0; background: transparent; border: none; color: var(--text); font-size: 16px; }
 .cmd-input::placeholder { color: var(--text-dim); }
 .cmd-kbd { font-family: var(--font-mono); font-size: 9.5px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--hud-line); color: var(--text-dim); background: var(--glass-2); }
 .cmd-list { list-style: none; margin: 0; padding: 8px; max-height: 46vh; overflow: auto; }
