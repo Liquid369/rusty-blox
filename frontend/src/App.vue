@@ -240,5 +240,18 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectL
   .hide-sm { display: none; }
   .brand-txt small { display: none; }
   .cmdbar-ph { display: none; }
+  /* the heartbeat glyph is decorative and 96px wide — drop it so SYNC/TIP fit */
+  .heartbeat { display: none; }
+  .topbar { gap: var(--space-3); padding: 0 var(--space-4); }
+  .cmdbar { flex: 0 1 auto; padding: 9px 11px; }
+  .cmdbar kbd { display: none; }   /* no ⌘ key on mobile; frees space so TIP fits */
+  .telem { gap: var(--space-3); }
+  /* nav rail: scroll the tabs horizontally instead of overflowing the page */
+  .navrail { overflow-x: auto; scrollbar-width: none; padding: 0 var(--space-4); }
+  .navrail::-webkit-scrollbar { display: none; }
+  .tab { flex: none; padding: 0 13px; }
+  .navrail-fill, .navrail-id { display: none; }
+  /* tighter page gutters on phones */
+  .viewport { padding: var(--space-4) var(--space-4) var(--space-6); }
 }
 </style>

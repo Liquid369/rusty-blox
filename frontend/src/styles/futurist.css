@@ -258,9 +258,15 @@ body {
 .section-title::before { content: ""; width: 14px; height: 1px; background: var(--neon); box-shadow: var(--glow-xs); }
 .section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--hud-line), transparent); }
 
-.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+.stack { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 .split { display: grid; gap: var(--space-4); }
-@media (min-width: 900px) { .split.s-2 { grid-template-columns: 1fr 1fr; } .split.s-37 { grid-template-columns: 0.72fr 1fr; } .split.s-21 { grid-template-columns: 2fr 1fr; } }
+/* grid/flex items default to min-width:auto, so a wide child (an echarts canvas)
+   forces the track past the container — a horizontal-scroll bug that bites the
+   near-square Galaxy Fold viewport. Let split items shrink to their track. */
+.split > * { min-width: 0; }
+/* Two-column splits from 760px so the Fold's ~840px near-square inner screen
+   (and tablets) use the width instead of staying single-column until 900px. */
+@media (min-width: 760px) { .split.s-2 { grid-template-columns: 1fr 1fr; } .split.s-37 { grid-template-columns: 0.72fr 1fr; } .split.s-21 { grid-template-columns: 2fr 1fr; } }
 
 /* banners */
 .banner { padding: var(--space-4); border-radius: var(--radius-md); border: 1px solid var(--border-strong); font-family: var(--font-mono); font-size: 12.5px; }

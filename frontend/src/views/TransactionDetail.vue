@@ -13,6 +13,7 @@ import { isCoinstakeTx, isUnresolvedColdVin, coinstakeInputAddresses, coinstakeI
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
+import Copyable from '../components/Copyable.vue'
 
 const props = defineProps({ txid: { type: String, required: true } })
 const tx = ref(null)
@@ -111,6 +112,17 @@ const sankeyOption = computed(() => {
     if (v > 0) links.push({ source: TXC, target: node(`out:${addr}`, 'out'), value: v })
   })
 
+  // Sapling: draw the net value crossing the shielded-pool boundary as its own
+  // node. value_balance (PIV, signed): < 0 shielding (TX -> pool), > 0
+  // deshielding (pool -> TX); 0 (pure z->z) has no transparent flow to show.
+  const vb = t.sapling ? Number(t.sapling.value_balance) : 0
+  if (vb) {
+    const POOL = '◈ SHIELDED'
+    nodes.push({ name: POOL, itemStyle: { color: '#8f5cff' }, label: { color: '#c9a6ff', fontWeight: 700 } })
+    if (vb < 0) links.push({ source: TXC, target: POOL, value: Math.abs(vb) })
+    else links.push({ source: POOL, target: TXC, value: vb })
+  }
+
   return {
     backgroundColor: 'transparent',
     tooltip: { ...baseOption(p).tooltip, trigger: 'item', formatter: (d) => d.dataType === 'edge' ? `${d.value.toFixed(4)} PIV` : d.name.replace(/^(in|out):/, '') },
@@ -155,7 +167,7 @@ const sankeyOption = computed(() => {
       </div>
 
       <h2 class="section-title">Value flow</h2>
-      <HudPanel title="VIN → VOUT VALUE-FLOW" id="sankey · satoshi → PIV" hero>
+      <HudPanel title="VIN → VOUT VALUE-FLOW" :id="isShielded ? 'transparent + shielded pool' : 'sankey · satoshi → PIV'" hero>
         <template #head><span class="pill cyan mono">{{ tx.vin.length }} in</span><span class="pill neon mono">{{ tx.vout.length }} out</span></template>
         <EChart :option="sankeyOption" height="300px" aria-label="Transaction value flow from inputs to outputs" />
       </HudPanel>
@@ -218,38 +230,39 @@ const sankeyOption = computed(() => {
             <Stat k="SHIELDED OUTPUTS"><template #v>{{ formatCount(sapling.shielded_output_count) }}</template><template #s>notes created</template></Stat>
           </div>
           <dl class="kv" style="margin-top: var(--space-4)">
-            <dt>Binding signature</dt><dd class="mono">{{ sapling.binding_sig ? truncateHash(sapling.binding_sig, 18, 14) : '—' }}</dd>
+            <dt>Binding signature</dt>
+            <dd><Copyable v-if="sapling.binding_sig" :value="sapling.binding_sig">{{ truncateHash(sapling.binding_sig, 18, 14) }}</Copyable><span v-else class="dim">—</span></dd>
           </dl>
           <div class="split s-2" style="margin-top: var(--space-4)">
-            <div v-if="sapling.spends && sapling.spends.length">
-              <div class="mono dim" style="margin-bottom:6px">SHIELDED SPENDS · {{ sapling.spends.length }}</div>
+            <div v-if="sapling.spends && sapling.spends.length" style="overflow-x:auto">
+              <div class="mono dim" style="margin-bottom:6px">SHIELDED SPENDS · {{ sapling.spends.length }} · click a value to copy</div>
               <table class="dtable">
-                <thead><tr><th>#</th><th>Nullifier</th><th>Anchor</th></tr></thead>
+                <thead><tr><th>Nullifier</th><th>Anchor</th><th>Value commitment</th></tr></thead>
                 <tbody>
                   <tr v-for="(s, i) in sapling.spends" :key="i">
-                    <td class="dim">{{ i }}</td>
-                    <td class="mono">{{ truncateHash(s.nullifier, 8, 6) }}</td>
-                    <td class="mono">{{ truncateHash(s.anchor, 8, 6) }}</td>
+                    <td><Copyable :value="s.nullifier">{{ truncateHash(s.nullifier, 8, 6) }}</Copyable></td>
+                    <td><Copyable :value="s.anchor">{{ truncateHash(s.anchor, 8, 6) }}</Copyable></td>
+                    <td><Copyable :value="s.cv">{{ truncateHash(s.cv, 8, 6) }}</Copyable></td>
                   </tr>
                 </tbody>
               </table>
             </div>
-            <div v-if="sapling.outputs && sapling.outputs.length">
-              <div class="mono dim" style="margin-bottom:6px">SHIELDED OUTPUTS · {{ sapling.outputs.length }}</div>
+            <div v-if="sapling.outputs && sapling.outputs.length" style="overflow-x:auto">
+              <div class="mono dim" style="margin-bottom:6px">SHIELDED OUTPUTS · {{ sapling.outputs.length }} · click a value to copy</div>
               <table class="dtable">
-                <thead><tr><th>#</th><th>Commitment</th><th>Ephemeral key</th></tr></thead>
+                <thead><tr><th>Commitment</th><th>Ephemeral key</th><th>Value commitment</th></tr></thead>
                 <tbody>
                   <tr v-for="(o, i) in sapling.outputs" :key="i">
-                    <td class="dim">{{ i }}</td>
-                    <td class="mono">{{ truncateHash(o.cmu, 8, 6) }}</td>
-                    <td class="mono">{{ truncateHash(o.ephemeral_key, 8, 6) }}</td>
+                    <td><Copyable :value="o.cmu">{{ truncateHash(o.cmu, 8, 6) }}</Copyable></td>
+                    <td><Copyable :value="o.ephemeral_key">{{ truncateHash(o.ephemeral_key, 8, 6) }}</Copyable></td>
+                    <td><Copyable :value="o.cv">{{ truncateHash(o.cv, 8, 6) }}</Copyable></td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
           <p class="dim" style="margin-top:var(--space-3);font-size:12px">
-            Shielded addresses and amounts are private by design — only the public commitments, nullifiers, and the net transparent value balance are visible on-chain.
+            Shielded addresses and amounts are private by design — only the public commitments, nullifiers, and the net transparent value balance are visible on-chain. Click any value to copy the full hex.
           </p>
         </HudPanel>
       </template>

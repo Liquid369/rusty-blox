@@ -22,20 +22,37 @@ let chart = null
 const reduceMotion = () =>
   window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
+let ro = null
+let raf = 0
+
 function render() {
   if (!chart || !props.option) return
   const opt = reduceMotion() ? { ...props.option, animation: false } : props.option
   chart.setOption(opt, true)
 }
-function resize() { chart && chart.resize() }
+// rAF-throttled: observe the CONTAINER (not just window) so the canvas tracks any
+// width change — breakpoint reflow, a sidebar toggle, or a Fold device folding/
+// unfolding. window.resize alone left the canvas stale and overflowing.
+function resize() {
+  if (!chart) return
+  cancelAnimationFrame(raf)
+  raf = requestAnimationFrame(() => chart && chart.resize())
+}
 
 onMounted(() => {
   chart = echarts.init(el.value, null, { renderer: 'canvas' })
   render()
-  window.addEventListener('resize', resize)
+  if (window.ResizeObserver) {
+    ro = new ResizeObserver(resize)
+    ro.observe(el.value)
+  } else {
+    window.addEventListener('resize', resize)
+  }
 })
 onBeforeUnmount(() => {
-  window.removeEventListener('resize', resize)
+  cancelAnimationFrame(raf)
+  if (ro) ro.disconnect()
+  else window.removeEventListener('resize', resize)
   chart && chart.dispose()
   chart = null
 })
@@ -43,5 +60,5 @@ watch(() => props.option, render, { deep: true })
 </script>
 
 <template>
-  <div ref="el" role="img" :aria-label="ariaLabel" :style="{ width: '100%', height }"></div>
+  <div ref="el" role="img" :aria-label="ariaLabel" :style="{ width: '100%', minWidth: 0, height }"></div>
 </template>
