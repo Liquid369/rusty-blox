@@ -44,7 +44,12 @@ onBeforeUnmount(() => { clearInterval(clk); clearInterval(poll) })
 // chronological order for L->R axes
 const chrono = computed(() => [...blocks.value].reverse())
 const newest = computed(() => blocks.value[0] || null)
-const sinceLast = computed(() => newest.value ? Math.max(0, now.value - newest.value.time) : 0)
+// Prefer the live WS block time (no /block-stats cache lag); fall back to the
+// newest polled block until the first WS event arrives.
+const sinceLast = computed(() => {
+  const t = chain.lastBlockAt || newest.value?.time || 0
+  return t ? Math.max(0, now.value - t) : 0
+})
 
 // derived block intervals (consecutive time deltas; ~60s PoS target)
 const intervals = computed(() => {

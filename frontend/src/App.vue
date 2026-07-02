@@ -46,13 +46,14 @@ function skipToMain() {
 onMounted(() => {
   chain.refresh()
   chain.refreshHealth()
+  chain.connectLive() // live tip + "since last block" via /ws/blocks (no cache lag)
   tick()
   t = setInterval(tick, 1000)
-  // Keep the tip/sync telemetry live instead of frozen at page-load (status
-  // caches 5s server-side).
+  // Fallback poll for sync% / network height (and if the WS drops); status
+  // caches 5s server-side.
   poll = setInterval(() => chain.refresh(), 15000)
 })
-onBeforeUnmount(() => { clearInterval(t); clearInterval(poll) })
+onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectLive() })
 </script>
 
 <template>
