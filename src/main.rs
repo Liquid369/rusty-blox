@@ -287,7 +287,7 @@ async fn start_web_server(
     // every built bundle 404'd its own JS/CSS when hit directly on this port.
     let frontend_dist = config
         .get_string("paths.frontend_dist")
-        .unwrap_or_else(|_| "frontend-legacy/dist".to_string());
+        .unwrap_or_else(|_| "frontend/dist".to_string());
     let app = if std::path::Path::new(&frontend_dist)
         .join("index.html")
         .exists()

@@ -1,0 +1,22 @@
+{
+  "name": "rusty-blox-foundation",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Neutral, data-wired base for the rusty-blox explorer redesign competition. Fork + reskin; keep the data wiring + money formatting.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "echarts": "^5.4.3",
+    "pinia": "^2.1.7",
+    "vue": "^3.4.15",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.7",
+    "vite": "^8.0.10"
+  }
+}
