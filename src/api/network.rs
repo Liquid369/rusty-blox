@@ -55,6 +55,12 @@ pub struct HealthStatus {
     pub valid_transactions: u64,
     pub orphaned_transactions: u64,
     pub indexed_addresses: u64,
+    /// Unix time (s) of the most recently indexed block; 0 if none recorded yet.
+    pub last_block_time: i64,
+    /// Age of the indexed tip in seconds. `None` while the index is still
+    /// building; otherwise `now - last_block_time`. An uptime checker can alert
+    /// on this directly (a frozen tip grows unbounded even when `synced` reads true).
+    pub tip_age_seconds: Option<i64>,
     pub warnings: Vec<String>,
 }
 
@@ -115,6 +121,31 @@ pub async fn health_check_v2(
             warnings.push("Address index is empty but many transactions exist. Run rebuild_address_index.".to_string());
         }
 
+        // Frozen-tip detection. When RPC dies mid-loop the monitor stops
+        // connecting blocks AND stops advancing network_height, so `synced` still
+        // reads true — the only honest signal is that the last indexed block's
+        // header time stops moving. Only judged once the index is complete.
+        let last_block_time = db
+            .get_cf(state_cf, b"tip_block_time")?
+            .filter(|b| b.len() >= 8)
+            .map(|b| i64::from_le_bytes(b[0..8].try_into().unwrap_or([0u8; 8])))
+            .unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let tip_age_seconds =
+            crate::chain_state::tip_age_seconds(last_block_time, now, address_index_complete);
+        // Option<i64> is Copy, so filtering here doesn't consume the field below.
+        if let Some(age) =
+            tip_age_seconds.filter(|a| *a > crate::chain_state::STALE_TIP_THRESHOLD_SECS)
+        {
+            warnings.push(format!(
+                "No new block indexed in {age}s (~{} min); tip may be frozen — check pivxd RPC.",
+                age / 60
+            ));
+        }
+
         let status = if warnings.is_empty() { "healthy" } else { "degraded" };
 
         Ok(HealthStatus {
@@ -127,6 +158,8 @@ pub async fn health_check_v2(
             valid_transactions: total_txs,
             orphaned_transactions: 0,
             indexed_addresses,
+            last_block_time,
+            tip_age_seconds,
             warnings,
         })
     }).await;

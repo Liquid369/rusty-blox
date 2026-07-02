@@ -4,7 +4,7 @@
 // Tests derivation, gap limit logic, validation, and error handling.
 
 #[cfg(test)]
-mod xpub_tests {
+mod tests {
 
     /// Test that xpub parsing works for valid PIVX mainnet xpubs
     #[test]
@@ -21,9 +21,9 @@ mod xpub_tests {
         assert!(parsed.is_ok(), "Valid xpub should parse successfully");
 
         let xpub_key = parsed.unwrap();
-        // This particular xpub happens to be at depth 4, but we're just testing parsing
-        // In production, we validate depth separately
-        assert!(xpub_key.depth >= 0, "Parsed xpub should have valid depth");
+        // This account-level xpub parses at depth 3 (u8 depth is always >= 0, so
+        // assert the real value instead of a vacuous bound).
+        assert_eq!(xpub_key.depth, 3, "expected this xpub to parse at depth 3");
     }
 
     /// Test that invalid xpub format is rejected

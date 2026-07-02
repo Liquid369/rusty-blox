@@ -22,10 +22,15 @@ use crate::parser::{deserialize_transaction, deserialize_transaction_blocking};
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
 pub(crate) fn redact_xpub(xpub: &str) -> String {
-    if xpub.len() <= 12 {
+    // Char-indexed, not byte-indexed: this runs on attacker-controlled input
+    // (the invalid-xpub branch), so a multi-byte UTF-8 char must not panic.
+    let chars: Vec<char> = xpub.chars().collect();
+    if chars.len() <= 12 {
         return "<invalid>".to_string();
     }
-    format!("{}...{}", &xpub[..8], &xpub[xpub.len() - 4..])
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}...{tail}")
 }
 
 /// P2-B: validate a PIVX transparent address before treating it as a real
@@ -1153,7 +1158,26 @@ async fn compute_utxos(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_address, is_valid_xpub};
+    use super::{is_valid_address, is_valid_xpub, redact_xpub};
+
+    /// P2: `redact_xpub` is called on the invalid-xpub branch with fully
+    /// attacker-controlled input, so it must never panic. The old code
+    /// byte-sliced `&xpub[..8]` guarded only by byte-length, which panicked when
+    /// byte 8 (or len-4) fell inside a multi-byte UTF-8 char.
+    #[test]
+    fn redact_xpub_never_panics_on_multibyte() {
+        // 13 multi-byte chars (39 bytes). Old `&xpub[..8]` split the 3rd char.
+        let long = "中".repeat(13);
+        assert_eq!(
+            redact_xpub(&long),
+            format!("{}...{}", "中".repeat(8), "中".repeat(4))
+        );
+        // 7 chars but 13 bytes: passes the old byte-length guard (>12) and
+        // panicked; char-length (7 <= 12) correctly reports "<invalid>".
+        assert_eq!(redact_xpub("xpub中中中"), "<invalid>");
+        // ASCII behavior is unchanged (char count == byte count).
+        assert_eq!(redact_xpub("xpub661MyMwAqRbc"), "xpub661M...qRbc");
+    }
 
     /// P2-B: every real PIVX transparent address class must pass validation.
     /// Asymmetric risk — a validator that rejects a VALID address is worse than

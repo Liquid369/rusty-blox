@@ -128,14 +128,3 @@ pub async fn check_address_undo_coverage(
 
     Ok((blocks_with_undo, total_blocks))
 }
-
-#[cfg(test)]
-mod tests {
-
-    #[tokio::test]
-    async fn test_coverage_check() {
-        // This is a placeholder test - requires actual database
-        // In practice, would test with temp database
-        assert!(true);
-    }
-}

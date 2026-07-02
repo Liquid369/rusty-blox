@@ -2909,10 +2909,10 @@ mod tests {
             ..base_inputs()
         };
         let c = compute_tx_join(&inp, "2024-01-01");
-        assert_eq!(c.fees_total, 1 * COIN);
+        assert_eq!(c.fees_total, COIN);
         assert_eq!(c.normal_tx_bytes, 300 - 8);
         assert_eq!(c.rewards_total, 0);
-        assert_eq!(c.treasury.is_none(), true);
+        assert!(c.treasury.is_none());
     }
 
     /// Mixed resolved+unresolved inputs -> fee SUPPRESSED, but coin_days / p2cs /

@@ -62,6 +62,26 @@ lazy_static::lazy_static! {
         .expect("failed to build RPC HTTP client");
 }
 
+/// Flatten a reqwest transport error to a client-safe message. reqwest's Display
+/// embeds the target URL, which would leak the internal RPC host:port to anonymous
+/// callers (e.g. /sendtx echoes this error verbatim). Node *rejection* reasons do
+/// NOT pass through here — they're parsed from the JSON body and forwarded intact.
+fn rpc_transport_error(e: reqwest::Error) -> Box<dyn std::error::Error + Send + Sync> {
+    // Full detail (incl. URL) to the operator log only; a fixed, URL-free string
+    // to the caller. Never interpolate `e` into the returned message — its Display
+    // carries the URL.
+    tracing::debug!(error = %e, "RPC transport error (sanitized for client)");
+    if e.is_timeout() {
+        "node RPC request timed out".into()
+    } else if e.is_connect() {
+        "node RPC connection failed".into()
+    } else if e.is_decode() {
+        "node RPC returned an unreadable response".into()
+    } else {
+        "node RPC request failed".into()
+    }
+}
+
 /// Async JSON-RPC call to the PIVX node.
 ///
 /// Replaces the previous per-endpoint synchronous `TcpStream` implementations,
@@ -101,8 +121,9 @@ pub async fn rpc_call_json(
         .basic_auth(&rpc_user, Some(&rpc_pass))
         .json(&body)
         .send()
-        .await?;
-    let value: serde_json::Value = resp.json().await?;
+        .await
+        .map_err(rpc_transport_error)?;
+    let value: serde_json::Value = resp.json().await.map_err(rpc_transport_error)?;
     if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
         return Err(format!("RPC error: {err}").into());
     }
@@ -145,5 +166,22 @@ mod tests {
         assert_eq!(format_piv_amount(123_456_789), "1.23456789");
         assert_eq!(format_piv_amount(-100_000_000), "-1.00000000");
         assert_eq!(format_piv_amount(-50_000_000), "-0.50000000");
+    }
+
+    /// P3: /sendtx echoes rpc_call_json's error verbatim. A transport failure
+    /// must not leak the internal RPC URL (host:port + path) to anonymous callers.
+    #[tokio::test]
+    async fn rpc_transport_error_does_not_leak_url() {
+        // Connection refused to port 1 yields a reqwest error whose Display
+        // includes the URL; the sanitizer must strip it.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/internal-rpc-path")
+            .send()
+            .await
+            .expect_err("connect to port 1 must fail");
+        let msg = rpc_transport_error(err).to_string();
+        assert!(!msg.contains("127.0.0.1"), "leaked host: {msg}");
+        assert!(!msg.contains("internal-rpc-path"), "leaked path: {msg}");
+        assert!(!msg.contains("://"), "leaked URL: {msg}");
     }
 }

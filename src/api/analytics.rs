@@ -535,6 +535,12 @@ pub async fn network_health_analytics(
     Query(params): Query<TimeRangeQuery>,
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<NetworkHealthDataPoint>>, StatusCode> {
+    // See rich_list: until the index is ready the precomputed daily series is
+    // absent and the fallback loops millions of per-block lookups per request —
+    // 503 during the sync/enrich window instead.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let db_clone = db.clone();
     let range = params.range.clone();
 
@@ -561,6 +567,12 @@ pub async fn rich_list(
     Query(params): Query<RichListQuery>,
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<RichListEntry>>, StatusCode> {
+    // Reindexing: the precomputed snapshot isn't built and the live fallback is a
+    // full addr_index scan — 503 like the data endpoints, so anonymous requests
+    // can't amplify into whole-CF scans during the sync/enrich window.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let db_clone = db.clone();
     let limit = params.limit.clamp(1, 1000);
 
@@ -646,6 +658,11 @@ fn shape_rich_list(
 pub async fn wealth_distribution(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<WealthDistribution>, StatusCode> {
+    // See rich_list: 503 while (re)building rather than running the whole-index
+    // fallback scan on anonymous requests.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let db_clone = db.clone();
 
     let result = tokio::task::spawn_blocking(

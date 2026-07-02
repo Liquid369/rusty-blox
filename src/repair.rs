@@ -431,6 +431,37 @@ pub async fn reresolve_heightless_blocks(
     Ok((processed, total_promoted))
 }
 
+/// Delete malformed "phantom stub" transaction records: `'t' + txid(32)` entries whose
+/// value is too short (< 8 bytes) to hold `version(4) + height(4)`. They can't be a real
+/// transaction and only serve to SHADOW the valid record at the other key order (the `/tx`
+/// 404 bug). Deleting them is safe — a `< 8`-byte value carries no recoverable tx data.
+/// Returns the count deleted. Idempotent.
+pub fn delete_stub_tx_records(db: &Arc<DB>) -> Result<usize, Box<dyn std::error::Error>> {
+    let cf = db
+        .cf_handle("transactions")
+        .ok_or("transactions CF not found")?;
+    let mut batch = WriteBatch::default();
+    let mut deleted = 0usize;
+    for item in db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+        let (key, value) = item?;
+        // 't' + txid(32) == 33-byte key; a real record is version(4)+height(4)+raw_tx (>= 8).
+        if key.first() == Some(&b't') && key.len() == 33 && value.len() < 8 {
+            batch.delete_cf(&cf, &key);
+            deleted += 1;
+        }
+    }
+    if !batch.is_empty() {
+        db.write(batch)?;
+    }
+    if deleted > 0 {
+        info!(
+            deleted,
+            "Deleted malformed phantom-stub transaction records"
+        );
+    }
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +600,34 @@ mod tests {
 
         let heights = nominate_heightless_heights(&db).unwrap();
         assert_eq!(heights.into_iter().collect::<Vec<_>>(), vec![5_465_071]);
+    }
+
+    // Delete only the short 't'+txid stubs; valid records and non-'t' keys survive.
+    #[test]
+    fn deletes_short_stub_records_only() {
+        let (_t, db) = seed_db();
+        let cf = db.cf_handle("transactions").unwrap();
+        db.put_cf(&cf, tkey(TXA, true), rec(5000, &[0xAA])).unwrap(); // valid (>=8)
+        db.put_cf(&cf, tkey(TXB, true), [0u8, 1, 2]).unwrap(); // 3-byte stub
+        let mut bkey = vec![b'B']; // a 'B' index entry with a short value
+        bkey.extend(&100i32.to_le_bytes());
+        bkey.extend(&0u64.to_le_bytes());
+        db.put_cf(&cf, &bkey, b"x").unwrap();
+
+        let n = delete_stub_tx_records(&db).unwrap();
+
+        assert_eq!(n, 1);
+        assert!(
+            db.get_cf(&cf, tkey(TXA, true)).unwrap().is_some(),
+            "valid record deleted"
+        );
+        assert!(
+            db.get_cf(&cf, tkey(TXB, true)).unwrap().is_none(),
+            "stub not deleted"
+        );
+        assert!(
+            db.get_cf(&cf, &bkey).unwrap().is_some(),
+            "'B' entry wrongly deleted"
+        );
     }
 }
