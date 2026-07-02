@@ -22,15 +22,24 @@ const health = ref(null)
 const txSeries = ref([])
 const now = ref(Math.floor(Date.now() / 1000))
 let clk = null
+let poll = null
+
+// Re-fetch recent blocks so "since last block", the feed, and the charts track
+// the chain tip instead of freezing at page-load. block-stats caches 60s
+// server-side; a failed poll keeps the last good data.
+async function loadBlocks() {
+  try { blocks.value = await getRecentBlocks(40) } catch { /* keep last good data */ }
+}
 
 onMounted(async () => {
-  blocks.value = await getRecentBlocks(40)
+  await loadBlocks()
   supply.value = await getSupply()
   health.value = await getHealth()
   txSeries.value = await getTransactions()
   clk = setInterval(() => { now.value = Math.floor(Date.now() / 1000) }, 1000)
+  poll = setInterval(loadBlocks, 20000)
 })
-onBeforeUnmount(() => clearInterval(clk))
+onBeforeUnmount(() => { clearInterval(clk); clearInterval(poll) })
 
 // chronological order for L->R axes
 const chrono = computed(() => [...blocks.value].reverse())

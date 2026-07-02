@@ -20,6 +20,7 @@ const palette = ref(null)
 const clock = ref('')
 const uptime = ref(0)
 let t = null
+let poll = null
 function tick() {
   const d = new Date()
   clock.value = d.toISOString().slice(11, 19) + 'Z'
@@ -47,8 +48,11 @@ onMounted(() => {
   chain.refreshHealth()
   tick()
   t = setInterval(tick, 1000)
+  // Keep the tip/sync telemetry live instead of frozen at page-load (status
+  // caches 5s server-side).
+  poll = setInterval(() => chain.refresh(), 15000)
 })
-onBeforeUnmount(() => clearInterval(t))
+onBeforeUnmount(() => { clearInterval(t); clearInterval(poll) })
 </script>
 
 <template>
