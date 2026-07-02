@@ -45,6 +45,29 @@ const coldInputValueSat = computed(() => {
   return coinstakeInputValueSat(t.value, rewardSat, (t.vin || []).length)
 })
 
+// --- Sapling / shielded --------------------------------------------------
+const sapling = computed(() => tx.value?.sapling || null)
+const isShielded = computed(() => {
+  const s = sapling.value
+  return !!s && ((s.shielded_spend_count || 0) > 0 || (s.shielded_output_count || 0) > 0)
+})
+// value_balance is a signed PIV FLOAT (not satoshis, so no formatSats): the
+// backend sets it > 0 for unshielding (shield -> transparent), < 0 for shielding
+// (transparent -> shield), 0 for a pure shielded (z->z) transfer.
+const shieldDirection = computed(() => {
+  const vb = sapling.value?.value_balance
+  if (vb == null) return null
+  if (vb < 0) return 'Shielding'
+  if (vb > 0) return 'Deshielding'
+  return 'Shielded transfer'
+})
+const valueBalance = computed(() => {
+  const vb = sapling.value?.value_balance
+  if (vb == null) return '—'
+  const n = Number(vb)
+  return (n > 0 ? '+' : '') + n.toFixed(8)
+})
+
 function spentPill(v) {
   if (v === true) return { cls: 'bad', text: 'spent' }
   if (v === false) return { cls: 'ok', text: 'unspent' }
@@ -119,6 +142,7 @@ const sankeyOption = computed(() => {
       <HudPanel class="txid-panel">
         <div class="txid-row">
           <span class="pill mono" :class="tx.confirmations > 0 ? 'neon' : 'warn'"><span class="dot" :class="tx.confirmations > 0 ? 'neon' : 'warn'"></span>{{ tx.confirmations > 0 ? 'CONFIRMED' : 'UNCONFIRMED' }}</span>
+          <span v-if="isShielded" class="pill cyan mono"><span class="dot cyan"></span>SHIELDED{{ shieldDirection ? ' · ' + shieldDirection.toUpperCase() : '' }}</span>
           <span class="mono txid-val">{{ tx.txid }}</span>
         </div>
       </HudPanel>
@@ -180,6 +204,55 @@ const sankeyOption = computed(() => {
           </table>
         </HudPanel>
       </div>
+
+      <template v-if="isShielded">
+        <h2 class="section-title">Shielded (Sapling)</h2>
+        <HudPanel title="SAPLING SHIELDED" :id="shieldDirection || 'shielded'">
+          <template #head>
+            <span class="pill cyan mono">{{ formatCount(sapling.shielded_spend_count) }} spend{{ sapling.shielded_spend_count === 1 ? '' : 's' }}</span>
+            <span class="pill neon mono">{{ formatCount(sapling.shielded_output_count) }} output{{ sapling.shielded_output_count === 1 ? '' : 's' }}</span>
+          </template>
+          <div class="statgrid cols-3">
+            <Stat k="VALUE BALANCE" accent><template #v>{{ valueBalance }}</template><template #s>PIV · {{ shieldDirection }}</template></Stat>
+            <Stat k="SHIELDED SPENDS"><template #v>{{ formatCount(sapling.shielded_spend_count) }}</template><template #s>notes consumed</template></Stat>
+            <Stat k="SHIELDED OUTPUTS"><template #v>{{ formatCount(sapling.shielded_output_count) }}</template><template #s>notes created</template></Stat>
+          </div>
+          <dl class="kv" style="margin-top: var(--space-4)">
+            <dt>Binding signature</dt><dd class="mono">{{ sapling.binding_sig ? truncateHash(sapling.binding_sig, 18, 14) : '—' }}</dd>
+          </dl>
+          <div class="split s-2" style="margin-top: var(--space-4)">
+            <div v-if="sapling.spends && sapling.spends.length">
+              <div class="mono dim" style="margin-bottom:6px">SHIELDED SPENDS · {{ sapling.spends.length }}</div>
+              <table class="dtable">
+                <thead><tr><th>#</th><th>Nullifier</th><th>Anchor</th></tr></thead>
+                <tbody>
+                  <tr v-for="(s, i) in sapling.spends" :key="i">
+                    <td class="dim">{{ i }}</td>
+                    <td class="mono">{{ truncateHash(s.nullifier, 8, 6) }}</td>
+                    <td class="mono">{{ truncateHash(s.anchor, 8, 6) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-if="sapling.outputs && sapling.outputs.length">
+              <div class="mono dim" style="margin-bottom:6px">SHIELDED OUTPUTS · {{ sapling.outputs.length }}</div>
+              <table class="dtable">
+                <thead><tr><th>#</th><th>Commitment</th><th>Ephemeral key</th></tr></thead>
+                <tbody>
+                  <tr v-for="(o, i) in sapling.outputs" :key="i">
+                    <td class="dim">{{ i }}</td>
+                    <td class="mono">{{ truncateHash(o.cmu, 8, 6) }}</td>
+                    <td class="mono">{{ truncateHash(o.ephemeral_key, 8, 6) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p class="dim" style="margin-top:var(--space-3);font-size:12px">
+            Shielded addresses and amounts are private by design — only the public commitments, nullifiers, and the net transparent value balance are visible on-chain.
+          </p>
+        </HudPanel>
+      </template>
 
       <h2 class="section-title">Context</h2>
       <HudPanel title="LEDGER CONTEXT" id="/tx metadata">
