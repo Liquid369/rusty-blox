@@ -25,8 +25,9 @@ block_index_copy_dir = "/tmp/pivx_block_index_current"
 chainstate_copy_dir = "/tmp/pivx_chainstate_current"
 
 # Directory the web server serves the built frontend from.
-# Default: frontend-legacy/dist (build with: cd frontend-legacy && npm run build)
-frontend_dist = "frontend-legacy/dist"
+# Default: frontend/dist — the redesigned UI (build with: cd frontend && npm install && npm run build).
+# The previous UI is still available at frontend-legacy/dist if you prefer it.
+frontend_dist = "frontend/dist"
 
 [sync]
 # Resync mode: clear all databases and rebuild from scratch on the next start.

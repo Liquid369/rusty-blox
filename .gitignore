@@ -19,3 +19,4 @@ config.toml
 *.backup
 *.old
 *.save
+frontend-redesign-archive/

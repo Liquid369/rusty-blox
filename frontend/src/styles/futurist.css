@@ -1,0 +1,317 @@
+/* =====================================================================
+   PROTO-FUTURIST — "PIVX MISSION CONTROL" HUD DESIGN SYSTEM
+   ---------------------------------------------------------------------
+   Maximally bold experimental futurism: neon/glow accents, holographic
+   gradient surfaces, animated live-feeling telemetry, spaceship-HUD
+   chrome, monospace data, scanline + grid motifs. PIVX purple #662D91
+   is the spine; everything is built ON TOP of tokens.css primitives.
+   Dark-first. Legibility is never sacrificed for flash.
+   ===================================================================== */
+
+:root {
+  /* ---- Extended HUD palette (built around the brand purple) -------- */
+  --neon:        #c46bff;   /* primary neon edge */
+  --neon-soft:   #9d4ef0;
+  --neon-deep:   #662d91;
+  --cyan:        #46e6d0;   /* secondary HUD accent (cold telemetry) */
+  --cyan-deep:   #1f9d92;
+  --amber:       #ffcf5c;
+  --rose:        #ff6f9c;
+  --hot:         #ff5470;
+
+  /* ---- Cosmic background field ------------------------------------- */
+  --void:        #07040d;   /* deepest */
+  --void-2:      #0b0716;
+  --glass:       rgba(28, 18, 44, 0.55);
+  --glass-2:     rgba(40, 26, 62, 0.42);
+  --glass-edge:  rgba(196, 107, 255, 0.30);
+  --glass-edge-strong: rgba(196, 107, 255, 0.55);
+  --hud-line:    rgba(150, 90, 220, 0.20);
+  --hud-line-2:  rgba(150, 90, 220, 0.10);
+  --grid-line:   rgba(124, 70, 190, 0.07);
+
+  /* ---- Glows -------------------------------------------------------- */
+  --glow-xs: 0 0 6px rgba(196, 107, 255, 0.45);
+  --glow-sm: 0 0 12px rgba(196, 107, 255, 0.40);
+  --glow-md: 0 0 22px rgba(150, 78, 240, 0.45);
+  --glow-lg: 0 0 48px rgba(150, 78, 240, 0.42);
+  --glow-cyan: 0 0 16px rgba(70, 230, 208, 0.45);
+
+  /* ---- Holographic gradients --------------------------------------- */
+  --holo:       linear-gradient(120deg, #c46bff 0%, #7a3aad 38%, #46e6d0 100%);
+  --holo-soft:  linear-gradient(120deg, rgba(196,107,255,0.18), rgba(70,230,208,0.10));
+  --panel-grad: linear-gradient(155deg, rgba(46,30,70,0.66), rgba(16,10,28,0.72));
+  --rail-grad:  linear-gradient(180deg, rgba(20,12,34,0.92), rgba(10,6,20,0.92));
+
+  --tabbar-h: 46px;
+  --topbar-h: 60px;
+
+  /* ---- A11y contrast: lift the tertiary grey above WCAG AA (was #8a7fa0,
+     which fell to ~4.0:1 on raised purple surfaces). This brighter lilac
+     clears 4.5:1 on every surface used here; neon stays for accents only. */
+  --text-dim: #a99dc0;
+}
+
+/* =====================================================================
+   GLOBAL FIELD — cosmic background, grid, scanlines
+   ===================================================================== */
+body {
+  background:
+    radial-gradient(1100px 700px at 82% -8%, rgba(102, 45, 145, 0.30), transparent 60%),
+    radial-gradient(900px 620px at 8% 4%, rgba(70, 230, 208, 0.08), transparent 55%),
+    radial-gradient(1200px 900px at 50% 120%, rgba(150, 78, 240, 0.12), transparent 60%),
+    var(--void);
+  background-attachment: fixed;
+  color: var(--text);
+  letter-spacing: 0.1px;
+}
+
+/* fixed grid + scanline overlay (decorative, pointer-events:none) */
+.fx-field {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 46px 46px, 46px 46px;
+  mask-image: radial-gradient(140% 120% at 50% 0%, #000 35%, transparent 90%);
+}
+.fx-scan {
+  position: fixed; inset: 0; z-index: 1; pointer-events: none; opacity: 0.5;
+  background: repeating-linear-gradient(
+    to bottom, rgba(255,255,255,0.012) 0 1px, transparent 1px 3px);
+  mix-blend-mode: overlay;
+}
+.fx-sweep {
+  position: fixed; left: 0; right: 0; height: 140px; z-index: 1;
+  pointer-events: none; opacity: 0.5;
+  background: linear-gradient(180deg, transparent, rgba(196,107,255,0.05), transparent);
+  animation: sweep 9s linear infinite;
+}
+@keyframes sweep { 0% { top: -160px } 100% { top: 100% } }
+
+/* =====================================================================
+   TYPOGRAPHY HELPERS
+   ===================================================================== */
+.mono { font-family: var(--font-mono); }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.22em; color: var(--text-dim);
+}
+.holo-text {
+  background: var(--holo); -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+}
+.neon-text { color: var(--neon); text-shadow: var(--glow-xs); }
+.cyan-text { color: var(--cyan); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.dim { color: var(--text-dim); }
+.muted { color: var(--text-muted); }
+
+/* =====================================================================
+   HUD PANEL — framed glass surface with corner reticles
+   ===================================================================== */
+.panel {
+  position: relative;
+  background: var(--panel-grad);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 10px 40px rgba(0,0,0,0.45);
+}
+.panel::before, .panel::after {
+  content: ""; position: absolute; width: 14px; height: 14px; pointer-events: none;
+  border-color: var(--glass-edge-strong);
+}
+.panel::before { top: 7px; left: 7px; border-top: 2px solid; border-left: 2px solid; border-top-left-radius: 4px; }
+.panel::after  { bottom: 7px; right: 7px; border-bottom: 2px solid; border-right: 2px solid; border-bottom-right-radius: 4px; }
+.panel.pad { padding: var(--space-5); }
+
+.panel-head {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--hud-line);
+}
+.panel-head .ttl {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.2em; color: var(--text);
+}
+.panel-head .id {
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em;
+  color: var(--text-dim); margin-left: auto;
+}
+.panel-body { padding: var(--space-4); }
+
+/* a thin holo top accent for hero panels */
+.panel.hero { border-color: var(--glass-edge-strong); }
+.panel.hero::before { border-color: var(--neon); }
+.panel.hero::after  { border-color: var(--cyan); }
+
+/* =====================================================================
+   STAT TILES — glowing metric cells
+   ===================================================================== */
+.statgrid { display: grid; gap: var(--space-3); }
+.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.cols-4 { grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); }
+.cols-5 { grid-template-columns: repeat(auto-fit, minmax(160px,1fr)); }
+
+.stat {
+  position: relative; overflow: hidden;
+  background: linear-gradient(160deg, rgba(40,26,62,0.5), rgba(14,9,24,0.6));
+  border: 1px solid var(--hud-line);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  transition: border-color .2s, transform .2s, box-shadow .2s;
+}
+.stat::after {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--holo); opacity: 0.85;
+}
+.stat:hover { border-color: var(--glass-edge); transform: translateY(-2px); box-shadow: var(--glow-sm); }
+.stat .k {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.16em; color: var(--text-dim);
+  display: flex; align-items: center; gap: 6px;
+}
+.stat .v {
+  font-family: var(--font-mono); font-weight: 700; line-height: 1.05;
+  font-size: clamp(20px, 2.2vw, 28px); margin-top: 8px; color: var(--text);
+  letter-spacing: -0.5px;
+}
+.stat .v.glow { text-shadow: var(--glow-xs); }
+.stat .s { font-size: 11px; color: var(--text-muted); margin-top: 6px; font-family: var(--font-mono); }
+.stat.accent .v { background: var(--holo); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+
+/* =====================================================================
+   PILLS / BADGES
+   ===================================================================== */
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px; border-radius: var(--radius-pill);
+  font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  background: var(--overlay); color: var(--text-muted);
+  border: 1px solid var(--hud-line);
+}
+.pill.ok    { background: rgba(92,203,111,0.12); color: var(--success); border-color: rgba(92,203,111,0.35); }
+.pill.bad   { background: rgba(255,84,112,0.12); color: var(--hot); border-color: rgba(255,84,112,0.4); }
+.pill.warn  { background: rgba(246,211,90,0.12); color: var(--warn); border-color: rgba(246,211,90,0.35); }
+.pill.neon  { background: rgba(196,107,255,0.14); color: var(--neon); border-color: var(--glass-edge); }
+.pill.cyan  { background: rgba(70,230,208,0.12); color: var(--cyan); border-color: rgba(70,230,208,0.35); }
+
+/* live pulse dot */
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 0 rgba(246,211,90,0.6); }
+.dot.live { background: var(--success); animation: pulse 2s infinite; }
+.dot.neon { background: var(--neon); animation: pulse-n 2s infinite; }
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(92,203,111,0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(92,203,111,0); }
+  100% { box-shadow: 0 0 0 0 rgba(92,203,111,0); }
+}
+@keyframes pulse-n {
+  0% { box-shadow: 0 0 0 0 rgba(196,107,255,0.55); }
+  70% { box-shadow: 0 0 0 8px rgba(196,107,255,0); }
+  100% { box-shadow: 0 0 0 0 rgba(196,107,255,0); }
+}
+
+/* =====================================================================
+   DATA TABLES
+   ===================================================================== */
+.dtable { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12.5px; }
+.dtable th {
+  text-align: left; font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--text-dim); padding: 10px 12px;
+  border-bottom: 1px solid var(--hud-line); white-space: nowrap;
+  position: sticky; top: 0; background: rgba(14,9,24,0.7); backdrop-filter: blur(4px);
+}
+.dtable td { padding: 9px 12px; border-bottom: 1px solid var(--hud-line-2); color: var(--text-muted); }
+.dtable tbody tr { transition: background .12s; }
+.dtable tbody tr:hover td { background: rgba(196,107,255,0.06); color: var(--text); }
+.dtable a { color: var(--neon); }
+.dtable a:hover { text-shadow: var(--glow-xs); text-decoration: none; }
+.dtable .strong { color: var(--text); font-weight: 600; }
+
+/* mini horizontal bar inside a table cell */
+.minibar { position: relative; height: 6px; border-radius: 3px; background: rgba(150,90,220,0.12); overflow: hidden; }
+.minibar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--holo); display: block; }
+
+/* key/value list */
+.kv { display: grid; grid-template-columns: 168px 1fr; gap: 10px var(--space-4); }
+.kv dt { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--text-dim); }
+.kv dd { margin: 0; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-muted); word-break: break-all; }
+.kv dd a { color: var(--neon); }
+
+/* =====================================================================
+   SECTION TITLES / LAYOUT
+   ===================================================================== */
+.page { position: relative; z-index: 2; }
+.page-head { display: flex; align-items: flex-end; gap: var(--space-4); margin-bottom: var(--space-5); flex-wrap: wrap; }
+.page-title {
+  font-family: var(--font-mono); font-weight: 700; font-size: clamp(22px, 3vw, 32px);
+  letter-spacing: -0.5px; margin: 0; line-height: 1.05;
+}
+.section-title {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.2em; color: var(--text-muted); margin: var(--space-6) 0 var(--space-3);
+  display: flex; align-items: center; gap: 10px;
+}
+.section-title::before { content: ""; width: 14px; height: 1px; background: var(--neon); box-shadow: var(--glow-xs); }
+.section-title::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--hud-line), transparent); }
+
+.stack { display: flex; flex-direction: column; gap: var(--space-4); }
+.split { display: grid; gap: var(--space-4); }
+@media (min-width: 900px) { .split.s-2 { grid-template-columns: 1fr 1fr; } .split.s-37 { grid-template-columns: 0.72fr 1fr; } .split.s-21 { grid-template-columns: 2fr 1fr; } }
+
+/* banners */
+.banner { padding: var(--space-4); border-radius: var(--radius-md); border: 1px solid var(--border-strong); font-family: var(--font-mono); font-size: 12.5px; }
+.banner.warn { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); }
+.banner.bad  { background: var(--danger-bg); border-color: var(--danger); color: var(--hot); }
+
+/* generic ghost button */
+.gbtn {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 6px 12px; border-radius: var(--radius-md); cursor: pointer;
+  background: var(--glass-2); color: var(--text-muted); border: 1px solid var(--hud-line);
+  transition: all .15s;
+}
+.gbtn:hover { border-color: var(--glass-edge); color: var(--text); box-shadow: var(--glow-xs); }
+.gbtn.on { background: rgba(196,107,255,0.16); color: var(--neon); border-color: var(--glass-edge-strong); }
+
+/* skeleton shimmer */
+.sk { background: linear-gradient(100deg, rgba(150,90,220,0.06) 30%, rgba(196,107,255,0.16) 50%, rgba(150,90,220,0.06) 70%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; border-radius: var(--radius-md); }
+@keyframes shimmer { 0% { background-position: 200% 0 } 100% { background-position: -200% 0 } }
+
+/* loading dots */
+.loading { color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.1em; }
+
+/* =====================================================================
+   A11Y — KEYBOARD FOCUS
+   Visible cyan focus ring on every interactive control (links, buttons,
+   nav tabs, search, table-row links, palette). :focus-visible so it only
+   shows for keyboard users; never strip an outline without this.
+   ===================================================================== */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+/* =====================================================================
+   A11Y — REDUCED MOTION
+   Gate ALL non-essential motion (scanline sweep, pulse/glow heartbeat,
+   telemetry ticker, fresh-row flash, skeleton shimmer, palette pop, chart
+   entrance — charts also get animation:false via EChart.vue). Universal
+   reset so scoped component animations are covered too.
+   ===================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
