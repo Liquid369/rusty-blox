@@ -112,6 +112,17 @@ const sankeyOption = computed(() => {
     if (v > 0) links.push({ source: TXC, target: node(`out:${addr}`, 'out'), value: v })
   })
 
+  // Sapling: draw the net value crossing the shielded-pool boundary as its own
+  // node. value_balance (PIV, signed): < 0 shielding (TX -> pool), > 0
+  // deshielding (pool -> TX); 0 (pure z->z) has no transparent flow to show.
+  const vb = t.sapling ? Number(t.sapling.value_balance) : 0
+  if (vb) {
+    const POOL = '◈ SHIELDED'
+    nodes.push({ name: POOL, itemStyle: { color: '#8f5cff' }, label: { color: '#c9a6ff', fontWeight: 700 } })
+    if (vb < 0) links.push({ source: TXC, target: POOL, value: Math.abs(vb) })
+    else links.push({ source: POOL, target: TXC, value: vb })
+  }
+
   return {
     backgroundColor: 'transparent',
     tooltip: { ...baseOption(p).tooltip, trigger: 'item', formatter: (d) => d.dataType === 'edge' ? `${d.value.toFixed(4)} PIV` : d.name.replace(/^(in|out):/, '') },
@@ -156,7 +167,7 @@ const sankeyOption = computed(() => {
       </div>
 
       <h2 class="section-title">Value flow</h2>
-      <HudPanel title="VIN → VOUT VALUE-FLOW" id="sankey · satoshi → PIV" hero>
+      <HudPanel title="VIN → VOUT VALUE-FLOW" :id="isShielded ? 'transparent + shielded pool' : 'sankey · satoshi → PIV'" hero>
         <template #head><span class="pill cyan mono">{{ tx.vin.length }} in</span><span class="pill neon mono">{{ tx.vout.length }} out</span></template>
         <EChart :option="sankeyOption" height="300px" aria-label="Transaction value flow from inputs to outputs" />
       </HudPanel>
