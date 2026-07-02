@@ -29,6 +29,9 @@ watch(() => props.height, load)
 
 const txType = (t) => t.tx_type || 'normal'
 const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', normal: '#46e6d0' }
+// A tx is shielded if it carries Sapling spends/outputs — orthogonal to tx_type
+// (a "normal" tx can be shielded), so it's flagged as an extra badge, not a type.
+const isShielded = (t) => !!t.sapling && ((t.sapling.shielded_spend_count || 0) > 0 || (t.sapling.shielded_output_count || 0) > 0)
 
 // Block reward (total minted, PIV float) -> satoshi, for recovering the value the
 // cold-staker put in (the backend leaves P2CS coinstake inputs blank).
@@ -154,6 +157,7 @@ const totalFees = computed(() =>
       <HudPanel v-for="t in block.tx" :key="t.txid" :title="`TX ${truncateHash(t.txid, 8, 6)}`" :id="`${t.vin.length} in · ${t.vout.length} out`" class="txp">
         <template #head>
           <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='normal' }">{{ txType(t) }}</span>
+          <span v-if="isShielded(t)" class="pill cyan mono" style="margin-left:4px">SHIELDED</span>
           <RouterLink :to="`/tx/${t.txid}`" class="gbtn">OPEN ↗</RouterLink>
         </template>
         <div class="txflow">
