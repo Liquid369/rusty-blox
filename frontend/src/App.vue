@@ -188,7 +188,9 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectL
 }
 .cmdbar:hover { border-color: var(--glass-edge); box-shadow: var(--glow-xs); }
 .cmdbar-ic { color: var(--neon); font-size: 15px; }
-.cmdbar-ph { flex: 1; text-align: left; font-family: var(--font-mono); font-size: 12.5px; }
+/* min-width:0 + nowrap/ellipsis: never wrap the hint — a wrapped placeholder
+   grew the fixed-height topbar and spilled over the nav rail on the Fold. */
+.cmdbar-ph { flex: 1; min-width: 0; text-align: left; font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmdbar kbd { font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--hud-line); color: var(--text-muted); background: var(--glass-2); }
 
 .telem { display: flex; align-items: center; gap: var(--space-4); }
@@ -236,12 +238,16 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectL
 .foot .mono { font-size: 10.5px; }
 .foot-sep { color: var(--text-dim); }
 
+/* Fold / small tablet (720-900): the topbar is still cramped there, so drop the
+   decorative 96px heartbeat to give the search bar room. */
+@media (max-width: 900px) {
+  .heartbeat { display: none; }
+}
+
 @media (max-width: 720px) {
   .hide-sm { display: none; }
   .brand-txt small { display: none; }
   .cmdbar-ph { display: none; }
-  /* the heartbeat glyph is decorative and 96px wide — drop it so SYNC/TIP fit */
-  .heartbeat { display: none; }
   .topbar { gap: var(--space-3); padding: 0 var(--space-4); }
   .cmdbar { flex: 0 1 auto; padding: 9px 11px; }
   .cmdbar kbd { display: none; }   /* no ⌘ key on mobile; frees space so TIP fits */
