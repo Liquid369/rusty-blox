@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "echarts": "^5.4.3",
+    "echarts": "^6.1.0",
     "pinia": "^2.1.7",
     "vue": "^3.4.15",
     "vue-router": "^4.2.5"
