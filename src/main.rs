@@ -18,6 +18,7 @@ use rustyblox::api::{
     // Governance module
     budget_info_v2,
     budget_projection_v2,
+    finalized_budgets_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
@@ -254,6 +255,7 @@ async fn start_web_server(
         .route("/api/v2/budgetinfo", get(budget_info_v2))
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
+        .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
         .route(
             "/api/v2/mnrawbudgetvote/{raw_vote_params}",
             get(api_handler),

@@ -101,3 +101,31 @@ async fn compute_budget_projection(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     rpc_call_json("getbudgetprojection", serde_json::json!([])).await
 }
+
+/// GET /api/v2/finalizedbudgets
+/// Finalized budgets the node currently tracks (RPC `mnfinalbudget show`): an
+/// object keyed "Name (hash)", each with FeeTX (the collateral txid), BlockStart/
+/// End, Proposals (names), VoteCount, Status, IsValid. Lets a budget-finalization
+/// collateral tx be resolved to its budget by matching FeeTX == txid. NOTE: the
+/// node prunes old finalized budgets, so historical ones may be absent.
+///
+/// **CACHED**: 120 second TTL
+pub async fn finalized_budgets_v2(
+    Extension(cache): Extension<Arc<CacheManager>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let result = cache
+        .get_or_compute("budget:finalized", Duration::from_secs(120), || async {
+            compute_finalized_budgets().await
+        })
+        .await;
+
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn compute_finalized_budgets(
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    rpc_call_json("mnfinalbudget", serde_json::json!(["show"])).await
+}
