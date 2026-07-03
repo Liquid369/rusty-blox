@@ -5,8 +5,8 @@
    STRING → formatSats (BigInt-safe). spent: true/false/null(unknown).
    ===================================================================== */
 import { ref, watch, onMounted, computed } from 'vue'
-import { getTx, getBlockDetail } from '../api/client.js'
-import { formatSats } from '../lib/money.js'
+import { getTx, getBlockDetail, getBudgetInfo, getFinalizedBudgets } from '../api/client.js'
+import { formatSats, formatPiv } from '../lib/money.js'
 import { formatDateTime, truncateHash, formatCount, timeAgo } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import { isCoinstakeTx, isUnresolvedColdVin, coinstakeInputAddresses, coinstakeInputValueSat } from '../lib/coinstake.js'
@@ -68,6 +68,83 @@ const valueBalance = computed(() => {
   const n = Number(vb)
   return (n > 0 ? '+' : '') + n.toFixed(8)
 })
+
+// Decode a vout scriptPubKey (the /tx API gives per-output `hex` but no type)
+// into a coarse type + OP_RETURN payload. Handles direct pushes + PUSHDATA1/2.
+function voutScript(vout) {
+  const h = (vout.hex || '').toLowerCase()
+  if (h.startsWith('6a')) {
+    let i = 2
+    const parts = []
+    while (i + 2 <= h.length) {
+      const op = parseInt(h.slice(i, i + 2), 16); i += 2
+      let n = 0
+      if (op <= 0x4b) n = op
+      else if (op === 0x4c) { n = parseInt(h.slice(i, i + 2), 16); i += 2 }
+      else if (op === 0x4d) { n = parseInt(h.slice(i + 2, i + 4) + h.slice(i, i + 2), 16); i += 4 }
+      else break
+      parts.push(h.slice(i, i + n * 2)); i += n * 2
+    }
+    return { type: 'OP_RETURN', data: parts.join('') }
+  }
+  if (h.startsWith('76a914') && h.endsWith('88ac')) return { type: 'P2PKH' }
+  if (h.startsWith('a914') && h.endsWith('87')) return { type: 'P2SH' }
+  return { type: vout.addresses && vout.addresses.length ? 'address' : 'nonstandard' }
+}
+// hex -> ASCII (· for non-printable); '' when nothing printable (pure binary blob).
+function hexToAscii(hex) {
+  let s = '', printable = 0
+  for (let i = 0; i + 2 <= hex.length; i += 2) {
+    const c = parseInt(hex.slice(i, i + 2), 16)
+    if (c >= 32 && c < 127) { s += String.fromCharCode(c); printable++ } else s += '·'
+  }
+  return printable ? s : ''
+}
+// vout decorated with its decoded script, so the template parses each hex once.
+// Detect a PIVX budget collateral OP_RETURN: a 32-byte hash (6a 20) whose output
+// burns the fee — >= 50 PIV = proposal (PROPOSAL_FEE_TX), 5..49 PIV = finalization
+// (BUDGET_FEE_TX). Confirmed against Core's CheckCollateral. `value` is a satoshi
+// STRING, so compare with BigInt (never Number() a satoshi field).
+function budgetCollateral(v) {
+  if (v.script.type !== 'OP_RETURN' || (v.script.data || '').length !== 64) return null
+  let sats
+  try { sats = BigInt(v.value || '0') } catch { return null }
+  if (sats >= 5_000_000_000n) return { kind: 'Budget proposal', hash: v.script.data }
+  if (sats >= 500_000_000n) return { kind: 'Budget finalization', hash: v.script.data }
+  return null
+}
+const vouts = computed(() => (tx.value?.vout || []).map((v) => {
+  const out = { ...v, script: voutScript(v) }
+  out.budget = budgetCollateral(out)
+  return out
+}))
+const txBudget = computed(() => vouts.value.find((v) => v.budget)?.budget || null)
+
+// Resolve a budget collateral tx to its governance record: proposals match by
+// FeeHash == txid (getbudgetinfo), finalized budgets by FeeTX == txid
+// (getfinalizedbudgets). The node prunes old budgets, so it may be unresolvable.
+const govRecord = ref(null)
+async function resolveGovernance() {
+  govRecord.value = null
+  const b = txBudget.value
+  const id = (tx.value?.txid || '').toLowerCase()
+  if (!b || !id) return
+  try {
+    if (b.kind === 'Budget proposal') {
+      const props = await getBudgetInfo()
+      const p = (props || []).find((x) => (x.FeeHash || '').toLowerCase() === id)
+      if (p) govRecord.value = { kind: 'proposal', ...p }
+    } else {
+      const fbs = await getFinalizedBudgets()
+      for (const [name, fb] of Object.entries(fbs || {})) {
+        if ((fb.FeeTX || '').toLowerCase() === id) { govRecord.value = { kind: 'finalized', name, ...fb }; break }
+      }
+    }
+  } catch { /* leave unresolved */ }
+}
+watch(txBudget, resolveGovernance)
+// Full /tx response, pretty-printed, for the copyable raw-JSON section.
+const rawJson = computed(() => (tx.value ? JSON.stringify(tx.value, null, 2) : ''))
 
 function spentPill(v) {
   if (v === true) return { cls: 'bad', text: 'spent' }
@@ -155,6 +232,7 @@ const sankeyOption = computed(() => {
         <div class="txid-row">
           <span class="pill mono" :class="tx.confirmations > 0 ? 'neon' : 'warn'"><span class="dot" :class="tx.confirmations > 0 ? 'neon' : 'warn'"></span>{{ tx.confirmations > 0 ? 'CONFIRMED' : 'UNCONFIRMED' }}</span>
           <span v-if="isShielded" class="pill cyan mono"><span class="dot cyan"></span>SHIELDED{{ shieldDirection ? ' · ' + shieldDirection.toUpperCase() : '' }}</span>
+          <span v-if="txBudget" class="pill neon mono"><span class="dot neon"></span>{{ txBudget.kind.toUpperCase() }}</span>
           <span class="mono txid-val">{{ tx.txid }}</span>
         </div>
       </HudPanel>
@@ -200,14 +278,21 @@ const sankeyOption = computed(() => {
           <table class="dtable">
             <thead><tr><th>Address</th><th class="num">Value (PIV)</th><th>State</th></tr></thead>
             <tbody>
-              <tr v-for="(vout, i) in tx.vout" :key="i">
+              <tr v-for="(vout, i) in vouts" :key="i">
                 <td>
                   <template v-if="vout.addresses && vout.addresses.length >= 2">
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[1]}`">{{ truncateHash(vout.addresses[1], 8, 6) }}</RouterLink><span class="pill neon mono">OWNER</span></div>
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
                   <RouterLink v-else-if="vout.addresses && vout.addresses[0]" :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 10, 8) }}</RouterLink>
-                  <span v-else class="dim">—</span>
+                  <template v-else-if="vout.script.type === 'OP_RETURN'">
+                    <span v-if="vout.budget" class="pill neon mono">{{ vout.budget.kind.toUpperCase() }}</span>
+                    <span v-else class="pill warn mono">OP_RETURN</span>
+                    <div style="margin-top:4px"><Copyable :value="vout.script.data">{{ truncateHash(vout.script.data, 14, 12) }}</Copyable></div>
+                    <div v-if="vout.budget" class="dim mono" style="font-size:11px;margin-top:2px">budget hash · {{ formatSats(vout.value, { decimals: 0 }) }} PIV fee (burned)</div>
+                    <div v-else-if="hexToAscii(vout.script.data)" class="dim mono" style="font-size:11px;margin-top:2px">“{{ hexToAscii(vout.script.data) }}”</div>
+                  </template>
+                  <span v-else class="dim mono">{{ vout.script.type.toLowerCase() }}</span>
                 </td>
                 <td class="num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</td>
                 <td><span class="pill" :class="spentPill(vout.spent).cls">{{ spentPill(vout.spent).text }}</span></td>
@@ -267,6 +352,39 @@ const sankeyOption = computed(() => {
         </HudPanel>
       </template>
 
+      <template v-if="txBudget">
+        <h2 class="section-title">Governance</h2>
+        <HudPanel :title="txBudget.kind === 'Budget finalization' ? 'FINALIZED BUDGET' : 'BUDGET PROPOSAL'" id="decoded from collateral">
+          <template v-if="govRecord && govRecord.kind === 'proposal'">
+            <div class="statgrid cols-4">
+              <Stat k="PROPOSAL" accent><template #v>{{ govRecord.Name }}</template><template #s>{{ govRecord.IsValid ? 'valid' : 'invalid' }}</template></Stat>
+              <Stat k="MONTHLY"><template #v>{{ formatPiv(govRecord.MonthlyPayment, { decimals: 0 }) }}</template><template #s>PIV · {{ govRecord.TotalPaymentCount }} payments</template></Stat>
+              <Stat k="VOTES"><template #v>{{ govRecord.Yeas }} / {{ govRecord.Nays }}</template><template #s>yea / nay</template></Stat>
+              <Stat k="PAYS"><template #v>#{{ govRecord.BlockStart }}</template><template #s>→ #{{ govRecord.BlockEnd }}</template></Stat>
+            </div>
+            <dl class="kv" style="margin-top:var(--space-4)">
+              <dt>URL</dt><dd><a :href="govRecord.URL" target="_blank" rel="noopener noreferrer">{{ govRecord.URL }}</a></dd>
+              <dt>Payee</dt><dd><RouterLink :to="`/address/${govRecord.PaymentAddress}`">{{ govRecord.PaymentAddress }}</RouterLink></dd>
+            </dl>
+          </template>
+          <template v-else-if="govRecord && govRecord.kind === 'finalized'">
+            <div class="statgrid cols-4">
+              <Stat k="STATUS" accent><template #v>{{ govRecord.Status }}</template><template #s>{{ govRecord.IsValid ? 'valid' : 'invalid' }}</template></Stat>
+              <Stat k="VOTES"><template #v>{{ formatCount(govRecord.VoteCount) }}</template><template #s>masternode votes</template></Stat>
+              <Stat k="PAYS"><template #v>#{{ govRecord.BlockStart }}</template><template #s>→ #{{ govRecord.BlockEnd }}</template></Stat>
+              <Stat k="PROPOSALS"><template #v>{{ (govRecord.Proposals || '').split(',').filter(Boolean).length || '—' }}</template><template #s>in this budget</template></Stat>
+            </div>
+            <dl class="kv" style="margin-top:var(--space-4)">
+              <dt>Budget</dt><dd class="mono">{{ govRecord.name }}</dd>
+              <dt>Proposals</dt><dd class="mono">{{ govRecord.Proposals || '—' }}</dd>
+            </dl>
+          </template>
+          <div v-else class="dim">
+            Collateral hash <span class="mono">{{ truncateHash(txBudget.hash, 12, 10) }}</span> — the node no longer tracks this {{ txBudget.kind.toLowerCase().replace('budget ', '') }} (old budgets are pruned), so its contents can't be resolved.
+          </div>
+        </HudPanel>
+      </template>
+
       <h2 class="section-title">Context</h2>
       <HudPanel title="LEDGER CONTEXT" id="/tx metadata">
         <dl class="kv">
@@ -276,6 +394,15 @@ const sankeyOption = computed(() => {
           <dt>Size</dt><dd>{{ formatCount(tx.size) }} B · vsize {{ formatCount(tx.vsize) }} B</dd>
           <dt>Version</dt><dd>{{ tx.version }} · locktime {{ tx.lockTime }}</dd>
         </dl>
+      </HudPanel>
+
+      <h2 class="section-title">Raw</h2>
+      <HudPanel title="RAW TRANSACTION JSON" id="/tx response">
+        <template #head><Copyable :value="rawJson"><span class="pill cyan mono">⧉ copy JSON</span></Copyable></template>
+        <details>
+          <summary class="mono dim" style="cursor:pointer">show / hide the full /tx response</summary>
+          <pre style="overflow:auto;max-height:460px;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
+        </details>
       </HudPanel>
     </template>
 

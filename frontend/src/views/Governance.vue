@@ -8,7 +8,7 @@
    ===================================================================== */
 import { ref, onMounted, computed, nextTick } from 'vue'
 import { useChainStore } from '../store.js'
-import { getBudgetInfo, getBudgetProjection, getMnCount, proposalPasses, nextSuperblock } from '../api/client.js'
+import { getBudgetInfo, getBudgetProjection, getMnCount, proposalPasses, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
 import { formatCount, percent } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
@@ -59,6 +59,14 @@ const daysLeft = computed(() => (blocksLeft.value * 60) / 86400)
 
 const allotted = computed(() =>
   projection.value.length ? projection.value[projection.value.length - 1].TotalBudgetAllotted : 0)
+// Treasury value in fiat: PIV allotted × PIVX/USD (0 when price unavailable).
+const allottedUsd = computed(() =>
+  chain.price && chain.price.usd > 0 ? allotted.value * chain.price.usd : 0)
+// Per-cycle treasury cap (PIV) — Core funds greedily UP TO this and defers the
+// rest, so allotted should never exceed it. Surface it so the max is visible.
+const cap = computed(() => monthlyBudgetCap())
+const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
+const overCap = computed(() => allotted.value > cap.value + 1)
 const demand = computed(() => proposals.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
 const PAL = ['#c46bff', '#46e6d0', '#ffcf5c', '#9d4ef0', '#ff6f9c', '#7ad97a']
@@ -132,7 +140,7 @@ const allocOption = computed(() => {
       </Stat>
       <Stat k="ALLOTTED THIS CYCLE" glow>
         <template #v>{{ formatPiv(allotted, { decimals: 0 }) }}</template>
-        <template #s>PIV across {{ projection.length }} funded proposals</template>
+        <template #s><span v-if="overCap" style="color:var(--warn);font-weight:700">⚠ OVER CAP · </span>{{ capPct.toFixed(0) }}% of the {{ formatPiv(cap, { decimals: 0 }) }} PIV cap{{ allottedUsd ? ' · ≈ $' + Math.round(allottedUsd).toLocaleString('en-US') : '' }}</template>
       </Stat>
       <Stat k="PROPOSALS">
         <template #v>{{ projection.length }}<span class="unit">/ {{ proposals.length }}</span></template>

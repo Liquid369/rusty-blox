@@ -4,7 +4,7 @@
    ===================================================================== */
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { getStatus, getHealth, API_BASE, isMock } from './api/client.js'
+import { getStatus, getHealth, getPrice, API_BASE, isMock } from './api/client.js'
 
 export const useChainStore = defineStore('chain', () => {
   const height = ref(0)
@@ -41,6 +41,17 @@ export const useChainStore = defineStore('chain', () => {
 
   async function refreshHealth() {
     try { health.value = await getHealth() } catch (e) { /* non-fatal */ }
+  }
+
+  // PIVX market price, shared by the header ticker + Dashboard + Governance.
+  // /price degrades to a zero-fallback on upstream failure — keep the last good
+  // value rather than flash "$0". 300s server cache, so poll gently.
+  const price = ref(null) // { usd, eur, btc, last_updated } or null
+  async function refreshPrice() {
+    try {
+      const p = await getPrice()
+      if (p && p.usd > 0) price.value = p
+    } catch (e) { /* keep last good */ }
   }
 
   // --- live block feed over WebSocket (/ws/blocks) ----------------------
@@ -88,8 +99,8 @@ export const useChainStore = defineStore('chain', () => {
   }
 
   return {
-    height, networkHeight, hash, synced, syncPercentage, health,
+    height, networkHeight, hash, synced, syncPercentage, health, price,
     loading, error, lastUpdate, lastBlockAt, blocksBehind, isSyncing,
-    refresh, refreshHealth, connectLive, disconnectLive
+    refresh, refreshHealth, refreshPrice, connectLive, disconnectLive
   }
 })

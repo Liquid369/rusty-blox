@@ -228,7 +228,20 @@ pub(crate) async fn build_transaction_from_db(
             }
             let mut key = vec![b'a'];
             key.extend_from_slice(address.as_bytes());
-            let data = db_clone.get_cf(cf, &key).ok().flatten()?;
+            let data = match db_clone.get_cf(cf, &key).ok().flatten() {
+                Some(d) => d,
+                None => {
+                    // The 'a' UTXO set is DELETED when an address empties (monitor.rs
+                    // delete_cf at zero balance). So an absent 'a' key on a KNOWN
+                    // address (one that has an 'r' received-total) means every output
+                    // it held is spent — report Some(false)=absent (→ spent), not
+                    // None=unknown. Only a genuinely un-indexed address stays None.
+                    let mut r_key = vec![b'r'];
+                    r_key.extend_from_slice(address.as_bytes());
+                    // Some(received-total) ⇒ known address, empty UTXO set ⇒ spent.
+                    return db_clone.get_cf(cf, &r_key).ok().flatten().map(|_| false);
+                }
+            };
             // v2 'a' format: repeated 49-byte [txid(32)+vout(8 LE)+value(8)+kind(1)].
             // Only txid+vout (the first 40 bytes) matter here; ignore the trailing 9.
             if data.is_empty() || data.len() % crate::parser::ADDR_UTXO_STRIDE != 0 {

@@ -610,17 +610,31 @@ export const monthlyBudgetCap = () => MONTHLY_BUDGET_CAP
 // /budgetinfo — all proposals (Allotted = 0 here, per the real RPC).
 export function budgetInfo() { return BUDGET_PROPOSALS.map((p) => ({ ...p })) }
 
+export function price() {
+  return { usd: 0.2143, eur: 0.1985, btc: 0.00000214, last_updated: 1782700000 }
+}
+
+// ponytail: empty — the mock demo txs aren't budget collaterals, so this is
+// never matched. Add a fixture if a mock budget-finalization tx is introduced.
+export function finalizedBudgets() { return {} }
+
 // /budgetprojection — only the funded subset, priority-ordered, with the real
 // Allotted populated and a cumulative TotalBudgetAllotted running total.
 export function budgetProjection() {
-  const funded = BUDGET_PROPOSALS
+  const ranked = BUDGET_PROPOSALS
     .filter(proposalPasses)
     .sort((a, b) => (b.Yeas - b.Nays) - (a.Yeas - a.Nays))
+  // Real PIVX rule: fund each ranked proposal only if it still FITS under the
+  // per-cycle cap (greedy-skip); an overflowing proposal is deferred, not paid.
+  // So TotalBudgetAllotted never exceeds MONTHLY_BUDGET_CAP (432,000).
   let cum = 0
-  return funded.map((p) => {
+  const out = []
+  for (const p of ranked) {
+    if (cum + p.MonthlyPayment > MONTHLY_BUDGET_CAP) continue
     cum += p.MonthlyPayment
-    return { ...p, Allotted: p.MonthlyPayment, TotalBudgetAllotted: cum }
-  })
+    out.push({ ...p, Allotted: p.MonthlyPayment, TotalBudgetAllotted: cum })
+  }
+  return out
 }
 
 // /budgetvotes/{name} — raw RPC array; length != Yeas (includes NO/ABSTAIN +
