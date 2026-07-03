@@ -353,20 +353,13 @@ fn get_block_transactions(
                 if let Ok(txid_str) = std::str::from_utf8(&value) {
                     // Look up the full transaction data
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
-                        // Try reversed format first (new/correct format)
-                        let reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-
-                        let mut tx_key = vec![b't'];
-                        tx_key.extend_from_slice(&reversed);
-
-                        let tx_data = if let Ok(Some(data)) = db.get_cf(&cf_transactions, &tx_key) {
-                            Some(data)
-                        } else {
-                            // Fallback: try display format (old/incorrect format for migration)
-                            let mut tx_key_display = vec![b't'];
-                            tx_key_display.extend_from_slice(&txid_bytes);
-                            db.get_cf(&cf_transactions, &tx_key_display).ok().flatten()
-                        };
+                        // Prefer a record WITH a body over an 8-byte stub (shadowing bug),
+                        // else a stub-shadowed tx fails to parse and vanishes from the block.
+                        let tx_data = crate::api::transactions::read_valid_tx_record(
+                            db,
+                            &cf_transactions,
+                            &txid_bytes,
+                        );
 
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
@@ -406,22 +399,16 @@ fn enrich_transaction_inputs(
         // Get the previous transaction if we have txid
         if let Some(ref prev_txid) = input.txid {
             if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
-                // Try reversed format first (new/correct format)
-                let reversed: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
-                let mut prev_key = vec![b't'];
-                prev_key.extend_from_slice(&reversed);
-
-                let prev_data = if let Ok(Some(data)) = db.get_cf(cf_transactions, &prev_key) {
-                    Some(data)
-                } else {
-                    // Fallback: try display format (old/incorrect format for migration)
-                    let mut prev_key_display = vec![b't'];
-                    prev_key_display.extend_from_slice(&prev_txid_bytes);
-                    db.get_cf(cf_transactions, &prev_key_display).ok().flatten()
-                };
+                // Prefer a record WITH a body over an 8-byte stub (same shadowing bug as
+                // read_valid_tx_record); the shared reader checks both key orders.
+                let prev_data = crate::api::transactions::read_valid_tx_record(
+                    db,
+                    &cf_transactions,
+                    &prev_txid_bytes,
+                );
 
                 if let Some(prev_data) = prev_data {
-                    if prev_data.len() >= 8 {
+                    if prev_data.len() > 8 {
                         let prev_tx_data = &prev_data[8..]; // Skip block_version + height
 
                         // Prepend dummy header for parser

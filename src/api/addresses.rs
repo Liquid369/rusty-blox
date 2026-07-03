@@ -685,9 +685,7 @@ async fn aggregate_xpub_data(
         let mut total_received: i64 = 0;
 
         for txid_bytes in &txids {
-            let mut key = vec![b't'];
-            key.extend(txid_bytes);
-            let key_clone = key.clone();
+            let txid_clone = txid_bytes.clone();
             let db_clone = db.clone();
             let addr_clone = address.clone();
 
@@ -696,9 +694,13 @@ async fn aggregate_xpub_data(
                     let cf_transactions = db_clone
                         .cf_handle("transactions")
                         .ok_or_else(|| "transactions CF not found".to_string())?;
-                    db_clone
-                        .get_cf(&cf_transactions, &key_clone)
-                        .map_err(|e| e.to_string())
+                    // Prefer a body over an 8-byte stub across both key orders, else old
+                    // internal-keyed txs are missed and totalReceived undercounts.
+                    Ok(crate::api::transactions::read_valid_tx_record(
+                        &db_clone,
+                        &cf_transactions,
+                        &txid_clone,
+                    ))
                 })
                 .await
                 .map_err(|e| format!("Task join error: {e}"))?
