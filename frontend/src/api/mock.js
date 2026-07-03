@@ -617,14 +617,20 @@ export function price() {
 // /budgetprojection — only the funded subset, priority-ordered, with the real
 // Allotted populated and a cumulative TotalBudgetAllotted running total.
 export function budgetProjection() {
-  const funded = BUDGET_PROPOSALS
+  const ranked = BUDGET_PROPOSALS
     .filter(proposalPasses)
     .sort((a, b) => (b.Yeas - b.Nays) - (a.Yeas - a.Nays))
+  // Real PIVX rule: fund each ranked proposal only if it still FITS under the
+  // per-cycle cap (greedy-skip); an overflowing proposal is deferred, not paid.
+  // So TotalBudgetAllotted never exceeds MONTHLY_BUDGET_CAP (432,000).
   let cum = 0
-  return funded.map((p) => {
+  const out = []
+  for (const p of ranked) {
+    if (cum + p.MonthlyPayment > MONTHLY_BUDGET_CAP) continue
     cum += p.MonthlyPayment
-    return { ...p, Allotted: p.MonthlyPayment, TotalBudgetAllotted: cum }
-  })
+    out.push({ ...p, Allotted: p.MonthlyPayment, TotalBudgetAllotted: cum })
+  }
+  return out
 }
 
 // /budgetvotes/{name} — raw RPC array; length != Yeas (includes NO/ABSTAIN +
