@@ -267,14 +267,14 @@ const flowHeight = computed(() => {
               <tr v-for="(vin, i) in tx.vin" :key="i">
                 <td>
                   <template v-if="vinCold(vin)">
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vinCold(vin)[1]}`">{{ truncateHash(vinCold(vin)[1], 8, 6) }}</RouterLink><span class="pill neon mono">OWNER</span></div>
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vinCold(vin)[0]}`">{{ truncateHash(vinCold(vin)[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vinCold(vin)[1]}`">{{ vinCold(vin)[1] }}</RouterLink><span class="pill neon mono">OWNER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vinCold(vin)[0]}`">{{ vinCold(vin)[0] }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
                   <template v-else-if="vin.addresses && vin.addresses.length >= 2">
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[1]}`">{{ truncateHash(vin.addresses[1], 8, 6) }}</RouterLink><span class="pill neon mono">OWNER</span></div>
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[1]}`">{{ vin.addresses[1] }}</RouterLink><span class="pill neon mono">OWNER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[0]}`">{{ vin.addresses[0] }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
-                  <RouterLink v-else-if="vin.addresses && vin.addresses[0]" :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 10, 8) }}</RouterLink>
+                  <RouterLink v-else-if="vin.addresses && vin.addresses[0]" :to="`/address/${vin.addresses[0]}`">{{ vin.addresses[0] }}</RouterLink>
                   <RouterLink v-else-if="vin.txid" :to="`/tx/${vin.txid}`" class="dim mono" :title="`${vin.txid}:${vin.vout}`">{{ truncateHash(vin.txid, 8, 6) }}:{{ vin.vout }}</RouterLink>
                   <span v-else class="dim">coinbase</span>
                 </td>
@@ -292,10 +292,10 @@ const flowHeight = computed(() => {
               <tr v-for="(vout, i) in vouts" :key="i">
                 <td>
                   <template v-if="vout.addresses && vout.addresses.length >= 2">
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[1]}`">{{ truncateHash(vout.addresses[1], 8, 6) }}</RouterLink><span class="pill neon mono">OWNER</span></div>
-                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[1]}`">{{ vout.addresses[1] }}</RouterLink><span class="pill neon mono">OWNER</span></div>
+                    <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[0]}`">{{ vout.addresses[0] }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
-                  <RouterLink v-else-if="vout.addresses && vout.addresses[0]" :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 10, 8) }}</RouterLink>
+                  <RouterLink v-else-if="vout.addresses && vout.addresses[0]" :to="`/address/${vout.addresses[0]}`">{{ vout.addresses[0] }}</RouterLink>
                   <template v-else-if="vout.script.type === 'OP_RETURN'">
                     <span v-if="vout.budget" class="pill neon mono">{{ vout.budget.kind.toUpperCase() }}</span>
                     <span v-else class="pill warn mono">OP_RETURN</span>
