@@ -101,7 +101,24 @@ function hexToAscii(hex) {
   return printable ? s : ''
 }
 // vout decorated with its decoded script, so the template parses each hex once.
-const vouts = computed(() => (tx.value?.vout || []).map((v) => ({ ...v, script: voutScript(v) })))
+// Detect a PIVX budget collateral OP_RETURN: a 32-byte hash (6a 20) whose output
+// burns the fee — >= 50 PIV = proposal (PROPOSAL_FEE_TX), 5..49 PIV = finalization
+// (BUDGET_FEE_TX). Confirmed against Core's CheckCollateral. `value` is a satoshi
+// STRING, so compare with BigInt (never Number() a satoshi field).
+function budgetCollateral(v) {
+  if (v.script.type !== 'OP_RETURN' || (v.script.data || '').length !== 64) return null
+  let sats
+  try { sats = BigInt(v.value || '0') } catch { return null }
+  if (sats >= 5_000_000_000n) return { kind: 'Budget proposal', hash: v.script.data }
+  if (sats >= 500_000_000n) return { kind: 'Budget finalization', hash: v.script.data }
+  return null
+}
+const vouts = computed(() => (tx.value?.vout || []).map((v) => {
+  const out = { ...v, script: voutScript(v) }
+  out.budget = budgetCollateral(out)
+  return out
+}))
+const txBudget = computed(() => vouts.value.find((v) => v.budget)?.budget || null)
 // Full /tx response, pretty-printed, for the copyable raw-JSON section.
 const rawJson = computed(() => (tx.value ? JSON.stringify(tx.value, null, 2) : ''))
 
@@ -191,6 +208,7 @@ const sankeyOption = computed(() => {
         <div class="txid-row">
           <span class="pill mono" :class="tx.confirmations > 0 ? 'neon' : 'warn'"><span class="dot" :class="tx.confirmations > 0 ? 'neon' : 'warn'"></span>{{ tx.confirmations > 0 ? 'CONFIRMED' : 'UNCONFIRMED' }}</span>
           <span v-if="isShielded" class="pill cyan mono"><span class="dot cyan"></span>SHIELDED{{ shieldDirection ? ' · ' + shieldDirection.toUpperCase() : '' }}</span>
+          <span v-if="txBudget" class="pill neon mono"><span class="dot neon"></span>{{ txBudget.kind.toUpperCase() }}</span>
           <span class="mono txid-val">{{ tx.txid }}</span>
         </div>
       </HudPanel>
@@ -244,9 +262,11 @@ const sankeyOption = computed(() => {
                   </template>
                   <RouterLink v-else-if="vout.addresses && vout.addresses[0]" :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 10, 8) }}</RouterLink>
                   <template v-else-if="vout.script.type === 'OP_RETURN'">
-                    <span class="pill warn mono">OP_RETURN</span>
+                    <span v-if="vout.budget" class="pill neon mono">{{ vout.budget.kind.toUpperCase() }}</span>
+                    <span v-else class="pill warn mono">OP_RETURN</span>
                     <div style="margin-top:4px"><Copyable :value="vout.script.data">{{ truncateHash(vout.script.data, 14, 12) }}</Copyable></div>
-                    <div v-if="hexToAscii(vout.script.data)" class="dim mono" style="font-size:11px;margin-top:2px">“{{ hexToAscii(vout.script.data) }}”</div>
+                    <div v-if="vout.budget" class="dim mono" style="font-size:11px;margin-top:2px">budget hash · {{ formatSats(vout.value, { decimals: 0 }) }} PIV fee (burned)</div>
+                    <div v-else-if="hexToAscii(vout.script.data)" class="dim mono" style="font-size:11px;margin-top:2px">“{{ hexToAscii(vout.script.data) }}”</div>
                   </template>
                   <span v-else class="dim mono">{{ vout.script.type.toLowerCase() }}</span>
                 </td>
