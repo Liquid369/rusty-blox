@@ -216,7 +216,7 @@ function blockType(b, i) {
       </Stat>
       <Stat k="MARKET PRICE" glow>
         <template #v>{{ chain.price ? '$' + chain.price.usd.toFixed(4) : '—' }}</template>
-        <template #s>{{ chain.price ? '€' + chain.price.eur.toFixed(4) + ' · ' + chain.price.btc.toExponential(2) + ' BTC' : 'PIVX · USD / EUR / BTC' }}</template>
+        <template #s>{{ chain.price ? '€' + chain.price.eur.toFixed(4) + ' · ' + Math.round(chain.price.btc * 1e8).toLocaleString('en-US') + ' sats' : 'PIVX · USD / EUR / sats' }}</template>
       </Stat>
     </div>
 

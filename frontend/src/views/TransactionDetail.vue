@@ -266,6 +266,7 @@ const sankeyOption = computed(() => {
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
                   <RouterLink v-else-if="vin.addresses && vin.addresses[0]" :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 10, 8) }}</RouterLink>
+                  <RouterLink v-else-if="vin.txid" :to="`/tx/${vin.txid}`" class="dim mono" :title="`${vin.txid}:${vin.vout}`">{{ truncateHash(vin.txid, 8, 6) }}:{{ vin.vout }}</RouterLink>
                   <span v-else class="dim">coinbase</span>
                 </td>
                 <td class="num strong">{{ vinCold(vin) ? (coldInputValueSat != null ? formatSats(coldInputValueSat, { decimals: 4 }) : '—') : (vin.value != null ? formatSats(vin.value, { decimals: 4 }) : '—') }}</td>
