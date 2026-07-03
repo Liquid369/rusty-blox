@@ -69,6 +69,42 @@ const valueBalance = computed(() => {
   return (n > 0 ? '+' : '') + n.toFixed(8)
 })
 
+// Decode a vout scriptPubKey (the /tx API gives per-output `hex` but no type)
+// into a coarse type + OP_RETURN payload. Handles direct pushes + PUSHDATA1/2.
+function voutScript(vout) {
+  const h = (vout.hex || '').toLowerCase()
+  if (h.startsWith('6a')) {
+    let i = 2
+    const parts = []
+    while (i + 2 <= h.length) {
+      const op = parseInt(h.slice(i, i + 2), 16); i += 2
+      let n = 0
+      if (op <= 0x4b) n = op
+      else if (op === 0x4c) { n = parseInt(h.slice(i, i + 2), 16); i += 2 }
+      else if (op === 0x4d) { n = parseInt(h.slice(i + 2, i + 4) + h.slice(i, i + 2), 16); i += 4 }
+      else break
+      parts.push(h.slice(i, i + n * 2)); i += n * 2
+    }
+    return { type: 'OP_RETURN', data: parts.join('') }
+  }
+  if (h.startsWith('76a914') && h.endsWith('88ac')) return { type: 'P2PKH' }
+  if (h.startsWith('a914') && h.endsWith('87')) return { type: 'P2SH' }
+  return { type: vout.addresses && vout.addresses.length ? 'address' : 'nonstandard' }
+}
+// hex -> ASCII (· for non-printable); '' when nothing printable (pure binary blob).
+function hexToAscii(hex) {
+  let s = '', printable = 0
+  for (let i = 0; i + 2 <= hex.length; i += 2) {
+    const c = parseInt(hex.slice(i, i + 2), 16)
+    if (c >= 32 && c < 127) { s += String.fromCharCode(c); printable++ } else s += '·'
+  }
+  return printable ? s : ''
+}
+// vout decorated with its decoded script, so the template parses each hex once.
+const vouts = computed(() => (tx.value?.vout || []).map((v) => ({ ...v, script: voutScript(v) })))
+// Full /tx response, pretty-printed, for the copyable raw-JSON section.
+const rawJson = computed(() => (tx.value ? JSON.stringify(tx.value, null, 2) : ''))
+
 function spentPill(v) {
   if (v === true) return { cls: 'bad', text: 'spent' }
   if (v === false) return { cls: 'ok', text: 'unspent' }
@@ -200,14 +236,19 @@ const sankeyOption = computed(() => {
           <table class="dtable">
             <thead><tr><th>Address</th><th class="num">Value (PIV)</th><th>State</th></tr></thead>
             <tbody>
-              <tr v-for="(vout, i) in tx.vout" :key="i">
+              <tr v-for="(vout, i) in vouts" :key="i">
                 <td>
                   <template v-if="vout.addresses && vout.addresses.length >= 2">
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[1]}`">{{ truncateHash(vout.addresses[1], 8, 6) }}</RouterLink><span class="pill neon mono">OWNER</span></div>
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
                   <RouterLink v-else-if="vout.addresses && vout.addresses[0]" :to="`/address/${vout.addresses[0]}`">{{ truncateHash(vout.addresses[0], 10, 8) }}</RouterLink>
-                  <span v-else class="dim">—</span>
+                  <template v-else-if="vout.script.type === 'OP_RETURN'">
+                    <span class="pill warn mono">OP_RETURN</span>
+                    <div style="margin-top:4px"><Copyable :value="vout.script.data">{{ truncateHash(vout.script.data, 14, 12) }}</Copyable></div>
+                    <div v-if="hexToAscii(vout.script.data)" class="dim mono" style="font-size:11px;margin-top:2px">“{{ hexToAscii(vout.script.data) }}”</div>
+                  </template>
+                  <span v-else class="dim mono">{{ vout.script.type.toLowerCase() }}</span>
                 </td>
                 <td class="num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</td>
                 <td><span class="pill" :class="spentPill(vout.spent).cls">{{ spentPill(vout.spent).text }}</span></td>
@@ -276,6 +317,15 @@ const sankeyOption = computed(() => {
           <dt>Size</dt><dd>{{ formatCount(tx.size) }} B · vsize {{ formatCount(tx.vsize) }} B</dd>
           <dt>Version</dt><dd>{{ tx.version }} · locktime {{ tx.lockTime }}</dd>
         </dl>
+      </HudPanel>
+
+      <h2 class="section-title">Raw</h2>
+      <HudPanel title="RAW TRANSACTION JSON" id="/tx response">
+        <template #head><Copyable :value="rawJson"><span class="pill cyan mono">⧉ copy JSON</span></Copyable></template>
+        <details>
+          <summary class="mono dim" style="cursor:pointer">show / hide the full /tx response</summary>
+          <pre style="overflow:auto;max-height:460px;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
+        </details>
       </HudPanel>
     </template>
 
