@@ -266,6 +266,7 @@ const sankeyOption = computed(() => {
                     <div style="display:flex;align-items:center;gap:6px;margin:1px 0"><RouterLink :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 8, 6) }}</RouterLink><span class="pill cyan mono">STAKER</span></div>
                   </template>
                   <RouterLink v-else-if="vin.addresses && vin.addresses[0]" :to="`/address/${vin.addresses[0]}`">{{ truncateHash(vin.addresses[0], 10, 8) }}</RouterLink>
+                  <RouterLink v-else-if="vin.txid" :to="`/tx/${vin.txid}`" class="dim mono" :title="`${vin.txid}:${vin.vout}`">{{ truncateHash(vin.txid, 8, 6) }}:{{ vin.vout }}</RouterLink>
                   <span v-else class="dim">coinbase</span>
                 </td>
                 <td class="num strong">{{ vinCold(vin) ? (coldInputValueSat != null ? formatSats(coldInputValueSat, { decimals: 4 }) : '—') : (vin.value != null ? formatSats(vin.value, { decimals: 4 }) : '—') }}</td>
@@ -275,6 +276,7 @@ const sankeyOption = computed(() => {
         </HudPanel>
 
         <HudPanel title="OUTPUTS" :id="`${tx.vout.length} vout`">
+          <div style="overflow-x:auto">
           <table class="dtable">
             <thead><tr><th>Address</th><th class="num">Value (PIV)</th><th>State</th></tr></thead>
             <tbody>
@@ -299,6 +301,7 @@ const sankeyOption = computed(() => {
               </tr>
             </tbody>
           </table>
+          </div>
         </HudPanel>
       </div>
 
@@ -401,7 +404,7 @@ const sankeyOption = computed(() => {
         <template #head><Copyable :value="rawJson"><span class="pill cyan mono">⧉ copy JSON</span></Copyable></template>
         <details>
           <summary class="mono dim" style="cursor:pointer">show / hide the full /tx response</summary>
-          <pre style="overflow:auto;max-height:460px;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
+          <pre style="max-width:100%;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
         </details>
       </HudPanel>
     </template>
