@@ -46,20 +46,22 @@ pub async fn tx_v2(
 
 /// Read a transaction's stored record (`version(4) ++ height(4) ++ raw_tx`), preferring a
 /// VALID record over a malformed "phantom stub". A tx may be keyed INTERNAL (reversed
-/// display) or DISPLAY; a short (<8-byte) stub at one key must NOT shadow the real record
-/// at the other (that shadowing is the `/tx` 404 bug). Returns the first record with
-/// `len() >= 8`, or None.
+/// display) or DISPLAY; a body-LESS stub (≤8 bytes: version+height, no tx) at one key must
+/// NOT shadow the real record at the other (that shadowing is the `/tx` 404 bug). Returns
+/// the first record with a body (`len() > 8`), or None.
 pub(crate) fn read_valid_tx_record(
     db: &DB,
     cf: &impl rocksdb::AsColumnFamilyRef,
     display_txid_bytes: &[u8],
 ) -> Option<Vec<u8>> {
     let internal: Vec<u8> = display_txid_bytes.iter().rev().cloned().collect();
+    // Prefer a record WITH a body (len>8) at either key order; a body-LESS stub (≤8 bytes,
+    // e.g. reorg orphan-marking) must not shadow the real record.
     for txid in [internal.as_slice(), display_txid_bytes] {
         let mut key = vec![b't'];
         key.extend_from_slice(txid);
         if let Ok(Some(d)) = db.get_cf(cf, &key) {
-            if d.len() >= 8 {
+            if d.len() > 8 {
                 return Some(d);
             }
         }
@@ -577,6 +579,34 @@ mod tests {
         let internal: Vec<u8> = display.iter().rev().cloned().collect();
         put(&db, &internal, &[0u8, 1]);
         put(&db, &display, &[0u8, 1, 2]);
+        let cf = db.cf_handle("transactions").unwrap();
+        assert_eq!(read_valid_tx_record(&db, &cf, &display), None);
+    }
+
+    // THE reorg bug: an EXACTLY-8-byte body-less stub (version(4)+HEIGHT_ORPHAN(4), no tx
+    // bytes — written by reorg.rs disconnect_transaction) passes the len>=8 check. It must
+    // NOT shadow the real record (which has a body, len>8) at the other key order.
+    #[test]
+    fn prefers_body_over_eight_byte_stub() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        let stub = vec![0u8, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF]; // version=0, height=-1, no body
+        put(&db, &internal, &stub);
+        let valid = vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xAA, 0xBB]; // has a body
+        put(&db, &display, &valid);
+        let cf = db.cf_handle("transactions").unwrap();
+        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+    }
+
+    // An exactly-8-byte body-less stub at every key order has no body to serve -> None
+    // (guards the len>8 vs len>=8 boundary that WAS the bug).
+    #[test]
+    fn none_when_only_eight_byte_stub() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        let stub = vec![0u8, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF];
+        put(&db, &internal, &stub);
+        put(&db, &display, &stub);
         let cf = db.cf_handle("transactions").unwrap();
         assert_eq!(read_valid_tx_record(&db, &cf, &display), None);
     }

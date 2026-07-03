@@ -389,17 +389,20 @@ async fn disconnect_transaction(
         }
     }
 
-    // 4. Delete transaction record (mark as orphaned)
-    // Instead of deleting, mark with HEIGHT_ORPHAN to indicate orphaned
-    let mut orphan_data = vec![0u8; 4]; // version = 0
-    orphan_data.extend_from_slice(&HEIGHT_ORPHAN.to_le_bytes()); // height = HEIGHT_ORPHAN
+    // 4. Orphan-mark the tx record (HEIGHT_ORPHAN) so it is no longer served as confirmed.
+    // CRITICAL: only when we actually have the body to preserve. Writing a body-LESS 8-byte
+    // record (version + height, no tx bytes) is exactly the stub that makes /tx return
+    // "Empty transaction data". If the body isn't at this (display) key it lives untouched at
+    // the internal key (initial-sync), and read_valid_tx_record serves it from there — so
+    // skipping the write here never loses data, and never manufactures a phantom stub.
     if let Some(ref data) = tx_data {
         if data.len() > 8 {
-            orphan_data.extend_from_slice(&data[8..]); // Original tx bytes
+            let mut orphan_data = vec![0u8; 4]; // version = 0
+            orphan_data.extend_from_slice(&HEIGHT_ORPHAN.to_le_bytes()); // height = HEIGHT_ORPHAN
+            orphan_data.extend_from_slice(&data[8..]); // preserve original tx bytes
+            writer.put("transactions", tx_key, orphan_data);
         }
     }
-
-    writer.put("transactions", tx_key, orphan_data);
 
     Ok(())
 }
@@ -580,6 +583,17 @@ pub async fn handle_reorg(
 mod tests {
     use super::*;
 
+    // Temp DB with the CFs the disconnect tests touch.
+    fn seed() -> (tempfile::TempDir, Arc<rocksdb::DB>) {
+        use rocksdb::{Options, DB};
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["transactions", "utxo"]).unwrap());
+        (temp, db)
+    }
+
     #[test]
     fn test_reorg_info_creation() {
         let info = ReorgInfo::new(100, 100, 5, "old_hash".to_string(), "new_hash".to_string());
@@ -693,14 +707,8 @@ mod tests {
     #[tokio::test]
     async fn disconnect_orphan_marks_real_tx_at_display_key() {
         use crate::constants::HEIGHT_ORPHAN;
-        use rocksdb::{Options, DB};
-        use tempfile::TempDir;
 
-        let temp = TempDir::new().unwrap();
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["transactions", "utxo"]).unwrap());
+        let (_temp, db) = seed();
         let cf_tx = db.cf_handle("transactions").unwrap();
 
         let txid_display =
@@ -740,6 +748,50 @@ mod tests {
         assert!(
             db.get_cf(&cf_tx, &tkey_internal).unwrap().is_none(),
             "no phantom orphan stub at the internal key",
+        );
+    }
+
+    /// Reorg must NEVER manufacture a body-less 8-byte stub. When the tx body lives only at
+    /// the INTERNAL key (initial-sync style), disconnect reads the display key, finds nothing,
+    /// and must SKIP the write — not write version+HEIGHT_ORPHAN (8 bytes) at the display key.
+    /// That 8-byte record is exactly what makes /tx return "Empty transaction data".
+    #[tokio::test]
+    async fn disconnect_never_writes_bodyless_stub() {
+        let (_temp, db) = seed();
+        let cf_tx = db.cf_handle("transactions").unwrap();
+
+        let txid_display =
+            hex::decode("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+                .unwrap();
+        let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
+
+        // Body lives ONLY at the internal key (as initial-sync writes it).
+        let height: i32 = 4200;
+        let mut rec = vec![1u8, 0, 0, 0];
+        rec.extend_from_slice(&height.to_le_bytes());
+        rec.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]); // body
+        let mut tkey_internal = vec![b't'];
+        tkey_internal.extend_from_slice(&txid_internal);
+        db.put_cf(&cf_tx, &tkey_internal, &rec).unwrap();
+
+        let mut writer = AtomicBatchWriter::new(db.clone(), 1000);
+        disconnect_transaction(&mut writer, &db, &txid_display, height)
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        // No body-less stub manufactured at the display key.
+        let mut tkey_display = vec![b't'];
+        tkey_display.extend_from_slice(&txid_display);
+        assert!(
+            db.get_cf(&cf_tx, &tkey_display).unwrap().is_none(),
+            "must not manufacture a body-less stub at the display key",
+        );
+        // The real body at the internal key is left intact.
+        assert_eq!(
+            db.get_cf(&cf_tx, &tkey_internal).unwrap().unwrap(),
+            rec,
+            "internal-key body must be left intact",
         );
     }
 
