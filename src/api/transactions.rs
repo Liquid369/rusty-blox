@@ -147,23 +147,15 @@ pub(crate) async fn build_transaction_from_db(
 
                 // Try to get value and address from previous transaction
                 if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
-                    let reversed: Vec<u8> = prev_txid_bytes.iter().rev().cloned().collect();
-                    let mut prev_key = vec![b't'];
-                    prev_key.extend_from_slice(&reversed);
-
-                    let prev_data_opt = if let Ok(Some(d)) = db_clone.get_cf(&cf_transactions, &prev_key) {
-                        Some(d)
-                    } else {
-                        // Fallback: try display format
-                        let mut prev_key_display = vec![b't'];
-                        prev_key_display.extend_from_slice(&prev_txid_bytes);
-                        db_clone.get_cf(&cf_transactions, &prev_key_display).ok().flatten()
-                    };
+                    // Prefer a record WITH a body over an 8-byte stub (same shadowing bug as
+                    // read_valid_tx_record) so a stub prevout never silently zeroes valueIn.
+                    let prev_data_opt =
+                        read_valid_tx_record(&db_clone, &cf_transactions, &prev_txid_bytes);
 
                     if let Some(prev_data) = prev_data_opt {
                         if prev_data.len() > 10_000_000 {
                             warn!(prevout_hash = %prevout.hash, size_bytes = prev_data.len(), "Previous transaction data too large");
-                        } else if prev_data.len() >= 8 {
+                        } else if prev_data.len() > 8 {
                             let prev_tx_data_len = prev_data.len() - 8;
                             if prev_tx_data_len > 0 {
                                 let mut prev_tx_data_with_header = Vec::with_capacity(4 + prev_tx_data_len);
