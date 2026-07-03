@@ -214,6 +214,10 @@ function blockType(b, i) {
         <template #v>{{ avgInterval.toFixed(1) }}<span class="unit">s</span></template>
         <template #s>~60s PoS target · {{ todayTx.count ? compactNumber(todayTx.count) : '—' }} tx/day</template>
       </Stat>
+      <Stat k="MARKET PRICE" glow>
+        <template #v>{{ chain.price ? '$' + chain.price.usd.toFixed(4) : '—' }}</template>
+        <template #s>{{ chain.price ? '€' + chain.price.eur.toFixed(4) + ' · ' + chain.price.btc.toExponential(2) + ' BTC' : 'PIVX · USD / EUR / BTC' }}</template>
+      </Stat>
     </div>
 
     <!-- HERO HEARTBEAT + SIDE GAUGE -->

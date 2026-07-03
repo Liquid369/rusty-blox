@@ -610,6 +610,10 @@ export const monthlyBudgetCap = () => MONTHLY_BUDGET_CAP
 // /budgetinfo — all proposals (Allotted = 0 here, per the real RPC).
 export function budgetInfo() { return BUDGET_PROPOSALS.map((p) => ({ ...p })) }
 
+export function price() {
+  return { usd: 0.2143, eur: 0.1985, btc: 0.00000214, last_updated: 1782700000 }
+}
+
 // /budgetprojection — only the funded subset, priority-ordered, with the real
 // Allotted populated and a cumulative TotalBudgetAllotted running total.
 export function budgetProjection() {

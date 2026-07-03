@@ -153,6 +153,13 @@ export const getXpub = (xpub, opts = {}) => {
 export const getSearch = (query) =>
   isMock ? Promise.resolve(mock.search(query)) : getJSON(`/search/${encodeURIComponent(query)}`)
 
+// --- price ------------------------------------------------------------
+// PIVX market price: { usd, eur, btc, last_updated } — all f64 NUMBERS (btc in
+// sci-notation). Degrades to a 200 zero-fallback on upstream failure, so treat
+// usd <= 0 as "unavailable" and keep the last good value.
+export const getPrice = () =>
+  isMock ? Promise.resolve(mock.price()) : getJSON('/price')
+
 // Governance funding-gate helpers (mock-derived constants; live UI computes
 // the threshold from /mncount.total).
 export const mnTotal = mock.mnTotal
@@ -182,7 +189,7 @@ export default {
   getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
   getMnCount, getMnList, getMempool, getMempoolSeries,
-  getBudgetInfo, getBudgetProjection, getBudgetVotes, getXpub, getSearch,
+  getBudgetInfo, getBudgetProjection, getBudgetVotes, getXpub, getSearch, getPrice,
   mnTotal, nextSuperblock, proposalPasses, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }

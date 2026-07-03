@@ -21,6 +21,7 @@ const clock = ref('')
 const uptime = ref(0)
 let t = null
 let poll = null
+let pricePoll = null
 function tick() {
   const d = new Date()
   clock.value = d.toISOString().slice(11, 19) + 'Z'
@@ -52,8 +53,11 @@ onMounted(() => {
   // Fallback poll for sync% / network height (and if the WS drops); status
   // caches 5s server-side.
   poll = setInterval(() => chain.refresh(), 15000)
+  // Market price (300s server cache + external API) — fetch once, refresh gently.
+  chain.refreshPrice()
+  pricePoll = setInterval(() => chain.refreshPrice(), 120000)
 })
-onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectLive() })
+onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pricePoll); chain.disconnectLive() })
 </script>
 
 <template>
@@ -98,6 +102,10 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectL
         <div class="t-cell">
           <span class="t-k">TIP</span>
           <span class="t-v mono">{{ formatCount(chain.height) }}</span>
+        </div>
+        <div class="t-cell hide-price">
+          <span class="t-k">PRICE</span>
+          <span class="t-v mono">{{ chain.price ? '$' + chain.price.usd.toFixed(4) : '—' }}</span>
         </div>
         <div class="t-cell hide-sm">
           <span class="t-k">UTC</span>
@@ -242,6 +250,7 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); chain.disconnectL
    decorative 96px heartbeat to give the search bar room. */
 @media (max-width: 900px) {
   .heartbeat { display: none; }
+  .hide-price { display: none; }  /* price ticker off in the Fold/mobile range (shown on Dashboard + Governance) */
 }
 
 @media (max-width: 720px) {

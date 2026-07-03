@@ -59,6 +59,9 @@ const daysLeft = computed(() => (blocksLeft.value * 60) / 86400)
 
 const allotted = computed(() =>
   projection.value.length ? projection.value[projection.value.length - 1].TotalBudgetAllotted : 0)
+// Treasury value in fiat: PIV allotted × PIVX/USD (0 when price unavailable).
+const allottedUsd = computed(() =>
+  chain.price && chain.price.usd > 0 ? allotted.value * chain.price.usd : 0)
 const demand = computed(() => proposals.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
 const PAL = ['#c46bff', '#46e6d0', '#ffcf5c', '#9d4ef0', '#ff6f9c', '#7ad97a']
@@ -132,7 +135,7 @@ const allocOption = computed(() => {
       </Stat>
       <Stat k="ALLOTTED THIS CYCLE" glow>
         <template #v>{{ formatPiv(allotted, { decimals: 0 }) }}</template>
-        <template #s>PIV across {{ projection.length }} funded proposals</template>
+        <template #s>{{ allottedUsd ? '≈ $' + Math.round(allottedUsd).toLocaleString('en-US') + ' · ' : '' }}PIV across {{ projection.length }} funded proposals</template>
       </Stat>
       <Stat k="PROPOSALS">
         <template #v>{{ projection.length }}<span class="unit">/ {{ proposals.length }}</span></template>
