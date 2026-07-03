@@ -217,19 +217,9 @@ fn search_transaction(
     // Transaction key format: 't' + txid_bytes_reversed (internal format)
     let txid_bytes = hex::decode(txid)?;
 
-    // Try reversed format first (new/correct format)
-    let txid_reversed: Vec<u8> = txid_bytes.iter().rev().cloned().collect();
-    let mut key = vec![b't'];
-    key.extend_from_slice(&txid_reversed);
-
-    let tx_data = if let Ok(Some(data)) = db.get_cf(&cf_transactions, &key) {
-        Some(data)
-    } else {
-        // Fallback: try display format (old/incorrect format for migration)
-        let mut key_display = vec![b't'];
-        key_display.extend_from_slice(&txid_bytes);
-        db.get_cf(&cf_transactions, &key_display)?
-    };
+    // Prefer a record WITH a body over an 8-byte stub (shadowing bug) so search reports the
+    // real block height, not the orphan/stub sentinel; the shared reader checks both orders.
+    let tx_data = crate::api::transactions::read_valid_tx_record(db, &cf_transactions, &txid_bytes);
 
     match tx_data {
         Some(tx_data) => {
