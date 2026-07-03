@@ -275,6 +275,7 @@ const sankeyOption = computed(() => {
         </HudPanel>
 
         <HudPanel title="OUTPUTS" :id="`${tx.vout.length} vout`">
+          <div style="overflow-x:auto">
           <table class="dtable">
             <thead><tr><th>Address</th><th class="num">Value (PIV)</th><th>State</th></tr></thead>
             <tbody>
@@ -299,6 +300,7 @@ const sankeyOption = computed(() => {
               </tr>
             </tbody>
           </table>
+          </div>
         </HudPanel>
       </div>
 
@@ -401,7 +403,7 @@ const sankeyOption = computed(() => {
         <template #head><Copyable :value="rawJson"><span class="pill cyan mono">⧉ copy JSON</span></Copyable></template>
         <details>
           <summary class="mono dim" style="cursor:pointer">show / hide the full /tx response</summary>
-          <pre style="overflow:auto;max-height:460px;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
+          <pre style="max-width:100%;margin-top:10px;padding:12px;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text-muted);background:rgba(0,0,0,0.25);border-radius:8px">{{ rawJson }}</pre>
         </details>
       </HudPanel>
     </template>
