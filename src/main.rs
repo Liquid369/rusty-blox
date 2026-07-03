@@ -18,10 +18,10 @@ use rustyblox::api::{
     // Governance module
     budget_info_v2,
     budget_projection_v2,
-    finalized_budgets_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
+    finalized_budgets_v2,
     health_check_v2,
     hodl_analytics,
     mempool_tx_v2,

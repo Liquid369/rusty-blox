@@ -238,10 +238,8 @@ pub(crate) async fn build_transaction_from_db(
                     // None=unknown. Only a genuinely un-indexed address stays None.
                     let mut r_key = vec![b'r'];
                     r_key.extend_from_slice(address.as_bytes());
-                    return match db_clone.get_cf(cf, &r_key).ok().flatten() {
-                        Some(_) => Some(false),
-                        None => None,
-                    };
+                    // Some(received-total) ⇒ known address, empty UTXO set ⇒ spent.
+                    return db_clone.get_cf(cf, &r_key).ok().flatten().map(|_| false);
                 }
             };
             // v2 'a' format: repeated 49-byte [txid(32)+vout(8 LE)+value(8)+kind(1)].
