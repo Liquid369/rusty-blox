@@ -27,10 +27,10 @@ async function load() {
 onMounted(load)
 watch(() => props.height, load)
 
-const txType = (t) => t.tx_type || 'normal'
-const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', normal: '#46e6d0' }
+const txType = (t) => { const x = t.tx_type || 'transparent'; return x === 'normal' ? 'transparent' : x }
+const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0' }
 // A tx is shielded if it carries Sapling spends/outputs — orthogonal to tx_type
-// (a "normal" tx can be shielded), so it's flagged as an extra badge, not a type.
+// (a transparent tx can be shielded), so it's flagged as an extra badge, not a type.
 const isShielded = (t) => !!t.sapling && ((t.sapling.shielded_spend_count || 0) > 0 || (t.sapling.shielded_output_count || 0) > 0)
 
 // Block reward (total minted, PIV float) -> satoshi, for recovering the value the
@@ -61,7 +61,7 @@ const minter = computed(() => {
 })
 
 const typeCounts = computed(() => {
-  const c = { coinbase: 0, coinstake: 0, normal: 0 }
+  const c = { coinbase: 0, coinstake: 0, transparent: 0 }
   for (const t of (block.value?.tx || [])) c[txType(t)]++
   return c
 })
@@ -79,7 +79,7 @@ const donutOption = computed(() => {
       data: [
         { name: 'coinstake', value: c.coinstake, itemStyle: { color: TYPE_COLOR.coinstake } },
         { name: 'coinbase', value: c.coinbase, itemStyle: { color: TYPE_COLOR.coinbase } },
-        { name: 'normal', value: c.normal, itemStyle: { color: TYPE_COLOR.normal } },
+        { name: 'transparent', value: c.transparent, itemStyle: { color: TYPE_COLOR.transparent } },
       ].filter((d) => d.value > 0),
     }],
   }
@@ -109,14 +109,14 @@ const totalFees = computed(() =>
     <template v-if="block">
       <div class="statgrid cols-5">
         <Stat k="REWARD" accent><template #v>{{ formatPiv(block.reward, { decimals: 2 }) }}</template><template #s>PIV minted</template></Stat>
-        <Stat k="TRANSACTIONS" glow><template #v>{{ block.tx.length }}</template><template #s>{{ typeCounts.normal }} payment</template></Stat>
+        <Stat k="TRANSACTIONS" glow><template #v>{{ block.tx.length }}</template><template #s>{{ typeCounts.transparent }} payment</template></Stat>
         <Stat k="VALUE OUT"><template #v>{{ formatPiv(totalOut, { decimals: 2 }) }}</template><template #s>PIV moved</template></Stat>
         <Stat k="CONFIRMATIONS"><template #v>{{ compactNumber(block.confirmations) }}</template><template #s>{{ timeAgo(block.time) }}</template></Stat>
         <Stat k="DIFFICULTY"><template #v>{{ formatDifficulty(block.difficulty) }}</template><template #s>fees {{ formatPiv(totalFees, { decimals: 8 }) }}</template></Stat>
       </div>
 
       <div class="split s-37" style="margin-top: var(--space-4)">
-        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · normal" hero>
+        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent" hero>
           <div class="donut-wrap">
             <EChart :option="donutOption" height="200px" />
             <div class="donut-legend">
@@ -134,12 +134,12 @@ const totalFees = computed(() =>
             <template v-if="minter">
               <dt>{{ minter.cold ? 'Staker' : 'Staked by' }}</dt>
               <dd>
-                <RouterLink :to="`/address/${minter.staker}`">{{ truncateHash(minter.staker, 14, 12) }}</RouterLink>
+                <RouterLink :to="`/address/${minter.staker}`">{{ minter.staker }}</RouterLink>
                 <span v-if="minter.cold" class="pill cyan mono" style="margin-left:6px">COLD-STAKE</span>
               </dd>
               <template v-if="minter.cold">
                 <dt>Owner</dt>
-                <dd><RouterLink :to="`/address/${minter.owner}`">{{ truncateHash(minter.owner, 14, 12) }}</RouterLink></dd>
+                <dd><RouterLink :to="`/address/${minter.owner}`">{{ minter.owner }}</RouterLink></dd>
               </template>
             </template>
             <dt>Hash</dt><dd>{{ block.hash }}</dd>
@@ -156,7 +156,7 @@ const totalFees = computed(() =>
       <h2 class="section-title">Transactions ({{ block.tx.length }})</h2>
       <HudPanel v-for="t in block.tx" :key="t.txid" :title="`TX ${truncateHash(t.txid, 8, 6)}`" :id="`${t.vin.length} in · ${t.vout.length} out`" class="txp">
         <template #head>
-          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='normal' }">{{ txType(t) }}</span>
+          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='transparent' }">{{ txType(t) }}</span>
           <span v-if="isShielded(t)" class="pill cyan mono" style="margin-left:4px">SHIELDED</span>
           <RouterLink :to="`/tx/${t.txid}`" class="gbtn">OPEN ↗</RouterLink>
         </template>
@@ -165,10 +165,10 @@ const totalFees = computed(() =>
             <div class="eyebrow">INPUTS · sat → PIV</div>
             <div v-for="(vin, i) in t.vin" :key="i" class="flow-row">
               <span v-if="vinCold(t, vin)" class="mono" style="display:inline-flex;flex-direction:column;gap:1px;line-height:1.35">
-                <span class="dim">{{ truncateHash(vinCold(t, vin)[1], 6, 4) }} <span class="pill neon mono" style="padding:0 4px">OWNER</span></span>
-                <span class="dim">{{ truncateHash(vinCold(t, vin)[0], 6, 4) }} <span class="pill cyan mono" style="padding:0 4px">STAKER</span></span>
+                <span class="dim">{{ vinCold(t, vin)[1] }} <span class="pill neon mono" style="padding:0 4px">OWNER</span></span>
+                <span class="dim">{{ vinCold(t, vin)[0] }} <span class="pill cyan mono" style="padding:0 4px">STAKER</span></span>
               </span>
-              <span v-else class="dim mono">{{ vin.coinbase ? 'coinbase' : truncateHash(vin.address || '—', 8, 6) }}</span>
+              <span v-else class="dim mono">{{ vin.coinbase ? 'coinbase' : (vin.address || '—') }}</span>
               <span class="mono num">{{ vinCold(t, vin) ? (vinColdValueSat(t) != null ? formatSats(vinColdValueSat(t), { decimals: 4 }) : '—') : (vin.value != null ? formatSats(vin.value, { decimals: 4 }) : '—') }}</span>
             </div>
           </div>
@@ -184,10 +184,10 @@ const totalFees = computed(() =>
             <div class="eyebrow">OUTPUTS · sat → PIV</div>
             <div v-for="(vout, i) in t.vout" :key="i" class="flow-row">
               <span v-if="vout.addresses && vout.addresses.length >= 2" class="mono" style="display:inline-flex;flex-direction:column;gap:1px;line-height:1.35">
-                <span class="dim">{{ truncateHash(vout.addresses[1], 6, 4) }} <span class="pill neon mono" style="padding:0 4px">OWNER</span></span>
-                <span class="dim">{{ truncateHash(vout.addresses[0], 6, 4) }} <span class="pill cyan mono" style="padding:0 4px">STAKER</span></span>
+                <span class="dim">{{ vout.addresses[1] }} <span class="pill neon mono" style="padding:0 4px">OWNER</span></span>
+                <span class="dim">{{ vout.addresses[0] }} <span class="pill cyan mono" style="padding:0 4px">STAKER</span></span>
               </span>
-              <span v-else class="dim mono">{{ (vout.addresses && vout.addresses[0]) ? truncateHash(vout.addresses[0], 8, 6) : '—' }}</span>
+              <span v-else class="dim mono">{{ (vout.addresses && vout.addresses[0]) ? vout.addresses[0] : '—' }}</span>
               <span class="mono num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</span>
             </div>
           </div>
