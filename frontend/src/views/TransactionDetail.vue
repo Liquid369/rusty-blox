@@ -214,6 +214,15 @@ const sankeyOption = computed(() => {
     }],
   }
 })
+
+// The Sankey needs ~20px of vertical room per node or the labels collapse into an
+// illegible block (a 44-output payout crammed into a fixed 300px). Scale to the busier
+// side. ponytail: capped at 1200px — a pathological fan-out (>~58 nodes) re-crowds past
+// the cap, acceptable ceiling; raise it or aggregate small outputs if that ever matters.
+const flowHeight = computed(() => {
+  const n = Math.max(tx.value?.vin?.length || 1, tx.value?.vout?.length || 1)
+  return Math.min(1200, Math.max(300, n * 20 + 40)) + 'px'
+})
 </script>
 
 <template>
@@ -247,7 +256,7 @@ const sankeyOption = computed(() => {
       <h2 class="section-title">Value flow</h2>
       <HudPanel title="VIN → VOUT VALUE-FLOW" :id="isShielded ? 'transparent + shielded pool' : 'sankey · satoshi → PIV'" hero>
         <template #head><span class="pill cyan mono">{{ tx.vin.length }} in</span><span class="pill neon mono">{{ tx.vout.length }} out</span></template>
-        <EChart :option="sankeyOption" height="300px" aria-label="Transaction value flow from inputs to outputs" />
+        <EChart :option="sankeyOption" :height="flowHeight" aria-label="Transaction value flow from inputs to outputs" />
       </HudPanel>
 
       <div class="split s-2" style="margin-top: var(--space-4)">
