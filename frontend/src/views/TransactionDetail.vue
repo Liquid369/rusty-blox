@@ -5,8 +5,8 @@
    STRING → formatSats (BigInt-safe). spent: true/false/null(unknown).
    ===================================================================== */
 import { ref, watch, onMounted, computed } from 'vue'
-import { getTx, getBlockDetail } from '../api/client.js'
-import { formatSats } from '../lib/money.js'
+import { getTx, getBlockDetail, getBudgetInfo, getFinalizedBudgets } from '../api/client.js'
+import { formatSats, formatPiv } from '../lib/money.js'
 import { formatDateTime, truncateHash, formatCount, timeAgo } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import { isCoinstakeTx, isUnresolvedColdVin, coinstakeInputAddresses, coinstakeInputValueSat } from '../lib/coinstake.js'
@@ -119,6 +119,30 @@ const vouts = computed(() => (tx.value?.vout || []).map((v) => {
   return out
 }))
 const txBudget = computed(() => vouts.value.find((v) => v.budget)?.budget || null)
+
+// Resolve a budget collateral tx to its governance record: proposals match by
+// FeeHash == txid (getbudgetinfo), finalized budgets by FeeTX == txid
+// (getfinalizedbudgets). The node prunes old budgets, so it may be unresolvable.
+const govRecord = ref(null)
+async function resolveGovernance() {
+  govRecord.value = null
+  const b = txBudget.value
+  const id = (tx.value?.txid || '').toLowerCase()
+  if (!b || !id) return
+  try {
+    if (b.kind === 'Budget proposal') {
+      const props = await getBudgetInfo()
+      const p = (props || []).find((x) => (x.FeeHash || '').toLowerCase() === id)
+      if (p) govRecord.value = { kind: 'proposal', ...p }
+    } else {
+      const fbs = await getFinalizedBudgets()
+      for (const [name, fb] of Object.entries(fbs || {})) {
+        if ((fb.FeeTX || '').toLowerCase() === id) { govRecord.value = { kind: 'finalized', name, ...fb }; break }
+      }
+    }
+  } catch { /* leave unresolved */ }
+}
+watch(txBudget, resolveGovernance)
 // Full /tx response, pretty-printed, for the copyable raw-JSON section.
 const rawJson = computed(() => (tx.value ? JSON.stringify(tx.value, null, 2) : ''))
 
@@ -325,6 +349,39 @@ const sankeyOption = computed(() => {
           <p class="dim" style="margin-top:var(--space-3);font-size:12px">
             Shielded addresses and amounts are private by design — only the public commitments, nullifiers, and the net transparent value balance are visible on-chain. Click any value to copy the full hex.
           </p>
+        </HudPanel>
+      </template>
+
+      <template v-if="txBudget">
+        <h2 class="section-title">Governance</h2>
+        <HudPanel :title="txBudget.kind === 'Budget finalization' ? 'FINALIZED BUDGET' : 'BUDGET PROPOSAL'" id="decoded from collateral">
+          <template v-if="govRecord && govRecord.kind === 'proposal'">
+            <div class="statgrid cols-4">
+              <Stat k="PROPOSAL" accent><template #v>{{ govRecord.Name }}</template><template #s>{{ govRecord.IsValid ? 'valid' : 'invalid' }}</template></Stat>
+              <Stat k="MONTHLY"><template #v>{{ formatPiv(govRecord.MonthlyPayment, { decimals: 0 }) }}</template><template #s>PIV · {{ govRecord.TotalPaymentCount }} payments</template></Stat>
+              <Stat k="VOTES"><template #v>{{ govRecord.Yeas }} / {{ govRecord.Nays }}</template><template #s>yea / nay</template></Stat>
+              <Stat k="PAYS"><template #v>#{{ govRecord.BlockStart }}</template><template #s>→ #{{ govRecord.BlockEnd }}</template></Stat>
+            </div>
+            <dl class="kv" style="margin-top:var(--space-4)">
+              <dt>URL</dt><dd><a :href="govRecord.URL" target="_blank" rel="noopener noreferrer">{{ govRecord.URL }}</a></dd>
+              <dt>Payee</dt><dd><RouterLink :to="`/address/${govRecord.PaymentAddress}`">{{ govRecord.PaymentAddress }}</RouterLink></dd>
+            </dl>
+          </template>
+          <template v-else-if="govRecord && govRecord.kind === 'finalized'">
+            <div class="statgrid cols-4">
+              <Stat k="STATUS" accent><template #v>{{ govRecord.Status }}</template><template #s>{{ govRecord.IsValid ? 'valid' : 'invalid' }}</template></Stat>
+              <Stat k="VOTES"><template #v>{{ formatCount(govRecord.VoteCount) }}</template><template #s>masternode votes</template></Stat>
+              <Stat k="PAYS"><template #v>#{{ govRecord.BlockStart }}</template><template #s>→ #{{ govRecord.BlockEnd }}</template></Stat>
+              <Stat k="PROPOSALS"><template #v>{{ (govRecord.Proposals || '').split(',').filter(Boolean).length || '—' }}</template><template #s>in this budget</template></Stat>
+            </div>
+            <dl class="kv" style="margin-top:var(--space-4)">
+              <dt>Budget</dt><dd class="mono">{{ govRecord.name }}</dd>
+              <dt>Proposals</dt><dd class="mono">{{ govRecord.Proposals || '—' }}</dd>
+            </dl>
+          </template>
+          <div v-else class="dim">
+            Collateral hash <span class="mono">{{ truncateHash(txBudget.hash, 12, 10) }}</span> — the node no longer tracks this {{ txBudget.kind.toLowerCase().replace('budget ', '') }} (old budgets are pruned), so its contents can't be resolved.
+          </div>
         </HudPanel>
       </template>
 

@@ -132,6 +132,12 @@ export const getBudgetInfo = () =>
 export const getBudgetProjection = () =>
   isMock ? Promise.resolve(mock.budgetProjection()) : getJSON('/budgetprojection')
 
+// Finalized budgets the node tracks (mnfinalbudget show): object keyed "Name (hash)"
+// with FeeTX/BlockStart/BlockEnd/Proposals/VoteCount/Status. Used to resolve a
+// budget-finalization collateral tx to its budget (FeeTX == txid).
+export const getFinalizedBudgets = () =>
+  isMock ? Promise.resolve(mock.finalizedBudgets()) : getJSON('/finalizedbudgets')
+
 // Proposal name may contain spaces/parens — URL-encode it.
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
@@ -189,7 +195,7 @@ export default {
   getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
   getMnCount, getMnList, getMempool, getMempoolSeries,
-  getBudgetInfo, getBudgetProjection, getBudgetVotes, getXpub, getSearch, getPrice,
+  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
   mnTotal, nextSuperblock, proposalPasses, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }
