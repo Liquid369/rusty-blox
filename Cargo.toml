@@ -102,7 +102,7 @@ path = "tools/maintenance/reset_live_watermark.rs"
 # jemalloc global allocator: returns freed memory to the OS far more aggressively
 # than the system allocator (the macOS default retained the per-tx deserialization
 # churn, inflating enrichment RSS). Set as #[global_allocator] in each binary root.
-tikv-jemallocator = "=0.6.0"
+tikv-jemallocator = "=0.6.1"
 # Direct handle to jemalloc's mallctl (already in the lock via jemallocator) so
 # the sync can force an arena purge at the parse->enrich phase boundary, handing
 # freed-but-retained parse/resolve pages back to the OS.
