@@ -8,9 +8,9 @@
    ===================================================================== */
 import { ref, onMounted, computed, nextTick } from 'vue'
 import { useChainStore } from '../store.js'
-import { getBudgetInfo, getBudgetProjection, getMnCount, proposalPasses, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
+import { getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getTx, proposalPasses, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
-import { formatCount, percent } from '../lib/format.js'
+import { formatCount, percent, formatDateTime, truncateHash } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -23,6 +23,7 @@ const projection = ref([])
 const mncount = ref(null)
 const loading = ref(true)
 const error = ref(null)
+const finalized = ref([])
 
 /* Overview (read-only) vs Simulator (what-if sandbox). Tablist with roving
    focus + arrow keys, mirroring the nav-rail tab semantics. */
@@ -46,6 +47,25 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  // Finalized budget (mnfinalbudget show) — best-effort, never blocks the page. The FeeTX is
+  // the OP_RETURN finalization-collateral tx; resolve it to its block for the "finalized when".
+  try {
+    const fb = await getFinalizedBudgets()
+    const rows = Object.entries(fb || {}).map(([key, v]) => {
+      const m = key.match(/^(.*?)\s*\(([0-9a-fA-F]+)\)\s*$/)
+      return {
+        name: m ? m[1] : key, hash: m ? m[2] : '',
+        feeTx: v.FeeTX, blockStart: v.BlockStart, blockEnd: v.BlockEnd,
+        votes: v.VoteCount, status: v.Status, proposals: v.Proposals,
+        atHeight: null, atTime: null,
+      }
+    })
+    for (const r of rows) {
+      if (!r.feeTx) continue
+      try { const tx = await getTx(r.feeTx); r.atHeight = tx.blockHeight; r.atTime = tx.blockTime } catch { /* still link the tx */ }
+    }
+    finalized.value = rows
+  } catch { /* no finalized budget available */ }
 })
 
 const threshold = computed(() => mncount.value ? 0.1 * mncount.value.total : 211)
@@ -169,6 +189,24 @@ const allocOption = computed(() => {
       </div>
     </HudPanel>
 
+    <!-- FINALIZED BUDGET (mnfinalbudget show) -->
+    <template v-if="finalized.length">
+      <h2 class="section-title">Finalized budget</h2>
+      <HudPanel v-for="f in finalized" :key="f.hash || f.name" title="FINALIZED BUDGET" id="mnfinalbudget · OP_RETURN collateral">
+        <template #head><span class="pill mono" :class="f.status === 'OK' ? 'ok' : 'bad'">{{ f.status }}</span></template>
+        <div class="fb">
+          <div class="fb-row"><span class="fb-k">Finalized</span><span class="fb-v">
+            <template v-if="f.atTime">{{ formatDateTime(f.atTime) }} · block <RouterLink :to="`/block/${f.atHeight}`">#{{ formatCount(f.atHeight) }}</RouterLink></template>
+            <span v-else class="dim">— (finalization tx unconfirmed)</span>
+          </span></div>
+          <div class="fb-row"><span class="fb-k">Finalization tx</span><span class="fb-v"><RouterLink :to="`/tx/${f.feeTx}`" class="mono">{{ truncateHash(f.feeTx, 14, 12) }}</RouterLink> <span class="pill warn mono">OP_RETURN</span></span></div>
+          <div class="fb-row"><span class="fb-k">Superblock window</span><span class="fb-v mono"><RouterLink :to="`/block/${f.blockStart}`">#{{ formatCount(f.blockStart) }}</RouterLink> → #{{ formatCount(f.blockEnd) }}</span></div>
+          <div class="fb-row"><span class="fb-k">Votes</span><span class="fb-v mono">{{ formatCount(f.votes) }}</span></div>
+          <div class="fb-row"><span class="fb-k">Proposals</span><span class="fb-v dim">{{ f.proposals }}</span></div>
+        </div>
+      </HudPanel>
+    </template>
+
     <!-- PROPOSAL TABLE -->
     <h2 class="section-title">All proposals ({{ proposals.length }})</h2>
     <HudPanel title="PROPOSALS" id="/budgetinfo · approval = (Yeas−Nays) &gt; 10% MN">
@@ -221,6 +259,13 @@ const allocOption = computed(() => {
 
 .head-live { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .unit { font-size: 0.5em; color: var(--text-dim); margin-left: 4px; }
+
+/* Finalized-budget key/value rows */
+.fb { display: grid; gap: 9px; }
+.fb-row { display: grid; grid-template-columns: 158px 1fr; gap: 14px; align-items: baseline; font-size: 13px; line-height: 1.5; }
+.fb-k { color: var(--text-dim); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+.fb-v { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .fb-row { grid-template-columns: 1fr; gap: 2px; } }
 .alloc-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--hud-line); }
 .al { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
 .al-dot { width: 9px; height: 9px; border-radius: 2px; box-shadow: 0 0 6px currentColor; }
