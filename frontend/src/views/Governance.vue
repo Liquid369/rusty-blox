@@ -62,6 +62,9 @@ const allotted = computed(() =>
 // Treasury value in fiat: PIV allotted × PIVX/USD (0 when price unavailable).
 const allottedUsd = computed(() =>
   chain.price && chain.price.usd > 0 ? allotted.value * chain.price.usd : 0)
+// USD value of a PIV amount at the live price, rounded + grouped ('' when unavailable).
+const usd = (piv) =>
+  chain.price && chain.price.usd > 0 ? '$' + Math.round(piv * chain.price.usd).toLocaleString('en-US') : ''
 // Per-cycle treasury cap (PIV) — Core funds greedily UP TO this and defers the
 // rest, so allotted should never exceed it. Surface it so the max is visible.
 const cap = computed(() => monthlyBudgetCap())
@@ -186,7 +189,10 @@ const allocOption = computed(() => {
                   <span class="mono dim vnums">{{ formatCount(p.Yeas) }} / {{ formatCount(p.Nays) }} · {{ percent(p.Ratio * 100, 1) }}</span>
                 </div>
               </td>
-              <td class="num strong">{{ formatPiv(p.MonthlyPayment, { decimals: 0 }) }}</td>
+              <td class="num strong">
+                {{ formatPiv(p.MonthlyPayment, { decimals: 0 }) }}
+                <div v-if="usd(p.MonthlyPayment)" class="dim mono" style="font-weight:400;font-size:11px;margin-top:2px">≈ {{ usd(p.MonthlyPayment) }}/mo · {{ usd(p.TotalPayment) }} total</div>
+              </td>
               <td class="num dim">{{ p.RemainingPaymentCount }} / {{ p.TotalPaymentCount }}</td>
               <td><span class="pill" :class="passes(p) ? 'ok' : 'bad'">{{ passes(p) ? 'PASSING' : 'FAILING' }}</span></td>
             </tr>
