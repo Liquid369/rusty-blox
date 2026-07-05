@@ -46,6 +46,27 @@ watch(() => props.addr, load)
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
 const utxoTotal = computed(() => utxos.value.reduce((s, u) => s + sat2piv(u.value), 0))
 
+// Ledger value must be THIS address's delta in each tx (Σ outputs paying it − Σ inputs
+// spending it), NOT the tx's grand total — a big exchange batch tx moves far more than this
+// address's slice. Satoshi BigInt (values are integer sat strings); memoized (batch txs can
+// have hundreds of outputs). toSat guards a stray non-integer so one bad value can't crash.
+const toSat = (v) => { try { return BigInt(v || 0) } catch { return 0n } }
+const txDeltas = computed(() => {
+  const A = props.addr
+  const m = {}
+  for (const t of (info.value?.transactions || [])) {
+    let d = 0n
+    for (const o of (t.vout || [])) if ((o.addresses || []).includes(A)) d += toSat(o.value)
+    for (const i of (t.vin || [])) if ((i.addresses || []).includes(A)) d -= toSat(i.value)
+    const abs = d < 0n ? -d : d
+    m[t.txid] = {
+      str: (d > 0n ? '+' : d < 0n ? '-' : '') + formatSats(abs, { decimals: 4 }),
+      color: d > 0n ? 'var(--cyan)' : d < 0n ? 'var(--rose)' : 'var(--text-muted)',
+    }
+  }
+  return m
+})
+
 /* ---------- balance accumulation from the CURRENT UTXO set ----------
    The address tx list (details=txs) is INCOMPLETE for cold-stake owners — it omits the
    P2CS coinstake txs that hold most of the balance — so a forward tx-delta sum
@@ -220,13 +241,13 @@ const addrKind = computed(() => {
       <HudPanel title="LEDGER" :id="`${info.txs} total`">
         <div class="scroll">
           <table class="dtable">
-            <thead><tr><th>Txid</th><th class="num">Height</th><th>Age</th><th class="num">Value (PIV)</th><th class="num">Conf.</th></tr></thead>
+            <thead><tr><th>Txid</th><th class="num">Height</th><th>Age</th><th class="num">Amount (PIV)</th><th class="num">Conf.</th></tr></thead>
             <tbody>
               <tr v-for="t in info.transactions" :key="t.txid">
                 <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
                 <td class="num dim">{{ formatCount(t.blockHeight) }}</td>
                 <td class="dim">{{ timeAgo(t.blockTime) }}</td>
-                <td class="num strong">{{ formatSats(t.value, { decimals: 4 }) }}</td>
+                <td class="num strong" :style="{ color: (txDeltas[t.txid] || {}).color }">{{ (txDeltas[t.txid] || {}).str }}</td>
                 <td class="num dim">{{ formatCount(t.confirmations) }}</td>
               </tr>
             </tbody>
