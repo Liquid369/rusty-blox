@@ -76,23 +76,18 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use lazy_static::lazy_static;
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex as TokioMutex, Semaphore};
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 use tracing::info_span;
 
 // Single source of truth for the DB column-family set (incl. the private tail CFs).
 use rustyblox::COLUMN_FAMILIES;
-
-lazy_static! {
-    static ref DB_MUTEX: TokioMutex<()> = TokioMutex::new(());
-}
 
 // ============================================================================
 // Request admission control (P1-2)
