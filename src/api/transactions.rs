@@ -37,10 +37,16 @@ pub async fn tx_v2(
 
     match result {
         Ok(tx) => Ok(Json(tx)),
-        Err(e) => Err((
-            StatusCode::NOT_FOUND,
-            Json(BlockbookError::new(e.to_string())),
-        )),
+        Err(e) => {
+            // A real storage error must surface as 500 — mapping it to 404 tells
+            // clients (and their caches) that an EXISTING tx doesn't exist.
+            let status = if e.downcast_ref::<rocksdb::Error>().is_some() {
+                StatusCode::INTERNAL_SERVER_ERROR
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            Err((status, Json(BlockbookError::new(e.to_string()))))
+        }
     }
 }
 

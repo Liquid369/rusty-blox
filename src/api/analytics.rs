@@ -227,6 +227,14 @@ pub async fn transaction_analytics(
     Query(params): Query<TimeRangeQuery>,
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<TransactionDataPoint>>, StatusCode> {
+    // See rich_list/network_analytics: during the sync/enrich window the daily
+    // series is absent and the fallback walks the whole transactions CF (its
+    // range cap only bounds IN-range txs) — and a timed-out request leaves the
+    // scan running detached in the blocking pool. 503 like the sibling
+    // endpoints so anonymous requests can't amplify into full-CF scans.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let db_clone = db.clone();
     let range = params.range.clone();
 
@@ -361,6 +369,12 @@ pub async fn staking_analytics(
     Query(params): Query<TimeRangeQuery>,
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<StakingDataPoint>>, StatusCode> {
+    // Same gate as transaction_analytics/rich_list: the fallback scan (which
+    // also makes a blocking RPC per request) must not be reachable by anonymous
+    // requests during the sync/enrich window.
+    if !crate::chain_state::addr_index_ready(&db) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let db_clone = db.clone();
     let range = params.range.clone();
 

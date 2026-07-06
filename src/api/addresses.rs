@@ -198,24 +198,18 @@ pub async fn addr_v2(
 
     match result {
         Ok(info) => Ok(Json(info)),
-        Err(_) => {
-            // Fallback: return empty address info. The address has already
-            // passed checksum validation above, so this is a transient DB/compute
-            // error for a real address — not the P2-B fake-zero-account case.
-            Ok(Json(AddressInfo {
-                page: Some(params.page),
-                total_pages: Some(1),
-                items_on_page: Some(params.page_size),
-                address,
-                balance: "0".to_string(),
-                total_received: "0".to_string(),
-                total_sent: "0".to_string(),
-                unconfirmed_balance: "0".to_string(),
-                unconfirmed_txs: 0,
-                txs: 0,
-                txids: Some(vec![]),
-                transactions: None,
-            }))
+        Err(e) => {
+            // A transient DB/compute error for a checksum-valid address must FAIL
+            // the request. Returning a zeroed account here (as this used to) is a
+            // confident false statement — "this address holds nothing" — that a
+            // wallet will act on; Blockbook 5xxs the same case.
+            warn!(address = %address, error = %e, "address compute failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(super::types::BlockbookError::new(
+                    "Internal error computing address; please retry",
+                )),
+            ))
         }
     }
 }
@@ -1037,7 +1031,17 @@ pub async fn utxo_v2(
 
     match result {
         Ok(utxos) => Ok(Json(utxos)),
-        Err(_) => Ok(Json(vec![])),
+        Err(e) => {
+            // An internal error must FAIL the request: a 200 [] tells a wallet
+            // "no coins to spend" — a confident false statement it will act on.
+            warn!(address = %address, error = %e, "utxo compute failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(super::types::BlockbookError::new(
+                    "Internal error computing UTXOs; please retry",
+                )),
+            ))
+        }
     }
 }
 
