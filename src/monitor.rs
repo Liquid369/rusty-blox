@@ -1864,39 +1864,56 @@ pub async fn run_block_monitor(
         .get_int("sync.live_analytics_shadow_validate_days")
         .unwrap_or(0);
     if validate_days > 0 {
-        let db_v = Arc::clone(&db);
-        // std::thread + current-thread runtime: shadow_validate holds a RocksDB
-        // iterator across .await (so it is !Send), the same reason the daily-series
-        // pass is detached this way.
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "shadow_validate: failed to build runtime");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                for _ in 0..1440 {
-                    let done = db_v
-                        .cf_handle("chain_state")
-                        .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
-                        .map(|v| v.first() == Some(&1u8))
-                        .unwrap_or(false);
-                    if done {
-                        break;
+        // Single-flight: run_block_monitor is RE-ENTERED by the sync thread's
+        // retry loop after any monitor error, and each entry spawned a fresh
+        // ≤2h validator thread — stacking concurrent full-index scans that
+        // garbled each other's shadow keyspace and reports.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        static SHADOW_VALIDATOR_RUNNING: AtomicBool = AtomicBool::new(false);
+        if SHADOW_VALIDATOR_RUNNING.swap(true, AtomicOrdering::SeqCst) {
+            debug!("shadow_validate: already running; not spawning another");
+        } else {
+            let db_v = Arc::clone(&db);
+            // std::thread + current-thread runtime: shadow_validate holds a RocksDB
+            // iterator across .await (so it is !Send), the same reason the daily-series
+            // pass is detached this way.
+            std::thread::spawn(move || {
+                struct Reset;
+                impl Drop for Reset {
+                    fn drop(&mut self) {
+                        SHADOW_VALIDATOR_RUNNING.store(false, AtomicOrdering::SeqCst);
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
-                    Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
-                    Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
-                }
+                let _reset = Reset;
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        warn!(error = %e, "shadow_validate: failed to build runtime");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    for _ in 0..1440 {
+                        let done = db_v
+                            .cf_handle("chain_state")
+                            .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
+                            .map(|v| v.first() == Some(&1u8))
+                            .unwrap_or(false);
+                        if done {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
+                        Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
+                        Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
+                    }
+                });
             });
-        });
+        }
     }
 
     // Tier-3 hourly snapshot tracking (resumes from the persisted series).

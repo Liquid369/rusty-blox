@@ -78,32 +78,47 @@ pub async fn run_mempool_monitor(
     let rpc_pass = config.get_string("rpc.pass")?;
 
     // Create RPC client in a completely separate OS thread
-    // PivxRpcClient uses reqwest::blocking which creates its own runtime
-    let (tx, rx) = std::sync::mpsc::channel();
-    let rpc_host_clone = rpc_host.clone();
+    // PivxRpcClient uses reqwest::blocking which creates its own runtime.
+    // RETRY with backoff: pivxd is routinely not up yet when the explorer boots
+    // (a host reboot starts both services). The old code returned Ok(()) on the
+    // first failure — the task died permanently and the mempool served frozen-
+    // empty for the process lifetime, indistinguishable from real data. Mirrors
+    // the sync thread's boot retry loop.
+    let rpc_client = loop {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rpc_host_clone = rpc_host.clone();
+        let rpc_user_clone = rpc_user.clone();
+        let rpc_pass_clone = rpc_pass.clone();
 
-    std::thread::spawn(move || {
-        let client =
-            PivxRpcClient::new(rpc_host_clone, Some(rpc_user), Some(rpc_pass), 3, 10, 1000);
+        std::thread::spawn(move || {
+            let client = PivxRpcClient::new(
+                rpc_host_clone,
+                Some(rpc_user_clone),
+                Some(rpc_pass_clone),
+                3,
+                10,
+                1000,
+            );
 
-        // Test connection
-        let result = match client.getblockcount() {
-            Ok(_) => Ok(Arc::new(client)),
-            Err(e) => Err(e),
-        };
-        let _ = tx.send(result);
-    });
+            // Test connection
+            let result = match client.getblockcount() {
+                Ok(_) => Ok(Arc::new(client)),
+                Err(e) => Err(e),
+            };
+            let _ = tx.send(result);
+        });
 
-    let rpc_client = match rx.recv_timeout(std::time::Duration::from_secs(10)) {
-        Ok(Ok(client)) => client,
-        Ok(Err(e)) => {
-            error!(error = ?e, "Mempool RPC connection failed");
-            return Ok(());
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(client)) => break client,
+            Ok(Err(e)) => {
+                error!(error = ?e, retry_secs = 30, "Mempool RPC connection failed; retrying")
+            }
+            Err(_) => error!(
+                retry_secs = 30,
+                "Mempool RPC connection timed out; retrying"
+            ),
         }
-        Err(_) => {
-            error!("Mempool RPC connection timed out");
-            return Ok(());
-        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
     };
 
     loop {

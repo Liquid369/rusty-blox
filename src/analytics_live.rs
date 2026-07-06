@@ -15,7 +15,7 @@ use rocksdb::{WriteBatch, DB};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Opt-in: auto-trigger a full re-enrich to re-green the gate after a deep reorg
 /// (`sync.live_analytics_auto_reenrich`, default false — a full enrich is ~heavy,
@@ -291,7 +291,13 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
         return;
     };
     if orphaned_blocks > R_BLOCKS {
-        let _ = db.put_cf(&cf_state, K_READY, [0u8]);
+        // Failing to clear the gate means live analytics keep serving over a
+        // known-bad baseline — fail-open. Nothing to retry against a broken DB,
+        // but it must be surfaced as the error it is, not swallowed.
+        if let Err(e) = db.put_cf(&cf_state, K_READY, [0u8]) {
+            error!(orphaned_blocks, error = %e,
+                "live-analytics: FAILED to clear ready gate after deep reorg — series may serve stale/bad data");
+        }
         if auto_reenrich() {
             warn!(
                 orphaned_blocks,
@@ -355,7 +361,15 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
         }
     }
     batch.put_cf(&cf_state, K_WATERMARK, (h_first - 1).to_le_bytes());
-    let _ = db.write(batch);
+    // A failed cleanup batch must not be LOGGED AS SUCCESS: orphaned-chain
+    // contributions would stay in the day blobs AND the un-rewound watermark
+    // would make Lane I skip re-applying those heights — permanently wrong
+    // daily analytics behind a log line claiming they were cleared.
+    if let Err(e) = db.write(batch) {
+        error!(fork_height, error = %e,
+            "live-analytics: reorg cleanup write FAILED — day blobs may retain orphaned data until the next full enrich");
+        return;
+    }
     warn!(fork_height, h_first, %delete_from, "live-analytics: reorg — cleared affected days, watermark reset (will rebuild)");
 }
 

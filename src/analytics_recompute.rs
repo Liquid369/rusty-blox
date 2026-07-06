@@ -16,7 +16,7 @@ use crate::enrich_addresses::{
 use rocksdb::{Direction, IteratorMode, WriteBatch, DB};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
@@ -150,7 +150,14 @@ pub fn on_reorg(db: &Arc<DB>, orphaned_blocks: i32) {
         return;
     }
     if let Some(cf) = db.cf_handle("chain_state") {
-        let _ = db.put_cf(&cf, K_ADDR_INDEX_DIRTY, [1u8]);
+        // The dirty flag is the ONLY thing stopping the periodic recompute from
+        // refreshing richlist/wealth off a known-un-reversed index. A failed put
+        // must not be logged as "paused" — surface it as the failure it is.
+        if let Err(e) = db.put_cf(&cf, K_ADDR_INDEX_DIRTY, [1u8]) {
+            error!(orphaned_blocks, error = %e,
+                "analytics-recompute: FAILED to set dirty flag after deep reorg — recompute is NOT paused and may refresh from an un-reversed index");
+            return;
+        }
         warn!(
             orphaned_blocks,
             undo_window = ADDR_INDEX_UNDO_WINDOW,
