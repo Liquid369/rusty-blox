@@ -378,7 +378,10 @@ fn get_block_transactions(
                     }
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                // Silent break rendered a mid-iteration read error as a shorter
+                // block (200 with missing txs) — surface it before stopping.
+                warn!(height, error = %e, "'B' index iteration failed mid-block; tx list truncated");
                 break;
             }
         }

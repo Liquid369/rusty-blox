@@ -859,10 +859,13 @@ async fn index_block_from_rpc(
                         output_idx as u64,
                     );
 
-                    // Store updated UTXO list
+                    // Store updated UTXO list. A failed 'a' write must fail the
+                    // BLOCK (tx_errors -> rollback + retry): swallowed, it leaves
+                    // the UTXO set diverged from r/s with zero log evidence.
                     let serialized = crate::parser::serialize_addr_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
                         warn!(address = %address, txid = %txid, error = %e, "Failed to index address for tx");
+                        tx_errors += 1;
                     }
                 }
             }
@@ -949,6 +952,12 @@ async fn index_block_from_rpc(
                                                     .send()
                                                     .await
                                                 {
+                                                    // A failed height lookup must write the
+                                                    // UNRESOLVED sentinel, never 0: height 0
+                                                    // is genesis (canonical!), needs_update
+                                                    // only overwrites heights < 0, and the
+                                                    // heal machinery targets the sentinels —
+                                                    // a 0 here is a PERMANENT wrong record.
                                                     Ok(block_resp) => block_resp
                                                         .json::<Value>()
                                                         .await
@@ -958,9 +967,11 @@ async fn index_block_from_rpc(
                                                                 .and_then(|r| r.get("height"))
                                                                 .and_then(|h| h.as_i64())
                                                         })
-                                                        .unwrap_or(0)
-                                                        as i32,
-                                                    Err(_) => 0,
+                                                        .map(|h| h as i32)
+                                                        .unwrap_or(
+                                                            crate::constants::HEIGHT_UNRESOLVED,
+                                                        ),
+                                                    Err(_) => crate::constants::HEIGHT_UNRESOLVED,
                                                 };
 
                                                 // Refuse to cache a body too short to be
@@ -1125,13 +1136,20 @@ async fn index_block_from_rpc(
                             })
                             .collect();
 
-                        // Update or delete
+                        // Update or delete. These were FULLY silent (`let _ =`):
+                        // a failed spend-removal left a phantom spendable UTXO in
+                        // /utxo and probe_unspent forever, with no log line. Fail
+                        // the block instead (tx_errors -> rollback + retry).
                         if !updated_utxos.is_empty() {
                             let serialized =
                                 crate::parser::serialize_addr_utxos(&updated_utxos).await;
-                            let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
-                        } else {
-                            let _ = db.delete_cf(&cf_addr_index, &addr_key);
+                            if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
+                                warn!(address = %address, error = %e, "Failed to remove spent UTXO from address set");
+                                tx_errors += 1;
+                            }
+                        } else if let Err(e) = db.delete_cf(&cf_addr_index, &addr_key) {
+                            warn!(address = %address, error = %e, "Failed to delete emptied address UTXO set");
+                            tx_errors += 1;
                         }
                     }
                 }
@@ -1174,6 +1192,7 @@ async fn index_block_from_rpc(
 
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
                         warn!(address = %address, error = %e, "Failed to update tx list for address");
+                        tx_errors += 1;
                     }
                 }
             }
@@ -1353,6 +1372,13 @@ async fn index_block_from_rpc(
         // 'H' was written. A clean abort also makes the retry a first apply —
         // no r/s double-count to repair.
         metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
+        // The 'E' marker goes down UNCONDITIONALLY, before the rollback attempt:
+        // if store_address_undo failed above (warn-only), the rollback silently
+        // cannot reverse r/s — a "clean" rollback without the marker would then
+        // skip the repair and persist a double-count. The repair is an idempotent
+        // recompute, so running it after a genuinely clean rollback is merely
+        // redundant, never wrong.
+        db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
         match crate::reorg::rollback_to_height(db.clone(), height - 1, height).await {
             Ok(_) => {
                 return Err(format!(
@@ -1362,11 +1388,7 @@ async fn index_block_from_rpc(
                 .into());
             }
             Err(e) => {
-                // Rollback failed: fall back to the 'E' retry marker so the
-                // eventual successful retry repairs the non-idempotent r/s
-                // double-count from the surviving partial writes.
-                warn!(height, error = %e, "Failed to roll back partial block; falling back to retry marker");
-                db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+                warn!(height, error = %e, "Failed to roll back partial block; retry will repair r/s via the marker");
                 return Err(format!(
                     "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
                     tx_array.len()
@@ -1842,39 +1864,56 @@ pub async fn run_block_monitor(
         .get_int("sync.live_analytics_shadow_validate_days")
         .unwrap_or(0);
     if validate_days > 0 {
-        let db_v = Arc::clone(&db);
-        // std::thread + current-thread runtime: shadow_validate holds a RocksDB
-        // iterator across .await (so it is !Send), the same reason the daily-series
-        // pass is detached this way.
-        std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    warn!(error = %e, "shadow_validate: failed to build runtime");
-                    return;
-                }
-            };
-            rt.block_on(async move {
-                for _ in 0..1440 {
-                    let done = db_v
-                        .cf_handle("chain_state")
-                        .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
-                        .map(|v| v.first() == Some(&1u8))
-                        .unwrap_or(false);
-                    if done {
-                        break;
+        // Single-flight: run_block_monitor is RE-ENTERED by the sync thread's
+        // retry loop after any monitor error, and each entry spawned a fresh
+        // ≤2h validator thread — stacking concurrent full-index scans that
+        // garbled each other's shadow keyspace and reports.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        static SHADOW_VALIDATOR_RUNNING: AtomicBool = AtomicBool::new(false);
+        if SHADOW_VALIDATOR_RUNNING.swap(true, AtomicOrdering::SeqCst) {
+            debug!("shadow_validate: already running; not spawning another");
+        } else {
+            let db_v = Arc::clone(&db);
+            // std::thread + current-thread runtime: shadow_validate holds a RocksDB
+            // iterator across .await (so it is !Send), the same reason the daily-series
+            // pass is detached this way.
+            std::thread::spawn(move || {
+                struct Reset;
+                impl Drop for Reset {
+                    fn drop(&mut self) {
+                        SHADOW_VALIDATOR_RUNNING.store(false, AtomicOrdering::SeqCst);
                     }
-                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
-                    Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
-                    Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
-                }
+                let _reset = Reset;
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        warn!(error = %e, "shadow_validate: failed to build runtime");
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    for _ in 0..1440 {
+                        let done = db_v
+                            .cf_handle("chain_state")
+                            .and_then(|cf| db_v.get_cf(&cf, b"analytics_complete").ok().flatten())
+                            .map(|v| v.first() == Some(&1u8))
+                            .unwrap_or(false);
+                        if done {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    match crate::analytics_live::shadow_validate(&db_v, validate_days).await {
+                        Ok(report) => info!("LIVE-ANALYTICS SHADOW VALIDATE:\n{report}"),
+                        Err(e) => warn!(error = %e, "live-analytics shadow_validate failed"),
+                    }
+                });
             });
-        });
+        }
     }
 
     // Tier-3 hourly snapshot tracking (resumes from the persisted series).
@@ -1882,6 +1921,17 @@ pub async fn run_block_monitor(
     let mut snapshot_failure_warned = false;
 
     loop {
+        // PAUSE while a full analytics re-enrich rewrites the addr index: the
+        // per-block 'a'/'r'/'s'/'t' read-modify-writes would land on rows
+        // Pass-2b then overwrites from its snapshot — deltas lost forever, and
+        // nothing re-applies them (sync_height has advanced). Blocks simply
+        // accumulate; catch-up drains the backlog once the rebuild finishes.
+        if crate::analytics_live::reenrich_in_progress() {
+            info!("full re-enrich in progress — live indexing paused this poll");
+            tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+            continue;
+        }
+
         // Hourly forward-only snapshot (mempool / masternodes / supply).
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

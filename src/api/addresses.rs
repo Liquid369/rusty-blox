@@ -128,25 +128,31 @@ fn address_recompute_cap() -> usize {
 
 /// Read the exact persisted per-address totals written by the enrichment phase:
 /// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
-/// Returns (total_received, total_sent); missing keys read as 0.
-async fn read_address_totals(db: &Arc<DB>, address: &str) -> (i64, i64) {
+/// A MISSING key reads as 0 (a never-seen address genuinely has no totals); a
+/// read ERROR propagates — folding it into 0 served a confident zeroed account
+/// for a rich address, minting the exact failure the handler's 500-on-error
+/// path exists to catch, one layer below it.
+async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), String> {
     let r_key = format!("r{address}").into_bytes();
     let s_key = format!("s{address}").into_bytes();
     let db_clone = Arc::clone(db);
 
-    tokio::task::spawn_blocking(move || -> (i64, i64) {
-        let read_i64 = |key: &[u8]| -> i64 {
-            db_clone
-                .cf_handle("addr_index")
-                .and_then(|cf| db_clone.get_cf(&cf, key).ok().flatten())
+    tokio::task::spawn_blocking(move || -> Result<(i64, i64), String> {
+        let cf = db_clone
+            .cf_handle("addr_index")
+            .ok_or_else(|| "addr_index CF not found".to_string())?;
+        let read_i64 = |key: &[u8]| -> Result<i64, String> {
+            Ok(db_clone
+                .get_cf(&cf, key)
+                .map_err(|e| e.to_string())?
                 .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
                 .map(i64::from_le_bytes)
-                .unwrap_or(0)
+                .unwrap_or(0))
         };
-        (read_i64(&r_key), read_i64(&s_key))
+        Ok((read_i64(&r_key)?, read_i64(&s_key)?))
     })
     .await
-    .unwrap_or((0, 0))
+    .map_err(|e| format!("Task join error: {e}"))?
 }
 
 /// GET /api/v2/address/{address}
@@ -259,7 +265,7 @@ async fn compute_address_info(
     // size, so the values are unchanged while the work drops from O(history) to
     // O(1). Missing keys read as 0 (an unenriched-but-indexed address shows
     // 0/0/0 rather than erroring — same as the prior fallback).
-    let (total_received, total_sent) = read_address_totals(db, address).await;
+    let (total_received, total_sent) = read_address_totals(db, address).await?;
     let balance = total_received - total_sent;
 
     // P1-1: the stored 't' txids are ALREADY canonical display order (parser.rs
@@ -625,11 +631,14 @@ async fn aggregate_xpub_data(
                 .iter()
                 .map(|k| (&cf_addr_index, k.as_slice()))
                 .collect();
+            // Absent key (None) = unused derived address, a legitimate zero.
+            // A per-key read ERROR must fail the request — folded into None it
+            // reads as "unused" and silently undercuts the xpub money totals.
             let utxo_results: Vec<Option<Vec<u8>>> = db_clone
                 .multi_get_cf(utxo_batch)
                 .into_iter()
-                .map(|r| r.ok().flatten())
-                .collect();
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("addr_index batch read failed: {e}"))?;
 
             // Batch get transaction lists for all addresses
             let tx_list_batch: Vec<_> = tx_list_keys_clone
@@ -639,8 +648,8 @@ async fn aggregate_xpub_data(
             let tx_list_results: Vec<Option<Vec<u8>>> = db_clone
                 .multi_get_cf(tx_list_batch)
                 .into_iter()
-                .map(|r| r.ok().flatten())
-                .collect();
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("addr_index batch read failed: {e}"))?;
 
             Ok((utxo_results, tx_list_results))
         },

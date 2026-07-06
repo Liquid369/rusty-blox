@@ -15,7 +15,7 @@ use rocksdb::{WriteBatch, DB};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Opt-in: auto-trigger a full re-enrich to re-green the gate after a deep reorg
 /// (`sync.live_analytics_auto_reenrich`, default false — a full enrich is ~heavy,
@@ -51,6 +51,28 @@ impl Drop for ReenrichGuard {
     }
 }
 
+/// Is a full re-enrich (Pass-1/2b addr_index rewrite) running in this process?
+/// The monitor pauses live indexing while true: its 'a'/'r'/'s'/'t' RMWs would
+/// land on rows the rebuild then overwrites from its snapshot — lost forever.
+pub fn reenrich_in_progress() -> bool {
+    REENRICH_IN_PROGRESS.load(Ordering::SeqCst)
+}
+
+/// Monotonic reorg counter (chain_state, u64 LE). The detached daily-series
+/// pass snapshots it at start and REFUSES its final green handoff if a reorg
+/// landed mid-pass: its blobs were built from the pre-reorg frozen snapshot,
+/// and the handoff's watermark/gate commit would clobber on_reorg's rewind
+/// with stale data. Single writer (the monitor task's reorg handler).
+pub const K_REORG_EPOCH: &[u8] = b"analytics_reorg_epoch";
+
+pub fn reorg_epoch(db: &Arc<DB>) -> u64 {
+    db.cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, K_REORG_EPOCH).ok().flatten())
+        .and_then(|v| <[u8; 8]>::try_from(v.as_slice()).ok())
+        .map(u64::from_le_bytes)
+        .unwrap_or(0)
+}
+
 /// Is auto-reenrich opted in?
 fn auto_reenrich() -> bool {
     crate::config::get_global_config()
@@ -83,9 +105,32 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
         };
         rt.block_on(async move {
             info!("live-analytics: full re-enrich starting (re-green)");
-            if let Err(e) = crate::enrich_addresses::enrich_all_addresses(Arc::clone(&db_bg)).await
-            {
-                warn!(error = %e, "live-analytics: full re-enrich failed");
+            // Drop the readiness marker for the REBUILD's duration: Pass-2b
+            // overwrites 'a'/'r'/'s'/'t' wholesale, so serving from the index
+            // mid-rebuild returns torn balances (half old, half new) — and a
+            // kill mid-rebuild used to leave that torn state marked complete
+            // forever. Cleared, the /address 503 gate holds during the rebuild
+            // and a boot after a kill re-runs enrichment (sync.rs re-enriches
+            // when the marker is absent).
+            if let Some(cf) = db_bg.cf_handle("chain_state") {
+                if let Err(e) = db_bg.delete_cf(&cf, b"address_index_complete") {
+                    error!(error = %e, "re-enrich: failed to clear readiness marker; aborting rebuild rather than tearing a live index");
+                    return;
+                }
+            }
+            match crate::enrich_addresses::enrich_all_addresses(Arc::clone(&db_bg)).await {
+                Ok(()) => {
+                    if let Some(cf) = db_bg.cf_handle("chain_state") {
+                        if let Err(e) = db_bg.put_cf(&cf, b"address_index_complete", [1u8]) {
+                            error!(error = %e, "re-enrich: rebuilt OK but failed to restore readiness marker — /address serves 503 until restart re-enriches");
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Marker stays cleared: 503 is the honest state for a failed
+                    // rebuild; the next boot re-runs enrichment.
+                    warn!(error = %e, "live-analytics: full re-enrich failed; readiness marker left cleared");
+                }
             }
         });
     });
@@ -290,8 +335,23 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     let Some(cf_state) = db.cf_handle("chain_state") else {
         return;
     };
+    // Bump the reorg epoch FIRST so a daily-series pass in flight refuses its
+    // final handoff (see K_REORG_EPOCH).
+    if let Err(e) = db.put_cf(
+        &cf_state,
+        K_REORG_EPOCH,
+        (reorg_epoch(db) + 1).to_le_bytes(),
+    ) {
+        error!(error = %e, "live-analytics: failed to bump reorg epoch");
+    }
     if orphaned_blocks > R_BLOCKS {
-        let _ = db.put_cf(&cf_state, K_READY, [0u8]);
+        // Failing to clear the gate means live analytics keep serving over a
+        // known-bad baseline — fail-open. Nothing to retry against a broken DB,
+        // but it must be surfaced as the error it is, not swallowed.
+        if let Err(e) = db.put_cf(&cf_state, K_READY, [0u8]) {
+            error!(orphaned_blocks, error = %e,
+                "live-analytics: FAILED to clear ready gate after deep reorg — series may serve stale/bad data");
+        }
         if auto_reenrich() {
             warn!(
                 orphaned_blocks,
@@ -355,7 +415,15 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
         }
     }
     batch.put_cf(&cf_state, K_WATERMARK, (h_first - 1).to_le_bytes());
-    let _ = db.write(batch);
+    // A failed cleanup batch must not be LOGGED AS SUCCESS: orphaned-chain
+    // contributions would stay in the day blobs AND the un-rewound watermark
+    // would make Lane I skip re-applying those heights — permanently wrong
+    // daily analytics behind a log line claiming they were cleared.
+    if let Err(e) = db.write(batch) {
+        error!(fork_height, error = %e,
+            "live-analytics: reorg cleanup write FAILED — day blobs may retain orphaned data until the next full enrich");
+        return;
+    }
     warn!(fork_height, h_first, %delete_from, "live-analytics: reorg — cleared affected days, watermark reset (will rebuild)");
 }
 
