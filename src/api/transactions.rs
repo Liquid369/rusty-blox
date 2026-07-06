@@ -48,25 +48,27 @@ pub async fn tx_v2(
 /// VALID record over a malformed "phantom stub". A tx may be keyed INTERNAL (reversed
 /// display) or DISPLAY; a body-LESS stub (≤8 bytes: version+height, no tx) at one key must
 /// NOT shadow the real record at the other (that shadowing is the `/tx` 404 bug). Returns
-/// the first record with a body (`len() > 8`), or None.
+/// the first record with a body (`len() > 8`), Ok(None) if none exists, or Err on a real
+/// RocksDB read failure — callers on money paths must propagate the Err (a swallowed IO
+/// error reads as "tx absent" and produces a confident wrong answer).
 pub(crate) fn read_valid_tx_record(
     db: &DB,
     cf: &impl rocksdb::AsColumnFamilyRef,
     display_txid_bytes: &[u8],
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>, rocksdb::Error> {
     let internal: Vec<u8> = display_txid_bytes.iter().rev().cloned().collect();
     // Prefer a record WITH a body (len>8) at either key order; a body-LESS stub (≤8 bytes,
     // e.g. reorg orphan-marking) must not shadow the real record.
     for txid in [internal.as_slice(), display_txid_bytes] {
         let mut key = vec![b't'];
         key.extend_from_slice(txid);
-        if let Ok(Some(d)) = db.get_cf(cf, &key) {
+        if let Some(d) = db.get_cf(cf, &key)? {
             if d.len() > 8 {
-                return Some(d);
+                return Ok(Some(d));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Build Transaction struct from raw DB data
@@ -93,7 +95,7 @@ pub(crate) async fn build_transaction_from_db(
         // Prefer a VALID record over a malformed "phantom stub": the record may be stored
         // internal-keyed (reversed) or display-keyed, and a short (<8-byte) stub at one key
         // must not shadow the real record at the other (otherwise /tx 404s a tx that exists).
-        let data = read_valid_tx_record(&db_clone, &cf_transactions, &txid_bytes)
+        let data = read_valid_tx_record(&db_clone, &cf_transactions, &txid_bytes)?
             .ok_or("Transaction not found")?;
 
         if data.len() > 10_000_000 {
@@ -149,8 +151,11 @@ pub(crate) async fn build_transaction_from_db(
                 if let Ok(prev_txid_bytes) = hex::decode(&prevout.hash) {
                     // Prefer a record WITH a body over an 8-byte stub (same shadowing bug as
                     // read_valid_tx_record) so a stub prevout never silently zeroes valueIn.
+                    // A read ERROR is deliberately treated as unresolved (master parity):
+                    // input enrichment is best-effort and must not fail the whole /tx.
                     let prev_data_opt =
-                        read_valid_tx_record(&db_clone, &cf_transactions, &prev_txid_bytes);
+                        read_valid_tx_record(&db_clone, &cf_transactions, &prev_txid_bytes)
+                            .unwrap_or(None);
 
                     if let Some(prev_data) = prev_data_opt {
                         if prev_data.len() > 10_000_000 {
@@ -549,7 +554,10 @@ mod tests {
         let valid = vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xAA, 0xBB];
         put(&db, &display, &valid);
         let cf = db.cf_handle("transactions").unwrap();
-        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+        assert_eq!(
+            read_valid_tx_record(&db, &cf, &display).unwrap(),
+            Some(valid)
+        );
     }
 
     // Valid at internal (the normal case) is returned; a display stub doesn't interfere.
@@ -561,7 +569,10 @@ mod tests {
         put(&db, &internal, &valid);
         put(&db, &display, &[0u8]); // 1-byte stub
         let cf = db.cf_handle("transactions").unwrap();
-        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+        assert_eq!(
+            read_valid_tx_record(&db, &cf, &display).unwrap(),
+            Some(valid)
+        );
     }
 
     // Only stubs -> None (a genuine 404).
@@ -572,7 +583,7 @@ mod tests {
         put(&db, &internal, &[0u8, 1]);
         put(&db, &display, &[0u8, 1, 2]);
         let cf = db.cf_handle("transactions").unwrap();
-        assert_eq!(read_valid_tx_record(&db, &cf, &display), None);
+        assert_eq!(read_valid_tx_record(&db, &cf, &display).unwrap(), None);
     }
 
     // THE reorg bug: an EXACTLY-8-byte body-less stub (version(4)+HEIGHT_ORPHAN(4), no tx
@@ -587,7 +598,10 @@ mod tests {
         let valid = vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xAA, 0xBB]; // has a body
         put(&db, &display, &valid);
         let cf = db.cf_handle("transactions").unwrap();
-        assert_eq!(read_valid_tx_record(&db, &cf, &display), Some(valid));
+        assert_eq!(
+            read_valid_tx_record(&db, &cf, &display).unwrap(),
+            Some(valid)
+        );
     }
 
     // An exactly-8-byte body-less stub at every key order has no body to serve -> None
@@ -600,6 +614,6 @@ mod tests {
         put(&db, &internal, &stub);
         put(&db, &display, &stub);
         let cf = db.cf_handle("transactions").unwrap();
-        assert_eq!(read_valid_tx_record(&db, &cf, &display), None);
+        assert_eq!(read_valid_tx_record(&db, &cf, &display).unwrap(), None);
     }
 }

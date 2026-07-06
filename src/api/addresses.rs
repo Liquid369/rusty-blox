@@ -695,12 +695,15 @@ async fn aggregate_xpub_data(
                         .cf_handle("transactions")
                         .ok_or_else(|| "transactions CF not found".to_string())?;
                     // Prefer a body over an 8-byte stub across both key orders, else old
-                    // internal-keyed txs are missed and totalReceived undercounts.
-                    Ok(crate::api::transactions::read_valid_tx_record(
+                    // internal-keyed txs are missed and totalReceived undercounts. A read
+                    // ERROR propagates (fails the request) — swallowing it would silently
+                    // undercount a money total with HTTP 200.
+                    crate::api::transactions::read_valid_tx_record(
                         &db_clone,
                         &cf_transactions,
                         &txid_clone,
-                    ))
+                    )
+                    .map_err(|e| e.to_string())
                 })
                 .await
                 .map_err(|e| format!("Task join error: {e}"))?
@@ -759,20 +762,19 @@ async fn aggregate_xpub_data(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
-            // tx CF is keyed by 't' + canonical display-order bytes, so use the
-            // decoded txid directly. The prior reverse made every key miss, so
-            // xpub tx heights silently read 0 and the list was effectively unsorted.
-            let mut key = vec![b't'];
-            key.extend(&txid_bytes);
+            // Height via the shared stub-safe reader (BOTH key orders): a raw
+            // display-only read sorted internal-keyed (initial-sync) txs as height 0
+            // and read a stub's -1 sentinel. Sorting is cosmetic, so a read error
+            // still degrades to height 0 rather than failing the request.
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
-                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
-                        if tx_data.len() >= 8 {
-                            return i32::from_le_bytes([
-                                tx_data[4], tx_data[5], tx_data[6], tx_data[7],
-                            ]);
-                        }
+                    if let Ok(Some(tx_data)) =
+                        crate::api::transactions::read_valid_tx_record(&db_clone, &cf, &txid_bytes)
+                    {
+                        return i32::from_le_bytes([
+                            tx_data[4], tx_data[5], tx_data[6], tx_data[7],
+                        ]);
                     }
                 }
                 0
@@ -1074,81 +1076,75 @@ async fn compute_utxos(
         // duddino, wallets, and every other explorer reject.
         let txid_display = hex::encode(txid_hash);
 
-        // Look up transaction to get value, confirmations, and other details.
-        // The tx CF key uses internal (non-reversed) txid bytes, i.e. txid_hash
-        // as stored in the 'a' unspent set.
-        let mut tx_key = vec![b't'];
-        tx_key.extend_from_slice(txid_hash);
-
+        // Look up the tx record for height/confirmations via the shared stub-safe
+        // reader (BOTH key orders; a body-less 8-byte stub must not shadow the real
+        // record — a raw one-key read here used to silently DROP a canonical UTXO
+        // when the probed key held a stub or the record lived at the other order).
+        // Read errors degrade to "record missing" (UTXO skipped), as before.
         let db_clone = Arc::clone(db);
-        let tx_key_clone = tx_key.clone();
+        let txid_owned = txid_hash.clone();
         let tx_data_opt = tokio::task::spawn_blocking(move || {
-            if let Some(cf) = db_clone.cf_handle("transactions") {
-                db_clone.get_cf(&cf, &tx_key_clone).ok().flatten()
-            } else {
-                None
-            }
+            let cf = db_clone.cf_handle("transactions")?;
+            crate::api::transactions::read_valid_tx_record(&db_clone, &cf, &txid_owned)
+                .unwrap_or(None)
         })
         .await
         .ok()
         .flatten();
 
         if let Some(tx_data) = tx_data_opt {
-            if tx_data.len() >= 8 {
-                let block_height =
-                    i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+            let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
 
-                // A UTXO present in the 'a' unspent set is canonical by construction;
-                // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
-                // read must NOT silently drop a canonical UTXO. Height/orphan are
-                // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
-                // before — only the expensive full-tx parse is removed.
-                if block_height == HEIGHT_ORPHAN {
-                    continue;
-                }
+            // A UTXO present in the 'a' unspent set is canonical by construction;
+            // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
+            // read must NOT silently drop a canonical UTXO. Height/orphan are
+            // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
+            // before — only the expensive full-tx parse is removed.
+            if block_height == HEIGHT_ORPHAN {
+                continue;
+            }
 
-                let confirmations =
-                    if is_canonical_height(block_height) && is_canonical_height(current_height) {
-                        ((current_height - block_height) + 1).max(0) as u32
-                    } else {
-                        0
-                    };
-
-                // value + coinbase/coinstake come from the inline 'a' record (49B):
-                // no deserialize_transaction on the hot (confirmed) path. lock_time is
-                // only ever emitted when confirmations == 0, so parse the tx ONLY in
-                // that rare degraded/unconfirmed case to preserve exact prior output.
-                let tx_type = crate::tx_type::u8_to_ty(*kind);
-                let lock_time = if confirmations == 0 {
-                    let tx_data_len = tx_data.len() - 8;
-                    let mut tx_with_header = Vec::with_capacity(4 + tx_data_len);
-                    tx_with_header.extend_from_slice(&[0u8; 4]);
-                    tx_with_header.extend_from_slice(&tx_data[8..]);
-                    deserialize_transaction_blocking(&tx_with_header)
-                        .ok()
-                        .filter(|tx| tx.lock_time > 0)
-                        .map(|tx| tx.lock_time)
+            let confirmations =
+                if is_canonical_height(block_height) && is_canonical_height(current_height) {
+                    ((current_height - block_height) + 1).max(0) as u32
                 } else {
-                    None
+                    0
                 };
 
-                utxo_list.push(UTXO {
-                    txid: txid_display,
-                    vout: *vout as u32,
-                    value: value.to_string(),
-                    confirmations,
-                    lock_time,
-                    height: if block_height > 0 {
-                        Some(block_height as u32)
-                    } else {
-                        None
-                    },
-                    coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
-                    coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
-                    spendable: Some(true),
-                    blocks_until_spendable: None,
-                });
-            }
+            // value + coinbase/coinstake come from the inline 'a' record (49B):
+            // no deserialize_transaction on the hot (confirmed) path. lock_time is
+            // only ever emitted when confirmations == 0, so parse the tx ONLY in
+            // that rare degraded/unconfirmed case to preserve exact prior output.
+            let tx_type = crate::tx_type::u8_to_ty(*kind);
+            let lock_time = if confirmations == 0 {
+                let tx_data_len = tx_data.len() - 8;
+                let mut tx_with_header = Vec::with_capacity(4 + tx_data_len);
+                tx_with_header.extend_from_slice(&[0u8; 4]);
+                tx_with_header.extend_from_slice(&tx_data[8..]);
+                deserialize_transaction_blocking(&tx_with_header)
+                    .ok()
+                    .filter(|tx| tx.lock_time > 0)
+                    .map(|tx| tx.lock_time)
+            } else {
+                None
+            };
+
+            utxo_list.push(UTXO {
+                txid: txid_display,
+                vout: *vout as u32,
+                value: value.to_string(),
+                confirmations,
+                lock_time,
+                height: if block_height > 0 {
+                    Some(block_height as u32)
+                } else {
+                    None
+                },
+                coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
+                coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
+                spendable: Some(true),
+                blocks_until_spendable: None,
+            });
         }
     }
 

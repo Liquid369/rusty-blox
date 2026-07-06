@@ -219,7 +219,9 @@ fn search_transaction(
 
     // Prefer a record WITH a body over an 8-byte stub (shadowing bug) so search reports the
     // real block height, not the orphan/stub sentinel; the shared reader checks both orders.
-    let tx_data = crate::api::transactions::read_valid_tx_record(db, &cf_transactions, &txid_bytes);
+    // A RocksDB error propagates (500) — it must never read as "txid does not exist".
+    let tx_data =
+        crate::api::transactions::read_valid_tx_record(db, &cf_transactions, &txid_bytes)?;
 
     match tx_data {
         Some(tx_data) => {
