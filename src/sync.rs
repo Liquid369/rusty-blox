@@ -241,6 +241,13 @@ fn refresh_canonical_metadata(db: &Arc<DB>) -> Result<i32, Box<dyn std::error::E
 
     let leveldb_path = get_block_index_path(&pivx_blocks_dir, block_index_copy_dir.as_deref())?;
     let canonical_chain = build_canonical_chain_from_leveldb(&leveldb_path)?;
+    // Guard the len-1: an empty result (wrong/corrupt block-index copy) must
+    // fail loudly, not underflow (debug panic / wrap to -1 in release).
+    if canonical_chain.is_empty() {
+        return Err(
+            "Canonical chain from leveldb is empty - wrong or corrupt block index path".into(),
+        );
+    }
     let leveldb_height = (canonical_chain.len() - 1) as i32;
 
     let cf_metadata = db
@@ -319,6 +326,12 @@ async fn run_initial_sync_leveldb(
     let canonical_chain = build_canonical_chain_from_leveldb(&leveldb_path)?;
 
     let chain_len = canonical_chain.len();
+    // Guard the len-1 underflow (empty = wrong/corrupt block index path).
+    if chain_len == 0 {
+        return Err(
+            "Canonical chain from leveldb is empty - wrong or corrupt block index path".into(),
+        );
+    }
     let leveldb_height = (chain_len - 1) as i32;
 
     info!(
