@@ -376,9 +376,22 @@ async fn index_block_from_rpc(
             // Already indexed this exact block - skip silently
             return Ok(());
         } else {
-            // Different block at same height - REORG detected!
-            warn!(height = height, expected = %existing_hash_str, current = %block_hash, "REORG detected");
-            // Delete processing marker if it exists (allow reindex)
+            // Different block at same height — this height was reorged. Roll the
+            // OLD block's effects back FIRST (tx orphan-marks, 'B' entries,
+            // metadata, addr-index reversal via its undo record) — re-indexing on
+            // top of them (as this used to) double-applied the old block's
+            // address entries and left both blocks' 'B' entries at this height.
+            // rollback_to_height is the same single-height machinery the reorg
+            // handler uses; it also rewinds sync_height to height-1 in its final
+            // atomic batch, which the successful re-index below restores.
+            warn!(height = height, expected = %existing_hash_str, current = %block_hash,
+                "REORG detected at already-indexed height; rolling back the old block before reindexing");
+            crate::reorg::rollback_to_height(db.clone(), height - 1, height)
+                .await
+                .map_err(|e| format!("rollback of reorged height {height} failed: {e}"))?;
+            // The old 'H' marker and processing marker describe a block that no
+            // longer exists; clear both so the re-index below proceeds cleanly.
+            db.delete_cf(&cf_state, &height_hash_key).ok();
             db.delete_cf(&cf_state, &processing_key).ok();
         }
     }
