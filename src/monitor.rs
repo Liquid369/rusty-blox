@@ -175,13 +175,34 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
         .ok_or("chain_metadata CF not found")?;
 
     let height_key = height.to_le_bytes().to_vec();
-    let hash_bytes = db
-        .get_cf(&cf_metadata, &height_key)?
-        .ok_or("Block hash not found for current height")?;
+    if let Some(hash_bytes) = db.get_cf(&cf_metadata, &height_key)? {
+        return Ok(ChainTip {
+            height,
+            hash: hex::encode(&hash_bytes),
+        });
+    }
 
-    let hash = hex::encode(&hash_bytes);
-
-    Ok(ChainTip { height, hash })
+    // The watermark can point at deleted metadata after a crash mid-reorg-rollback
+    // (rollback deletes top-down; a partial batch may have committed the deletions
+    // for the top heights before the final batch carrying sync_height landed).
+    // Erroring here made the monitor loop retry the same dead read forever. Walk
+    // down to the highest surviving mapping instead — reorg re-detection then
+    // heals the state from there. Bounded well past any real PIVX reorg depth.
+    let floor = (height - 1_000).max(0);
+    for h in (floor..height).rev() {
+        if let Some(hash_bytes) = db.get_cf(&cf_metadata, h.to_le_bytes())? {
+            warn!(
+                sync_height = height,
+                surviving_height = h,
+                "sync_height points at missing chain metadata (crash mid-rollback?); using highest surviving height"
+            );
+            return Ok(ChainTip {
+                height: h,
+                hash: hex::encode(&hash_bytes),
+            });
+        }
+    }
+    Err("Block hash not found for current height".into())
 }
 
 /// Phase 1a: Fetch block data from RPC (without indexing)
@@ -1293,11 +1314,52 @@ async fn index_block_from_rpc(
         }
     }
 
-    // Update sync height
     let cf_state = db
         .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
 
+    // A retry marker for this height: 'E' + height, written when an attempt ends
+    // with tx_errors > 0 (below). Its presence on a SUCCESSFUL pass means a prior
+    // partial attempt already applied some txs — the 'r'/'s' adds are NOT
+    // idempotent, so this re-apply double-counted them. Repair from the
+    // authoritative t/a indexes (the exact recompute crash recovery uses).
+    let mut retry_marker_key = vec![b'E'];
+    retry_marker_key.extend(&height.to_le_bytes());
+
+    if tx_errors > 0 {
+        // Do NOT mark the block done: no 'H' marker, no sync_height advance —
+        // the next poll retries this height (the RAII guard clears 'P'). The old
+        // behavior marked the block complete with a warn log, permanently
+        // dropping the failed txs from the index with no signal.
+        db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+        metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
+        return Err(format!(
+            "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
+            tx_array.len()
+        )
+        .into());
+    }
+
+    if db.get_cf(&cf_state, &retry_marker_key)?.is_some() {
+        match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
+            Ok(n) => {
+                info!(
+                    height,
+                    addresses = n,
+                    "Repaired r/s totals after a retried partial block"
+                );
+                db.delete_cf(&cf_state, &retry_marker_key)?;
+            }
+            Err(e) => {
+                // Keep the marker so the inconsistency stays discoverable; the
+                // recompute is a local read-only derivation, so failure here means
+                // the DB itself is in trouble.
+                warn!(height, error = %e, "Failed to repair r/s after retried block; marker retained");
+            }
+        }
+    }
+
+    // Update sync height
     db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
 
     // CRITICAL FIX: Store block hash for deduplication
@@ -2035,8 +2097,15 @@ pub async fn run_block_monitor(
                         }
                     }
                     Err(e) => {
-                        error!(height = block.height, error = %e, "Failed to index block");
+                        // STOP the batch at the first failed block. Continuing would
+                        // let the NEXT block's sync_height write advance the watermark
+                        // past this hole, permanently dropping the block from the
+                        // index with only a log line. Retry from the last good height
+                        // on the next poll.
+                        error!(height = block.height, error = %e,
+                            "Failed to index block during catchup - stopping batch; retrying from the last good height next poll");
                         index_errors += 1;
+                        break;
                     }
                 }
             }
@@ -2129,8 +2198,35 @@ mod tests {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state"]).unwrap());
+        let db =
+            Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state", "chain_metadata"]).unwrap());
         (temp, db)
+    }
+
+    /// Crash mid-reorg-rollback can leave sync_height pointing at deleted metadata
+    /// (deletions commit top-down before the watermark batch). The tip read must
+    /// walk down to the highest surviving mapping instead of erroring forever.
+    #[test]
+    fn db_chain_tip_walks_back_over_deleted_metadata() {
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 100).unwrap();
+        let cf = db.cf_handle("chain_metadata").unwrap();
+        // Heights 98-100 deleted by a partial rollback; 97 survives.
+        db.put_cf(&cf, 97i32.to_le_bytes(), [0xAB; 32]).unwrap();
+        let tip = get_db_chain_tip(&db).unwrap();
+        assert_eq!(tip.height, 97);
+        assert_eq!(tip.hash, hex::encode([0xAB; 32]));
+    }
+
+    #[test]
+    fn db_chain_tip_normal_path_unchanged() {
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 100).unwrap();
+        let cf = db.cf_handle("chain_metadata").unwrap();
+        db.put_cf(&cf, 100i32.to_le_bytes(), [0xCD; 32]).unwrap();
+        let tip = get_db_chain_tip(&db).unwrap();
+        assert_eq!(tip.height, 100);
+        assert_eq!(tip.hash, hex::encode([0xCD; 32]));
     }
 
     fn tip(height: i32, hash: &str) -> ChainTip {
