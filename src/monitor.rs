@@ -1921,6 +1921,17 @@ pub async fn run_block_monitor(
     let mut snapshot_failure_warned = false;
 
     loop {
+        // PAUSE while a full analytics re-enrich rewrites the addr index: the
+        // per-block 'a'/'r'/'s'/'t' read-modify-writes would land on rows
+        // Pass-2b then overwrites from its snapshot — deltas lost forever, and
+        // nothing re-applies them (sync_height has advanced). Blocks simply
+        // accumulate; catch-up drains the backlog once the rebuild finishes.
+        if crate::analytics_live::reenrich_in_progress() {
+            info!("full re-enrich in progress — live indexing paused this poll");
+            tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+            continue;
+        }
+
         // Hourly forward-only snapshot (mempool / masternodes / supply).
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

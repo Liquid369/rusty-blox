@@ -1605,6 +1605,10 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
         let _ = db.write(batch);
     }
     let db_bg = Arc::clone(&db);
+    // Snapshot the reorg epoch: the pass computes from THIS enrich's frozen
+    // view; if a reorg lands during the ~hour-long pass, the final handoff
+    // below must not clobber on_reorg's day-blob cleanup + watermark rewind.
+    let epoch_at_start = crate::analytics_live::reorg_epoch(&db);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1629,6 +1633,15 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
             .await
             {
                 warn!(error = %e, "Background: failed to persist transaction daily series");
+                return;
+            }
+            // A reorg during the pass invalidates the frozen view this series
+            // was computed from — the handoff would overwrite on_reorg's
+            // cleanup/rewind with stale data. Refuse it; analytics_in_progress
+            // stays set, so the interrupted-enrich recovery re-runs a full
+            // enrich on the next restart (the designed heal path).
+            if crate::analytics_live::reorg_epoch(&db_bg) != epoch_at_start {
+                warn!("Background: reorg landed during the daily-series pass — withholding the green handoff; restart (or a new full enrich) will rebuild on the post-reorg chain");
                 return;
             }
             // Strictly-last handoff: flip the live gate green WITH the watermark
