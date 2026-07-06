@@ -663,15 +663,18 @@ async fn index_block_from_rpc(
             true
         };
 
-        // Extract transaction version from raw_tx_bytes (first 4 bytes)
-        let tx_version_bytes = if raw_tx_bytes.len() >= 4 {
-            &raw_tx_bytes[0..4]
-        } else {
-            warn!(txid = %txid, "Transaction has invalid size (< 4 bytes), using default version");
-            &[1u8, 0, 0, 0] // Default to version 1
-        };
+        // A raw tx shorter than its 4-byte version field is not a transaction —
+        // writing it would create the banned body-less/garbage 't' record (an
+        // empty RPC result padded with a default version = exactly the 8-byte
+        // stub that shadows real records). Skip the tx entirely, like the RPC
+        // error branches above; nothing (tx record, 'B' entry) may reference it.
+        if raw_tx_bytes.len() < 4 {
+            warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction data too short, skipping (refusing to write a body-less record)");
+            tx_errors += 1;
+            continue;
+        }
 
-        let mut full_data = tx_version_bytes.to_vec();
+        let mut full_data = raw_tx_bytes[0..4].to_vec();
         full_data.extend(&height.to_le_bytes());
         full_data.extend(&raw_tx_bytes);
 
@@ -703,12 +706,6 @@ async fn index_block_from_rpc(
         // Validate transaction size before allocation
         if raw_tx_bytes.len() > 10_000_000 {
             warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction too large, skipping");
-            tx_errors += 1;
-            continue;
-        }
-
-        if raw_tx_bytes.is_empty() {
-            warn!(txid = %txid, "Transaction has empty data, skipping");
             tx_errors += 1;
             continue;
         }
@@ -932,15 +929,17 @@ async fn index_block_from_rpc(
                                                     Err(_) => 0,
                                                 };
 
-                                                // Store this transaction with proper height
-                                                // Extract tx version from raw bytes (first 4 bytes)
-                                                let tx_version_bytes = if raw_bytes.len() >= 4 {
-                                                    &raw_bytes[0..4]
-                                                } else {
-                                                    &[1u8, 0, 0, 0] // Default to version 1
-                                                };
+                                                // Refuse to cache a body too short to be
+                                                // a real tx — a default-version pad around
+                                                // empty bytes writes the banned 8-byte
+                                                // body-less stub. Skip this input like the
+                                                // surrounding RPC-error branches do.
+                                                if raw_bytes.len() < 4 {
+                                                    warn!(prev_txid = %prev_txid_hex, bytes = raw_bytes.len(), "Previous tx data too short, skipping (refusing to write a body-less record)");
+                                                    continue;
+                                                }
 
-                                                let mut full_data = tx_version_bytes.to_vec();
+                                                let mut full_data = raw_bytes[0..4].to_vec();
                                                 full_data.extend(&prev_height.to_le_bytes());
                                                 full_data.extend(&raw_bytes);
 
