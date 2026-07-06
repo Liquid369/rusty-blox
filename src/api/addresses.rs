@@ -17,7 +17,7 @@ use super::types::{AddressInfo, AddressQuery, UtxoQuery, XPubInfo, UTXO};
 use crate::cache::CacheManager;
 use crate::constants::{is_canonical_height, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 use crate::maturity::get_current_height;
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking};
+use crate::parser::deserialize_transaction_blocking;
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
@@ -684,56 +684,55 @@ async fn aggregate_xpub_data(
         // Calculate total received for this address
         let mut total_received: i64 = 0;
 
-        for txid_bytes in &txids {
-            let txid_clone = txid_bytes.clone();
-            let db_clone = db.clone();
-            let addr_clone = address.clone();
-
-            let tx_data =
-                tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-                    let cf_transactions = db_clone
-                        .cf_handle("transactions")
-                        .ok_or_else(|| "transactions CF not found".to_string())?;
-                    // Prefer a body over an 8-byte stub across both key orders, else old
-                    // internal-keyed txs are missed and totalReceived undercounts. A read
-                    // ERROR propagates (fails the request) — swallowing it would silently
-                    // undercount a money total with HTTP 200.
-                    crate::api::transactions::read_valid_tx_record(
+        // ONE blocking pass over this address's txs (a per-tx spawn_blocking dispatch
+        // + async parse hop made large xpubs pay thousands of dispatches per uncached
+        // request once the stub-safe reader started actually finding historical txs).
+        // Reads are orphan-AWARE: a reorg orphan-marks only the display record, and
+        // the internal-first body read would otherwise count a disconnected tx —
+        // permanently inflating totalReceived. A read ERROR propagates (fails the
+        // request): swallowing it would silently undercount a money total under 200.
+        let txids_clone: Vec<Vec<u8>> = txids.clone();
+        let db_clone = db.clone();
+        let addr_clone = address.clone();
+        total_received += tokio::task::spawn_blocking(move || -> Result<i64, String> {
+            let cf_transactions = db_clone
+                .cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            let mut sum: i64 = 0;
+            for txid in &txids_clone {
+                let (tx_data, orphan_marked) =
+                    crate::api::transactions::read_tx_record_orphan_aware(
                         &db_clone,
                         &cf_transactions,
-                        &txid_clone,
+                        txid,
                     )
-                    .map_err(|e| e.to_string())
-                })
-                .await
-                .map_err(|e| format!("Task join error: {e}"))?
-                .map_err(|e| e.to_string())?;
-
-            if let Some(tx_data) = tx_data {
-                if tx_data.len() >= 8 {
-                    // Skip orphaned and unresolved transactions
-                    let block_height =
-                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                    if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
-                        continue;
-                    }
-                    let tx_data_len = tx_data.len() - 8;
-                    if tx_data_len > 0 {
-                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
-
-                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                            for output in &tx.outputs {
-                                if output.address.contains(&addr_clone) {
-                                    total_received += output.value;
-                                }
-                            }
+                    .map_err(|e| e.to_string())?;
+                if orphan_marked {
+                    continue;
+                }
+                let Some(tx_data) = tx_data else { continue };
+                // Skip orphaned/unresolved sentinels on the served record itself.
+                let block_height =
+                    i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
+                    continue;
+                }
+                let mut tx_data_with_header = Vec::with_capacity(4 + tx_data.len() - 8);
+                tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                if let Ok(tx) = deserialize_transaction_blocking(&tx_data_with_header) {
+                    for output in &tx.outputs {
+                        if output.address.contains(&addr_clone) {
+                            sum += output.value;
                         }
                     }
                 }
             }
-        }
+            Ok(sum)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+        .map_err(|e| e.to_string())?;
 
         let total_sent = total_received - address_balance;
 

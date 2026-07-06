@@ -71,6 +71,44 @@ pub(crate) fn read_valid_tx_record(
     Ok(None)
 }
 
+/// Like [`read_valid_tx_record`], but ALSO reports whether any record at either key
+/// order — including body-less stubs — carries the `HEIGHT_ORPHAN` sentinel. A reorg
+/// orphan-marks only the DISPLAY record, so a stale INTERNAL record with its old
+/// positive height would otherwise shadow the mark entirely (the reader probes
+/// internal first, and would count a disconnected tx). Callers whose SUMS must
+/// exclude disconnected txs (xpub totals) check the flag; display callers that
+/// should still serve an orphaned tx's body keep using `read_valid_tx_record`.
+///
+/// ponytail: an any-order orphan mark wins even against a positive height at the
+/// other order. A tx orphaned during initial sync and later re-broadcast under the
+/// same txid would be wrongly skipped — if that ever matters, the upgrade path is a
+/// 'B'+height membership check (the authoritative canonical txid list).
+pub(crate) fn read_tx_record_orphan_aware(
+    db: &DB,
+    cf: &impl rocksdb::AsColumnFamilyRef,
+    display_txid_bytes: &[u8],
+) -> Result<(Option<Vec<u8>>, bool), rocksdb::Error> {
+    let internal: Vec<u8> = display_txid_bytes.iter().rev().cloned().collect();
+    let mut body: Option<Vec<u8>> = None;
+    let mut orphan_marked = false;
+    for txid in [internal.as_slice(), display_txid_bytes] {
+        let mut key = vec![b't'];
+        key.extend_from_slice(txid);
+        if let Some(d) = db.get_cf(cf, &key)? {
+            if d.len() >= 8 {
+                let h = i32::from_le_bytes([d[4], d[5], d[6], d[7]]);
+                if h == crate::constants::HEIGHT_ORPHAN {
+                    orphan_marked = true;
+                }
+            }
+            if d.len() > 8 && body.is_none() {
+                body = Some(d);
+            }
+        }
+    }
+    Ok((body, orphan_marked))
+}
+
 /// Build Transaction struct from raw DB data
 ///
 /// This is a public helper used by:
@@ -225,25 +263,38 @@ pub(crate) async fn build_transaction_from_db(
             if txid_display_bytes.len() != 32 {
                 return None;
             }
+            // An empty UTXO set comes in TWO shapes: the monitor DELETES the 'a' key
+            // when an address empties (delete_cf at zero balance), while full
+            // enrichment writes an EMPTY (0-byte) 'a' value for the same state. Treat
+            // both identically: if the address is genuinely KNOWN — its 'r'
+            // received-total exists AND is > 0 — an empty set means every output it
+            // held is spent (Some(false)). An 'r' of exactly 0 stays None: a reorg
+            // rollback leaves 'r'=0 behind for an address whose only receipt was
+            // disconnected, and those outputs were never spent — asserting "spent"
+            // there would be a false statement. Un-indexed addresses stay None.
+            let known_and_emptied = || -> Option<bool> {
+                let mut r_key = vec![b'r'];
+                r_key.extend_from_slice(address.as_bytes());
+                let r = db_clone.get_cf(cf, &r_key).ok().flatten()?;
+                let total = <[u8; 8]>::try_from(r.as_slice())
+                    .ok()
+                    .map(i64::from_le_bytes)?;
+                if total > 0 {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
             let mut key = vec![b'a'];
             key.extend_from_slice(address.as_bytes());
             let data = match db_clone.get_cf(cf, &key).ok().flatten() {
+                Some(d) if d.is_empty() => return known_and_emptied(),
                 Some(d) => d,
-                None => {
-                    // The 'a' UTXO set is DELETED when an address empties (monitor.rs
-                    // delete_cf at zero balance). So an absent 'a' key on a KNOWN
-                    // address (one that has an 'r' received-total) means every output
-                    // it held is spent — report Some(false)=absent (→ spent), not
-                    // None=unknown. Only a genuinely un-indexed address stays None.
-                    let mut r_key = vec![b'r'];
-                    r_key.extend_from_slice(address.as_bytes());
-                    // Some(received-total) ⇒ known address, empty UTXO set ⇒ spent.
-                    return db_clone.get_cf(cf, &r_key).ok().flatten().map(|_| false);
-                }
+                None => return known_and_emptied(),
             };
             // v2 'a' format: repeated 49-byte [txid(32)+vout(8 LE)+value(8)+kind(1)].
             // Only txid+vout (the first 40 bytes) matter here; ignore the trailing 9.
-            if data.is_empty() || data.len() % crate::parser::ADDR_UTXO_STRIDE != 0 {
+            if data.len() % crate::parser::ADDR_UTXO_STRIDE != 0 {
                 return None;
             }
             let mut found = false;
@@ -602,6 +653,31 @@ mod tests {
             read_valid_tx_record(&db, &cf, &display).unwrap(),
             Some(valid)
         );
+    }
+
+    // A reorg orphan-marks only the DISPLAY record; the stale internal record keeps its
+    // positive height. The orphan-aware reader must return the body AND raise the flag,
+    // so summing callers (xpub totals) can skip the disconnected tx.
+    #[test]
+    fn orphan_aware_flags_display_orphan_behind_internal_body() {
+        let (_t, db, display) = seed();
+        let internal: Vec<u8> = display.iter().rev().cloned().collect();
+        let confirmed = vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xAA, 0xBB]; // height 5, body
+        put(&db, &internal, &confirmed);
+        let orphaned = vec![1u8, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA, 0xBB]; // height -1, body
+        put(&db, &display, &orphaned);
+        let cf = db.cf_handle("transactions").unwrap();
+        let (body, orphan_marked) = read_tx_record_orphan_aware(&db, &cf, &display).unwrap();
+        assert_eq!(body, Some(confirmed), "internal body still served");
+        assert!(orphan_marked, "display orphan mark must not be shadowed");
+        // No orphan mark anywhere -> flag stays false.
+        let (_t2, db2, display2) = seed();
+        let internal2: Vec<u8> = display2.iter().rev().cloned().collect();
+        put(&db2, &internal2, &vec![1u8, 0, 0, 0, 5, 0, 0, 0, 0xCC]);
+        let cf2 = db2.cf_handle("transactions").unwrap();
+        let (body2, orphan2) = read_tx_record_orphan_aware(&db2, &cf2, &display2).unwrap();
+        assert!(body2.is_some());
+        assert!(!orphan2);
     }
 
     // An exactly-8-byte body-less stub at every key order has no body to serve -> None
