@@ -949,6 +949,12 @@ async fn index_block_from_rpc(
                                                     .send()
                                                     .await
                                                 {
+                                                    // A failed height lookup must write the
+                                                    // UNRESOLVED sentinel, never 0: height 0
+                                                    // is genesis (canonical!), needs_update
+                                                    // only overwrites heights < 0, and the
+                                                    // heal machinery targets the sentinels —
+                                                    // a 0 here is a PERMANENT wrong record.
                                                     Ok(block_resp) => block_resp
                                                         .json::<Value>()
                                                         .await
@@ -958,9 +964,11 @@ async fn index_block_from_rpc(
                                                                 .and_then(|r| r.get("height"))
                                                                 .and_then(|h| h.as_i64())
                                                         })
-                                                        .unwrap_or(0)
-                                                        as i32,
-                                                    Err(_) => 0,
+                                                        .map(|h| h as i32)
+                                                        .unwrap_or(
+                                                            crate::constants::HEIGHT_UNRESOLVED,
+                                                        ),
+                                                    Err(_) => crate::constants::HEIGHT_UNRESOLVED,
                                                 };
 
                                                 // Refuse to cache a body too short to be
