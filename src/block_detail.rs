@@ -355,11 +355,14 @@ fn get_block_transactions(
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
                         // Prefer a record WITH a body over an 8-byte stub (shadowing bug),
                         // else a stub-shadowed tx fails to parse and vanishes from the block.
+                        // Read errors degrade to "tx missing" (warned below) — block pages
+                        // render the rest of the block rather than failing wholesale.
                         let tx_data = crate::api::transactions::read_valid_tx_record(
                             db,
                             &cf_transactions,
                             &txid_bytes,
-                        );
+                        )
+                        .unwrap_or(None);
 
                         if let Some(tx_data) = tx_data {
                             if let Ok(mut tx) = parse_transaction(&tx_data) {
@@ -401,11 +404,13 @@ fn enrich_transaction_inputs(
             if let Ok(prev_txid_bytes) = hex::decode(prev_txid) {
                 // Prefer a record WITH a body over an 8-byte stub (same shadowing bug as
                 // read_valid_tx_record); the shared reader checks both key orders.
+                // Input enrichment is best-effort: a read error leaves the input unresolved.
                 let prev_data = crate::api::transactions::read_valid_tx_record(
                     db,
                     &cf_transactions,
                     &prev_txid_bytes,
-                );
+                )
+                .unwrap_or(None);
 
                 if let Some(prev_data) = prev_data {
                     if prev_data.len() > 8 {
@@ -623,16 +628,15 @@ fn parse_transaction_from_json(
 }
 
 fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn std::error::Error>> {
-    use crate::parser::deserialize_transaction;
-
     // Parse using the binary parser
     // Need to prepend 4-byte dummy block_version header since parser expects it
     let mut data_with_header = vec![0u8; 4]; // Dummy block_version
     data_with_header.extend_from_slice(data);
 
-    // Use blocking runtime since this is called from a blocking context
-    let tx = tokio::runtime::Handle::current()
-        .block_on(async { deserialize_transaction(&data_with_header).await })?;
+    // Pure-CPU parse via the sync twin. The old Handle::current().block_on here
+    // worked only because callers happened to run inside spawn_blocking with a
+    // runtime in TLS — a panic ("no reactor") or deadlock trap for any new caller.
+    let tx = crate::parser::deserialize_transaction_blocking(&data_with_header)?;
 
     // Convert inputs
     let mut vin = Vec::new();

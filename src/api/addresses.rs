@@ -17,7 +17,7 @@ use super::types::{AddressInfo, AddressQuery, UtxoQuery, XPubInfo, UTXO};
 use crate::cache::CacheManager;
 use crate::constants::{is_canonical_height, HEIGHT_ORPHAN, HEIGHT_UNRESOLVED};
 use crate::maturity::get_current_height;
-use crate::parser::{deserialize_transaction, deserialize_transaction_blocking};
+use crate::parser::deserialize_transaction_blocking;
 
 /// Redact xpub for safe logging (privacy protection)
 /// Shows first 8 and last 4 characters: "xpub661M...3Mzx"
@@ -198,24 +198,18 @@ pub async fn addr_v2(
 
     match result {
         Ok(info) => Ok(Json(info)),
-        Err(_) => {
-            // Fallback: return empty address info. The address has already
-            // passed checksum validation above, so this is a transient DB/compute
-            // error for a real address — not the P2-B fake-zero-account case.
-            Ok(Json(AddressInfo {
-                page: Some(params.page),
-                total_pages: Some(1),
-                items_on_page: Some(params.page_size),
-                address,
-                balance: "0".to_string(),
-                total_received: "0".to_string(),
-                total_sent: "0".to_string(),
-                unconfirmed_balance: "0".to_string(),
-                unconfirmed_txs: 0,
-                txs: 0,
-                txids: Some(vec![]),
-                transactions: None,
-            }))
+        Err(e) => {
+            // A transient DB/compute error for a checksum-valid address must FAIL
+            // the request. Returning a zeroed account here (as this used to) is a
+            // confident false statement — "this address holds nothing" — that a
+            // wallet will act on; Blockbook 5xxs the same case.
+            warn!(address = %address, error = %e, "address compute failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(super::types::BlockbookError::new(
+                    "Internal error computing address; please retry",
+                )),
+            ))
         }
     }
 }
@@ -684,53 +678,55 @@ async fn aggregate_xpub_data(
         // Calculate total received for this address
         let mut total_received: i64 = 0;
 
-        for txid_bytes in &txids {
-            let txid_clone = txid_bytes.clone();
-            let db_clone = db.clone();
-            let addr_clone = address.clone();
-
-            let tx_data =
-                tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, String> {
-                    let cf_transactions = db_clone
-                        .cf_handle("transactions")
-                        .ok_or_else(|| "transactions CF not found".to_string())?;
-                    // Prefer a body over an 8-byte stub across both key orders, else old
-                    // internal-keyed txs are missed and totalReceived undercounts.
-                    Ok(crate::api::transactions::read_valid_tx_record(
+        // ONE blocking pass over this address's txs (a per-tx spawn_blocking dispatch
+        // + async parse hop made large xpubs pay thousands of dispatches per uncached
+        // request once the stub-safe reader started actually finding historical txs).
+        // Reads are orphan-AWARE: a reorg orphan-marks only the display record, and
+        // the internal-first body read would otherwise count a disconnected tx —
+        // permanently inflating totalReceived. A read ERROR propagates (fails the
+        // request): swallowing it would silently undercount a money total under 200.
+        let txids_clone: Vec<Vec<u8>> = txids.clone();
+        let db_clone = db.clone();
+        let addr_clone = address.clone();
+        total_received += tokio::task::spawn_blocking(move || -> Result<i64, String> {
+            let cf_transactions = db_clone
+                .cf_handle("transactions")
+                .ok_or_else(|| "transactions CF not found".to_string())?;
+            let mut sum: i64 = 0;
+            for txid in &txids_clone {
+                let (tx_data, orphan_marked) =
+                    crate::api::transactions::read_tx_record_orphan_aware(
                         &db_clone,
                         &cf_transactions,
-                        &txid_clone,
-                    ))
-                })
-                .await
-                .map_err(|e| format!("Task join error: {e}"))?
-                .map_err(|e| e.to_string())?;
-
-            if let Some(tx_data) = tx_data {
-                if tx_data.len() >= 8 {
-                    // Skip orphaned and unresolved transactions
-                    let block_height =
-                        i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
-                    if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
-                        continue;
-                    }
-                    let tx_data_len = tx_data.len() - 8;
-                    if tx_data_len > 0 {
-                        let mut tx_data_with_header = Vec::with_capacity(4 + tx_data_len);
-                        tx_data_with_header.extend_from_slice(&[0u8; 4]);
-                        tx_data_with_header.extend_from_slice(&tx_data[8..]);
-
-                        if let Ok(tx) = deserialize_transaction(&tx_data_with_header).await {
-                            for output in &tx.outputs {
-                                if output.address.contains(&addr_clone) {
-                                    total_received += output.value;
-                                }
-                            }
+                        txid,
+                    )
+                    .map_err(|e| e.to_string())?;
+                if orphan_marked {
+                    continue;
+                }
+                let Some(tx_data) = tx_data else { continue };
+                // Skip orphaned/unresolved sentinels on the served record itself.
+                let block_height =
+                    i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+                if block_height == HEIGHT_ORPHAN || block_height == HEIGHT_UNRESOLVED {
+                    continue;
+                }
+                let mut tx_data_with_header = Vec::with_capacity(4 + tx_data.len() - 8);
+                tx_data_with_header.extend_from_slice(&[0u8; 4]);
+                tx_data_with_header.extend_from_slice(&tx_data[8..]);
+                if let Ok(tx) = deserialize_transaction_blocking(&tx_data_with_header) {
+                    for output in &tx.outputs {
+                        if output.address.contains(&addr_clone) {
+                            sum += output.value;
                         }
                     }
                 }
             }
-        }
+            Ok(sum)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {e}"))?
+        .map_err(|e| e.to_string())?;
 
         let total_sent = total_received - address_balance;
 
@@ -759,20 +755,19 @@ async fn aggregate_xpub_data(
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
     for txid in &unique_txids {
         if let Ok(txid_bytes) = hex::decode(txid) {
-            // tx CF is keyed by 't' + canonical display-order bytes, so use the
-            // decoded txid directly. The prior reverse made every key miss, so
-            // xpub tx heights silently read 0 and the list was effectively unsorted.
-            let mut key = vec![b't'];
-            key.extend(&txid_bytes);
+            // Height via the shared stub-safe reader (BOTH key orders): a raw
+            // display-only read sorted internal-keyed (initial-sync) txs as height 0
+            // and read a stub's -1 sentinel. Sorting is cosmetic, so a read error
+            // still degrades to height 0 rather than failing the request.
             let db_clone = db.clone();
             let height = tokio::task::spawn_blocking(move || -> i32 {
                 if let Some(cf) = db_clone.cf_handle("transactions") {
-                    if let Ok(Some(tx_data)) = db_clone.get_cf(&cf, &key) {
-                        if tx_data.len() >= 8 {
-                            return i32::from_le_bytes([
-                                tx_data[4], tx_data[5], tx_data[6], tx_data[7],
-                            ]);
-                        }
+                    if let Ok(Some(tx_data)) =
+                        crate::api::transactions::read_valid_tx_record(&db_clone, &cf, &txid_bytes)
+                    {
+                        return i32::from_le_bytes([
+                            tx_data[4], tx_data[5], tx_data[6], tx_data[7],
+                        ]);
                     }
                 }
                 0
@@ -1036,7 +1031,17 @@ pub async fn utxo_v2(
 
     match result {
         Ok(utxos) => Ok(Json(utxos)),
-        Err(_) => Ok(Json(vec![])),
+        Err(e) => {
+            // An internal error must FAIL the request: a 200 [] tells a wallet
+            // "no coins to spend" — a confident false statement it will act on.
+            warn!(address = %address, error = %e, "utxo compute failed");
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(super::types::BlockbookError::new(
+                    "Internal error computing UTXOs; please retry",
+                )),
+            ))
+        }
     }
 }
 
@@ -1074,81 +1079,75 @@ async fn compute_utxos(
         // duddino, wallets, and every other explorer reject.
         let txid_display = hex::encode(txid_hash);
 
-        // Look up transaction to get value, confirmations, and other details.
-        // The tx CF key uses internal (non-reversed) txid bytes, i.e. txid_hash
-        // as stored in the 'a' unspent set.
-        let mut tx_key = vec![b't'];
-        tx_key.extend_from_slice(txid_hash);
-
+        // Look up the tx record for height/confirmations via the shared stub-safe
+        // reader (BOTH key orders; a body-less 8-byte stub must not shadow the real
+        // record — a raw one-key read here used to silently DROP a canonical UTXO
+        // when the probed key held a stub or the record lived at the other order).
+        // Read errors degrade to "record missing" (UTXO skipped), as before.
         let db_clone = Arc::clone(db);
-        let tx_key_clone = tx_key.clone();
+        let txid_owned = txid_hash.clone();
         let tx_data_opt = tokio::task::spawn_blocking(move || {
-            if let Some(cf) = db_clone.cf_handle("transactions") {
-                db_clone.get_cf(&cf, &tx_key_clone).ok().flatten()
-            } else {
-                None
-            }
+            let cf = db_clone.cf_handle("transactions")?;
+            crate::api::transactions::read_valid_tx_record(&db_clone, &cf, &txid_owned)
+                .unwrap_or(None)
         })
         .await
         .ok()
         .flatten();
 
         if let Some(tx_data) = tx_data_opt {
-            if tx_data.len() >= 8 {
-                let block_height =
-                    i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
+            let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
 
-                // A UTXO present in the 'a' unspent set is canonical by construction;
-                // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
-                // read must NOT silently drop a canonical UTXO. Height/orphan are
-                // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
-                // before — only the expensive full-tx parse is removed.
-                if block_height == HEIGHT_ORPHAN {
-                    continue;
-                }
+            // A UTXO present in the 'a' unspent set is canonical by construction;
+            // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
+            // read must NOT silently drop a canonical UTXO. Height/orphan are
+            // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
+            // before — only the expensive full-tx parse is removed.
+            if block_height == HEIGHT_ORPHAN {
+                continue;
+            }
 
-                let confirmations =
-                    if is_canonical_height(block_height) && is_canonical_height(current_height) {
-                        ((current_height - block_height) + 1).max(0) as u32
-                    } else {
-                        0
-                    };
-
-                // value + coinbase/coinstake come from the inline 'a' record (49B):
-                // no deserialize_transaction on the hot (confirmed) path. lock_time is
-                // only ever emitted when confirmations == 0, so parse the tx ONLY in
-                // that rare degraded/unconfirmed case to preserve exact prior output.
-                let tx_type = crate::tx_type::u8_to_ty(*kind);
-                let lock_time = if confirmations == 0 {
-                    let tx_data_len = tx_data.len() - 8;
-                    let mut tx_with_header = Vec::with_capacity(4 + tx_data_len);
-                    tx_with_header.extend_from_slice(&[0u8; 4]);
-                    tx_with_header.extend_from_slice(&tx_data[8..]);
-                    deserialize_transaction_blocking(&tx_with_header)
-                        .ok()
-                        .filter(|tx| tx.lock_time > 0)
-                        .map(|tx| tx.lock_time)
+            let confirmations =
+                if is_canonical_height(block_height) && is_canonical_height(current_height) {
+                    ((current_height - block_height) + 1).max(0) as u32
                 } else {
-                    None
+                    0
                 };
 
-                utxo_list.push(UTXO {
-                    txid: txid_display,
-                    vout: *vout as u32,
-                    value: value.to_string(),
-                    confirmations,
-                    lock_time,
-                    height: if block_height > 0 {
-                        Some(block_height as u32)
-                    } else {
-                        None
-                    },
-                    coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
-                    coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
-                    spendable: Some(true),
-                    blocks_until_spendable: None,
-                });
-            }
+            // value + coinbase/coinstake come from the inline 'a' record (49B):
+            // no deserialize_transaction on the hot (confirmed) path. lock_time is
+            // only ever emitted when confirmations == 0, so parse the tx ONLY in
+            // that rare degraded/unconfirmed case to preserve exact prior output.
+            let tx_type = crate::tx_type::u8_to_ty(*kind);
+            let lock_time = if confirmations == 0 {
+                let tx_data_len = tx_data.len() - 8;
+                let mut tx_with_header = Vec::with_capacity(4 + tx_data_len);
+                tx_with_header.extend_from_slice(&[0u8; 4]);
+                tx_with_header.extend_from_slice(&tx_data[8..]);
+                deserialize_transaction_blocking(&tx_with_header)
+                    .ok()
+                    .filter(|tx| tx.lock_time > 0)
+                    .map(|tx| tx.lock_time)
+            } else {
+                None
+            };
+
+            utxo_list.push(UTXO {
+                txid: txid_display,
+                vout: *vout as u32,
+                value: value.to_string(),
+                confirmations,
+                lock_time,
+                height: if block_height > 0 {
+                    Some(block_height as u32)
+                } else {
+                    None
+                },
+                coinbase: Some(tx_type == crate::tx_type::TransactionType::Coinbase),
+                coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
+                spendable: Some(true),
+                blocks_until_spendable: None,
+            });
         }
     }
 

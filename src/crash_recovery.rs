@@ -86,24 +86,30 @@ pub async fn recompute_address_rs(
     let t_entries = crate::parser::deserialize_addr_txs(&t_list).await?;
     let mut total_received: i64 = 0;
     for (txid, _height) in &t_entries {
-        let mut tk = vec![b't'];
-        tk.extend_from_slice(txid);
-        if let Some(txd) = db.get_cf(&cf_tx, &tk)? {
-            if txd.len() >= 8 {
-                let h = i32::from_le_bytes([txd[4], txd[5], txd[6], txd[7]]);
-                // Skip non-canonical (orphaned/unresolved) txs, exactly as enrichment
-                // does via is_canonical_height — so the recomputed total matches the
-                // authoritative aggregate.
-                if !is_canonical_height(h) {
-                    continue;
-                }
-                let mut with_header = vec![0u8; 4];
-                with_header.extend_from_slice(&txd[8..]);
-                if let Ok(tx) = deserialize_transaction(&with_header).await {
-                    for out in &tx.outputs {
-                        if out.address.iter().any(|a| a == address) {
-                            total_received += out.value;
-                        }
+        // Stub-safe, orphan-aware read (both key orders): this recompute PERSISTS
+        // r/s, so a display-only read here re-created the exact bugs the serving
+        // paths were cured of — a stub/one-order record silently contributing 0
+        // (understated r, negative s), or a reorg's display-keyed orphan mark
+        // shadowed by a stale internal record (disconnected tx counted).
+        let (body, orphan_marked) =
+            crate::api::transactions::read_tx_record_orphan_aware(db, &cf_tx, txid)?;
+        if orphan_marked {
+            continue;
+        }
+        if let Some(txd) = body {
+            let h = i32::from_le_bytes([txd[4], txd[5], txd[6], txd[7]]);
+            // Skip non-canonical (orphaned/unresolved) txs, exactly as enrichment
+            // does via is_canonical_height — so the recomputed total matches the
+            // authoritative aggregate.
+            if !is_canonical_height(h) {
+                continue;
+            }
+            let mut with_header = vec![0u8; 4];
+            with_header.extend_from_slice(&txd[8..]);
+            if let Ok(tx) = deserialize_transaction(&with_header).await {
+                for out in &tx.outputs {
+                    if out.address.iter().any(|a| a == address) {
+                        total_received += out.value;
                     }
                 }
             }
@@ -155,11 +161,11 @@ async fn block_involved_addresses(
 
     let mut addresses: HashSet<String> = HashSet::new();
     for txid in &txids {
-        let mut tk = vec![b't'];
-        tk.extend_from_slice(txid);
-        let txd = match db.get_cf(&cf_tx, &tk)? {
-            Some(d) if d.len() >= 8 => d,
-            _ => continue,
+        // Stub-safe both-key-order read: a one-order/stub record must not hide a
+        // tx's addresses from the repair set.
+        let txd = match crate::api::transactions::read_valid_tx_record(db, &cf_tx, txid)? {
+            Some(d) => d,
+            None => continue,
         };
         let mut with_header = vec![0u8; 4];
         with_header.extend_from_slice(&txd[8..]);
@@ -180,18 +186,16 @@ async fn block_involved_addresses(
             }
             if let Some(prevout) = &inp.prevout {
                 if let Ok(ptxid) = hex::decode(&prevout.hash) {
-                    let mut ptk = vec![b't'];
-                    ptk.extend_from_slice(&ptxid);
-                    if let Some(ptxd) = db.get_cf(&cf_tx, &ptk)? {
-                        if ptxd.len() >= 8 {
-                            let mut pwh = vec![0u8; 4];
-                            pwh.extend_from_slice(&ptxd[8..]);
-                            if let Ok(ptx) = deserialize_transaction(&pwh).await {
-                                if let Some(pout) = ptx.outputs.get(prevout.n as usize) {
-                                    for a in &pout.address {
-                                        if !a.is_empty() {
-                                            addresses.insert(a.clone());
-                                        }
+                    if let Some(ptxd) =
+                        crate::api::transactions::read_valid_tx_record(db, &cf_tx, &ptxid)?
+                    {
+                        let mut pwh = vec![0u8; 4];
+                        pwh.extend_from_slice(&ptxd[8..]);
+                        if let Ok(ptx) = deserialize_transaction(&pwh).await {
+                            if let Some(pout) = ptx.outputs.get(prevout.n as usize) {
+                                for a in &pout.address {
+                                    if !a.is_empty() {
+                                        addresses.insert(a.clone());
                                     }
                                 }
                             }

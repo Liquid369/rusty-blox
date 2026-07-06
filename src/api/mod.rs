@@ -40,7 +40,7 @@ pub use types::*;
 pub async fn root_handler() -> axum::response::Html<String> {
     let frontend_dist = crate::config::get_global_config()
         .get_string("paths.frontend_dist")
-        .unwrap_or_else(|_| "frontend-legacy/dist".to_string());
+        .unwrap_or_else(|_| "frontend/dist".to_string());
     let index_path = std::path::Path::new(&frontend_dist).join("index.html");
 
     if let Ok(html) = std::fs::read_to_string(&index_path) {
@@ -52,7 +52,7 @@ pub async fn root_handler() -> axum::response::Html<String> {
 <p>No production build at <code>{}</code>.</p>
 <p>Build it and restart the service from the repository root (so the relative
 path resolves), or set <code>paths.frontend_dist</code> to an absolute path:</p>
-<pre>cd frontend-legacy &amp;&amp; npm ci &amp;&amp; npm run build</pre>"#,
+<pre>cd frontend &amp;&amp; npm ci &amp;&amp; npm run build</pre>"#,
         index_path.display()
     ))
 }

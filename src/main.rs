@@ -308,7 +308,7 @@ async fn start_web_server(
         app.nest_service("/assets", tower_http::services::ServeDir::new(assets_dir))
             .fallback_service(spa)
     } else {
-        warn!(path = %frontend_dist, "Frontend dist not found - build with: cd frontend-legacy && npm run build");
+        warn!(path = %frontend_dist, "Frontend dist not found - build with: cd frontend && npm run build");
         app.route("/", get(root_handler))
     };
 

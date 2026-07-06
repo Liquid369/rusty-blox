@@ -259,6 +259,13 @@ lazy_static! {
         &["error_type"]
     ).unwrap();
 
+    /// Transactions that failed to index in a live block. Non-zero means the block
+    /// was left unmarked and is being retried — sustained growth = flaky node RPC.
+    pub static ref TX_INDEX_ERRORS: IntCounter = IntCounter::new(
+        "rustyblox_tx_index_errors_total",
+        "Transactions that failed to index in a live block (block retried, not skipped)"
+    ).unwrap();
+
     /// Canonical blocks in database
     pub static ref CANONICAL_BLOCKS: IntGauge = IntGauge::new(
         "rustyblox_canonical_blocks_total",
@@ -423,6 +430,7 @@ pub fn init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     REGISTRY.register(Box::new(BLOCKS_BEHIND_TIP.clone()))?;
     REGISTRY.register(Box::new(ESTIMATED_SYNC_COMPLETION_SECONDS.clone()))?;
     REGISTRY.register(Box::new(TX_PARSE_ERRORS.clone()))?;
+    REGISTRY.register(Box::new(TX_INDEX_ERRORS.clone()))?;
     REGISTRY.register(Box::new(CANONICAL_BLOCKS.clone()))?;
     REGISTRY.register(Box::new(ORPHANED_BLOCKS.clone()))?;
     REGISTRY.register(Box::new(PENDING_REORG_DEPTH.clone()))?;

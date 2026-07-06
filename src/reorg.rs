@@ -214,13 +214,18 @@ pub async fn rollback_to_height(
         }
     }
 
-    // Final flush to commit ALL operations atomically (chain state + address index)
-    if writer.pending_count() > 0 {
-        writer.flush().await?;
-    }
-
-    // Update sync height to rollback point
-    update_sync_height(&db, rollback_to_height).await?;
+    // Final flush commits ALL remaining operations atomically (chain state +
+    // address index) INCLUDING the sync_height watermark. Writing sync_height as
+    // a separate put after the flush left a crash window where the watermark
+    // still pointed at metadata the batch had just deleted (rollback deletes
+    // top-down) — the monitor then error-looped on get_db_chain_tip forever,
+    // with nothing repairing it on restart.
+    writer.put(
+        "chain_state",
+        b"sync_height".to_vec(),
+        rollback_to_height.to_le_bytes().to_vec(),
+    );
+    writer.flush().await?;
 
     let elapsed = timer.elapsed_secs();
     info!(
@@ -465,26 +470,6 @@ fn delete_block_metadata(
 
     // Delete the forward height -> hash mapping.
     writer.delete("chain_metadata", height_key);
-
-    Ok(())
-}
-
-/// Update sync height in database
-async fn update_sync_height(
-    db: &Arc<DB>,
-    height: i32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let db_clone = db.clone();
-    tokio::task::spawn_blocking(move || {
-        let cf_state = db_clone
-            .cf_handle("chain_state")
-            .ok_or("chain_state CF not found")?;
-
-        db_clone
-            .put_cf(&cf_state, b"sync_height", height.to_le_bytes())
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-    })
-    .await??;
 
     Ok(())
 }

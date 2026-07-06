@@ -175,13 +175,34 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
         .ok_or("chain_metadata CF not found")?;
 
     let height_key = height.to_le_bytes().to_vec();
-    let hash_bytes = db
-        .get_cf(&cf_metadata, &height_key)?
-        .ok_or("Block hash not found for current height")?;
+    if let Some(hash_bytes) = db.get_cf(&cf_metadata, &height_key)? {
+        return Ok(ChainTip {
+            height,
+            hash: hex::encode(&hash_bytes),
+        });
+    }
 
-    let hash = hex::encode(&hash_bytes);
-
-    Ok(ChainTip { height, hash })
+    // The watermark can point at deleted metadata after a crash mid-reorg-rollback
+    // (rollback deletes top-down; a partial batch may have committed the deletions
+    // for the top heights before the final batch carrying sync_height landed).
+    // Erroring here made the monitor loop retry the same dead read forever. Walk
+    // down to the highest surviving mapping instead — reorg re-detection then
+    // heals the state from there. Bounded well past any real PIVX reorg depth.
+    let floor = (height - 1_000).max(0);
+    for h in (floor..height).rev() {
+        if let Some(hash_bytes) = db.get_cf(&cf_metadata, h.to_le_bytes())? {
+            warn!(
+                sync_height = height,
+                surviving_height = h,
+                "sync_height points at missing chain metadata (crash mid-rollback?); using highest surviving height"
+            );
+            return Ok(ChainTip {
+                height: h,
+                hash: hex::encode(&hash_bytes),
+            });
+        }
+    }
+    Err("Block hash not found for current height".into())
 }
 
 /// Phase 1a: Fetch block data from RPC (without indexing)
@@ -355,9 +376,22 @@ async fn index_block_from_rpc(
             // Already indexed this exact block - skip silently
             return Ok(());
         } else {
-            // Different block at same height - REORG detected!
-            warn!(height = height, expected = %existing_hash_str, current = %block_hash, "REORG detected");
-            // Delete processing marker if it exists (allow reindex)
+            // Different block at same height — this height was reorged. Roll the
+            // OLD block's effects back FIRST (tx orphan-marks, 'B' entries,
+            // metadata, addr-index reversal via its undo record) — re-indexing on
+            // top of them (as this used to) double-applied the old block's
+            // address entries and left both blocks' 'B' entries at this height.
+            // rollback_to_height is the same single-height machinery the reorg
+            // handler uses; it also rewinds sync_height to height-1 in its final
+            // atomic batch, which the successful re-index below restores.
+            warn!(height = height, expected = %existing_hash_str, current = %block_hash,
+                "REORG detected at already-indexed height; rolling back the old block before reindexing");
+            crate::reorg::rollback_to_height(db.clone(), height - 1, height)
+                .await
+                .map_err(|e| format!("rollback of reorged height {height} failed: {e}"))?;
+            // The old 'H' marker and processing marker describe a block that no
+            // longer exists; clear both so the re-index below proceeds cleanly.
+            db.delete_cf(&cf_state, &height_hash_key).ok();
             db.delete_cf(&cf_state, &processing_key).ok();
         }
     }
@@ -663,15 +697,18 @@ async fn index_block_from_rpc(
             true
         };
 
-        // Extract transaction version from raw_tx_bytes (first 4 bytes)
-        let tx_version_bytes = if raw_tx_bytes.len() >= 4 {
-            &raw_tx_bytes[0..4]
-        } else {
-            warn!(txid = %txid, "Transaction has invalid size (< 4 bytes), using default version");
-            &[1u8, 0, 0, 0] // Default to version 1
-        };
+        // A raw tx shorter than its 4-byte version field is not a transaction —
+        // writing it would create the banned body-less/garbage 't' record (an
+        // empty RPC result padded with a default version = exactly the 8-byte
+        // stub that shadows real records). Skip the tx entirely, like the RPC
+        // error branches above; nothing (tx record, 'B' entry) may reference it.
+        if raw_tx_bytes.len() < 4 {
+            warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction data too short, skipping (refusing to write a body-less record)");
+            tx_errors += 1;
+            continue;
+        }
 
-        let mut full_data = tx_version_bytes.to_vec();
+        let mut full_data = raw_tx_bytes[0..4].to_vec();
         full_data.extend(&height.to_le_bytes());
         full_data.extend(&raw_tx_bytes);
 
@@ -703,12 +740,6 @@ async fn index_block_from_rpc(
         // Validate transaction size before allocation
         if raw_tx_bytes.len() > 10_000_000 {
             warn!(txid = %txid, bytes = raw_tx_bytes.len(), "Transaction too large, skipping");
-            tx_errors += 1;
-            continue;
-        }
-
-        if raw_tx_bytes.is_empty() {
-            warn!(txid = %txid, "Transaction has empty data, skipping");
             tx_errors += 1;
             continue;
         }
@@ -932,15 +963,17 @@ async fn index_block_from_rpc(
                                                     Err(_) => 0,
                                                 };
 
-                                                // Store this transaction with proper height
-                                                // Extract tx version from raw bytes (first 4 bytes)
-                                                let tx_version_bytes = if raw_bytes.len() >= 4 {
-                                                    &raw_bytes[0..4]
-                                                } else {
-                                                    &[1u8, 0, 0, 0] // Default to version 1
-                                                };
+                                                // Refuse to cache a body too short to be
+                                                // a real tx — a default-version pad around
+                                                // empty bytes writes the banned 8-byte
+                                                // body-less stub. Skip this input like the
+                                                // surrounding RPC-error branches do.
+                                                if raw_bytes.len() < 4 {
+                                                    warn!(prev_txid = %prev_txid_hex, bytes = raw_bytes.len(), "Previous tx data too short, skipping (refusing to write a body-less record)");
+                                                    continue;
+                                                }
 
-                                                let mut full_data = tx_version_bytes.to_vec();
+                                                let mut full_data = raw_bytes[0..4].to_vec();
                                                 full_data.extend(&prev_height.to_le_bytes());
                                                 full_data.extend(&raw_bytes);
 
@@ -1294,11 +1327,79 @@ async fn index_block_from_rpc(
         }
     }
 
-    // Update sync height
     let cf_state = db
         .cf_handle("chain_state")
         .ok_or("chain_state CF not found")?;
 
+    // A retry marker for this height: 'E' + height, written when an attempt ends
+    // with tx_errors > 0 (below). Its presence on a SUCCESSFUL pass means a prior
+    // partial attempt already applied some txs — the 'r'/'s' adds are NOT
+    // idempotent, so this re-apply double-counted them. Repair from the
+    // authoritative t/a indexes (the exact recompute crash recovery uses).
+    let mut retry_marker_key = vec![b'E'];
+    retry_marker_key.extend(&height.to_le_bytes());
+
+    if tx_errors > 0 {
+        // Do NOT mark the block done: no 'H' marker, no sync_height advance —
+        // the next poll retries this height (the RAII guard clears 'P'). The old
+        // behavior marked the block complete with a warn log, permanently
+        // dropping the failed txs from the index with no signal.
+        //
+        // FIRST reverse the partial state this attempt already applied (tx
+        // records, 'B' entries, metadata, addr-index via the just-stored undo).
+        // Leaving it would poison the index if a reorg replaces this height
+        // before the retry: the reorg handler only rolls back to OUR tip (H-1,
+        // never touching H), and the 'H'-mismatch cleanup can't fire because no
+        // 'H' was written. A clean abort also makes the retry a first apply —
+        // no r/s double-count to repair.
+        metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
+        match crate::reorg::rollback_to_height(db.clone(), height - 1, height).await {
+            Ok(_) => {
+                return Err(format!(
+                    "{tx_errors} of {} txs failed to index at height {height}; partial state rolled back, block will be retried",
+                    tx_array.len()
+                )
+                .into());
+            }
+            Err(e) => {
+                // Rollback failed: fall back to the 'E' retry marker so the
+                // eventual successful retry repairs the non-idempotent r/s
+                // double-count from the surviving partial writes.
+                warn!(height, error = %e, "Failed to roll back partial block; falling back to retry marker");
+                db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+                return Err(format!(
+                    "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
+                    tx_array.len()
+                )
+                .into());
+            }
+        }
+    }
+
+    if db.get_cf(&cf_state, &retry_marker_key)?.is_some() {
+        match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
+            Ok(n) => {
+                info!(
+                    height,
+                    addresses = n,
+                    "Repaired r/s totals after a retried partial block"
+                );
+                db.delete_cf(&cf_state, &retry_marker_key)?;
+            }
+            Err(e) => {
+                // Leave the block UNMARKED (no 'H'/sync_height) and the marker in
+                // place: advancing here would mark the block done with known
+                // over-counted r/s. The recompute is a local derivation, so failure
+                // means the DB itself is in trouble — retry the whole block.
+                return Err(format!(
+                    "r/s repair after retried block {height} failed: {e}; block left unmarked for retry"
+                )
+                .into());
+            }
+        }
+    }
+
+    // Update sync height
     db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
 
     // CRITICAL FIX: Store block hash for deduplication
@@ -1332,6 +1433,36 @@ async fn index_block_from_rpc(
 
 /// Update aggregate database metrics (address count, UTXO count, Sapling tx count)
 /// Should be called periodically during monitoring to keep metrics up to date
+/// Run the aggregate-metrics scan OFF the monitor task, at most one at a time.
+/// `update_aggregate_metrics` iterates the whole addr_index CF (millions of
+/// keys); running it inline blocked the poll/reorg loop for the scan's duration
+/// and thrashed the block cache against live writes. Fire-and-forget: the two
+/// gauges it feeds don't need to gate block processing.
+fn spawn_aggregate_metrics_update(db: &Arc<DB>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+    if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
+        return; // previous scan still in flight — skip, next cadence tick retries
+    }
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || {
+        // Drop-guard: a panic in the scan must still clear the flag, or every
+        // future refresh is silently skipped for the life of the process.
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SCAN_RUNNING.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset = Reset;
+        if let Err(e) = update_aggregate_metrics(&db) {
+            warn!(error = %e, "Failed to update aggregate metrics");
+        } else if let Err(e) = metrics::save_metrics_to_db(&db) {
+            warn!(error = %e, "Failed to persist metrics to database");
+        }
+    });
+}
+
 fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
     let cf_addr_index = db
         .cf_handle("addr_index")
@@ -1398,6 +1529,7 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
 fn detect_reorg(
     db_tip: &ChainTip,
     rpc_tip: &ChainTip,
+    canonical_hash_at_db_tip: Option<&str>,
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     // If RPC height is less than ours, definite reorg
     if rpc_tip.height < db_tip.height {
@@ -1418,9 +1550,25 @@ fn detect_reorg(
         return Ok(Some(rpc_tip.height - 1));
     }
 
-    // TODO: More sophisticated reorg detection
-    // - Compare hashes at previous heights
-    // - Find common ancestor
+    // RPC ahead of us — the COMMON reorg presentation (a reorg + extension lands
+    // within one poll window). Being behind is only safe to treat as plain
+    // catch-up if OUR tip is still on the canonical chain; otherwise catch-up
+    // indexes the new chain on top of an orphaned block, whose txs stay served
+    // as confirmed forever. The caller passes getblockhash(db height) when
+    // rpc > db; None (RPC hiccup) degrades to no-detection for this poll.
+    if rpc_tip.height > db_tip.height {
+        if let Some(canonical) = canonical_hash_at_db_tip {
+            if canonical != db_tip.hash {
+                warn!(
+                    db_height = db_tip.height,
+                    db_hash = %db_tip.hash,
+                    canonical_hash = %canonical,
+                    "REORG DETECTED: our tip is not on the canonical chain"
+                );
+                return Ok(Some(db_tip.height - 1));
+            }
+        }
+    }
 
     Ok(None)
 }
@@ -1794,8 +1942,31 @@ pub async fn run_block_monitor(
             }
         };
 
+        // When the RPC is AHEAD of us, verify our tip is still canonical before
+        // treating the gap as plain catch-up (the common reorg presentation is
+        // "new chain already longer"). A failed probe degrades to None — no false
+        // reorg, re-checked next poll.
+        let canonical_at_db_tip = if rpc_tip.height > db_tip.height {
+            match crate::api::helpers::rpc_call_json(
+                "getblockhash",
+                serde_json::json!([db_tip.height as i64]),
+            )
+            .await
+            {
+                Ok(v) => v.as_str().map(|s| s.to_string()),
+                Err(e) => {
+                    warn!(height = db_tip.height, error = %e, "Canonical-tip probe failed; skipping reorg check this poll");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Check for reorg
-        if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
+        if let Some(_reorg_height) =
+            detect_reorg(&db_tip, &rpc_tip, canonical_at_db_tip.as_deref())?
+        {
             warn!("BLOCKCHAIN REORGANIZATION DETECTED");
 
             // Handle the reorg using our reorg module
@@ -1870,119 +2041,149 @@ pub async fn run_block_monitor(
             let start_height = db_tip.height + 1;
             let end_height = rpc_tip.height;
 
-            // === PHASE 1: Fetch blocks and build complete spent set ===
-            debug!(
-                blocks = blocks_behind,
-                "Phase 1: Fetching blocks and building spent set"
-            );
+            // TWO-PHASE catch-up in BOUNDED WINDOWS. Fetching the whole gap's
+            // verbosity-2 JSON before indexing held GBs resident for a
+            // multi-thousand-block gap (OOM territory on the 8G VPS). Each
+            // window fetches, builds its own spent set, indexes, then frees.
+            // Correctness is unchanged: the spent set only powers the
+            // born-and-die output-ADD skip within its batch; a cross-window
+            // spend is handled by the spending block's own input pass, exactly
+            // like single-block live processing (spent_set = None).
+            const CATCHUP_WINDOW_BLOCKS: i32 = 500;
 
-            let mut fetched_blocks = Vec::new();
-            let mut fetch_errors = 0;
-
-            // Fetch blocks in parallel for network efficiency
-            // Use semaphore to limit concurrency
             use std::sync::Arc as StdArc;
             use tokio::sync::Semaphore;
-
             const MAX_CONCURRENT_FETCH: usize = 10;
-            let fetch_semaphore = StdArc::new(Semaphore::new(MAX_CONCURRENT_FETCH));
-
-            let mut fetch_futures = Vec::new();
-            for height in start_height..=end_height {
-                let sem = fetch_semaphore.clone();
-
-                fetch_futures.push(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    (height, fetch_block_data(height).await)
-                });
-            }
-
-            // Wait for all fetches to complete
-            let fetch_results = futures::future::join_all(fetch_futures).await;
-
-            // Collect successfully fetched blocks
-            for (height, result) in fetch_results {
-                match result {
-                    Ok(block) => fetched_blocks.push(block),
-                    Err(e) => {
-                        error!(height = height, error = %e, "Failed to fetch block");
-                        metrics::increment_rpc_errors("getblock", "timeout");
-                        fetch_errors += 1;
-                    }
-                }
-            }
-
-            if fetch_errors > 0 {
-                warn!(
-                    fetch_errors = fetch_errors,
-                    retry_secs = poll_interval_secs,
-                    "Fetch errors occurred, retrying"
-                );
-                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-                continue;
-            }
-
-            // Build complete spent set from all fetched blocks
-            debug!(
-                blocks = fetched_blocks.len(),
-                "Building spent set from fetched blocks"
-            );
-            let spent_set = build_spent_set_from_blocks(&fetched_blocks);
-            debug!(
-                spent_outputs = spent_set.len(),
-                "Phase 1 complete: spent set built"
-            );
-
-            // === PHASE 2: Sequential indexing with complete spent knowledge ===
-            debug!("Phase 2: Indexing blocks with complete spent set");
 
             let mut indexed = 0;
             let mut index_errors = 0;
+            let mut fetch_failed = false;
 
-            // Process blocks sequentially in height order
-            // This ensures:
-            // - No race conditions
-            // - Height N indexed before N+1
-            // - Spend removal has complete knowledge
-            for block in fetched_blocks {
-                // Add canonical hash validation
-                let cf_metadata = db
-                    .cf_handle("chain_metadata")
-                    .ok_or("chain_metadata CF not found")?;
+            let mut window_start = start_height;
+            'windows: while window_start <= end_height {
+                let window_end = (window_start + CATCHUP_WINDOW_BLOCKS - 1).min(end_height);
 
-                let height_key = block.height.to_le_bytes();
+                // === PHASE 1 (window): fetch blocks and build the spent set ===
+                let mut fetched_blocks = Vec::new();
+                let mut fetch_errors = 0;
 
-                // Check if we already have a canonical hash for this height
-                if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
-                    let stored_hash_hex = hex::encode(&stored_hash);
+                let fetch_semaphore = StdArc::new(Semaphore::new(MAX_CONCURRENT_FETCH));
+                let mut fetch_futures = Vec::new();
+                for height in window_start..=window_end {
+                    let sem = fetch_semaphore.clone();
 
-                    if stored_hash_hex != block.block_hash {
-                        warn!(height = block.height, db_hash = %stored_hash_hex, rpc_hash = %block.block_hash,
-                              "REORG detected during catchup - aborting to trigger reorg handler");
-                        break;
-                    }
+                    fetch_futures.push(async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        (height, fetch_block_data(height).await)
+                    });
                 }
 
-                // Index this block with spent set available
-                match index_block_from_rpc(block.height, &db, &broadcaster, Some(&spent_set)).await
-                {
-                    Ok(_) => {
-                        indexed += 1;
-                        if indexed % 100 == 0 {
-                            let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
-                            debug!(
-                                indexed = indexed,
-                                total = blocks_behind,
-                                progress_pct = format!("{:.1}", progress),
-                                "Catchup progress"
-                            );
+                // join_all preserves input order, so blocks stay height-ascending.
+                let fetch_results = futures::future::join_all(fetch_futures).await;
+
+                for (height, result) in fetch_results {
+                    match result {
+                        Ok(block) => fetched_blocks.push(block),
+                        Err(e) => {
+                            error!(height = height, error = %e, "Failed to fetch block");
+                            metrics::increment_rpc_errors("getblock", "timeout");
+                            fetch_errors += 1;
                         }
                     }
-                    Err(e) => {
-                        error!(height = block.height, error = %e, "Failed to index block");
-                        index_errors += 1;
+                }
+
+                if fetch_errors > 0 {
+                    warn!(
+                        fetch_errors = fetch_errors,
+                        window_start = window_start,
+                        retry_secs = poll_interval_secs,
+                        "Fetch errors in catch-up window; already-indexed windows are kept, retrying from the watermark next poll"
+                    );
+                    fetch_failed = true;
+                    break 'windows;
+                }
+
+                let spent_set = build_spent_set_from_blocks(&fetched_blocks);
+                debug!(
+                    window_start = window_start,
+                    window_end = window_end,
+                    spent_outputs = spent_set.len(),
+                    "Catch-up window fetched; indexing"
+                );
+
+                // === PHASE 2 (window): sequential indexing, height order ===
+                for block in fetched_blocks {
+                    // Add canonical hash validation
+                    let cf_metadata = db
+                        .cf_handle("chain_metadata")
+                        .ok_or("chain_metadata CF not found")?;
+
+                    let height_key = block.height.to_le_bytes();
+
+                    // A stored mapping that disagrees with the fetched block can only be
+                    // a STALE pre-written entry: catch-up heights are strictly above
+                    // sync_height, so the monitor has indexed nothing there ('H' markers
+                    // and tx/addr state are written only as blocks index) — the mapping
+                    // came from the leveldb metadata refresh or the parse path before a
+                    // reorg. The old code `break`-ed here "to trigger the reorg handler",
+                    // but detection could never fire while rpc > db with a canonical tip,
+                    // so the monitor re-broke at the same height every poll — a livelock.
+                    // The RPC chain is authoritative for un-indexed heights: drop the
+                    // stale reverse 'h' entries (both byte orders, like reorg cleanup)
+                    // and fall through — index_block_from_rpc re-resolves the canonical
+                    // hash by height and overwrites the forward mapping.
+                    if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
+                        let stored_hash_hex = hex::encode(&stored_hash);
+
+                        if stored_hash_hex != block.block_hash {
+                            warn!(height = block.height, stale_hash = %stored_hash_hex, canonical_hash = %block.block_hash,
+                              "Stale canonical mapping above sync height - reindexing this height from the current chain");
+                            let mut h_as_stored = vec![b'h'];
+                            h_as_stored.extend_from_slice(&stored_hash);
+                            let reversed: Vec<u8> = stored_hash.iter().rev().cloned().collect();
+                            let mut h_reversed = vec![b'h'];
+                            h_reversed.extend_from_slice(&reversed);
+                            db.delete_cf(&cf_metadata, &h_as_stored)?;
+                            db.delete_cf(&cf_metadata, &h_reversed)?;
+                        }
+                    }
+
+                    // Index this block with spent set available
+                    match index_block_from_rpc(block.height, &db, &broadcaster, Some(&spent_set))
+                        .await
+                    {
+                        Ok(_) => {
+                            indexed += 1;
+                            if indexed % 100 == 0 {
+                                let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
+                                debug!(
+                                    indexed = indexed,
+                                    total = blocks_behind,
+                                    progress_pct = format!("{:.1}", progress),
+                                    "Catchup progress"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            // STOP the catch-up at the first failed block. Continuing
+                            // would let the NEXT block's sync_height write advance the
+                            // watermark past this hole, permanently dropping the block
+                            // from the index with only a log line. Retry from the last
+                            // good height on the next poll.
+                            error!(height = block.height, error = %e,
+                            "Failed to index block during catchup - stopping; retrying from the last good height next poll");
+                            index_errors += 1;
+                            break 'windows;
+                        }
                     }
                 }
+
+                window_start = window_end + 1;
+            }
+
+            if fetch_failed {
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+                continue;
             }
 
             info!(
@@ -1993,11 +2194,17 @@ pub async fn run_block_monitor(
             );
 
             if index_errors > 0 {
+                // Back off like the fetch-error path. Without this, a
+                // persistently-failing block (tx_errors now returns Err instead
+                // of silently advancing) hot-loops: re-fetch a full 500-block
+                // window, fail on block 0, repeat — no delay, hammering the node.
                 warn!(
                     errors = index_errors,
                     retry_secs = poll_interval_secs,
-                    "Some blocks failed to index"
+                    "Some blocks failed to index; backing off before retry"
                 );
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+                continue;
             }
 
             // Check if we successfully caught up
@@ -2015,33 +2222,18 @@ pub async fn run_block_monitor(
                 metrics::set_blocks_behind_tip(0);
                 metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
 
-                // Update aggregate metrics after catchup completes
-                if let Err(e) = update_aggregate_metrics(&db) {
-                    warn!(error = %e, "Failed to update aggregate metrics");
-                } else {
-                    // Persist metrics to database for restart durability
-                    if let Err(e) = metrics::save_metrics_to_db(&db) {
-                        warn!(error = %e, "Failed to persist metrics to database");
-                    } else {
-                        debug!("Metrics persisted to database");
-                    }
-                }
+                // Update aggregate metrics after catchup completes (off-task).
+                spawn_aggregate_metrics_update(&db);
             }
         } else {
-            // We're caught up - update aggregate metrics periodically
-            // Only update every 10 poll intervals to reduce overhead
+            // We're caught up - refresh aggregate metrics periodically (off-task).
+            // Every 120 polls (~10 min at the 5s default): the full addr_index
+            // scan is far too heavy to run every ~50s for two gauges.
             static POLL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = POLL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            if count % 10 == 0 {
-                if let Err(e) = update_aggregate_metrics(&db) {
-                    warn!(error = %e, "Failed to update aggregate metrics");
-                } else {
-                    // Persist metrics to database periodically
-                    if let Err(e) = metrics::save_metrics_to_db(&db) {
-                        warn!(error = %e, "Failed to persist metrics to database");
-                    }
-                }
+            if count % 120 == 0 {
+                spawn_aggregate_metrics_update(&db);
             }
 
             // We're caught up - sleep before checking again
@@ -2073,8 +2265,88 @@ mod tests {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        let db = Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state"]).unwrap());
+        let db =
+            Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state", "chain_metadata"]).unwrap());
         (temp, db)
+    }
+
+    /// Crash mid-reorg-rollback can leave sync_height pointing at deleted metadata
+    /// (deletions commit top-down before the watermark batch). The tip read must
+    /// walk down to the highest surviving mapping instead of erroring forever.
+    #[test]
+    fn db_chain_tip_walks_back_over_deleted_metadata() {
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 100).unwrap();
+        let cf = db.cf_handle("chain_metadata").unwrap();
+        // Heights 98-100 deleted by a partial rollback; 97 survives.
+        db.put_cf(&cf, 97i32.to_le_bytes(), [0xAB; 32]).unwrap();
+        let tip = get_db_chain_tip(&db).unwrap();
+        assert_eq!(tip.height, 97);
+        assert_eq!(tip.hash, hex::encode([0xAB; 32]));
+    }
+
+    #[test]
+    fn db_chain_tip_normal_path_unchanged() {
+        let (_t, db) = open_db();
+        crate::chain_state::set_sync_height(&db, 100).unwrap();
+        let cf = db.cf_handle("chain_metadata").unwrap();
+        db.put_cf(&cf, 100i32.to_le_bytes(), [0xCD; 32]).unwrap();
+        let tip = get_db_chain_tip(&db).unwrap();
+        assert_eq!(tip.height, 100);
+        assert_eq!(tip.hash, hex::encode([0xCD; 32]));
+    }
+
+    fn tip(height: i32, hash: &str) -> ChainTip {
+        ChainTip {
+            height,
+            hash: hash.to_string(),
+        }
+    }
+
+    /// THE blind spot: a reorg that presents with the new chain already LONGER
+    /// (rpc > db) — the common shape when a reorg + extension lands within one
+    /// poll window. Detection must fire when our tip hash is no longer the
+    /// canonical hash at our height, or catch-up indexes on top of an orphaned
+    /// block forever (and the catch-up "abort to trigger reorg handler" livelocks).
+    #[test]
+    fn detect_reorg_fires_when_rpc_ahead_and_our_tip_not_canonical() {
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        // Canonical hash at OUR height differs from what we indexed -> reorg.
+        let r = detect_reorg(&db, &rpc, Some("bb22")).unwrap();
+        assert!(r.is_some(), "must detect a reorg when our tip was orphaned");
+    }
+
+    #[test]
+    fn detect_reorg_quiet_when_rpc_ahead_on_our_chain() {
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        // Canonical hash at our height matches ours -> normal catch-up, no reorg.
+        assert!(detect_reorg(&db, &rpc, Some("aa11")).unwrap().is_none());
+    }
+
+    #[test]
+    fn detect_reorg_degrades_without_canonical_hash() {
+        // Hash probe unavailable (RPC hiccup) -> no false reorg; retry next poll.
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        assert!(detect_reorg(&db, &rpc, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn detect_reorg_existing_cases_unchanged() {
+        // rpc below db = definite reorg.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(98, "bb"), None)
+            .unwrap()
+            .is_some());
+        // same height, hash mismatch = reorg.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(100, "bb"), None)
+            .unwrap()
+            .is_some());
+        // same height, same hash = clean.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(100, "aa"), None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
