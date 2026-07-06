@@ -1189,12 +1189,26 @@ async fn tail_read_tick(
                         off
                     }
                     None => {
-                        // No magic in this window: advance past it (3-byte
-                        // overlap for a marker straddling the boundary) so a
-                        // long garbage stretch crosses one window per tick.
-                        // debug-level: this can repeat over a large stretch.
+                        // No magic in this window. If the garbage is followed by
+                        // a trailing zero run (Core's padding / write frontier),
+                        // stop at the RUN START — the next tick reads zeros ->
+                        // quiet Padding wait, and a crash-recovery overwrite
+                        // inside the padding is still picked up. Only when
+                        // garbage runs to the window end do we skip the whole
+                        // window (3-byte overlap for a straddling marker).
+                        // debug-level: can repeat across a large stretch.
+                        let zero_run_start = window
+                            .iter()
+                            .rposition(|b| *b != 0)
+                            .map(|p| p + 1)
+                            .unwrap_or(0);
                         let end = cursor.offset + window.len() as u64;
-                        let off = end.saturating_sub(3).max(cursor.offset + 1);
+                        let off = if zero_run_start < window.len() {
+                            cursor.offset + zero_run_start as u64
+                        } else {
+                            end.saturating_sub(3)
+                        }
+                        .max(cursor.offset + 1);
                         debug!(file = %path.display(), offset = off, msg = %msg,
                             "blk_tail: garbage window, no magic — advancing scan cursor");
                         off
@@ -2047,6 +2061,49 @@ mod tests {
         );
         let c = store.load_cursor().unwrap().unwrap();
         assert_eq!(c.cumulative_blocks, 2);
+    }
+
+    /// Garbage followed by zero padding: the skip must stop at the padding
+    /// frontier (not jump to len-3), so a crash-recovery overwrite of the
+    /// padding region is still ingested by a later tick.
+    #[tokio::test]
+    async fn tick_garbage_skip_stops_at_padding_frontier() {
+        let (store, _dbt) = store_with_chain();
+        let bdir = tempfile::TempDir::new().unwrap();
+        let parent = [0xAA; 32];
+        seed_canonical(&store, 10, parent, true, false);
+        let h1 = make_header(1, parent, NBITS);
+        let f1 = frame(PIVX_MAGIC, &h1);
+        let mut content = f1.clone();
+        content.extend_from_slice(&[0xcc, 0x82, 0x24, 0x5b]); // torn bytes
+        content.extend_from_slice(&[0u8; 64]); // padding to EOF
+        write_blk(bdir.path(), 0, &content);
+
+        // Tick 1 ingests h1, recovers over the garbage, and parks AT the
+        // padding frontier (start of the zero run).
+        let n1 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(n1, 1);
+        let c = store.load_cursor().unwrap().unwrap();
+        assert_eq!(
+            c.offset,
+            (f1.len() + 4) as u64,
+            "cursor must park at the zero-run start, not skip to len-3"
+        );
+
+        // Core's crash recovery overwrites the padding with the real record.
+        let h2 = make_header(1, hash_of(&h1), NBITS);
+        let mut content2 = f1;
+        content2.extend_from_slice(&[0xcc, 0x82, 0x24, 0x5b]);
+        content2.extend_from_slice(&frame(PIVX_MAGIC, &h2));
+        content2.extend_from_slice(&[0u8; 32]);
+        write_blk(bdir.path(), 0, &content2);
+
+        let n2 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(n2, 1, "overwrite inside the old padding must be ingested");
     }
 
     #[tokio::test]

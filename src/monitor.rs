@@ -859,10 +859,13 @@ async fn index_block_from_rpc(
                         output_idx as u64,
                     );
 
-                    // Store updated UTXO list
+                    // Store updated UTXO list. A failed 'a' write must fail the
+                    // BLOCK (tx_errors -> rollback + retry): swallowed, it leaves
+                    // the UTXO set diverged from r/s with zero log evidence.
                     let serialized = crate::parser::serialize_addr_utxos(&existing_utxos).await;
                     if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
                         warn!(address = %address, txid = %txid, error = %e, "Failed to index address for tx");
+                        tx_errors += 1;
                     }
                 }
             }
@@ -1133,13 +1136,20 @@ async fn index_block_from_rpc(
                             })
                             .collect();
 
-                        // Update or delete
+                        // Update or delete. These were FULLY silent (`let _ =`):
+                        // a failed spend-removal left a phantom spendable UTXO in
+                        // /utxo and probe_unspent forever, with no log line. Fail
+                        // the block instead (tx_errors -> rollback + retry).
                         if !updated_utxos.is_empty() {
                             let serialized =
                                 crate::parser::serialize_addr_utxos(&updated_utxos).await;
-                            let _ = db.put_cf(&cf_addr_index, &addr_key, &serialized);
-                        } else {
-                            let _ = db.delete_cf(&cf_addr_index, &addr_key);
+                            if let Err(e) = db.put_cf(&cf_addr_index, &addr_key, &serialized) {
+                                warn!(address = %address, error = %e, "Failed to remove spent UTXO from address set");
+                                tx_errors += 1;
+                            }
+                        } else if let Err(e) = db.delete_cf(&cf_addr_index, &addr_key) {
+                            warn!(address = %address, error = %e, "Failed to delete emptied address UTXO set");
+                            tx_errors += 1;
                         }
                     }
                 }
@@ -1182,6 +1192,7 @@ async fn index_block_from_rpc(
 
                     if let Err(e) = db.put_cf(&cf_addr_index, &tx_list_key, &serialized) {
                         warn!(address = %address, error = %e, "Failed to update tx list for address");
+                        tx_errors += 1;
                     }
                 }
             }
@@ -1361,6 +1372,13 @@ async fn index_block_from_rpc(
         // 'H' was written. A clean abort also makes the retry a first apply —
         // no r/s double-count to repair.
         metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
+        // The 'E' marker goes down UNCONDITIONALLY, before the rollback attempt:
+        // if store_address_undo failed above (warn-only), the rollback silently
+        // cannot reverse r/s — a "clean" rollback without the marker would then
+        // skip the repair and persist a double-count. The repair is an idempotent
+        // recompute, so running it after a genuinely clean rollback is merely
+        // redundant, never wrong.
+        db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
         match crate::reorg::rollback_to_height(db.clone(), height - 1, height).await {
             Ok(_) => {
                 return Err(format!(
@@ -1370,11 +1388,7 @@ async fn index_block_from_rpc(
                 .into());
             }
             Err(e) => {
-                // Rollback failed: fall back to the 'E' retry marker so the
-                // eventual successful retry repairs the non-idempotent r/s
-                // double-count from the surviving partial writes.
-                warn!(height, error = %e, "Failed to roll back partial block; falling back to retry marker");
-                db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+                warn!(height, error = %e, "Failed to roll back partial block; retry will repair r/s via the marker");
                 return Err(format!(
                     "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
                     tx_array.len()
