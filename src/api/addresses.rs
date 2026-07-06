@@ -1073,45 +1073,47 @@ async fn compute_utxos(
     })
     .await??;
 
-    let unspent_utxos = crate::parser::deserialize_addr_utxos(&result).await?;
-    let current_height = get_current_height(db).unwrap_or(0);
     // Blockbook parity: the UTXO list includes immature coinbase/coinstake outputs
     // (Blockbook flags them rather than hiding them; wallets handle maturity).
-    let spendable_utxos = unspent_utxos.clone();
+    let spendable_utxos = crate::parser::deserialize_addr_utxos(&result).await?;
+    let current_height = get_current_height(db).unwrap_or(0);
 
-    let mut utxo_list = Vec::new();
+    // Read every UTXO's tx record in ONE blocking pass. The prior code issued one
+    // spawn_blocking per UTXO (~0.65ms scheduling each) purely to read block height;
+    // a dust-spammed / exchange-payout address with tens of thousands of UTXOs blew
+    // past the 30s request timeout (the exact anti-pattern already removed from
+    // /address). Height/confirmations/orphan are still derived LIVE from the tx CF
+    // (not the inline 'a' fields) via the stub-safe reader — only the per-UTXO task
+    // hop is removed. The rare confirmations==0 lock_time parse now also runs inside
+    // this blocking task instead of blocking the async worker inline.
+    let db_blocking = Arc::clone(db);
+    let mut utxo_list = tokio::task::spawn_blocking(move || -> Result<Vec<UTXO>, String> {
+        let cf = db_blocking
+            .cf_handle("transactions")
+            .ok_or_else(|| "transactions CF not found".to_string())?;
+        let mut out = Vec::with_capacity(spendable_utxos.len());
+        for (txid_hash, vout, value, kind) in &spendable_utxos {
+            // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
+            // (the same bytes that key the tx CF), so emit them directly.
+            let txid_display = hex::encode(txid_hash);
 
-    for (txid_hash, vout, value, kind) in &spendable_utxos {
-        // P1-1: the 'a' unspent index stores txids in canonical DISPLAY order
-        // (the same bytes that key the tx CF below), so emit them directly. The
-        // earlier .reverse() produced a non-canonical txid that the node,
-        // duddino, wallets, and every other explorer reject.
-        let txid_display = hex::encode(txid_hash);
+            // Stub-safe reader (BOTH key orders; a body-less 8-byte stub must not
+            // shadow the real record). Read errors degrade to "record missing"
+            // (UTXO skipped), as before.
+            let tx_data = match crate::api::transactions::read_valid_tx_record(
+                &db_blocking,
+                &cf,
+                txid_hash,
+            ) {
+                Ok(Some(d)) => d,
+                _ => continue,
+            };
 
-        // Look up the tx record for height/confirmations via the shared stub-safe
-        // reader (BOTH key orders; a body-less 8-byte stub must not shadow the real
-        // record — a raw one-key read here used to silently DROP a canonical UTXO
-        // when the probed key held a stub or the record lived at the other order).
-        // Read errors degrade to "record missing" (UTXO skipped), as before.
-        let db_clone = Arc::clone(db);
-        let txid_owned = txid_hash.clone();
-        let tx_data_opt = tokio::task::spawn_blocking(move || {
-            let cf = db_clone.cf_handle("transactions")?;
-            crate::api::transactions::read_valid_tx_record(&db_clone, &cf, &txid_owned)
-                .unwrap_or(None)
-        })
-        .await
-        .ok()
-        .flatten();
-
-        if let Some(tx_data) = tx_data_opt {
             let block_height = i32::from_le_bytes([tx_data[4], tx_data[5], tx_data[6], tx_data[7]]);
 
             // A UTXO present in the 'a' unspent set is canonical by construction;
             // only drop a definitive orphan (-1). A transient HEIGHT_UNRESOLVED
-            // read must NOT silently drop a canonical UTXO. Height/orphan are
-            // derived LIVE from the tx CF (not the inline 'a' fields), exactly as
-            // before — only the expensive full-tx parse is removed.
+            // read must NOT silently drop a canonical UTXO.
             if block_height == HEIGHT_ORPHAN {
                 continue;
             }
@@ -1123,10 +1125,9 @@ async fn compute_utxos(
                     0
                 };
 
-            // value + coinbase/coinstake come from the inline 'a' record (49B):
-            // no deserialize_transaction on the hot (confirmed) path. lock_time is
-            // only ever emitted when confirmations == 0, so parse the tx ONLY in
-            // that rare degraded/unconfirmed case to preserve exact prior output.
+            // value + coinbase/coinstake come from the inline 'a' record (49B): no
+            // deserialize on the hot (confirmed) path. lock_time is only emitted when
+            // confirmations == 0, so parse the tx ONLY in that rare case.
             let tx_type = crate::tx_type::u8_to_ty(*kind);
             let lock_time = if confirmations == 0 {
                 let tx_data_len = tx_data.len() - 8;
@@ -1141,7 +1142,7 @@ async fn compute_utxos(
                 None
             };
 
-            utxo_list.push(UTXO {
+            out.push(UTXO {
                 txid: txid_display,
                 vout: *vout as u32,
                 value: value.to_string(),
@@ -1158,7 +1159,9 @@ async fn compute_utxos(
                 blocks_until_spendable: None,
             });
         }
-    }
+        Ok(out)
+    })
+    .await??;
 
     // Sort by confirmations ascending (newest first = least confirmations first)
     utxo_list.sort_by(|a, b| a.confirmations.cmp(&b.confirmations));
