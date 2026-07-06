@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 type TailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -1098,6 +1098,18 @@ fn roll_to_next_file(store: &TailStore, from: &TailCursor) -> TailResult<()> {
     store.commit(batch)
 }
 
+/// Find the next magic marker at or after `from` in `window` (absolute index into
+/// the window). Torn-garbage recovery: a daemon crash leaves partially-flushed
+/// bytes in the tail that are neither magic nor zero padding; the next real
+/// record resumes at the next magic marker.
+fn scan_next_magic(window: &[u8], from: usize, magic: [u8; 4]) -> Option<usize> {
+    let start = from.min(window.len());
+    window[start..]
+        .windows(4)
+        .position(|w| w == magic)
+        .map(|p| start + p)
+}
+
 /// One read tick: advance the cursor through complete records now on disk, with
 /// the reindex/shrink guard and file rollover. Returns blocks ingested.
 async fn tail_read_tick(
@@ -1160,8 +1172,49 @@ async fn tail_read_tick(
         ingested = outcome.blocks_ingested;
         match &outcome.stop {
             StopReason::Corruption(msg) => {
-                warn!(file = %path.display(), offset = outcome.next_offset, msg = %msg,
-                    "blk_tail: framing corruption — halting this file (no advance past it)");
+                // A daemon crash leaves torn garbage in the tail (partial flush;
+                // Core then resumes appending at its own recorded position).
+                // Halting here wedged the observer on this file forever AND
+                // re-warned every 2s tick. Recover instead: skip to the next
+                // magic marker and persist the moved cursor. A false magic
+                // inside garbage just fails framing next tick and the scan
+                // continues — this namespace is private (zero canonical
+                // writes), so a mis-step cannot corrupt served data.
+                let rel = (outcome.next_offset.saturating_sub(cursor.offset)) as usize;
+                let new_offset = match scan_next_magic(&window, rel + 1, magic) {
+                    Some(p) => {
+                        let off = cursor.offset + p as u64;
+                        warn!(file = %path.display(), from = outcome.next_offset, to = off, msg = %msg,
+                            "blk_tail: torn/garbage region — skipping to next magic marker");
+                        off
+                    }
+                    None => {
+                        // No magic in this window: advance past it (3-byte
+                        // overlap for a marker straddling the boundary) so a
+                        // long garbage stretch crosses one window per tick.
+                        // debug-level: this can repeat over a large stretch.
+                        let end = cursor.offset + window.len() as u64;
+                        let off = end.saturating_sub(3).max(cursor.offset + 1);
+                        debug!(file = %path.display(), offset = off, msg = %msg,
+                            "blk_tail: garbage window, no magic — advancing scan cursor");
+                        off
+                    }
+                };
+                // cumulative_blocks/file_no from the LATEST persisted cursor
+                // (blocks ingested earlier in this window already advanced it).
+                let latest = store.load_cursor()?.unwrap_or(cursor);
+                let recovered = TailCursor {
+                    file_no: latest.file_no,
+                    offset: new_offset,
+                    // No record ends at a skipped offset; the anchor is
+                    // informational (zero is also the initial-cursor state).
+                    trailing_hash: [0u8; 32],
+                    cumulative_blocks: latest.cumulative_blocks,
+                    file_len_watermark: len,
+                };
+                let mut batch = WriteBatch::default();
+                store.stage_cursor(&mut batch, &recovered)?;
+                store.commit(batch)?;
                 return Ok(ingested);
             }
             StopReason::Padding | StopReason::Incomplete => file_exhausted = drained_to_eof,
@@ -1243,6 +1296,27 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Crash-torn garbage recovery: the scan must find the next magic marker
+    /// after the corrupt position (or None when the window holds no more).
+    #[test]
+    fn scan_next_magic_finds_marker_past_garbage() {
+        let magic = [0x90u8, 0xc4, 0xfd, 0xe9];
+        let mut w = vec![0xccu8, 0x82, 0x24, 0x5b, 0x01, 0x02]; // torn garbage
+        let at = w.len();
+        w.extend_from_slice(&magic);
+        w.extend_from_slice(&[0xAA; 8]);
+        assert_eq!(scan_next_magic(&w, 1, magic), Some(at));
+        // Garbage containing a magic-prefix red herring before the real one.
+        let mut w2 = vec![0x90u8, 0xc4, 0xfd, 0x00];
+        let at2 = w2.len();
+        w2.extend_from_slice(&magic);
+        assert_eq!(scan_next_magic(&w2, 0, magic), Some(at2));
+        // No magic at all -> None.
+        assert_eq!(scan_next_magic(&[0xffu8; 64], 0, magic), None);
+        // from past the end -> None, no panic.
+        assert_eq!(scan_next_magic(&w, w.len() + 10, magic), None);
+    }
 
     fn frame(magic: [u8; 4], body: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(8 + body.len());
@@ -1939,6 +2013,40 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// Regression: a daemon crash leaves torn garbage between records. The tick
+    /// used to halt on it forever (re-warning every 2s, never rolling over);
+    /// it must instead skip to the next magic marker and keep ingesting.
+    #[tokio::test]
+    async fn tick_recovers_past_torn_garbage() {
+        let (store, _dbt) = store_with_chain();
+        let bdir = tempfile::TempDir::new().unwrap();
+        let parent = [0xAA; 32];
+        seed_canonical(&store, 10, parent, true, false);
+        let h1 = make_header(1, parent, NBITS);
+        let h2 = make_header(1, hash_of(&h1), NBITS);
+        let mut content = frame(PIVX_MAGIC, &h1);
+        content.extend_from_slice(&[0xcc, 0x82, 0x24, 0x5b, 0xde, 0xad]); // crash-torn bytes
+        content.extend_from_slice(&frame(PIVX_MAGIC, &h2));
+        content.extend_from_slice(&[0u8; 32]); // trailing padding
+        write_blk(bdir.path(), 0, &content);
+
+        // Tick 1 ingests h1, hits the garbage, and recovers by moving the
+        // cursor to h2's magic; tick 2 ingests h2 from there.
+        let n1 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        let n2 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            n1 + n2,
+            2,
+            "both real blocks ingested despite the torn gap (was: wedged forever)"
+        );
+        let c = store.load_cursor().unwrap().unwrap();
+        assert_eq!(c.cumulative_blocks, 2);
     }
 
     #[tokio::test]
