@@ -233,7 +233,10 @@ pub fn compute_money_supply_blocking(
 
     let json_body = r#"{"jsonrpc":"1.0","id":"1","method":"getsupplyinfo","params":[false]}"#;
     let auth = format!("{rpc_user}:{rpc_pass}");
-    let auth_b64 = base64::encode(auth);
+    let auth_b64 = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(auth)
+    };
 
     let http_request = format!(
         "POST / HTTP/1.1\r\n\
