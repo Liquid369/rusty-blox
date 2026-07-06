@@ -1,29 +1,17 @@
-use rocksdb::DB;
 /// Transaction Key Helpers
 ///
-/// Centralized helpers for consistent transaction key format handling.
+/// Byte-level txid helpers for the transactions CF ('t' + 32-byte txid = 33-byte key).
 ///
-/// KEY FORMAT IN TRANSACTIONS CF:
-/// - Prefix: b't' (1 byte)
-/// - TXID: 32 bytes in natural/display order (NOT reversed)
-/// - Total: 33 bytes
+/// IMPORTANT — the CF holds records under TWO coexisting key orders: INTERNAL
+/// (reversed; written by initial sync) and DISPLAY (written by the live monitor).
+/// There is deliberately NO single-key lookup helper here: any serving-path read
+/// must go through `crate::api::transactions::read_valid_tx_record`, which probes
+/// both orders and refuses body-less stub records. (A display-only `get_transaction`
+/// used to live here with zero callers — it was exactly the raw one-key read that
+/// caused the stub-shadowing /tx 404 bug, so it was removed.)
 ///
-/// IMPORTANT: prevout.hash from deserialized transactions is hex-encoded in display order.
-/// When decoded, the bytes are already in the correct order to use as-is (no reversal needed).
-use std::sync::Arc;
-
-/// Build a transaction CF key from txid bytes.
-///
-/// # Arguments
-/// * `txid_bytes` - 32-byte transaction ID in natural/display order
-///
-/// # Returns
-/// 33-byte key: b't' + txid_bytes
-pub fn tx_cf_key(txid_bytes: &[u8]) -> Vec<u8> {
-    let mut key = vec![b't'];
-    key.extend_from_slice(txid_bytes);
-    key
-}
+/// prevout.hash from deserialized transactions is hex-encoded in display order;
+/// hex-decoding it yields display-order bytes.
 
 /// Extract txid bytes from a transaction CF key.
 ///
@@ -57,36 +45,9 @@ pub fn txid_from_hex(txid_hex: &str) -> Result<Vec<u8>, hex::FromHexError> {
     hex::decode(txid_hex)
 }
 
-/// Lookup a transaction by txid bytes.
-///
-/// # Arguments
-/// * `db` - Database handle
-/// * `cf_transactions` - Transaction column family handle
-/// * `txid_bytes` - 32-byte txid in natural/display order
-///
-/// # Returns
-/// Transaction data if found
-pub async fn get_transaction(
-    db: Arc<DB>,
-    cf_transactions: &rocksdb::ColumnFamily,
-    txid_bytes: &[u8],
-) -> Option<Vec<u8>> {
-    let key = tx_cf_key(txid_bytes);
-    db.get_cf(cf_transactions, &key).ok().flatten()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_tx_cf_key() {
-        let txid = vec![0x12u8; 32];
-        let key = tx_cf_key(&txid);
-        assert_eq!(key.len(), 33);
-        assert_eq!(key[0], b't');
-        assert_eq!(&key[1..], &txid[..]);
-    }
 
     #[test]
     fn test_txid_from_key() {
