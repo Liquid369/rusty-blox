@@ -71,7 +71,6 @@ pub mod metrics;
 pub mod offset_indexer;
 pub mod parser;
 pub mod pivx_copy;
-pub mod pos_validation;
 pub mod reorg;
 pub mod repair;
 pub mod script_utils;
