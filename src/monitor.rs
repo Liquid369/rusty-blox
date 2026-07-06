@@ -1397,6 +1397,7 @@ fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Erro
 fn detect_reorg(
     db_tip: &ChainTip,
     rpc_tip: &ChainTip,
+    canonical_hash_at_db_tip: Option<&str>,
 ) -> Result<Option<i32>, Box<dyn std::error::Error>> {
     // If RPC height is less than ours, definite reorg
     if rpc_tip.height < db_tip.height {
@@ -1417,9 +1418,25 @@ fn detect_reorg(
         return Ok(Some(rpc_tip.height - 1));
     }
 
-    // TODO: More sophisticated reorg detection
-    // - Compare hashes at previous heights
-    // - Find common ancestor
+    // RPC ahead of us — the COMMON reorg presentation (a reorg + extension lands
+    // within one poll window). Being behind is only safe to treat as plain
+    // catch-up if OUR tip is still on the canonical chain; otherwise catch-up
+    // indexes the new chain on top of an orphaned block, whose txs stay served
+    // as confirmed forever. The caller passes getblockhash(db height) when
+    // rpc > db; None (RPC hiccup) degrades to no-detection for this poll.
+    if rpc_tip.height > db_tip.height {
+        if let Some(canonical) = canonical_hash_at_db_tip {
+            if canonical != db_tip.hash {
+                warn!(
+                    db_height = db_tip.height,
+                    db_hash = %db_tip.hash,
+                    canonical_hash = %canonical,
+                    "REORG DETECTED: our tip is not on the canonical chain"
+                );
+                return Ok(Some(db_tip.height - 1));
+            }
+        }
+    }
 
     Ok(None)
 }
@@ -1793,8 +1810,31 @@ pub async fn run_block_monitor(
             }
         };
 
+        // When the RPC is AHEAD of us, verify our tip is still canonical before
+        // treating the gap as plain catch-up (the common reorg presentation is
+        // "new chain already longer"). A failed probe degrades to None — no false
+        // reorg, re-checked next poll.
+        let canonical_at_db_tip = if rpc_tip.height > db_tip.height {
+            match crate::api::helpers::rpc_call_json(
+                "getblockhash",
+                serde_json::json!([db_tip.height as i64]),
+            )
+            .await
+            {
+                Ok(v) => v.as_str().map(|s| s.to_string()),
+                Err(e) => {
+                    warn!(height = db_tip.height, error = %e, "Canonical-tip probe failed; skipping reorg check this poll");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Check for reorg
-        if let Some(_reorg_height) = detect_reorg(&db_tip, &rpc_tip)? {
+        if let Some(_reorg_height) =
+            detect_reorg(&db_tip, &rpc_tip, canonical_at_db_tip.as_deref())?
+        {
             warn!("BLOCKCHAIN REORGANIZATION DETECTED");
 
             // Handle the reorg using our reorg module
@@ -1951,14 +1991,31 @@ pub async fn run_block_monitor(
 
                 let height_key = block.height.to_le_bytes();
 
-                // Check if we already have a canonical hash for this height
+                // A stored mapping that disagrees with the fetched block can only be
+                // a STALE pre-written entry: catch-up heights are strictly above
+                // sync_height, so the monitor has indexed nothing there ('H' markers
+                // and tx/addr state are written only as blocks index) — the mapping
+                // came from the leveldb metadata refresh or the parse path before a
+                // reorg. The old code `break`-ed here "to trigger the reorg handler",
+                // but detection could never fire while rpc > db with a canonical tip,
+                // so the monitor re-broke at the same height every poll — a livelock.
+                // The RPC chain is authoritative for un-indexed heights: drop the
+                // stale reverse 'h' entries (both byte orders, like reorg cleanup)
+                // and fall through — index_block_from_rpc re-resolves the canonical
+                // hash by height and overwrites the forward mapping.
                 if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
                     let stored_hash_hex = hex::encode(&stored_hash);
 
                     if stored_hash_hex != block.block_hash {
-                        warn!(height = block.height, db_hash = %stored_hash_hex, rpc_hash = %block.block_hash,
-                              "REORG detected during catchup - aborting to trigger reorg handler");
-                        break;
+                        warn!(height = block.height, stale_hash = %stored_hash_hex, canonical_hash = %block.block_hash,
+                              "Stale canonical mapping above sync height - reindexing this height from the current chain");
+                        let mut h_as_stored = vec![b'h'];
+                        h_as_stored.extend_from_slice(&stored_hash);
+                        let reversed: Vec<u8> = stored_hash.iter().rev().cloned().collect();
+                        let mut h_reversed = vec![b'h'];
+                        h_reversed.extend_from_slice(&reversed);
+                        db.delete_cf(&cf_metadata, &h_as_stored)?;
+                        db.delete_cf(&cf_metadata, &h_reversed)?;
                     }
                 }
 
@@ -2074,6 +2131,59 @@ mod tests {
         opts.create_missing_column_families(true);
         let db = Arc::new(DB::open_cf(&opts, temp.path(), &["chain_state"]).unwrap());
         (temp, db)
+    }
+
+    fn tip(height: i32, hash: &str) -> ChainTip {
+        ChainTip {
+            height,
+            hash: hash.to_string(),
+        }
+    }
+
+    /// THE blind spot: a reorg that presents with the new chain already LONGER
+    /// (rpc > db) — the common shape when a reorg + extension lands within one
+    /// poll window. Detection must fire when our tip hash is no longer the
+    /// canonical hash at our height, or catch-up indexes on top of an orphaned
+    /// block forever (and the catch-up "abort to trigger reorg handler" livelocks).
+    #[test]
+    fn detect_reorg_fires_when_rpc_ahead_and_our_tip_not_canonical() {
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        // Canonical hash at OUR height differs from what we indexed -> reorg.
+        let r = detect_reorg(&db, &rpc, Some("bb22")).unwrap();
+        assert!(r.is_some(), "must detect a reorg when our tip was orphaned");
+    }
+
+    #[test]
+    fn detect_reorg_quiet_when_rpc_ahead_on_our_chain() {
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        // Canonical hash at our height matches ours -> normal catch-up, no reorg.
+        assert!(detect_reorg(&db, &rpc, Some("aa11")).unwrap().is_none());
+    }
+
+    #[test]
+    fn detect_reorg_degrades_without_canonical_hash() {
+        // Hash probe unavailable (RPC hiccup) -> no false reorg; retry next poll.
+        let db = tip(100, "aa11");
+        let rpc = tip(102, "cc33");
+        assert!(detect_reorg(&db, &rpc, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn detect_reorg_existing_cases_unchanged() {
+        // rpc below db = definite reorg.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(98, "bb"), None)
+            .unwrap()
+            .is_some());
+        // same height, hash mismatch = reorg.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(100, "bb"), None)
+            .unwrap()
+            .is_some());
+        // same height, same hash = clean.
+        assert!(detect_reorg(&tip(100, "aa"), &tip(100, "aa"), None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
