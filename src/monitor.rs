@@ -1393,6 +1393,28 @@ async fn index_block_from_rpc(
 
 /// Update aggregate database metrics (address count, UTXO count, Sapling tx count)
 /// Should be called periodically during monitoring to keep metrics up to date
+/// Run the aggregate-metrics scan OFF the monitor task, at most one at a time.
+/// `update_aggregate_metrics` iterates the whole addr_index CF (millions of
+/// keys); running it inline blocked the poll/reorg loop for the scan's duration
+/// and thrashed the block cache against live writes. Fire-and-forget: the two
+/// gauges it feeds don't need to gate block processing.
+fn spawn_aggregate_metrics_update(db: &Arc<DB>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
+    if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
+        return; // previous scan still in flight — skip, next cadence tick retries
+    }
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = update_aggregate_metrics(&db) {
+            warn!(error = %e, "Failed to update aggregate metrics");
+        } else if let Err(e) = metrics::save_metrics_to_db(&db) {
+            warn!(error = %e, "Failed to persist metrics to database");
+        }
+        SCAN_RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
 fn update_aggregate_metrics(db: &Arc<DB>) -> Result<(), Box<dyn std::error::Error>> {
     let cf_addr_index = db
         .cf_handle("addr_index")
@@ -1971,143 +1993,149 @@ pub async fn run_block_monitor(
             let start_height = db_tip.height + 1;
             let end_height = rpc_tip.height;
 
-            // === PHASE 1: Fetch blocks and build complete spent set ===
-            debug!(
-                blocks = blocks_behind,
-                "Phase 1: Fetching blocks and building spent set"
-            );
+            // TWO-PHASE catch-up in BOUNDED WINDOWS. Fetching the whole gap's
+            // verbosity-2 JSON before indexing held GBs resident for a
+            // multi-thousand-block gap (OOM territory on the 8G VPS). Each
+            // window fetches, builds its own spent set, indexes, then frees.
+            // Correctness is unchanged: the spent set only powers the
+            // born-and-die output-ADD skip within its batch; a cross-window
+            // spend is handled by the spending block's own input pass, exactly
+            // like single-block live processing (spent_set = None).
+            const CATCHUP_WINDOW_BLOCKS: i32 = 500;
 
-            let mut fetched_blocks = Vec::new();
-            let mut fetch_errors = 0;
-
-            // Fetch blocks in parallel for network efficiency
-            // Use semaphore to limit concurrency
             use std::sync::Arc as StdArc;
             use tokio::sync::Semaphore;
-
             const MAX_CONCURRENT_FETCH: usize = 10;
-            let fetch_semaphore = StdArc::new(Semaphore::new(MAX_CONCURRENT_FETCH));
-
-            let mut fetch_futures = Vec::new();
-            for height in start_height..=end_height {
-                let sem = fetch_semaphore.clone();
-
-                fetch_futures.push(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    (height, fetch_block_data(height).await)
-                });
-            }
-
-            // Wait for all fetches to complete
-            let fetch_results = futures::future::join_all(fetch_futures).await;
-
-            // Collect successfully fetched blocks
-            for (height, result) in fetch_results {
-                match result {
-                    Ok(block) => fetched_blocks.push(block),
-                    Err(e) => {
-                        error!(height = height, error = %e, "Failed to fetch block");
-                        metrics::increment_rpc_errors("getblock", "timeout");
-                        fetch_errors += 1;
-                    }
-                }
-            }
-
-            if fetch_errors > 0 {
-                warn!(
-                    fetch_errors = fetch_errors,
-                    retry_secs = poll_interval_secs,
-                    "Fetch errors occurred, retrying"
-                );
-                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
-                continue;
-            }
-
-            // Build complete spent set from all fetched blocks
-            debug!(
-                blocks = fetched_blocks.len(),
-                "Building spent set from fetched blocks"
-            );
-            let spent_set = build_spent_set_from_blocks(&fetched_blocks);
-            debug!(
-                spent_outputs = spent_set.len(),
-                "Phase 1 complete: spent set built"
-            );
-
-            // === PHASE 2: Sequential indexing with complete spent knowledge ===
-            debug!("Phase 2: Indexing blocks with complete spent set");
 
             let mut indexed = 0;
             let mut index_errors = 0;
+            let mut fetch_failed = false;
 
-            // Process blocks sequentially in height order
-            // This ensures:
-            // - No race conditions
-            // - Height N indexed before N+1
-            // - Spend removal has complete knowledge
-            for block in fetched_blocks {
-                // Add canonical hash validation
-                let cf_metadata = db
-                    .cf_handle("chain_metadata")
-                    .ok_or("chain_metadata CF not found")?;
+            let mut window_start = start_height;
+            'windows: while window_start <= end_height {
+                let window_end = (window_start + CATCHUP_WINDOW_BLOCKS - 1).min(end_height);
 
-                let height_key = block.height.to_le_bytes();
+                // === PHASE 1 (window): fetch blocks and build the spent set ===
+                let mut fetched_blocks = Vec::new();
+                let mut fetch_errors = 0;
 
-                // A stored mapping that disagrees with the fetched block can only be
-                // a STALE pre-written entry: catch-up heights are strictly above
-                // sync_height, so the monitor has indexed nothing there ('H' markers
-                // and tx/addr state are written only as blocks index) — the mapping
-                // came from the leveldb metadata refresh or the parse path before a
-                // reorg. The old code `break`-ed here "to trigger the reorg handler",
-                // but detection could never fire while rpc > db with a canonical tip,
-                // so the monitor re-broke at the same height every poll — a livelock.
-                // The RPC chain is authoritative for un-indexed heights: drop the
-                // stale reverse 'h' entries (both byte orders, like reorg cleanup)
-                // and fall through — index_block_from_rpc re-resolves the canonical
-                // hash by height and overwrites the forward mapping.
-                if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
-                    let stored_hash_hex = hex::encode(&stored_hash);
+                let fetch_semaphore = StdArc::new(Semaphore::new(MAX_CONCURRENT_FETCH));
+                let mut fetch_futures = Vec::new();
+                for height in window_start..=window_end {
+                    let sem = fetch_semaphore.clone();
 
-                    if stored_hash_hex != block.block_hash {
-                        warn!(height = block.height, stale_hash = %stored_hash_hex, canonical_hash = %block.block_hash,
-                              "Stale canonical mapping above sync height - reindexing this height from the current chain");
-                        let mut h_as_stored = vec![b'h'];
-                        h_as_stored.extend_from_slice(&stored_hash);
-                        let reversed: Vec<u8> = stored_hash.iter().rev().cloned().collect();
-                        let mut h_reversed = vec![b'h'];
-                        h_reversed.extend_from_slice(&reversed);
-                        db.delete_cf(&cf_metadata, &h_as_stored)?;
-                        db.delete_cf(&cf_metadata, &h_reversed)?;
-                    }
+                    fetch_futures.push(async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        (height, fetch_block_data(height).await)
+                    });
                 }
 
-                // Index this block with spent set available
-                match index_block_from_rpc(block.height, &db, &broadcaster, Some(&spent_set)).await
-                {
-                    Ok(_) => {
-                        indexed += 1;
-                        if indexed % 100 == 0 {
-                            let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
-                            debug!(
-                                indexed = indexed,
-                                total = blocks_behind,
-                                progress_pct = format!("{:.1}", progress),
-                                "Catchup progress"
-                            );
+                // join_all preserves input order, so blocks stay height-ascending.
+                let fetch_results = futures::future::join_all(fetch_futures).await;
+
+                for (height, result) in fetch_results {
+                    match result {
+                        Ok(block) => fetched_blocks.push(block),
+                        Err(e) => {
+                            error!(height = height, error = %e, "Failed to fetch block");
+                            metrics::increment_rpc_errors("getblock", "timeout");
+                            fetch_errors += 1;
                         }
                     }
-                    Err(e) => {
-                        // STOP the batch at the first failed block. Continuing would
-                        // let the NEXT block's sync_height write advance the watermark
-                        // past this hole, permanently dropping the block from the
-                        // index with only a log line. Retry from the last good height
-                        // on the next poll.
-                        error!(height = block.height, error = %e,
-                            "Failed to index block during catchup - stopping batch; retrying from the last good height next poll");
-                        index_errors += 1;
-                        break;
+                }
+
+                if fetch_errors > 0 {
+                    warn!(
+                        fetch_errors = fetch_errors,
+                        window_start = window_start,
+                        retry_secs = poll_interval_secs,
+                        "Fetch errors in catch-up window; already-indexed windows are kept, retrying from the watermark next poll"
+                    );
+                    fetch_failed = true;
+                    break 'windows;
+                }
+
+                let spent_set = build_spent_set_from_blocks(&fetched_blocks);
+                debug!(
+                    window_start = window_start,
+                    window_end = window_end,
+                    spent_outputs = spent_set.len(),
+                    "Catch-up window fetched; indexing"
+                );
+
+                // === PHASE 2 (window): sequential indexing, height order ===
+                for block in fetched_blocks {
+                    // Add canonical hash validation
+                    let cf_metadata = db
+                        .cf_handle("chain_metadata")
+                        .ok_or("chain_metadata CF not found")?;
+
+                    let height_key = block.height.to_le_bytes();
+
+                    // A stored mapping that disagrees with the fetched block can only be
+                    // a STALE pre-written entry: catch-up heights are strictly above
+                    // sync_height, so the monitor has indexed nothing there ('H' markers
+                    // and tx/addr state are written only as blocks index) — the mapping
+                    // came from the leveldb metadata refresh or the parse path before a
+                    // reorg. The old code `break`-ed here "to trigger the reorg handler",
+                    // but detection could never fire while rpc > db with a canonical tip,
+                    // so the monitor re-broke at the same height every poll — a livelock.
+                    // The RPC chain is authoritative for un-indexed heights: drop the
+                    // stale reverse 'h' entries (both byte orders, like reorg cleanup)
+                    // and fall through — index_block_from_rpc re-resolves the canonical
+                    // hash by height and overwrites the forward mapping.
+                    if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
+                        let stored_hash_hex = hex::encode(&stored_hash);
+
+                        if stored_hash_hex != block.block_hash {
+                            warn!(height = block.height, stale_hash = %stored_hash_hex, canonical_hash = %block.block_hash,
+                              "Stale canonical mapping above sync height - reindexing this height from the current chain");
+                            let mut h_as_stored = vec![b'h'];
+                            h_as_stored.extend_from_slice(&stored_hash);
+                            let reversed: Vec<u8> = stored_hash.iter().rev().cloned().collect();
+                            let mut h_reversed = vec![b'h'];
+                            h_reversed.extend_from_slice(&reversed);
+                            db.delete_cf(&cf_metadata, &h_as_stored)?;
+                            db.delete_cf(&cf_metadata, &h_reversed)?;
+                        }
+                    }
+
+                    // Index this block with spent set available
+                    match index_block_from_rpc(block.height, &db, &broadcaster, Some(&spent_set))
+                        .await
+                    {
+                        Ok(_) => {
+                            indexed += 1;
+                            if indexed % 100 == 0 {
+                                let progress = (indexed as f64 / blocks_behind as f64) * 100.0;
+                                debug!(
+                                    indexed = indexed,
+                                    total = blocks_behind,
+                                    progress_pct = format!("{:.1}", progress),
+                                    "Catchup progress"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            // STOP the catch-up at the first failed block. Continuing
+                            // would let the NEXT block's sync_height write advance the
+                            // watermark past this hole, permanently dropping the block
+                            // from the index with only a log line. Retry from the last
+                            // good height on the next poll.
+                            error!(height = block.height, error = %e,
+                            "Failed to index block during catchup - stopping; retrying from the last good height next poll");
+                            index_errors += 1;
+                            break 'windows;
+                        }
                     }
                 }
+
+                window_start = window_end + 1;
+            }
+
+            if fetch_failed {
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+                continue;
             }
 
             info!(
@@ -2140,33 +2168,18 @@ pub async fn run_block_monitor(
                 metrics::set_blocks_behind_tip(0);
                 metrics::RPC_CATCHUP_BLOCKS.inc_by(blocks_behind as u64);
 
-                // Update aggregate metrics after catchup completes
-                if let Err(e) = update_aggregate_metrics(&db) {
-                    warn!(error = %e, "Failed to update aggregate metrics");
-                } else {
-                    // Persist metrics to database for restart durability
-                    if let Err(e) = metrics::save_metrics_to_db(&db) {
-                        warn!(error = %e, "Failed to persist metrics to database");
-                    } else {
-                        debug!("Metrics persisted to database");
-                    }
-                }
+                // Update aggregate metrics after catchup completes (off-task).
+                spawn_aggregate_metrics_update(&db);
             }
         } else {
-            // We're caught up - update aggregate metrics periodically
-            // Only update every 10 poll intervals to reduce overhead
+            // We're caught up - refresh aggregate metrics periodically (off-task).
+            // Every 120 polls (~10 min at the 5s default): the full addr_index
+            // scan is far too heavy to run every ~50s for two gauges.
             static POLL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let count = POLL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-            if count % 10 == 0 {
-                if let Err(e) = update_aggregate_metrics(&db) {
-                    warn!(error = %e, "Failed to update aggregate metrics");
-                } else {
-                    // Persist metrics to database periodically
-                    if let Err(e) = metrics::save_metrics_to_db(&db) {
-                        warn!(error = %e, "Failed to persist metrics to database");
-                    }
-                }
+            if count % 120 == 0 {
+                spawn_aggregate_metrics_update(&db);
             }
 
             // We're caught up - sleep before checking again
