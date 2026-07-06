@@ -1344,13 +1344,36 @@ async fn index_block_from_rpc(
         // the next poll retries this height (the RAII guard clears 'P'). The old
         // behavior marked the block complete with a warn log, permanently
         // dropping the failed txs from the index with no signal.
-        db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+        //
+        // FIRST reverse the partial state this attempt already applied (tx
+        // records, 'B' entries, metadata, addr-index via the just-stored undo).
+        // Leaving it would poison the index if a reorg replaces this height
+        // before the retry: the reorg handler only rolls back to OUR tip (H-1,
+        // never touching H), and the 'H'-mismatch cleanup can't fire because no
+        // 'H' was written. A clean abort also makes the retry a first apply —
+        // no r/s double-count to repair.
         metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
-        return Err(format!(
-            "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
-            tx_array.len()
-        )
-        .into());
+        match crate::reorg::rollback_to_height(db.clone(), height - 1, height).await {
+            Ok(_) => {
+                return Err(format!(
+                    "{tx_errors} of {} txs failed to index at height {height}; partial state rolled back, block will be retried",
+                    tx_array.len()
+                )
+                .into());
+            }
+            Err(e) => {
+                // Rollback failed: fall back to the 'E' retry marker so the
+                // eventual successful retry repairs the non-idempotent r/s
+                // double-count from the surviving partial writes.
+                warn!(height, error = %e, "Failed to roll back partial block; falling back to retry marker");
+                db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+                return Err(format!(
+                    "{tx_errors} of {} txs failed to index at height {height}; block left unmarked for retry",
+                    tx_array.len()
+                )
+                .into());
+            }
+        }
     }
 
     if db.get_cf(&cf_state, &retry_marker_key)?.is_some() {
@@ -1364,10 +1387,14 @@ async fn index_block_from_rpc(
                 db.delete_cf(&cf_state, &retry_marker_key)?;
             }
             Err(e) => {
-                // Keep the marker so the inconsistency stays discoverable; the
-                // recompute is a local read-only derivation, so failure here means
-                // the DB itself is in trouble.
-                warn!(height, error = %e, "Failed to repair r/s after retried block; marker retained");
+                // Leave the block UNMARKED (no 'H'/sync_height) and the marker in
+                // place: advancing here would mark the block done with known
+                // over-counted r/s. The recompute is a local derivation, so failure
+                // means the DB itself is in trouble — retry the whole block.
+                return Err(format!(
+                    "r/s repair after retried block {height} failed: {e}; block left unmarked for retry"
+                )
+                .into());
             }
         }
     }
@@ -1419,12 +1446,20 @@ fn spawn_aggregate_metrics_update(db: &Arc<DB>) {
     }
     let db = db.clone();
     tokio::task::spawn_blocking(move || {
+        // Drop-guard: a panic in the scan must still clear the flag, or every
+        // future refresh is silently skipped for the life of the process.
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SCAN_RUNNING.store(false, Ordering::SeqCst);
+            }
+        }
+        let _reset = Reset;
         if let Err(e) = update_aggregate_metrics(&db) {
             warn!(error = %e, "Failed to update aggregate metrics");
         } else if let Err(e) = metrics::save_metrics_to_db(&db) {
             warn!(error = %e, "Failed to persist metrics to database");
         }
-        SCAN_RUNNING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -2159,11 +2194,17 @@ pub async fn run_block_monitor(
             );
 
             if index_errors > 0 {
+                // Back off like the fetch-error path. Without this, a
+                // persistently-failing block (tx_errors now returns Err instead
+                // of silently advancing) hot-loops: re-fetch a full 500-block
+                // window, fail on block 0, repeat — no delay, hammering the node.
                 warn!(
                     errors = index_errors,
                     retry_secs = poll_interval_secs,
-                    "Some blocks failed to index"
+                    "Some blocks failed to index; backing off before retry"
                 );
+                tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
+                continue;
             }
 
             // Check if we successfully caught up

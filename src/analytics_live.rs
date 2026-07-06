@@ -280,6 +280,13 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     if !is_enabled() {
         return;
     }
+    // A no-op reorg (fork == tip, nothing rolled back — e.g. the canonical-tip
+    // probe fired on a flapping node and find_fork_point resolved at the tip)
+    // changes no chain state: deleting day blobs / rewinding the watermark here
+    // would thrash today's analytics for nothing.
+    if orphaned_blocks <= 0 {
+        return;
+    }
     let Some(cf_state) = db.cf_handle("chain_state") else {
         return;
     };
