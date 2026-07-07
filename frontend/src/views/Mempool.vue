@@ -3,12 +3,13 @@
    MEMPOOL — /mempool pending-tx snapshot. The node monitor uses a
    non-verbose getrawmempool, so per-tx size/fee and bytes/usage are
    ALWAYS null — we surface "—" with a note rather than fake numbers.
-   The size-over-time sparkline is the inventory's recommended congestion
-   view (client-accumulated; mock-only here).
+   The size-over-time sparkline is client-accumulated live while the page is
+   open (there is no backend mempool-history endpoint), so it starts empty and
+   fills as you watch.
    UNITS: no money fields available on this endpoint.
    ===================================================================== */
-import { ref, onMounted, computed } from 'vue'
-import { getMempool, getMempoolSeries } from '../api/client.js'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { getMempool } from '../api/client.js'
 import { timeAgo, truncateHash, formatCount, formatDateTime } from '../lib/format.js'
 import { baseOption, catAxis, valAxis, palette, areaFill, hexA, echarts } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
@@ -16,11 +17,27 @@ import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
 
 const pool = ref(null)
+// Congestion series is accumulated client-side while the page is open: there is
+// no backend mempool-history endpoint (the monitor reads non-verbose
+// getrawmempool), so we poll the live snapshot every 10s and append {ts, txs}.
+// It starts empty and fills as you watch — real session telemetry, not a mock.
 const series = ref([])
+let timer = null
 
-onMounted(async () => {
-  pool.value = await getMempool()
-  series.value = await getMempoolSeries()
+async function poll() {
+  const p = await getMempool()
+  if (!p) return
+  pool.value = p
+  series.value.push({ ts: Math.floor(Date.now() / 1000), txs: p.size })
+  if (series.value.length > 120) series.value.shift() // keep ~20 min at 10s cadence
+}
+
+onMounted(() => {
+  poll()
+  timer = setInterval(poll, 10000)
+})
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
 })
 
 const txs = computed(() => pool.value?.transactions || [])
@@ -81,7 +98,7 @@ const congestionOption = computed(() => {
 
     <!-- CONGESTION -->
     <h2 class="section-title">Congestion — mempool size over time</h2>
-    <HudPanel title="MEMPOOL CONGESTION" id="accumulated 10s-poll telemetry (mock)" hero>
+    <HudPanel title="MEMPOOL CONGESTION" id="live 10s-poll telemetry · this session" hero>
       <EChart v-if="series.length" :option="congestionOption" height="160px" aria-label="Mempool size over time" />
       <p class="note mono dim">
         Fee/size histograms are not possible: the monitor reads non-verbose getrawmempool, so
