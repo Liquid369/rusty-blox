@@ -250,7 +250,7 @@ const flowHeight = computed(() => {
         <Stat k="VALUE OUT" accent><template #v>{{ formatSats(tx.value, { decimals: 4 }) }}</template><template #s>PIV</template></Stat>
         <Stat k="VALUE IN"><template #v>{{ formatSats(coldInputValueSat != null ? coldInputValueSat : tx.valueIn, { decimals: 4 }) }}</template><template #s>PIV</template></Stat>
         <Stat k="FEES" glow><template #v>{{ formatSats(tx.fees) }}</template><template #s>PIV</template></Stat>
-        <Stat k="CONFIRMATIONS" live><template #v>{{ formatCount(tx.confirmations) }}</template><template #s>{{ timeAgo(tx.blockTime) }}</template></Stat>
+        <Stat k="CONFIRMATIONS" live><template #v>{{ formatCount(tx.confirmations) }}</template><template #s>{{ tx.confirmations > 0 ? timeAgo(tx.blockTime) : 'in mempool' }}</template></Stat>
       </div>
 
       <h2 class="section-title">Value flow</h2>
@@ -400,9 +400,14 @@ const flowHeight = computed(() => {
       <h2 class="section-title">Context</h2>
       <HudPanel title="LEDGER CONTEXT" id="/tx metadata">
         <dl class="kv">
-          <dt>Block height</dt><dd><RouterLink :to="`/block/${tx.blockHeight}`">#{{ tx.blockHeight }}</RouterLink></dd>
-          <dt>Block hash</dt><dd>{{ truncateHash(tx.blockHash, 18, 14) }}</dd>
-          <dt>Block time</dt><dd>{{ formatDateTime(tx.blockTime) }}</dd>
+          <template v-if="tx.confirmations > 0">
+            <dt>Block height</dt><dd><RouterLink :to="`/block/${tx.blockHeight}`">#{{ tx.blockHeight }}</RouterLink></dd>
+            <dt>Block hash</dt><dd>{{ truncateHash(tx.blockHash, 18, 14) }}</dd>
+            <dt>Block time</dt><dd>{{ formatDateTime(tx.blockTime) }}</dd>
+          </template>
+          <template v-else>
+            <dt>Status</dt><dd><span class="pill warn mono">UNCONFIRMED</span> — in the mempool, not yet in a block</dd>
+          </template>
           <dt>Size</dt><dd>{{ formatCount(tx.size) }} B · vsize {{ formatCount(tx.vsize) }} B</dd>
           <dt>Version</dt><dd>{{ tx.version }} · locktime {{ tx.lockTime }}</dd>
         </dl>
