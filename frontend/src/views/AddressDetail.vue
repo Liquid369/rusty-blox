@@ -44,7 +44,10 @@ onMounted(load)
 watch(() => props.addr, load)
 
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
-const utxoTotal = computed(() => utxos.value.reduce((s, u) => s + sat2piv(u.value), 0))
+// Sum UTXO value as BigInt satoshis (the /utxo values are integer satoshi
+// strings) so UNSPENT is exact for any address and matches BALANCE — a float
+// sum via sat2piv corrupts past 2^53 sats and reads lossily.
+const utxoTotal = computed(() => utxos.value.reduce((s, u) => s + BigInt(u.value), 0n).toString())
 
 // Ledger value must be THIS address's delta in each tx (Σ outputs paying it − Σ inputs
 // spending it), NOT the tx's grand total — a big exchange batch tx moves far more than this
@@ -209,9 +212,9 @@ const addrKind = computed(() => {
     <template v-else-if="info">
       <div class="statgrid cols-4" style="margin-top: var(--space-4)">
         <Stat k="BALANCE" accent><template #v>{{ formatSats(info.balance, { decimals: 2 }) }}</template><template #s>PIV (incl. immature)</template></Stat>
-        <Stat k="TOTAL RECEIVED" glow><template #v>{{ compactNumber(sat2piv(info.totalReceived)) }}</template><template #s>PIV lifetime in</template></Stat>
-        <Stat k="TOTAL SENT"><template #v>{{ compactNumber(sat2piv(info.totalSent)) }}</template><template #s>PIV lifetime out</template></Stat>
-        <Stat k="UNSPENT"><template #v>{{ compactNumber(utxoTotal) }}</template><template #s>{{ utxos.length }} UTXOs spendable</template></Stat>
+        <Stat k="TOTAL RECEIVED" glow><template #v>{{ formatSats(info.totalReceived, { decimals: 2 }) }}</template><template #s>PIV lifetime in</template></Stat>
+        <Stat k="TOTAL SENT"><template #v>{{ formatSats(info.totalSent, { decimals: 2 }) }}</template><template #s>PIV lifetime out</template></Stat>
+        <Stat k="UNSPENT"><template #v>{{ formatSats(utxoTotal, { decimals: 2 }) }}</template><template #s>{{ utxos.length }} UTXOs spendable</template></Stat>
       </div>
 
       <div class="split s-21" style="margin-top: var(--space-4)">
@@ -221,8 +224,8 @@ const addrKind = computed(() => {
         <HudPanel title="RECEIVED / SENT" id="totalReceived vs totalSent">
           <EChart :option="flowOption" height="160px" aria-label="Received versus sent split" />
           <div class="flow-cap">
-            <span class="mono"><span class="fc-dot" style="background:var(--cyan)"></span>received {{ compactNumber(sat2piv(info.totalReceived)) }}</span>
-            <span class="mono"><span class="fc-dot" style="background:var(--rose)"></span>sent {{ compactNumber(sat2piv(info.totalSent)) }}</span>
+            <span class="mono"><span class="fc-dot" style="background:var(--cyan)"></span>received {{ formatSats(info.totalReceived, { decimals: 2 }) }}</span>
+            <span class="mono"><span class="fc-dot" style="background:var(--rose)"></span>sent {{ formatSats(info.totalSent, { decimals: 2 }) }}</span>
           </div>
         </HudPanel>
       </div>
