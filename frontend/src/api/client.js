@@ -121,10 +121,6 @@ export const getMnList = () =>
 export const getMempool = () =>
   isMock ? Promise.resolve(mock.mempool()) : getJSON('/mempool')
 
-// Mock-only congestion sparkline; live mode accumulates client-side instead.
-export const getMempoolSeries = () =>
-  Promise.resolve(isMock ? mock.mempoolSeries() : [])
-
 // --- governance -------------------------------------------------------
 export const getBudgetInfo = () =>
   isMock ? Promise.resolve(mock.budgetInfo()) : getJSON('/budgetinfo')
@@ -194,7 +190,7 @@ export default {
   getStatus, getHealth, getRecentBlocks, getBlock, getBlockDetail, getTx,
   getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
-  getMnCount, getMnList, getMempool, getMempoolSeries,
+  getMnCount, getMnList, getMempool,
   getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
   mnTotal, nextSuperblock, proposalPasses, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
