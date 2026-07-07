@@ -1213,24 +1213,46 @@ async fn index_block_from_rpc(
                     let mut key_r = vec![b'r'];
                     key_r.extend_from_slice(address.as_bytes());
 
-                    let current_total = db
-                        .get_cf(&cf_addr_index, &key_r)?
-                        .and_then(|bytes| {
-                            if bytes.len() == 8 {
-                                Some(i64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                    bytes[6], bytes[7],
-                                ]))
+                    // A READ error must NOT fall through to a write: defaulting
+                    // current_total to 0 and writing 0+delta would CLOBBER the lifetime
+                    // total, and the delta-only undo cannot restore it (reorg reversal
+                    // subtracts the recorded delta, so a tip rollback would leave
+                    // delta-delta=0, losing the true prior value). So a failed read just
+                    // aborts the block (tx_errors) and leaves 'r' untouched. Ok(None) or a
+                    // bad-length blob is a genuine 0 (new address) and DOES write.
+                    match db.get_cf(&cf_addr_index, &key_r) {
+                        Ok(existing) => {
+                            let current_total = existing
+                                .and_then(|bytes| {
+                                    if bytes.len() == 8 {
+                                        Some(i64::from_le_bytes([
+                                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+                                            bytes[5], bytes[6], bytes[7],
+                                        ]))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            let new_total = current_total + received_delta;
+                            // Non-idempotent write: on failure route to the block-abort
+                            // path (tx_errors), never a bare `?` that would return before
+                            // store_address_undo and strand partial r/s with no undo/'E'.
+                            if let Err(e) =
+                                db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())
+                            {
+                                warn!(address = %address, error = %e, "Failed to update received total");
+                                tx_errors += 1;
                             } else {
-                                None
+                                // Reorg-undo capture: record exactly the amount added to 'r'.
+                                block_undo.add_received(address.clone(), received_delta);
                             }
-                        })
-                        .unwrap_or(0);
-
-                    let new_total = current_total + received_delta;
-                    db.put_cf(&cf_addr_index, &key_r, new_total.to_le_bytes())?;
-                    // Reorg-undo capture: record exactly the amount we add to 'r'.
-                    block_undo.add_received(address.clone(), received_delta);
+                        }
+                        Err(e) => {
+                            warn!(address = %address, error = %e, "Failed to read received total; leaving 'r' untouched, aborting block");
+                            tx_errors += 1;
+                        }
+                    }
                 }
 
                 // Calculate sent amount (inputs spending from this address)
@@ -1248,8 +1270,17 @@ async fn index_block_from_rpc(
                             let mut prev_tx_key = vec![b't'];
                             prev_tx_key.extend_from_slice(&prev_txid_bytes);
 
-                            // Get previous transaction
-                            if let Some(prev_tx_data) = db.get_cf(&cf_transactions, &prev_tx_key)? {
+                            // Get previous transaction. A read error routes to the block
+                            // abort (tx_errors), never a bare `?` that would return before
+                            // store_address_undo and strand the partial r/s already written.
+                            let prev_tx_data_opt = db
+                                .get_cf(&cf_transactions, &prev_tx_key)
+                                .unwrap_or_else(|e| {
+                                    warn!(address = %address, error = %e, "Failed to read prev tx for sent total");
+                                    tx_errors += 1;
+                                    None
+                                });
+                            if let Some(prev_tx_data) = prev_tx_data_opt {
                                 if prev_tx_data.len() >= 8 {
                                     let prev_raw_tx = &prev_tx_data[8..];
                                     let mut prev_tx_with_header =
@@ -1279,24 +1310,39 @@ async fn index_block_from_rpc(
                     let mut key_s = vec![b's'];
                     key_s.extend_from_slice(address.as_bytes());
 
-                    let current_total = db
-                        .get_cf(&cf_addr_index, &key_s)?
-                        .and_then(|bytes| {
-                            if bytes.len() == 8 {
-                                Some(i64::from_le_bytes([
-                                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-                                    bytes[6], bytes[7],
-                                ]))
+                    // Same read-failure discipline as 'r': a failed read leaves 's'
+                    // untouched and aborts the block; it never clobbers the lifetime total
+                    // with a 0-based write the delta-only undo could not reverse.
+                    match db.get_cf(&cf_addr_index, &key_s) {
+                        Ok(existing) => {
+                            let current_total = existing
+                                .and_then(|bytes| {
+                                    if bytes.len() == 8 {
+                                        Some(i64::from_le_bytes([
+                                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4],
+                                            bytes[5], bytes[6], bytes[7],
+                                        ]))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            let new_total = current_total + sent_delta;
+                            if let Err(e) =
+                                db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())
+                            {
+                                warn!(address = %address, error = %e, "Failed to update sent total");
+                                tx_errors += 1;
                             } else {
-                                None
+                                // Reorg-undo capture: record exactly the amount added to 's'.
+                                block_undo.add_sent(address.clone(), sent_delta);
                             }
-                        })
-                        .unwrap_or(0);
-
-                    let new_total = current_total + sent_delta;
-                    db.put_cf(&cf_addr_index, &key_s, new_total.to_le_bytes())?;
-                    // Reorg-undo capture: record exactly the amount we add to 's'.
-                    block_undo.add_sent(address.clone(), sent_delta);
+                        }
+                        Err(e) => {
+                            warn!(address = %address, error = %e, "Failed to read sent total; leaving 's' untouched, aborting block");
+                            tx_errors += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1379,6 +1425,49 @@ async fn index_block_from_rpc(
         // recompute, so running it after a genuinely clean rollback is merely
         // redundant, never wrong.
         db.put_cf(&cf_state, &retry_marker_key, height.to_le_bytes())?;
+
+        // rollback_to_height regresses sync_height to height-1 AND deletes this
+        // height's metadata + orphan-marks its txs. That is correct ONLY at the live
+        // tip (monitor extend), where height == sync_height+1 and the block being
+        // aborted really is the top. The below-tip re-apply callers
+        // (recover_crashed_blocks, backfill_heightless_catchup_range) run
+        // index_block_from_rpc for a height that is <= the committed tip; letting the
+        // rollback fire there would slam sync_height thousands of blocks backwards and
+        // wipe a still-canonical block. For those, leave the partial state and the 'E'
+        // marker so the idempotent t/a-indexed r/s repair reconciles it, never a
+        // watermark regression.
+        let committed_tip = crate::chain_state::get_sync_height(db).unwrap_or(0);
+        if height <= committed_tip {
+            // Below-tip re-apply (recover_crashed_blocks / backfill): do NOT roll back
+            // (that regresses the tip + orphan-deletes a still-canonical block). The
+            // partial r/s just written are non-idempotent, and no future SUCCESSFUL pass
+            // at this height is guaranteed to consume the 'E' marker
+            // (recover_crashed_blocks continues past this Err without retrying; backfill
+            // may skip the height once chain_metadata is keyed). So reconcile r/s NOW from
+            // the authoritative t/a indexes — the exact repair the marker would trigger —
+            // and clear the marker on success. Still return Err so the caller logs the
+            // partial attempt (t/a itself may be incomplete under the same IO fault, in
+            // which case the marker is left for a later pass).
+            match crate::crash_recovery::repair_block_addresses_rs(db, height).await {
+                Ok(n) => {
+                    info!(
+                        height,
+                        addresses = n,
+                        "Reconciled r/s for below-tip partial block from t/a (no rollback)"
+                    );
+                    let _ = db.delete_cf(&cf_state, &retry_marker_key);
+                }
+                Err(e) => {
+                    warn!(height, error = %e,
+                        "Below-tip r/s repair failed; 'E' marker left for a later pass");
+                }
+            }
+            return Err(format!(
+                "{tx_errors} of {} txs failed to index at below-tip height {height} (tip {committed_tip}); r/s reconciled from t/a, no rollback",
+                tx_array.len()
+            )
+            .into());
+        }
         match crate::reorg::rollback_to_height(db.clone(), height - 1, height).await {
             Ok(_) => {
                 return Err(format!(
@@ -1421,23 +1510,38 @@ async fn index_block_from_rpc(
         }
     }
 
-    // Update sync height
-    db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
+    // Advance the served tip ONLY when this block actually extends it. The below-tip
+    // re-apply callers (recover_crashed_blocks / backfill_heightless_catchup_range run
+    // index_block_from_rpc for heights <= the committed tip) must not regress
+    // sync_height: the regression triggers a full re-catchup that double-counts the
+    // non-idempotent r/s totals, and — with more than one leftover crash marker — could
+    // let the Wave-6-B abort guard misread the transiently-lowered tip and roll back a
+    // still-canonical block. Preventing the regression here is the root fix;
+    // restore_sync_height_if_regressed stays as a defensive net. The 'H'+height hash is
+    // per-height (dedup / mismatch detection) and is always written.
+    let is_tip_advance = height > crate::chain_state::get_sync_height(db).unwrap_or(0);
+    if is_tip_advance {
+        // Update sync height
+        db.put_cf(&cf_state, b"sync_height", height.to_le_bytes())?;
+    }
 
     // CRITICAL FIX: Store block hash for deduplication
     let mut height_hash_key = vec![b'H'];
     height_hash_key.extend(&height.to_le_bytes());
     db.put_cf(&cf_state, &height_hash_key, block_hash.as_bytes())?;
 
-    // Persist the tip block header time so /health can detect a frozen tip
-    // (now - tip_block_time) even across restarts and when network_height also
-    // froze because the same dead RPC stopped updating it.
-    db.put_cf(&cf_state, b"tip_block_time", (time as i64).to_le_bytes())?;
+    if is_tip_advance {
+        // Persist the tip block header time so /health can detect a frozen tip
+        // (now - tip_block_time) even across restarts and when network_height also
+        // froze because the same dead RPC stopped updating it. Gated with the
+        // watermark so a below-tip re-apply can't backdate the health tip-time.
+        db.put_cf(&cf_state, b"tip_block_time", (time as i64).to_le_bytes())?;
 
-    // Update indexed height metric
-    metrics::set_indexed_height("rpc_monitor", height as i64);
-    // Block header timestamp — lets an alert detect a frozen tip (now - ts > N).
-    metrics::set_last_block_timestamp(time as i64);
+        // Update indexed height metric
+        metrics::set_indexed_height("rpc_monitor", height as i64);
+        // Block header timestamp — lets an alert detect a frozen tip (now - ts > N).
+        metrics::set_last_block_timestamp(time as i64);
+    }
 
     // Processing marker will be cleaned up automatically by the guard's Drop impl
 

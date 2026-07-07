@@ -95,6 +95,23 @@ pub struct CacheManager {
 
     /// Generic JSON cache with TTL support for API responses
     json_cache: Arc<RwLock<LruCache<String, CachedEntry<serde_json::Value>>>>,
+
+    /// Single-flight registry: one async lock per key so a burst of concurrent
+    /// requests for the same cold/expired key runs `compute` ONCE instead of a
+    /// thundering herd (e.g. /price firing N simultaneous CoinGecko calls the
+    /// instant the TTL expires, defeating the very rate-limit guard the cache
+    /// exists for). Bounded LRU so it can't grow unbounded on high-cardinality
+    /// keys; if an in-flight key's lock is evicted (1024 OTHER keys churn during
+    /// one slow compute) a later caller mints a fresh lock and double-computes —
+    /// rare and correctness-preserving (both writers store the same value), never
+    /// unbounded. Distinct keys get distinct locks — only the SAME key coalesces,
+    /// so unrelated endpoints never serialize on each other.
+    ///
+    /// CAVEAT for future callers: the per-key mutex is held across `compute()`, so
+    /// a `compute` closure must never itself call `get_or_compute` for the SAME
+    /// key (self-deadlock). Today every call site is a top-level handler, so none
+    /// re-enter; distinct-key nesting is safe.
+    compute_locks: Arc<RwLock<LruCache<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl CacheManager {
@@ -136,6 +153,7 @@ impl CacheManager {
             json_cache: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(json_cap).unwrap(),
             ))),
+            compute_locks: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(1024).unwrap()))),
         }
     }
 
@@ -305,15 +323,29 @@ impl CacheManager {
         Fut: std::future::Future<Output = Result<T, E>>,
         T: Clone + Serialize + DeserializeOwned,
     {
-        // Try cache first
+        // Fast path: a live cached value needs no lock.
         if let Some(cached) = self.get_json::<T>(key).await {
             return Ok(cached);
         }
 
-        // Compute value
-        let value = compute().await?;
+        // Single-flight: take this key's async lock so only ONE caller computes.
+        // The registry lock is held only long enough to fetch/insert the per-key
+        // Mutex — never across compute() — so different keys never block each other.
+        let key_lock = {
+            let mut reg = self.compute_locks.write().await;
+            reg.get_or_insert(key.to_string(), || Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = key_lock.lock().await;
 
-        // Store in cache
+        // Re-check under the key lock: whoever held it before us has almost
+        // certainly populated the cache, so the rest of the herd hits here.
+        if let Some(cached) = self.get_json::<T>(key).await {
+            return Ok(cached);
+        }
+
+        // We are the single computer for this key.
+        let value = compute().await?;
         self.set_json(key, &value, ttl).await;
 
         Ok(value)
