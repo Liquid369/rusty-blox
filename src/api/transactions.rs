@@ -126,12 +126,25 @@ pub(crate) async fn build_transaction_from_db(
     db: &Arc<DB>,
     txid: &str,
 ) -> Result<Transaction, Box<dyn std::error::Error + Send + Sync>> {
+    build_transaction_inner(db, txid, None).await
+}
+
+/// Shared renderer for the confirmed [`build_transaction_from_db`] path and the
+/// unconfirmed-mempool path. `record_override` supplies the
+/// `version(4) ++ height(4) ++ raw_tx` blob directly (a mempool tx fetched via
+/// getrawtransaction); `None` reads it from the confirmed `transactions` index.
+/// Input values/addresses and output spent-flags are resolved from the index either
+/// way — for a mempool tx, confirmed prevouts resolve and its own not-yet-indexed
+/// outputs stay `spent: null`.
+async fn build_transaction_inner(
+    db: &Arc<DB>,
+    txid: &str,
+    record_override: Option<Vec<u8>>,
+) -> Result<Transaction, Box<dyn std::error::Error + Send + Sync>> {
     let db_clone = Arc::clone(db);
     let txid_clone = txid.to_string();
 
     tokio::task::spawn_blocking(move || {
-        let txid_bytes = hex::decode(&txid_clone)?;
-
         let cf_transactions = db_clone
             .cf_handle("transactions")
             .ok_or("transactions CF not found")?;
@@ -139,8 +152,15 @@ pub(crate) async fn build_transaction_from_db(
         // Prefer a VALID record over a malformed "phantom stub": the record may be stored
         // internal-keyed (reversed) or display-keyed, and a short (<8-byte) stub at one key
         // must not shadow the real record at the other (otherwise /tx 404s a tx that exists).
-        let data = read_valid_tx_record(&db_clone, &cf_transactions, &txid_bytes)?
-            .ok_or("Transaction not found")?;
+        // record_override carries a synthetic blob for an unconfirmed (mempool) tx.
+        let data = match record_override {
+            Some(d) => d,
+            None => {
+                let txid_bytes = hex::decode(&txid_clone)?;
+                read_valid_tx_record(&db_clone, &cf_transactions, &txid_bytes)?
+                    .ok_or("Transaction not found")?
+            }
+        };
 
         if data.len() > 10_000_000 {
             return Err("Transaction data too large".into());
@@ -326,7 +346,9 @@ pub(crate) async fn build_transaction_from_db(
             // 'a' index is address-keyed). Unspendable outputs (OP_RETURN, empty
             // scripts) can't be tracked — leave `spent` as None so the frontend
             // degrades cleanly rather than mislabeling them.
-            let spent = if output.address.is_empty() {
+            // block_height <= 0 → unconfirmed (mempool) or non-canonical (orphan): the
+            // output is not in the 'a' UTXO index, so a probe would falsely read "spent".
+            let spent = if output.address.is_empty() || block_height <= 0 {
                 None
             } else {
                 // An output is unspent if it is still present in the 'a' set of
@@ -467,15 +489,53 @@ pub(crate) async fn build_transaction_from_db(
     .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
 }
 
+/// Build an UNCONFIRMED (mempool) transaction from its raw hex (fetched via
+/// `getrawtransaction`). Rendered through the shared path with height 0, so it comes
+/// back with `confirmations: 0`, no block hash/height/time, and `spent: null` on its
+/// own outputs (they are not in the UTXO index yet).
+async fn build_unconfirmed_transaction(
+    db: &Arc<DB>,
+    txid: &str,
+    raw_hex: &str,
+) -> Result<Transaction, Box<dyn std::error::Error + Send + Sync>> {
+    let raw = hex::decode(raw_hex.trim()).map_err(|_| "Node returned invalid raw-tx hex")?;
+    if raw.is_empty() {
+        return Err("Node returned empty raw tx".into());
+    }
+    // Synthetic index-style record: block_version(4)=0 ++ height(4)=0 ++ raw_tx.
+    let mut record = Vec::with_capacity(8 + raw.len());
+    record.extend_from_slice(&[0u8; 8]);
+    record.extend_from_slice(&raw);
+    build_transaction_inner(db, txid, Some(record)).await
+}
+
 async fn compute_transaction_details(
     db: &Arc<DB>,
     txid: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    // Use the shared transaction builder
-    let tx = build_transaction_from_db(db, txid).await?;
-
-    // Convert to JSON for current endpoint compatibility
-    // TODO: Eventually return Transaction struct directly
+    let tx = match build_transaction_from_db(db, txid).await {
+        Ok(tx) => tx,
+        Err(e) => {
+            // Not in the confirmed index. A genuine "not found" may just be an
+            // UNCONFIRMED tx still in the mempool — the node can serve it via
+            // getrawtransaction. Fall back ONLY on a logical not-found, never on a
+            // storage error (which must surface as 500, not be masked as a 404).
+            if e.downcast_ref::<rocksdb::Error>().is_none()
+                && e.to_string() == "Transaction not found"
+            {
+                let raw = super::helpers::rpc_call_json(
+                    "getrawtransaction",
+                    serde_json::json!([txid, 0]),
+                )
+                .await
+                .map_err(|_| "Transaction not found")?;
+                let raw_hex = raw.as_str().ok_or("Transaction not found")?;
+                build_unconfirmed_transaction(db, txid, raw_hex).await?
+            } else {
+                return Err(e);
+            }
+        }
+    };
     Ok(serde_json::to_value(tx)?)
 }
 
@@ -697,5 +757,19 @@ mod tests {
         put(&db, &display, &stub);
         let cf = db.cf_handle("transactions").unwrap();
         assert_eq!(read_valid_tx_record(&db, &cf, &display).unwrap(), None);
+    }
+
+    // The unconfirmed (mempool) render path must reject malformed raw hex from the node
+    // BEFORE doing any work. Non-hex and empty both fail the input guards ahead of the
+    // spawn_blocking render, so a plain block_on (no tokio runtime) reaches them. A full
+    // render needs a live tx + runtime and is verified against the node on the VPS.
+    #[test]
+    fn unconfirmed_rejects_bad_raw_hex() {
+        let (_t, db, _) = seed();
+        let db = std::sync::Arc::new(db);
+        assert!(
+            futures::executor::block_on(build_unconfirmed_transaction(&db, "aa", "zz")).is_err()
+        );
+        assert!(futures::executor::block_on(build_unconfirmed_transaction(&db, "aa", "")).is_err());
     }
 }
