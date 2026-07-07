@@ -553,15 +553,6 @@ export function mempool() {
   return { size: txs.length, bytes: 0, usage: null, transactions: txs }
 }
 
-// Mock-only: a client-accumulated mempool-size sparkline (the inventory's
-// recommended 10s-poll congestion chart). No live endpoint backs this.
-export function mempoolSeries(points = 40) {
-  const out = []
-  let ts = TIP_TIME - points * 60
-  for (let i = 0; i < points; i++) { ts += 60; out.push({ ts, txs: Math.max(0, randInt(0, 13) - 5) }) }
-  return out
-}
-
 // =====================================================================
 // governance  (budgetinfo/projection amounts are PIV f64 numbers; Title-Case)
 // =====================================================================

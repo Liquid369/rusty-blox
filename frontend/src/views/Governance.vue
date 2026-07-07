@@ -92,6 +92,33 @@ const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 10
 const overCap = computed(() => allotted.value > cap.value + 1)
 const demand = computed(() => proposals.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
+/* ---------- funded THIS cycle (most recent superblock) ----------
+   /budgetprojection is forward-looking (the NEXT payout), so it can't answer
+   "what did the last superblock fund". We reproduce Core's allotment for the most
+   recent superblock instead: passing proposals whose payment window covers it,
+   ranked by net approval, funded greedily up to the monthly cap (skip-and-keep-
+   filling, exactly like CBudgetManager::GetBudget). Verified to match the on-chain
+   superblock payout (blocks pay one proposal each, contiguously from the superblock
+   height) exactly, without a per-block scan. */
+const SUPERBLOCK_CYCLE = 43200 // PIVX consensus: nBudgetCycleBlocks
+const lastSbHeight = computed(() =>
+  Math.floor((chain.height || 0) / SUPERBLOCK_CYCLE) * SUPERBLOCK_CYCLE)
+const fundedThisCycle = computed(() => {
+  const sb = lastSbHeight.value
+  if (!sb || !proposals.value.length) return { rows: [], total: 0 }
+  const cand = proposals.value
+    .filter((p) => passes(p) && p.BlockStart <= sb && sb <= p.BlockEnd && p.MonthlyPayment > 0)
+    .sort((a, b) => b.Yeas - b.Nays - (a.Yeas - a.Nays))
+  const rows = []
+  let total = 0
+  for (const p of cand) {
+    if (total + p.MonthlyPayment > cap.value + 0.5) continue // over cap → deferred, not paid
+    rows.push(p)
+    total += p.MonthlyPayment
+  }
+  return { rows, total }
+})
+
 const PAL = ['#c46bff', '#46e6d0', '#ffcf5c', '#9d4ef0', '#ff6f9c', '#7ad97a']
 
 /* ---------- treasury allocation: 100%-stacked horizontal bar ---------- */
@@ -161,13 +188,13 @@ const allocOption = computed(() => {
         <template #v>{{ formatCount(blocksLeft) }}<span class="unit">blk</span></template>
         <template #s>≈ {{ daysLeft.toFixed(1) }} days at ~60s/block</template>
       </Stat>
-      <Stat k="ALLOTTED THIS CYCLE" glow>
+      <Stat k="ALLOTTED · NEXT SUPERBLOCK" glow>
         <template #v>{{ formatPiv(allotted, { decimals: 0 }) }}</template>
         <template #s><span v-if="overCap" style="color:var(--warn);font-weight:700">⚠ OVER CAP · </span>{{ capPct.toFixed(0) }}% of the {{ formatPiv(cap, { decimals: 0 }) }} PIV cap{{ allottedUsd ? ' · ≈ $' + Math.round(allottedUsd).toLocaleString('en-US') : '' }}</template>
       </Stat>
       <Stat k="PROPOSALS">
         <template #v>{{ projection.length }}<span class="unit">/ {{ proposals.length }}</span></template>
-        <template #s>funded / submitted</template>
+        <template #s>next payout / submitted</template>
       </Stat>
       <Stat k="TREASURY DEMAND">
         <template #v>{{ formatPiv(demand, { decimals: 0 }) }}</template>
@@ -176,10 +203,10 @@ const allocOption = computed(() => {
     </div>
 
     <!-- ALLOCATION -->
-    <h2 class="section-title">Treasury allocation — funded proposals this cycle</h2>
-    <HudPanel title="BUDGET ALLOCATION" id="/budgetprojection · Allotted share" hero>
+    <h2 class="section-title">Treasury allocation — next superblock payout (#{{ formatCount(sbHeight) }})</h2>
+    <HudPanel title="BUDGET ALLOCATION" id="/budgetprojection · next-payout Allotted share" hero>
       <template #head><span class="pill cyan mono">Σ {{ formatPiv(allotted, { decimals: 0 }) }} PIV</span></template>
-      <EChart v-if="projection.length" :option="allocOption" height="74px" aria-label="Treasury allocation share across funded proposals" />
+      <EChart v-if="projection.length" :option="allocOption" height="74px" aria-label="Treasury allocation share across next-payout proposals" />
       <div class="alloc-legend" v-if="projection.length">
         <div v-for="(r, i) in projection" :key="r.Hash" class="al">
           <span class="al-dot" :style="{ background: PAL[i % PAL.length] }"></span>
@@ -187,6 +214,26 @@ const allocOption = computed(() => {
           <span class="al-val mono">{{ formatPiv(r.Allotted, { decimals: 0 }) }} PIV</span>
         </div>
       </div>
+    </HudPanel>
+
+    <!-- FUNDED THIS CYCLE — the most recent superblock's actual payout, derived from
+         budget status to match the on-chain payment set without a per-block scan. -->
+    <h2 class="section-title">Funded this cycle — superblock #{{ formatCount(lastSbHeight) }}</h2>
+    <HudPanel title="BUDGET PAID" id="funded set · matches the on-chain superblock payout" hero>
+      <template #head><span class="pill ok mono">Σ {{ formatPiv(fundedThisCycle.total, { decimals: 0 }) }} PIV</span></template>
+      <div class="alloc-legend" v-if="fundedThisCycle.rows.length">
+        <div v-for="(p, i) in fundedThisCycle.rows" :key="p.Hash" class="al">
+          <span class="al-dot" :style="{ background: PAL[i % PAL.length] }"></span>
+          <RouterLink :to="`/proposal/${encodeURIComponent(p.Name)}`" class="al-name">{{ p.Name }}</RouterLink>
+          <span class="al-val mono">{{ formatPiv(p.MonthlyPayment, { decimals: 0 }) }} PIV</span>
+        </div>
+      </div>
+      <p v-else class="note mono dim">No proposals were funded at the most recent superblock.</p>
+      <p class="note mono dim">
+        {{ fundedThisCycle.rows.length }} passing proposals whose payment window covers superblock
+        <RouterLink :to="`/block/${lastSbHeight}`" class="mono">#{{ formatCount(lastSbHeight) }}</RouterLink>,
+        ranked by net approval and funded to the {{ formatPiv(cap, { decimals: 0 }) }} PIV cap{{ usd(fundedThisCycle.total) ? ' · ≈ ' + usd(fundedThisCycle.total) : '' }} — the same set paid on-chain across the superblock blocks, one proposal per block.
+      </p>
     </HudPanel>
 
     <!-- FINALIZED BUDGET (mnfinalbudget show) -->
