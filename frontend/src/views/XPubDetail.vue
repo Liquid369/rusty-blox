@@ -10,7 +10,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { getXpub } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
-import { timeAgo, truncateHash, formatCount, compactNumber } from '../lib/format.js'
+import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
 import { echarts, baseOption, catAxis, valAxis, palette, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -43,7 +43,10 @@ watch(() => props.xpub, load)
 
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
 const tokens = computed(() => info.value?.tokens || [])
-const chainOf = (path) => (path.split('/')[5] === '1' ? 'change' : 'receive')
+// path = m/44'/119'/account'/chain/index → split()[4] is the BIP44 chain field
+// (0=receive, 1=change). [5] is the address index — using it mis-buckets every
+// address whose index is 1 as "change" and every change addr at index 0 as "receive".
+const chainOf = (path) => (path.split('/')[4] === '1' ? 'change' : 'receive')
 
 /* ---------- balance by derived address ---------- */
 const balOption = computed(() => {
@@ -120,11 +123,11 @@ const splitOption = computed(() => {
           <template #s>PIV across {{ info.usedTokens }} addresses</template>
         </Stat>
         <Stat k="TOTAL RECEIVED" glow>
-          <template #v>{{ compactNumber(sat2piv(info.totalReceived)) }}</template>
+          <template #v>{{ formatSats(info.totalReceived, { decimals: 2 }) }}</template>
           <template #s>PIV lifetime in</template>
         </Stat>
         <Stat k="TOTAL SENT">
-          <template #v>{{ compactNumber(sat2piv(info.totalSent)) }}</template>
+          <template #v>{{ formatSats(info.totalSent, { decimals: 2 }) }}</template>
           <template #s>PIV lifetime out</template>
         </Stat>
         <Stat k="TRANSFERS">
@@ -174,7 +177,7 @@ const splitOption = computed(() => {
               <tbody>
                 <tr v-for="t in ledger.transactions" :key="t.txid">
                   <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
-                  <td class="num dim">{{ formatCount(t.blockHeight) }}</td>
+                  <td class="num dim"><span v-if="isUnconfirmedHeight(t.blockHeight)" class="pill warn mono">UNCONFIRMED</span><span v-else>{{ formatCount(t.blockHeight) }}</span></td>
                   <td class="dim">{{ timeAgo(t.blockTime) }}</td>
                   <td class="num strong">{{ formatSats(t.value, { decimals: 4 }) }}</td>
                   <td class="num dim">{{ formatCount(t.confirmations) }}</td>

@@ -8,7 +8,7 @@
 import { ref, watch, onMounted, computed } from 'vue'
 import { getAddress, getUtxo, setAddress503, isMock } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
-import { timeAgo, truncateHash, formatCount, compactNumber } from '../lib/format.js'
+import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
 import { echarts, baseOption, catAxis, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -189,6 +189,7 @@ const addrKind = computed(() => {
       </div>
       <div class="head-live">
         <span class="pill neon mono">{{ addrKind }}</span>
+        <span v-if="info && info.unconfirmedTxs > 0" class="pill warn mono">{{ info.unconfirmedTxs }} PENDING · {{ Number(info.unconfirmedBalance) > 0 ? '+' : '' }}{{ formatSats(info.unconfirmedBalance, { decimals: 2 }) }} PIV</span>
         <button v-if="isMock" class="gbtn" :class="{ on: demo503 }" @click="toggle503">{{ demo503 ? 'DISABLE' : 'DEMO' }} 503</button>
       </div>
     </div>
@@ -248,7 +249,7 @@ const addrKind = computed(() => {
             <tbody>
               <tr v-for="t in info.transactions" :key="t.txid">
                 <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
-                <td class="num dim">{{ formatCount(t.blockHeight) }}</td>
+                <td class="num dim"><span v-if="isUnconfirmedHeight(t.blockHeight)" class="pill warn mono">UNCONFIRMED</span><span v-else>{{ formatCount(t.blockHeight) }}</span></td>
                 <td class="dim">{{ timeAgo(t.blockTime) }}</td>
                 <td class="num strong" :style="{ color: (txDeltas[t.txid] || {}).color }">{{ (txDeltas[t.txid] || {}).str }}</td>
                 <td class="num dim">{{ formatCount(t.confirmations) }}</td>

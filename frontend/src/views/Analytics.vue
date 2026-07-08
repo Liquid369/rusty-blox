@@ -87,6 +87,14 @@ const txOption = computed(() => {
     lineStyle: { width: 0 }, emphasis: { focus: 'series' },
     data: rows.map((r) => r[key]),
   })
+  // cold-stake and shielded are OVERLAPPING subsets of the true partition
+  // (payment + stake + coinbase = count), so stacking them inflates the total by
+  // ~17%. Draw them as non-stacked dashed overlays ("of which N are cold-stake / shielded").
+  const overlay = (name, key, color) => ({
+    name, type: 'line', smooth: true, showSymbol: false,
+    lineStyle: { color, width: 1.5, type: 'dashed' }, emphasis: { focus: 'series' },
+    data: rows.map((r) => r[key]),
+  })
   return {
     ...base,
     legend: { data: ['payment', 'stake', 'coinbase', 'cold-stake', 'shielded', 'coin-days destroyed'], top: 0, textStyle: { color: p.text, fontFamily: 'monospace', fontSize: 10 }, itemWidth: 12, itemHeight: 8 },
@@ -100,8 +108,8 @@ const txOption = computed(() => {
       mk('payment', 'payment_count', p.cyan),
       mk('stake', 'stake_count', p.neon),
       mk('coinbase', 'coinbase_count', p.deep),
-      mk('cold-stake', 'coldstake_txs', '#7ad97a'),
-      mk('shielded', 'sapling_txs', '#ff5fd0'),
+      overlay('cold-stake', 'coldstake_txs', '#7ad97a'),
+      overlay('shielded', 'sapling_txs', '#ff5fd0'),
       {
         name: 'coin-days destroyed', type: 'line', yAxisIndex: 1, smooth: true, showSymbol: false,
         data: rows.map((r) => r.coin_days_destroyed),
