@@ -289,8 +289,8 @@ function richWidth(bal) {
         <h1 class="page-title">Analytics Deck</h1>
       </div>
       <div class="head-live">
-        <span class="pill cyan mono">120-DAY SERIES</span>
-        <span class="pill neon mono">FROZEN @ FULL-ENRICH</span>
+        <span class="pill cyan mono">{{ txs.length }}-DAY SERIES</span>
+        <span class="pill neon mono">RICH/WEALTH · SNAPSHOT</span>
       </div>
     </div>
 
@@ -335,7 +335,7 @@ function richWidth(bal) {
           <span class="hl-dot" :style="{ background: HODL_COLORS[b.band] }"></span>
           <span class="hl-band mono">{{ b.band }}</span>
           <span class="hl-val mono">{{ percent(b.percentage, 1) }}</span>
-          <span class="hl-piv mono dim">{{ compactNumber(b.value) }} PIV</span>
+          <span class="hl-piv mono dim">{{ formatPiv(b.value, { decimals: 0 }) }} PIV</span>
         </div>
       </div>
     </HudPanel>
