@@ -31,13 +31,18 @@ async function loadBlocks() {
   try { blocks.value = await getRecentBlocks(40) } catch { /* keep last good data */ }
 }
 
-onMounted(async () => {
-  await loadBlocks()
-  supply.value = await getSupply()
-  health.value = await getHealth()
-  txSeries.value = await getTransactions()
+onMounted(() => {
+  // Start the clock + block-feed poll FIRST: the old sequential awaits meant one
+  // rejected fetch (supply/health/tx) threw before the timers were set, killing
+  // the "since last block" counter and the live feed. allSettled isolates each load.
   clk = setInterval(() => { now.value = Math.floor(Date.now() / 1000) }, 1000)
   poll = setInterval(loadBlocks, 20000)
+  Promise.allSettled([
+    loadBlocks(),
+    getSupply().then((v) => { supply.value = v }),
+    getHealth().then((v) => { health.value = v }),
+    getTransactions().then((v) => { txSeries.value = v }),
+  ])
 })
 onBeforeUnmount(() => { clearInterval(clk); clearInterval(poll) })
 

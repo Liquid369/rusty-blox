@@ -13,8 +13,13 @@ import HudPanel from '../components/HudPanel.vue'
 
 const props = defineProps({ query: { type: String, required: true } })
 const result = ref(null)
+const err = ref(null)
 
-async function load() { result.value = null; result.value = await getSearch(props.query) }
+async function load() {
+  result.value = null; err.value = null
+  try { result.value = await getSearch(props.query) }
+  catch (e) { err.value = e.message || 'search failed' }
+}
 onMounted(load)
 watch(() => props.query, load)
 
@@ -49,7 +54,9 @@ const card = computed(() => {
       </div>
     </HudPanel>
 
-    <div v-if="!result" class="loading" style="margin-top: var(--space-4)">classifying…</div>
+    <div v-if="err" class="banner bad" style="margin-top: var(--space-4)">{{ err }}</div>
+
+    <div v-else-if="!result" class="loading" style="margin-top: var(--space-4)">classifying…</div>
 
     <template v-else-if="card">
       <h2 class="section-title">Match found</h2>

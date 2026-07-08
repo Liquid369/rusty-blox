@@ -20,15 +20,24 @@ const proposal = ref(null)
 const votes = ref([])
 const mncount = ref(null)
 const notFound = ref(false)
+const err = ref(null)
+const loading = ref(true)
 
 async function load() {
-  proposal.value = null; votes.value = []; notFound.value = false
-  const [all, mc] = await Promise.all([getBudgetInfo(), getMnCount()])
-  mncount.value = mc
-  const p = all.find((x) => x.Name === props.name)
-  if (!p) { notFound.value = true; return }
-  proposal.value = p
-  votes.value = await getBudgetVotes(p.Name)
+  proposal.value = null; votes.value = []; notFound.value = false; err.value = null
+  loading.value = true
+  try {
+    const [all, mc] = await Promise.all([getBudgetInfo(), getMnCount()])
+    mncount.value = mc
+    const p = all.find((x) => x.Name === props.name)
+    if (!p) { notFound.value = true; return }
+    proposal.value = p
+    votes.value = await getBudgetVotes(p.Name)
+  } catch (e) {
+    err.value = e.message || 'failed to load proposal'
+  } finally {
+    loading.value = false
+  }
 }
 onMounted(load)
 watch(() => props.name, load)
@@ -132,6 +141,10 @@ const timelineOption = computed(() => {
       No proposal named “{{ name }}” in the current budget cycle.
       <RouterLink to="/governance">Back to governance ›</RouterLink>
     </div>
+
+    <div v-else-if="err" class="banner bad">{{ err }}</div>
+
+    <div v-else-if="loading" class="loading" style="margin-top: var(--space-4)">loading proposal telemetry…</div>
 
     <template v-else-if="proposal">
       <!-- HEADLINE -->

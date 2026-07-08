@@ -15,13 +15,22 @@ import Stat from '../components/Stat.vue'
 const props = defineProps({ id: { type: String, required: true } })
 const node = ref(null)
 const notFound = ref(false)
+const err = ref(null)
+const loading = ref(true)
 
 async function load() {
-  node.value = null; notFound.value = false
-  const list = await getMnList()
-  const m = list.find((n) => n.txhash === props.id || n.addr === props.id || `${n.txhash}-${n.outidx}` === props.id)
-  if (m) node.value = m
-  else notFound.value = true
+  node.value = null; notFound.value = false; err.value = null
+  loading.value = true
+  try {
+    const list = await getMnList()
+    const m = list.find((n) => n.txhash === props.id || n.addr === props.id || `${n.txhash}-${n.outidx}` === props.id)
+    if (m) node.value = m
+    else notFound.value = true
+  } catch (e) {
+    err.value = e.message || 'failed to load masternode'
+  } finally {
+    loading.value = false
+  }
 }
 onMounted(load)
 watch(() => props.id, load)
@@ -52,6 +61,10 @@ const paid = computed(() => node.value && node.value.lastpaid > 0)
       Masternode not found in the current roster snapshot. The list is unindexed and
       cached ~60s — it may have rotated. <RouterLink to="/masternodes">Back to roster ›</RouterLink>
     </div>
+
+    <div v-else-if="err" class="banner bad">{{ err }}</div>
+
+    <div v-else-if="loading" class="loading" style="margin-top: var(--space-4)">loading masternode telemetry…</div>
 
     <template v-else-if="node">
       <HudPanel>

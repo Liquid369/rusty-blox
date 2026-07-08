@@ -17,6 +17,7 @@ import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
 
 const pool = ref(null)
+const err = ref(null)
 // Congestion series is accumulated client-side while the page is open: there is
 // no backend mempool-history endpoint (the monitor reads non-verbose
 // getrawmempool), so we poll the live snapshot every 10s and append {ts, txs}.
@@ -25,11 +26,19 @@ const series = ref([])
 let timer = null
 
 async function poll() {
-  const p = await getMempool()
-  if (!p) return
-  pool.value = p
-  series.value.push({ ts: Math.floor(Date.now() / 1000), txs: p.size })
-  if (series.value.length > 120) series.value.shift() // keep ~20 min at 10s cadence
+  // setInterval swallows rejections into unhandled-rejection noise and freezes
+  // the page on "—"; catch so a backend hiccup keeps the last good snapshot and
+  // only surfaces an error if we never managed a first load.
+  try {
+    const p = await getMempool()
+    if (!p) return
+    pool.value = p
+    err.value = null
+    series.value.push({ ts: Math.floor(Date.now() / 1000), txs: p.size })
+    if (series.value.length > 120) series.value.shift() // keep ~20 min at 10s cadence
+  } catch (e) {
+    if (!pool.value) err.value = e.message || 'mempool unavailable'
+  }
 }
 
 onMounted(() => {
@@ -75,6 +84,8 @@ const congestionOption = computed(() => {
         <span class="pill" :class="txs.length ? 'warn' : 'ok'"><span class="dot" :class="txs.length ? '' : 'live'"></span>{{ txs.length ? `${txs.length} PENDING` : 'IDLE' }}</span>
       </div>
     </div>
+
+    <div v-if="err" class="banner bad" style="margin-top: var(--space-4)">{{ err }}</div>
 
     <!-- STAT BAND -->
     <div class="statgrid cols-4">
