@@ -9,6 +9,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChainStore } from './store.js'
 import { formatCount } from './lib/format.js'
+import { formatFiat } from './lib/money.js'
 import { isMock } from './api/client.js'
 import CommandPalette from './components/CommandPalette.vue'
 
@@ -105,7 +106,7 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pri
         </div>
         <div class="t-cell hide-price">
           <span class="t-k">PRICE</span>
-          <span class="t-v mono">{{ chain.price ? '$' + chain.price.usd.toFixed(4) : '—' }}</span>
+          <span class="t-v mono">{{ chain.price ? formatFiat(chain.price.usd) : '—' }}</span>
         </div>
         <div class="t-cell hide-sm">
           <span class="t-k">UTC</span>

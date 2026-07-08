@@ -10,6 +10,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { useChainStore } from '../store.js'
 import { getRecentBlocks, getSupply, getHealth, getTransactions } from '../api/client.js'
 import { compactNumber, formatCount, timeAgo, truncateHash, formatDifficulty } from '../lib/format.js'
+import { formatPiv, formatFiat } from '../lib/money.js'
 import { echarts, baseOption, catAxis, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -31,13 +32,18 @@ async function loadBlocks() {
   try { blocks.value = await getRecentBlocks(40) } catch { /* keep last good data */ }
 }
 
-onMounted(async () => {
-  await loadBlocks()
-  supply.value = await getSupply()
-  health.value = await getHealth()
-  txSeries.value = await getTransactions()
+onMounted(() => {
+  // Start the clock + block-feed poll FIRST: the old sequential awaits meant one
+  // rejected fetch (supply/health/tx) threw before the timers were set, killing
+  // the "since last block" counter and the live feed. allSettled isolates each load.
   clk = setInterval(() => { now.value = Math.floor(Date.now() / 1000) }, 1000)
   poll = setInterval(loadBlocks, 20000)
+  Promise.allSettled([
+    loadBlocks(),
+    getSupply().then((v) => { supply.value = v }),
+    getHealth().then((v) => { health.value = v }),
+    getTransactions().then((v) => { txSeries.value = v }),
+  ])
 })
 onBeforeUnmount(() => { clearInterval(clk); clearInterval(poll) })
 
@@ -215,7 +221,7 @@ function blockType(b, i) {
         <template #s>~60s PoS target · {{ todayTx.count ? compactNumber(todayTx.count) : '—' }} tx/day</template>
       </Stat>
       <Stat k="MARKET PRICE" glow>
-        <template #v>{{ chain.price ? '$' + chain.price.usd.toFixed(4) : '—' }}</template>
+        <template #v>{{ chain.price ? formatFiat(chain.price.usd) : '—' }}</template>
         <template #s>{{ chain.price ? '€' + chain.price.eur.toFixed(4) + ' · ' + Math.round(chain.price.btc * 1e8).toLocaleString('en-US') + ' sats' : 'PIVX · USD / EUR / sats' }}</template>
       </Stat>
     </div>
@@ -224,17 +230,17 @@ function blockType(b, i) {
     <div class="split s-21 hero-row">
       <HudPanel title="NETWORK HEARTBEAT" id="/block-stats · difficulty × tx-load" hero>
         <template #head><span class="pill cyan mono">{{ blocks.length }} BLK</span></template>
-        <EChart v-if="blocks.length" :option="heroOption" height="320px" />
+        <EChart v-if="blocks.length" :option="heroOption" height="320px" aria-label="Network heartbeat: difficulty and transaction load across recent blocks" />
         <div v-else class="sk" style="height:320px"></div>
         <div class="hero-sub">
           <div class="eyebrow">BLOCK-INTERVAL TAIL · CHAIN HEALTH</div>
-          <EChart v-if="intervals.length" :option="intervalOption" height="120px" />
+          <EChart v-if="intervals.length" :option="intervalOption" height="120px" aria-label="Recent block-interval tail versus the 60-second target" />
         </div>
       </HudPanel>
 
       <div class="stack">
         <HudPanel title="SYNC STATUS" id="/status" hero>
-          <EChart :option="gaugeOption" height="180px" />
+          <EChart :option="gaugeOption" height="180px" aria-label="Chain sync progress gauge" />
           <div class="gauge-cap">
             <span class="pill" :class="chain.synced ? 'ok' : 'warn'">
               <span class="dot" :class="chain.synced ? 'live' : ''"></span>{{ chain.synced ? 'SYNCED' : 'CATCHING UP' }}
@@ -245,19 +251,21 @@ function blockType(b, i) {
 
         <HudPanel title="SUPPLY COMPOSITION" id="/analytics/supply">
           <div class="supply-row">
-            <EChart v-if="supply" :option="supplyOption" height="150px" />
+            <EChart v-if="supply" :option="supplyOption" height="150px" aria-label="Supply composition: transparent versus shielded" />
             <div class="supply-legend" v-if="supply">
               <div class="sl-item">
                 <span class="sl-dot" style="background:var(--neon)"></span>
-                <div><b>Transparent</b><span class="mono dim">{{ compactNumber(supply.current.transparent_supply) }} PIV</span></div>
+                <div><b>Transparent</b><span class="mono dim">{{ formatPiv(supply.current.transparent_supply, { decimals: 0 }) }} PIV</span></div>
               </div>
               <div class="sl-item">
                 <span class="sl-dot" style="background:var(--cyan)"></span>
-                <div><b>Shielded</b><span class="mono dim">{{ compactNumber(supply.current.shielded_supply) }} PIV</span></div>
+                <div><b>Shielded</b><span class="mono dim">{{ formatPiv(supply.current.shielded_supply, { decimals: 0 }) }} PIV</span></div>
               </div>
               <div class="sl-gauge">
                 <div class="eyebrow">SHIELD ADOPTION</div>
-                <div class="sl-bar"><i :style="{ width: Math.min(100, shieldPct * 12) + '%' }"></i></div>
+                <!-- honest width: shield adoption is ~1%, so use a CSS min-width for
+                   visibility rather than the old ×12 magnification that read as ~12% -->
+              <div class="sl-bar"><i :style="{ width: Math.min(100, shieldPct) + '%', minWidth: shieldPct > 0 ? '4px' : '0' }"></i></div>
                 <span class="cyan-text mono">{{ shieldPct.toFixed(3) }}%</span>
               </div>
             </div>

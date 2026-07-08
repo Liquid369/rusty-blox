@@ -10,7 +10,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { getXpub } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
-import { timeAgo, truncateHash, formatCount, compactNumber } from '../lib/format.js'
+import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
 import { echarts, baseOption, catAxis, valAxis, palette, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -22,15 +22,16 @@ const ledger = ref(null)
 const reindexing = ref(false)
 const err = ref(null)
 const loading = ref(true)
+const ledgerPage = ref(1)
 
 async function load() {
   info.value = null; ledger.value = null; reindexing.value = false; err.value = null
-  loading.value = true
+  loading.value = true; ledgerPage.value = 1
   try {
     // The real /xpub returns tokens XOR transactions per detail mode (and never
     // txids), so the address breakdown and the merged ledger need separate calls.
     info.value = await getXpub(props.xpub, { details: 'tokens', pageSize: 25 })
-    ledger.value = await getXpub(props.xpub, { details: 'txs', pageSize: 25 })
+    ledger.value = await getXpub(props.xpub, { details: 'txs', page: 1, pageSize: 25 })
   } catch (e) {
     if (e.status === 503) reindexing.value = true
     else err.value = e.message
@@ -38,12 +39,25 @@ async function load() {
     loading.value = false
   }
 }
+
+// Server-side pagination of the merged ledger (breakdown + totals are
+// page-independent). Keep the current page on error.
+async function goLedgerPage(p) {
+  if (p < 1 || p > (ledger.value?.totalPages || 1)) return
+  try {
+    ledger.value = await getXpub(props.xpub, { details: 'txs', page: p, pageSize: 25 })
+    ledgerPage.value = p
+  } catch { /* keep current page */ }
+}
 onMounted(load)
 watch(() => props.xpub, load)
 
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
 const tokens = computed(() => info.value?.tokens || [])
-const chainOf = (path) => (path.split('/')[5] === '1' ? 'change' : 'receive')
+// path = m/44'/119'/account'/chain/index → split()[4] is the BIP44 chain field
+// (0=receive, 1=change). [5] is the address index — using it mis-buckets every
+// address whose index is 1 as "change" and every change addr at index 0 as "receive".
+const chainOf = (path) => (path.split('/')[4] === '1' ? 'change' : 'receive')
 
 /* ---------- balance by derived address ---------- */
 const balOption = computed(() => {
@@ -120,11 +134,11 @@ const splitOption = computed(() => {
           <template #s>PIV across {{ info.usedTokens }} addresses</template>
         </Stat>
         <Stat k="TOTAL RECEIVED" glow>
-          <template #v>{{ compactNumber(sat2piv(info.totalReceived)) }}</template>
+          <template #v>{{ formatSats(info.totalReceived, { decimals: 2 }) }}</template>
           <template #s>PIV lifetime in</template>
         </Stat>
         <Stat k="TOTAL SENT">
-          <template #v>{{ compactNumber(sat2piv(info.totalSent)) }}</template>
+          <template #v>{{ formatSats(info.totalSent, { decimals: 2 }) }}</template>
           <template #s>PIV lifetime out</template>
         </Stat>
         <Stat k="TRANSFERS">
@@ -174,13 +188,18 @@ const splitOption = computed(() => {
               <tbody>
                 <tr v-for="t in ledger.transactions" :key="t.txid">
                   <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
-                  <td class="num dim">{{ formatCount(t.blockHeight) }}</td>
+                  <td class="num dim"><span v-if="isUnconfirmedHeight(t.blockHeight)" class="pill warn mono">UNCONFIRMED</span><span v-else>{{ formatCount(t.blockHeight) }}</span></td>
                   <td class="dim">{{ timeAgo(t.blockTime) }}</td>
                   <td class="num strong">{{ formatSats(t.value, { decimals: 4 }) }}</td>
                   <td class="num dim">{{ formatCount(t.confirmations) }}</td>
                 </tr>
               </tbody>
             </table>
+          </div>
+          <div class="pager" v-if="(ledger.totalPages || 1) > 1">
+            <button class="gbtn" :disabled="ledgerPage <= 1" @click="goLedgerPage(ledgerPage - 1)">‹ PREV</button>
+            <span class="mono dim">{{ ledgerPage }} / {{ ledger.totalPages }}</span>
+            <button class="gbtn" :disabled="ledgerPage >= (ledger.totalPages || 1)" @click="goLedgerPage(ledgerPage + 1)">NEXT ›</button>
           </div>
         </HudPanel>
       </template>
@@ -195,4 +214,6 @@ const splitOption = computed(() => {
 .flow-cap { display: flex; justify-content: center; gap: 18px; margin-top: 8px; font-size: 11px; color: var(--text-muted); }
 .flow-cap .fd { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; box-shadow: 0 0 5px currentColor; }
 .scroll { overflow-x: auto; }
+.pager { display: flex; align-items: center; gap: 14px; justify-content: flex-end; margin-top: var(--space-3); }
+.pager .gbtn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

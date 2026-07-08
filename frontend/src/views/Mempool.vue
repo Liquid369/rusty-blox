@@ -17,6 +17,7 @@ import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
 
 const pool = ref(null)
+const err = ref(null)
 // Congestion series is accumulated client-side while the page is open: there is
 // no backend mempool-history endpoint (the monitor reads non-verbose
 // getrawmempool), so we poll the live snapshot every 10s and append {ts, txs}.
@@ -25,11 +26,19 @@ const series = ref([])
 let timer = null
 
 async function poll() {
-  const p = await getMempool()
-  if (!p) return
-  pool.value = p
-  series.value.push({ ts: Math.floor(Date.now() / 1000), txs: p.size })
-  if (series.value.length > 120) series.value.shift() // keep ~20 min at 10s cadence
+  // setInterval swallows rejections into unhandled-rejection noise and freezes
+  // the page on "—"; catch so a backend hiccup keeps the last good snapshot and
+  // only surfaces an error if we never managed a first load.
+  try {
+    const p = await getMempool()
+    if (!p) return
+    pool.value = p
+    err.value = null
+    series.value.push({ ts: Math.floor(Date.now() / 1000), txs: p.size })
+    if (series.value.length > 120) series.value.shift() // keep ~20 min at 10s cadence
+  } catch (e) {
+    if (!pool.value) err.value = e.message || 'mempool unavailable'
+  }
 }
 
 onMounted(() => {
@@ -76,6 +85,8 @@ const congestionOption = computed(() => {
       </div>
     </div>
 
+    <div v-if="err" class="banner bad" style="margin-top: var(--space-4)">{{ err }}</div>
+
     <!-- STAT BAND -->
     <div class="statgrid cols-4">
       <Stat k="PENDING TXS" accent live>
@@ -110,7 +121,8 @@ const congestionOption = computed(() => {
     <h2 class="section-title">Pending transactions ({{ txs.length }})</h2>
     <HudPanel title="PENDING QUEUE" id="/mempool · sorted by seen time">
       <div v-if="!txs.length" class="loading">mempool is empty — no unconfirmed transactions.</div>
-      <table v-else class="dtable">
+      <div v-else class="scroll">
+      <table class="dtable">
         <thead>
           <tr><th>Txid</th><th class="num">Fee</th><th class="num">Size</th><th>Seen</th><th>Observed at</th></tr>
         </thead>
@@ -124,6 +136,7 @@ const congestionOption = computed(() => {
           </tr>
         </tbody>
       </table>
+      </div>
     </HudPanel>
   </div>
 </template>
@@ -131,4 +144,5 @@ const congestionOption = computed(() => {
 <style scoped>
 .head-live { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .note { margin: var(--space-3) 0 0; font-size: 11px; padding-top: var(--space-3); border-top: 1px solid var(--hud-line); }
+.scroll { overflow-x: auto; }
 </style>

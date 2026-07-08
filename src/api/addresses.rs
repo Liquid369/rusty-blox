@@ -142,12 +142,15 @@ async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), 
             .cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
         let read_i64 = |key: &[u8]| -> Result<i64, String> {
-            Ok(db_clone
-                .get_cf(&cf, key)
-                .map_err(|e| e.to_string())?
-                .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
-                .map(i64::from_le_bytes)
-                .unwrap_or(0))
+            match db_clone.get_cf(&cf, key).map_err(|e| e.to_string())? {
+                // A MISSING key is a genuine 0 (never-seen address).
+                None => Ok(0),
+                // A PRESENT but wrong-width value is corruption — erroring beats
+                // folding it to 0 and serving a confident zeroed balance.
+                Some(bytes) => <[u8; 8]>::try_from(bytes.as_slice())
+                    .map(i64::from_le_bytes)
+                    .map_err(|_| format!("malformed {}-byte total", bytes.len())),
+            }
         };
         Ok((read_i64(&r_key)?, read_i64(&s_key)?))
     })
@@ -191,7 +194,10 @@ pub async fn addr_v2(
         ));
     }
 
-    let cache_key = format!("addr:{}:{}:{}", address, params.page, params.details);
+    // Key on the FULL query: pageSize (and from/to) shape the response, so keying
+    // on only page+details served one request another request's cached page.
+    // `{params:?}` over-keys slightly (worst case a cache miss) but can never omit a field.
+    let cache_key = format!("addr:{address}:{params:?}");
     let db_clone = Arc::clone(&db);
     let address_clone = address.clone();
     let params_clone = params.clone();
@@ -387,7 +393,9 @@ pub async fn xpub_v2(
         ));
     }
 
-    let cache_key = format!("xpub:{}:{}:{}", xpub_str, params.page, params.details);
+    // See addr_v2: key on the full query — gap/tokens/maxScan/tokensPage/pageSize all
+    // shape the xpub response, so keying on only page+details collided distinct requests.
+    let cache_key = format!("xpub:{xpub_str}:{params:?}");
     let db_clone = Arc::clone(&db);
     let xpub_clone = xpub_str.clone();
     let params_clone = params.clone();
@@ -401,12 +409,25 @@ pub async fn xpub_v2(
     match result {
         Ok(info) => Ok(Json(info)),
         Err(e) => {
-            // Log error with redacted xpub (privacy protection)
             warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
-            Err((
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(super::types::BlockbookError::new(e.to_string())),
-            ))
+            // is_valid_xpub already 400s malformed input up front, so a residual
+            // parse rejection stays client-shaped (400); anything else is a
+            // storage/derivation failure that must be 500. A blanket 400 told
+            // wallets a valid xpub was permanently invalid — and leaked internals.
+            let msg = e.to_string();
+            if msg.starts_with("Invalid xpub") {
+                Err((
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(super::types::BlockbookError::new(msg)),
+                ))
+            } else {
+                Err((
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(super::types::BlockbookError::new(
+                        "Internal error computing xpub; please retry",
+                    )),
+                ))
+            }
         }
     }
 }
@@ -564,15 +585,23 @@ async fn check_address_activity(
             .cf_handle("addr_index")
             .ok_or_else(|| "addr_index CF not found".to_string())?;
 
-        // Check UTXOs
-        if let Ok(Some(utxo_data)) = db_clone.get_cf(&cf_addr_index, &utxo_key_bytes) {
+        // Check UTXOs. Propagate IO errors: swallowing a get_cf failure into
+        // "inactive" stops the xpub gap-scan early and undercounts the account
+        // (a confident 200 short of its true balance, not a 500).
+        if let Some(utxo_data) = db_clone
+            .get_cf(&cf_addr_index, &utxo_key_bytes)
+            .map_err(|e| e.to_string())?
+        {
             if !utxo_data.is_empty() {
                 return Ok(true);
             }
         }
 
         // Check transaction history
-        if let Ok(Some(tx_data)) = db_clone.get_cf(&cf_addr_index, &tx_key_bytes) {
+        if let Some(tx_data) = db_clone
+            .get_cf(&cf_addr_index, &tx_key_bytes)
+            .map_err(|e| e.to_string())?
+        {
             if !tx_data.is_empty() {
                 return Ok(true);
             }

@@ -36,10 +36,8 @@
      - /analytics/snapshots : *_supply_piv .......... PIV f64 number
      - /moneysupply, /budgetinfo, /budgetprojection . PIV f64 number
 
-   formatBtcSci() — tiny BTC price that serializes in scientific
-     notation (e.g. 7.56531e-7).
-     - /price : btc .................................. f64 (sci-notation)
-     (usd/eur from /price are ordinary f64 — use formatPiv/formatFiat.)
+   formatFiat()    — ordinary fiat number (USD/EUR from /price, f64).
+     Guards the documented 0.0 "price unavailable" upstream fallback.
 
    NOT money: difficulty, percentages/rates, counts. Use lib/format.js.
    ===================================================================== */
@@ -157,27 +155,6 @@ export function formatPiv(piv, opts = {}) {
   const n = typeof piv === 'number' ? piv : parseFloat(String(piv).trim())
   if (!Number.isFinite(n)) return zero(decimals, group)
   return fromFloat(n, decimals, group)
-}
-
-/**
- * Format the tiny per-PIV BTC price that arrives in scientific notation
- * (e.g. 7.56531e-7). Renders a fixed-decimal, human-readable string with
- * significant digits preserved. Guards the 0.0 price-unavailable fallback.
- *
- * @param {number|string|null|undefined} btc
- * @param {number} [sig=4] significant figures to keep
- * @returns {string} e.g. "0.00000076" ("—" when unavailable)
- */
-export function formatBtcSci(btc, sig = 4) {
-  const n = typeof btc === 'number' ? btc : parseFloat(String(btc ?? ''))
-  if (!Number.isFinite(n) || n === 0) return '—'
-  if (n >= 1e-4) return groupThousands(n.toFixed(8))
-  // For very small values, keep `sig` significant figures past the leading zeros.
-  const s = n.toFixed(20)
-  const m = s.match(/^0\.(0*)(\d+)/)
-  if (!m) return n.toFixed(8)
-  const leadingZeros = m[1].length
-  return `0.${'0'.repeat(leadingZeros)}${m[2].slice(0, sig)}`
 }
 
 /**

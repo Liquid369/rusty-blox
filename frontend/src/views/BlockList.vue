@@ -122,7 +122,7 @@ const sparkOption = computed(() => {
       <div class="scroll">
         <table class="dtable">
           <thead>
-            <tr><th>Height</th><th>Age</th><th class="num">Txs</th><th class="num">Interval</th><th class="num">Difficulty</th><th class="num">Hdr bytes</th><th>Hash</th></tr>
+            <tr><th>Height</th><th>Age</th><th class="num">Txs</th><th class="num">Interval</th><th class="num">Difficulty</th><th>Hash</th></tr>
           </thead>
           <tbody>
             <tr v-for="(b, i) in pageRows" :key="b.height">
@@ -134,7 +134,6 @@ const sparkOption = computed(() => {
                 <template v-else>—</template>
               </td>
               <td class="num dim">{{ formatDifficulty(b.difficulty) }}</td>
-              <td class="num dim">{{ b.size }}</td>
               <td class="dim">{{ truncateHash(b.hash, 10, 6) }}</td>
             </tr>
           </tbody>

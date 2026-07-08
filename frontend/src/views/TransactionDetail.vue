@@ -146,7 +146,11 @@ watch(txBudget, resolveGovernance)
 // Full /tx response, pretty-printed, for the copyable raw-JSON section.
 const rawJson = computed(() => (tx.value ? JSON.stringify(tx.value, null, 2) : ''))
 
-function spentPill(v) {
+function spentPill(vout) {
+  // OP_RETURN and zero-value markers are unspendable by definition; the API omits
+  // `spent` on them, which would otherwise render as a misleading "unknown".
+  if (vout.script?.type === 'OP_RETURN' || Number(vout.value) === 0) return { cls: '', text: 'unspendable' }
+  const v = vout.spent
   if (v === true) return { cls: 'bad', text: 'spent' }
   if (v === false) return { cls: 'ok', text: 'unspent' }
   return { cls: 'warn', text: 'unknown' }
@@ -306,7 +310,7 @@ const flowHeight = computed(() => {
                   <span v-else class="dim mono">{{ vout.script.type.toLowerCase() }}</span>
                 </td>
                 <td class="num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</td>
-                <td><span class="pill" :class="spentPill(vout.spent).cls">{{ spentPill(vout.spent).text }}</span></td>
+                <td><span class="pill" :class="spentPill(vout).cls">{{ spentPill(vout).text }}</span></td>
               </tr>
             </tbody>
           </table>

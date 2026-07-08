@@ -8,7 +8,7 @@
 import { ref, watch, onMounted, computed } from 'vue'
 import { getAddress, getUtxo, setAddress503, isMock } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
-import { timeAgo, truncateHash, formatCount, compactNumber } from '../lib/format.js'
+import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
 import { echarts, baseOption, catAxis, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -21,12 +21,13 @@ const reindexing = ref(false)
 const err = ref(null)
 const demo503 = ref(false)
 const loading = ref(true)
+const page = ref(1)
 
 async function load() {
   err.value = null; reindexing.value = false; info.value = null; utxos.value = []
-  loading.value = true
+  loading.value = true; page.value = 1
   try {
-    info.value = await getAddress(props.addr, { details: 'txs', pageSize: 25 })
+    info.value = await getAddress(props.addr, { details: 'txs', page: 1, pageSize: 25 })
     utxos.value = await getUtxo(props.addr)
   } catch (e) {
     if (e.status === 503) reindexing.value = true
@@ -34,6 +35,16 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+// Server-side ledger pagination: re-fetch just the tx page (the charts + totals
+// are page-independent). Keep the current page if the fetch fails.
+async function goPage(p) {
+  if (p < 1 || p > (info.value?.totalPages || 1)) return
+  try {
+    info.value = await getAddress(props.addr, { details: 'txs', page: p, pageSize: 25 })
+    page.value = p
+  } catch { /* keep current page */ }
 }
 function toggle503() {
   demo503.value = !demo503.value
@@ -189,6 +200,7 @@ const addrKind = computed(() => {
       </div>
       <div class="head-live">
         <span class="pill neon mono">{{ addrKind }}</span>
+        <span v-if="info && info.unconfirmedTxs > 0" class="pill warn mono">{{ info.unconfirmedTxs }} PENDING · {{ Number(info.unconfirmedBalance) > 0 ? '+' : '' }}{{ formatSats(info.unconfirmedBalance, { decimals: 2 }) }} PIV</span>
         <button v-if="isMock" class="gbtn" :class="{ on: demo503 }" @click="toggle503">{{ demo503 ? 'DISABLE' : 'DEMO' }} 503</button>
       </div>
     </div>
@@ -248,13 +260,18 @@ const addrKind = computed(() => {
             <tbody>
               <tr v-for="t in info.transactions" :key="t.txid">
                 <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
-                <td class="num dim">{{ formatCount(t.blockHeight) }}</td>
+                <td class="num dim"><span v-if="isUnconfirmedHeight(t.blockHeight)" class="pill warn mono">UNCONFIRMED</span><span v-else>{{ formatCount(t.blockHeight) }}</span></td>
                 <td class="dim">{{ timeAgo(t.blockTime) }}</td>
                 <td class="num strong" :style="{ color: (txDeltas[t.txid] || {}).color }">{{ (txDeltas[t.txid] || {}).str }}</td>
                 <td class="num dim">{{ formatCount(t.confirmations) }}</td>
               </tr>
             </tbody>
           </table>
+        </div>
+        <div class="pager" v-if="(info.totalPages || 1) > 1">
+          <button class="gbtn" :disabled="page <= 1" @click="goPage(page - 1)">‹ PREV</button>
+          <span class="mono dim">{{ page }} / {{ info.totalPages }}</span>
+          <button class="gbtn" :disabled="page >= info.totalPages" @click="goPage(page + 1)">NEXT ›</button>
         </div>
       </HudPanel>
 
@@ -287,4 +304,6 @@ const addrKind = computed(() => {
 .fc-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; box-shadow: 0 0 5px currentColor; }
 /* Flow with the PAGE, not a hard-to-grab nested box; keep horizontal scroll for narrow screens. */
 .scroll { overflow-x: auto; }
+.pager { display: flex; align-items: center; gap: 14px; justify-content: flex-end; margin-top: var(--space-3); }
+.pager .gbtn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
