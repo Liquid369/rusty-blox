@@ -178,10 +178,10 @@ pub async fn block_v2(
     Path(param): Path<String>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Result<Json<crate::types::Block>, StatusCode> {
+) -> Result<Json<crate::types::Block>, (StatusCode, Json<BlockbookError>)> {
     let height = match resolve_block_height(&db, &param) {
         Some(h) => h,
-        None => return Err(StatusCode::NOT_FOUND),
+        None => return Err(not_found("Block not found")),
     };
     let cache_key = format!("block:height:{height}");
     let db_clone = Arc::clone(&db);
@@ -203,7 +203,17 @@ pub async fn block_v2(
 
     match result {
         Ok(block) => Ok(Json(block)),
-        Err(_) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            // Distinguish a genuinely-absent block (404) from a storage/IO failure
+            // (500). Mapping every error to 404 told clients an existing block
+            // vanished on transient IO; the bare StatusCode also dropped the JSON
+            // error body every other endpoint returns.
+            if e.downcast_ref::<rocksdb::Error>().is_some() {
+                Err(internal_error("Internal error loading block; please retry"))
+            } else {
+                Err(not_found("Block not found"))
+            }
+        }
     }
 }
 

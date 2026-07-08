@@ -38,14 +38,18 @@ pub async fn tx_v2(
     match result {
         Ok(tx) => Ok(Json(tx)),
         Err(e) => {
-            // A real storage error must surface as 500 — mapping it to 404 tells
-            // clients (and their caches) that an EXISTING tx doesn't exist.
-            let status = if e.downcast_ref::<rocksdb::Error>().is_some() {
-                StatusCode::INTERNAL_SERVER_ERROR
-            } else {
+            // 404 ONLY for a genuinely-absent tx. Errors like "transactions CF not
+            // found" or a task-join failure are String errors, NOT rocksdb::Error,
+            // so the old downcast mapped them to 404 — telling clients a corrupt or
+            // misconfigured DB simply has no such tx. Whitelist the real not-found
+            // messages instead; everything else is a storage error (500).
+            let msg = e.to_string();
+            let status = if msg == "Transaction not found" || msg == "Empty transaction data" {
                 StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
             };
-            Err((status, Json(BlockbookError::new(e.to_string()))))
+            Err((status, Json(BlockbookError::new(msg))))
         }
     }
 }
