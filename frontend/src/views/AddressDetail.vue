@@ -21,12 +21,13 @@ const reindexing = ref(false)
 const err = ref(null)
 const demo503 = ref(false)
 const loading = ref(true)
+const page = ref(1)
 
 async function load() {
   err.value = null; reindexing.value = false; info.value = null; utxos.value = []
-  loading.value = true
+  loading.value = true; page.value = 1
   try {
-    info.value = await getAddress(props.addr, { details: 'txs', pageSize: 25 })
+    info.value = await getAddress(props.addr, { details: 'txs', page: 1, pageSize: 25 })
     utxos.value = await getUtxo(props.addr)
   } catch (e) {
     if (e.status === 503) reindexing.value = true
@@ -34,6 +35,16 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+// Server-side ledger pagination: re-fetch just the tx page (the charts + totals
+// are page-independent). Keep the current page if the fetch fails.
+async function goPage(p) {
+  if (p < 1 || p > (info.value?.totalPages || 1)) return
+  try {
+    info.value = await getAddress(props.addr, { details: 'txs', page: p, pageSize: 25 })
+    page.value = p
+  } catch { /* keep current page */ }
 }
 function toggle503() {
   demo503.value = !demo503.value
@@ -257,6 +268,11 @@ const addrKind = computed(() => {
             </tbody>
           </table>
         </div>
+        <div class="pager" v-if="(info.totalPages || 1) > 1">
+          <button class="gbtn" :disabled="page <= 1" @click="goPage(page - 1)">‹ PREV</button>
+          <span class="mono dim">{{ page }} / {{ info.totalPages }}</span>
+          <button class="gbtn" :disabled="page >= info.totalPages" @click="goPage(page + 1)">NEXT ›</button>
+        </div>
       </HudPanel>
 
       <h2 class="section-title">Unspent outputs ({{ utxos.length }})</h2>
@@ -288,4 +304,6 @@ const addrKind = computed(() => {
 .fc-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; box-shadow: 0 0 5px currentColor; }
 /* Flow with the PAGE, not a hard-to-grab nested box; keep horizontal scroll for narrow screens. */
 .scroll { overflow-x: auto; }
+.pager { display: flex; align-items: center; gap: 14px; justify-content: flex-end; margin-top: var(--space-3); }
+.pager .gbtn:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
