@@ -8,7 +8,7 @@
    ===================================================================== */
 import { ref, onMounted, computed, nextTick } from 'vue'
 import { useChainStore } from '../store.js'
-import { getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getTx, proposalPasses, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
+import { getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getTx, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
 import { formatCount, percent, formatDateTime, truncateHash } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
@@ -60,10 +60,11 @@ onMounted(async () => {
         atHeight: null, atTime: null,
       }
     })
-    for (const r of rows) {
-      if (!r.feeTx) continue
+    // resolve every FeeTX concurrently — no need to wait N serial round-trips
+    await Promise.all(rows.map(async (r) => {
+      if (!r.feeTx) return
       try { const tx = await getTx(r.feeTx); r.atHeight = tx.blockHeight; r.atTime = tx.blockTime } catch { /* still link the tx */ }
-    }
+    }))
     finalized.value = rows
   } catch { /* no finalized budget available */ }
 })

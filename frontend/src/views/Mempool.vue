@@ -121,7 +121,8 @@ const congestionOption = computed(() => {
     <h2 class="section-title">Pending transactions ({{ txs.length }})</h2>
     <HudPanel title="PENDING QUEUE" id="/mempool · sorted by seen time">
       <div v-if="!txs.length" class="loading">mempool is empty — no unconfirmed transactions.</div>
-      <table v-else class="dtable">
+      <div v-else class="scroll">
+      <table class="dtable">
         <thead>
           <tr><th>Txid</th><th class="num">Fee</th><th class="num">Size</th><th>Seen</th><th>Observed at</th></tr>
         </thead>
@@ -135,6 +136,7 @@ const congestionOption = computed(() => {
           </tr>
         </tbody>
       </table>
+      </div>
     </HudPanel>
   </div>
 </template>
@@ -142,4 +144,5 @@ const congestionOption = computed(() => {
 <style scoped>
 .head-live { display: flex; align-items: center; gap: 10px; margin-left: auto; }
 .note { margin: var(--space-3) 0 0; font-size: 11px; padding-top: var(--space-3); border-top: 1px solid var(--hud-line); }
+.scroll { overflow-x: auto; }
 </style>

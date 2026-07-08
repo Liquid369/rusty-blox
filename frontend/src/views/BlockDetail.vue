@@ -118,7 +118,7 @@ const totalFees = computed(() =>
       <div class="split s-37" style="margin-top: var(--space-4)">
         <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent" hero>
           <div class="donut-wrap">
-            <EChart :option="donutOption" height="200px" />
+            <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent" />
             <div class="donut-legend">
               <div class="dl" v-for="(v,k) in typeCounts" :key="k" v-show="v>0">
                 <span class="dl-dot" :style="{ background: TYPE_COLOR[k] }"></span>

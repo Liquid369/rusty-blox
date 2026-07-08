@@ -51,9 +51,6 @@ export const getHealth = () =>
 export const getRecentBlocks = (count = 30) =>
   isMock ? Promise.resolve(mock.blockStats(count)) : getJSON(`/block-stats/${count}`)
 
-export const getBlock = (heightOrHash) =>
-  isMock ? Promise.resolve(mock.block(heightOrHash)) : getJSON(`/block/${heightOrHash}`)
-
 // height-only; per-io values are satoshi FLOATS.
 export const getBlockDetail = (height) =>
   isMock ? Promise.resolve(mock.blockDetail(height)) : getJSON(`/block-detail/${height}`)
@@ -162,11 +159,6 @@ export const getSearch = (query) =>
 export const getPrice = () =>
   isMock ? Promise.resolve(mock.price()) : getJSON('/price')
 
-// Governance funding-gate helpers (mock-derived constants; live UI computes
-// the threshold from /mncount.total).
-export const mnTotal = mock.mnTotal
-export const proposalPasses = mock.proposalPasses
-
 // PIVX budget cycle = consensus.nBudgetCycleBlocks (43,200 blocks, ~30 days).
 export const SUPERBLOCK_CYCLE = 43200
 
@@ -187,11 +179,11 @@ export const monthlyBudgetCap = () => (isMock ? mock.monthlyBudgetCap() : 432000
 export const setAddress503 = mock.setAddress503
 
 export default {
-  getStatus, getHealth, getRecentBlocks, getBlock, getBlockDetail, getTx,
+  getStatus, getHealth, getRecentBlocks, getBlockDetail, getTx,
   getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
   getMnCount, getMnList, getMempool,
   getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
-  mnTotal, nextSuperblock, proposalPasses, monthlyBudgetCap,
+  nextSuperblock, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }
