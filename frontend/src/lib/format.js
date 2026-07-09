@@ -142,3 +142,27 @@ export function formatDuration(seconds) {
   if (m > 0) return `${m}m`
   return `${Math.floor(s)}s`
 }
+
+/**
+ * Return `url` only when it uses an http(s) scheme; otherwise ''. Guards an
+ * attacker-controlled field (e.g. a PIVX proposal URL — Core validates it by
+ * LENGTH only, not scheme) from reaching an <a :href> sink as javascript:/data:.
+ * @param {string} url
+ * @returns {string}
+ */
+export function safeUrl(url) {
+  return /^https?:\/\//i.test(String(url ?? '')) ? String(url) : ''
+}
+
+/**
+ * Escape HTML metacharacters for safe interpolation into an HTML string. ECharts
+ * DOM tooltips parse their formatter's return value as HTML, so any free-form
+ * field (a proposal Name) must be escaped before `${...}` interpolation.
+ * @param {string|number} s
+ * @returns {string}
+ */
+export function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ))
+}

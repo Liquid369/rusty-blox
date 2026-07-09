@@ -53,10 +53,10 @@ export const getRecentBlocks = (count = 30) =>
 
 // height-only; per-io values are satoshi FLOATS.
 export const getBlockDetail = (height) =>
-  isMock ? Promise.resolve(mock.blockDetail(height)) : getJSON(`/block-detail/${height}`)
+  isMock ? Promise.resolve(mock.blockDetail(height)) : getJSON(`/block-detail/${encodeURIComponent(height)}`)
 
 export const getTx = (txid) =>
-  isMock ? Promise.resolve(mock.tx(txid)) : getJSON(`/tx/${txid}`)
+  isMock ? Promise.resolve(mock.tx(txid)) : getJSON(`/tx/${encodeURIComponent(txid)}`)
 
 // --- address / utxo (can 503) -----------------------------------------
 export const getAddress = (addr, opts = {}) => {
@@ -68,14 +68,14 @@ export const getAddress = (addr, opts = {}) => {
     page: String(opts.page || 1),
     pageSize: String(opts.pageSize || 25)
   })
-  return getJSON(`/address/${addr}?${q}`)
+  return getJSON(`/address/${encodeURIComponent(addr)}?${q}`)
 }
 
 export const getUtxo = (addr) => {
   if (isMock) {
     try { return Promise.resolve(mock.utxo(addr)) } catch (e) { return Promise.reject(e) }
   }
-  return getJSON(`/utxo/${addr}`)
+  return getJSON(`/utxo/${encodeURIComponent(addr)}`)
 }
 
 // --- analytics (Dashboard + Analytics pages) --------------------------
@@ -145,7 +145,7 @@ export const getXpub = (xpub, opts = {}) => {
     page: String(opts.page || 1),
     pageSize: String(opts.pageSize || 25)
   })
-  return getJSON(`/xpub/${xpub}?${q}`)
+  return getJSON(`/xpub/${encodeURIComponent(xpub)}?${q}`)
 }
 
 // --- universal search classifier --------------------------------------
