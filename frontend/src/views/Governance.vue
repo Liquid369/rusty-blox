@@ -10,7 +10,7 @@ import { ref, onMounted, computed, nextTick } from 'vue'
 import { useChainStore } from '../store.js'
 import { getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getTx, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
-import { formatCount, percent, formatDateTime, truncateHash } from '../lib/format.js'
+import { formatCount, percent, formatDateTime, truncateHash, esc } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -130,7 +130,7 @@ const allocOption = computed(() => {
   return {
     backgroundColor: 'transparent',
     grid: { left: 8, right: 8, top: 8, bottom: 8 },
-    tooltip: { ...baseOption(p).tooltip, trigger: 'item', formatter: (s) => `${s.seriesName}<br/>${formatPiv(s.value, { decimals: 0 })} PIV` },
+    tooltip: { ...baseOption(p).tooltip, trigger: 'item', formatter: (s) => `${esc(s.seriesName)}<br/>${formatPiv(s.value, { decimals: 0 })} PIV` },
     xAxis: { type: 'value', show: false },
     yAxis: { type: 'category', data: ['ALLOTTED'], show: false },
     series: rows.map((r, i) => ({

@@ -9,7 +9,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { getBudgetInfo, getBudgetVotes, getMnCount } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
-import { formatCount, percent, formatDateTime } from '../lib/format.js'
+import { formatCount, percent, formatDateTime, safeUrl } from '../lib/format.js'
 import { echarts, baseOption, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -198,7 +198,10 @@ const timelineOption = computed(() => {
       <HudPanel title="DETAIL" :id="proposal.IsEstablished ? 'established' : 'new'">
         <dl class="kv">
           <dt>Name</dt><dd>{{ proposal.Name }}</dd>
-          <dt>URL</dt><dd><a :href="proposal.URL" target="_blank" rel="noopener noreferrer">{{ proposal.URL }}</a></dd>
+          <dt>URL</dt><dd>
+            <a v-if="safeUrl(proposal.URL)" :href="safeUrl(proposal.URL)" target="_blank" rel="noopener noreferrer">{{ proposal.URL }}</a>
+            <span v-else class="mono dim">{{ proposal.URL }}</span>
+          </dd>
           <dt>Payment address</dt><dd><RouterLink :to="`/address/${proposal.PaymentAddress}`">{{ proposal.PaymentAddress }}</RouterLink></dd>
           <dt>Proposal hash</dt><dd>{{ proposal.Hash }}</dd>
           <dt>Fee hash</dt><dd><RouterLink :to="`/tx/${proposal.FeeHash}`">{{ proposal.FeeHash }}</RouterLink></dd>

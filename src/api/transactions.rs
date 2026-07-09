@@ -13,6 +13,14 @@ use super::types::{BlockbookError, SendTxResponse, Transaction, TxInput, TxOutpu
 use crate::cache::CacheManager;
 use crate::chain_state::get_chain_state;
 use crate::parser::deserialize_transaction_blocking;
+use tokio::sync::Semaphore;
+
+/// Bound concurrent mempool-fallback `getrawtransaction` RPCs. `/tx` for an absent
+/// 64-hex txid falls back to pivxd, uncached; without this cap an anonymous client
+/// spraying random txids amplifies 1:1 onto the node's small rpcthreads pool and
+/// starves the explorer's own sync/mempool RPC. `try_acquire` → treat as not-found
+/// when saturated rather than piling on.
+static MEMPOOL_RPC_LIMIT: Semaphore = Semaphore::const_new(4);
 
 pub use axum::extract::Path as AxumPath;
 
@@ -25,6 +33,14 @@ pub async fn tx_v2(
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
+    // Blockbook txids are exactly 64 hex chars. Reject anything else up front so a
+    // non-hex id returns 400 (not a 500 leaking the hex-decoder's internal message).
+    if txid.len() != 64 || !txid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(BlockbookError::new("Invalid transaction id")),
+        ));
+    }
     let cache_key = format!("tx:{txid}");
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
@@ -43,13 +59,17 @@ pub async fn tx_v2(
             // so the old downcast mapped them to 404 — telling clients a corrupt or
             // misconfigured DB simply has no such tx. Whitelist the real not-found
             // messages instead; everything else is a storage error (500).
+            // 404 ONLY for a genuinely-absent tx; a storage/parser error is a 500 with
+            // a GENERIC message (echoing e.to_string() leaked CF/IO internals to clients).
             let msg = e.to_string();
-            let status = if msg == "Transaction not found" || msg == "Empty transaction data" {
-                StatusCode::NOT_FOUND
+            if msg == "Transaction not found" || msg == "Empty transaction data" {
+                Err((StatusCode::NOT_FOUND, Json(BlockbookError::new(msg))))
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            Err((status, Json(BlockbookError::new(msg))))
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(BlockbookError::new("Internal error loading transaction")),
+                ))
+            }
         }
     }
 }
@@ -527,6 +547,11 @@ async fn compute_transaction_details(
             if e.downcast_ref::<rocksdb::Error>().is_none()
                 && e.to_string() == "Transaction not found"
             {
+                // Cap concurrent node RPCs from this path; if saturated, report
+                // not-found rather than amplifying a random-txid flood onto pivxd.
+                let _permit = MEMPOOL_RPC_LIMIT
+                    .try_acquire()
+                    .map_err(|_| "Transaction not found")?;
                 let raw = super::helpers::rpc_call_json(
                     "getrawtransaction",
                     serde_json::json!([txid, 0]),

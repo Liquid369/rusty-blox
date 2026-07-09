@@ -7,7 +7,7 @@
 import { ref, watch, onMounted, computed } from 'vue'
 import { getTx, getBlockDetail, getBudgetInfo, getFinalizedBudgets } from '../api/client.js'
 import { formatSats, formatPiv } from '../lib/money.js'
-import { formatDateTime, truncateHash, formatCount, timeAgo } from '../lib/format.js'
+import { formatDateTime, truncateHash, formatCount, timeAgo, safeUrl } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import { isCoinstakeTx, isUnresolvedColdVin, coinstakeInputAddresses, coinstakeInputValueSat } from '../lib/coinstake.js'
 import EChart from '../components/EChart.vue'
@@ -379,7 +379,10 @@ const flowHeight = computed(() => {
               <Stat k="PAYS"><template #v>#{{ govRecord.BlockStart }}</template><template #s>→ #{{ govRecord.BlockEnd }}</template></Stat>
             </div>
             <dl class="kv" style="margin-top:var(--space-4)">
-              <dt>URL</dt><dd><a :href="govRecord.URL" target="_blank" rel="noopener noreferrer">{{ govRecord.URL }}</a></dd>
+              <dt>URL</dt><dd>
+                <a v-if="safeUrl(govRecord.URL)" :href="safeUrl(govRecord.URL)" target="_blank" rel="noopener noreferrer">{{ govRecord.URL }}</a>
+                <span v-else class="mono dim">{{ govRecord.URL }}</span>
+              </dd>
               <dt>Payee</dt><dd><RouterLink :to="`/address/${govRecord.PaymentAddress}`">{{ govRecord.PaymentAddress }}</RouterLink></dd>
             </dl>
           </template>
