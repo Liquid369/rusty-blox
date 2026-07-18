@@ -91,7 +91,12 @@ const usd = (piv) =>
 const cap = computed(() => monthlyBudgetCap())
 const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
 const overCap = computed(() => allotted.value > cap.value + 1)
-const demand = computed(() => proposals.value.reduce((s, p) => s + p.MonthlyPayment, 0))
+/* Core's getbudgetinfo retains spent proposals (window closed, RemainingPaymentCount
+   0) until its lazy purge — only proposals with payments left are in the running.
+   fundedThisCycle intentionally keeps the FULL list: the spent ones are exactly
+   what the last superblock paid. */
+const active = computed(() => proposals.value.filter((p) => p.RemainingPaymentCount > 0))
+const demand = computed(() => active.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
 /* ---------- funded THIS cycle (most recent superblock) ----------
    /budgetprojection is forward-looking (the NEXT payout), so it can't answer
@@ -178,7 +183,7 @@ const allocOption = computed(() => {
 
     <!-- ================= SIMULATOR ================= -->
     <div v-if="mode === 'sim'" role="tabpanel" aria-labelledby="tab-sim">
-      <BudgetSimulator :candidates="proposals" :actual-funded="projection" :threshold="threshold" />
+      <BudgetSimulator :candidates="active" :actual-funded="projection" :threshold="threshold" />
     </div>
 
     <!-- ================= OVERVIEW (read-only) ================= -->
@@ -194,12 +199,12 @@ const allocOption = computed(() => {
         <template #s><span v-if="overCap" style="color:var(--warn);font-weight:700">⚠ OVER CAP · </span>{{ capPct.toFixed(0) }}% of the {{ formatPiv(cap, { decimals: 0 }) }} PIV cap{{ allottedUsd ? ' · ≈ $' + Math.round(allottedUsd).toLocaleString('en-US') : '' }}</template>
       </Stat>
       <Stat k="PROPOSALS">
-        <template #v>{{ projection.length }}<span class="unit">/ {{ proposals.length }}</span></template>
-        <template #s>next payout / submitted</template>
+        <template #v>{{ projection.length }}<span class="unit">/ {{ active.length }}</span></template>
+        <template #s>next payout / active ({{ proposals.length }} submitted)</template>
       </Stat>
       <Stat k="TREASURY DEMAND">
         <template #v>{{ formatPiv(demand, { decimals: 0 }) }}</template>
-        <template #s>PIV/month requested (all proposals)</template>
+        <template #s>PIV/month requested (active proposals)</template>
       </Stat>
     </div>
 
@@ -256,7 +261,7 @@ const allocOption = computed(() => {
     </template>
 
     <!-- PROPOSAL TABLE -->
-    <h2 class="section-title">All proposals ({{ proposals.length }})</h2>
+    <h2 class="section-title">Active proposals ({{ active.length }})</h2>
     <HudPanel title="PROPOSALS" id="/budgetinfo · approval = (Yeas−Nays) &gt; 10% MN">
       <div class="scroll">
         <table class="dtable">
@@ -264,7 +269,7 @@ const allocOption = computed(() => {
             <tr><th>Proposal</th><th>Approval (Yeas / Nays)</th><th class="num">Monthly</th><th class="num">Payments left</th><th>Status</th></tr>
           </thead>
           <tbody>
-            <tr v-for="p in proposals" :key="p.Hash">
+            <tr v-for="p in active" :key="p.Hash">
               <td><RouterLink :to="`/proposal/${encodeURIComponent(p.Name)}`">{{ p.Name }}</RouterLink></td>
               <td>
                 <div class="vote">
