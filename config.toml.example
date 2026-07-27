@@ -37,6 +37,11 @@ resync = false
 # false = start the web server in read-only mode against the existing DB.
 auto_start = true
 
+# Blocks that must be indexed before the web server starts. The default is
+# fine for mainnet. Drop it on a fresh testnet or regtest chain, which sits
+# below 1000 for a while and would otherwise never serve.
+min_blocks_to_serve = 1000
+
 # Fast sync: skip UTXO tracking during the initial sync for a large speedup.
 # Recommended: true (address data is built afterward by enrich_addresses).
 fast_sync = true

@@ -700,6 +700,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // leveldb import doesn't flood the log with hundreds of identical lines. The
         // gate still opens promptly (the height check runs every tick); only the
         // logging is throttled.
+        //
+        // The default suits mainnet, where 1000 blocks is a rounding error against
+        // the tip. A fresh chain starts below it and would never open the gate, so
+        // sync.min_blocks_to_serve lets a testnet or regtest instance serve earlier.
+        let min_blocks_to_serve = config
+            .get_int("sync.min_blocks_to_serve")
+            .unwrap_or(1000)
+            .max(0) as i32;
         let mut waited_ticks: u32 = 0;
         loop {
             let cf_state = match api_db.cf_handle("chain_state") {
@@ -713,7 +721,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match api_db.get_cf(&cf_state, b"sync_height") {
                 Ok(Some(bytes)) if bytes.len() == 4 => {
                     let height = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                    if height >= 1000 {
+                    if height >= min_blocks_to_serve {
                         info!(
                             height = height,
                             "Minimum viable data indexed - starting web server"
@@ -723,7 +731,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if waited_ticks % 30 == 0 {
                         info!(
                             height = height,
-                            "Indexing in progress - waiting for minimum 1000 blocks"
+                            required = min_blocks_to_serve,
+                            "Indexing in progress - waiting for minimum blocks"
                         );
                     }
                 }
