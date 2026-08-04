@@ -11,6 +11,7 @@ import { ref, onMounted, computed } from 'vue'
 import {
   getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
+  getSnapshots,
 } from '../api/client.js'
 import { formatSats, formatPiv } from '../lib/money.js'
 import { compactNumber, percent, truncateHash, formatCount } from '../lib/format.js'
@@ -28,17 +29,19 @@ const wealth = ref(null)
 const hodl = ref(null)
 const coldstaking = ref([])
 const treasury = ref([])
+const snapshots = ref([])
 const ready = ref(false)
 const error = ref(null)
 
 onMounted(async () => {
-  // Nine /analytics series in parallel — render a loading state, not empty
+  // Ten /analytics series in parallel — render a loading state, not empty
   // panels, until the whole deck resolves.
   try {
     ;[supply.value, txs.value, staking.value, network.value, richlist.value,
-      wealth.value, hodl.value, coldstaking.value, treasury.value] = await Promise.all([
+      wealth.value, hodl.value, coldstaking.value, treasury.value, snapshots.value] = await Promise.all([
       getSupply(), getTransactions(), getStaking(), getNetwork(),
       getRichlist(100), getWealthDistribution(), getHodl(), getColdstaking(), getTreasury(),
+      getSnapshots(),
     ])
     ready.value = true
   } catch (e) {
@@ -274,6 +277,29 @@ const stakingOption = computed(() => {
   }
 })
 
+/* ---------- masternode count history (hourly monitor snapshots) ---------- */
+const latestSnap = computed(() => snapshots.value.at(-1) || {})
+const mnOption = computed(() => {
+  const p = palette()
+  const rows = snapshots.value
+  const base = baseOption(p)
+  const fmt = (ts) => new Date(ts * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  return {
+    ...base,
+    grid: { left: 50, right: 16, top: 16, bottom: 26, containLabel: true },
+    tooltip: { ...base.tooltip, formatter: (arr) => `${arr[0].axisValue}<br/>${formatCount(arr[0].value)} masternodes` },
+    // hourly points — thin the axis labels to ~7 across whatever span exists
+    xAxis: catAxis(rows.map((r) => fmt(r.ts)), p, { axisLabel: { interval: Math.max(1, Math.floor(rows.length / 7)) } }),
+    yAxis: valAxis(p, { scale: true, axisLabel: { formatter: (v) => formatCount(v) } }),
+    series: [{
+      name: 'masternodes', type: 'line', showSymbol: false, step: 'end',
+      data: rows.map((r) => r.masternode_count),
+      lineStyle: { color: p.green, width: 2.2, shadowColor: hexA(p.green, 0.6), shadowBlur: 8 },
+      areaStyle: { color: areaFill(echarts, p.green, 0.25, 0.01) },
+    }],
+  }
+})
+
 const richMax = computed(() => richlist.value.length ? parseFloat(formatSats(richlist.value[0].balance, { decimals: 0, group: false })) : 1)
 function richWidth(bal) {
   const v = parseFloat(formatSats(bal, { decimals: 0, group: false }))
@@ -389,6 +415,16 @@ function richWidth(bal) {
         <span class="pill mono">{{ latestStake.active_stakers || '—' }} stakers</span>
       </template>
       <EChart v-if="staking.length" :option="stakingOption" height="260px" aria-label="Staking yield and staker concentration over time" />
+    </HudPanel>
+
+    <!-- MASTERNODE NETWORK -->
+    <h2 class="section-title">Masternode network</h2>
+    <HudPanel title="MASTERNODE COUNT" id="/analytics/snapshots · hourly">
+      <template #head>
+        <span class="pill cyan mono" v-if="snapshots.length">{{ formatCount(latestSnap.masternode_count) }} nodes</span>
+      </template>
+      <EChart v-if="snapshots.length" :option="mnOption" height="220px" aria-label="Masternode count over time, hourly monitor snapshots" />
+      <div v-else class="loading">no snapshot history yet — the monitor records one sample per hour</div>
     </HudPanel>
 
     <!-- RICH LIST + TREASURY -->

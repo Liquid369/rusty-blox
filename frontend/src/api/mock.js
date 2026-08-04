@@ -401,6 +401,25 @@ export function analyticsNetwork() {
   return out
 }
 
+// snapshots — hourly monitor samples. ts = unix secs; counts u64;
+// *_supply_piv = PIV f64 NUMBERS (no satoshi conversion).
+export function analyticsSnapshots() {
+  const out = []
+  let mn = 2050
+  for (let i = 14 * 24 - 1; i >= 0; i--) {
+    mn = Math.max(1950, Math.min(2200, mn + randInt(-6, 6)))
+    out.push({
+      ts: TIP_TIME - i * 3600,
+      mempool_txs: randInt(0, 8),
+      mempool_bytes: randInt(0, 4000),
+      masternode_count: mn,
+      shield_supply_piv: rand(1030000, 1070000),
+      transparent_supply_piv: rand(103e6, 105e6)
+    })
+  }
+  return out
+}
+
 // coldstaking — created/spent/net_cumulative PIV strings; cumulative grows.
 export function analyticsColdstaking() {
   const out = []
