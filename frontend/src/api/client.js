@@ -106,6 +106,12 @@ export const getColdstaking = (range = '90d') =>
 export const getTreasury = () =>
   isMock ? Promise.resolve(mock.analyticsTreasury()) : getJSON('/analytics/treasury')
 
+// hourly forward-only monitor snapshots (masternode count, mempool, shield
+// supply); empty until the monitor writes its first sample. hours clamped
+// server-side to 1..8760 — ask for the max and chart whatever exists.
+export const getSnapshots = (hours = 8760) =>
+  isMock ? Promise.resolve(mock.analyticsSnapshots()) : getJSON(`/analytics/snapshots?hours=${hours}`)
+
 // --- masternodes (live RPC proxies; no 503) ---------------------------
 export const getMnCount = () =>
   isMock ? Promise.resolve(mock.mnCount()) : getJSON('/mncount')
@@ -181,7 +187,7 @@ export const setAddress503 = mock.setAddress503
 export default {
   getStatus, getHealth, getRecentBlocks, getBlockDetail, getTx,
   getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
-  getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury,
+  getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
   getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
   nextSuperblock, monthlyBudgetCap,
