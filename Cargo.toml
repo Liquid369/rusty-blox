@@ -130,7 +130,7 @@ tower-http = { version = "0.7", features = ["cors", "timeout", "fs"] }
 futures = "0.3"
 tokio-stream = "0.1.15"
 tokio-util = { version = "0.7", features = ["io"] }
-lru = "0.16"
+lru = "0.18"
 rusty-leveldb = "4.0"
 throttled_json_rpc = "0.0.6"
 pivx_rpc_rs = "0.1.1"
