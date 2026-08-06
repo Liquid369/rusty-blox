@@ -27,7 +27,11 @@ pub use axum::extract::Path as AxumPath;
 /// GET /api/v2/tx/{txid}
 /// Returns full transaction details with inputs, outputs, and Sapling data.
 ///
-/// **CACHED**: 300 second TTL (confirmed transactions are immutable)
+/// **CACHED**: 300 second TTL for the immutable BODY only. `confirmations`
+/// grows with every block, so it is recomputed from the current tip on every
+/// cache hit; an UNCONFIRMED (mempool) response is never left in the cache —
+/// a cached "confirmations: 0" would keep answering for the full TTL after
+/// the tx is mined, stalling every wallet that polls this endpoint.
 pub async fn tx_v2(
     AxumPath(txid): AxumPath<String>,
     Extension(db): Extension<Arc<DB>>,
@@ -42,6 +46,17 @@ pub async fn tx_v2(
         ));
     }
     let cache_key = format!("tx:{txid}");
+
+    // Cache hit: serve the immutable body with `confirmations` freshened from
+    // the current tip. A cached unconfirmed snapshot can't be freshened (no
+    // height to count from) — drop it and recompute below.
+    if let Some(mut cached) = cache.get_json_value(&cache_key).await {
+        if freshen_confirmations(&db, &mut cached) {
+            return Ok(Json(cached));
+        }
+        cache.invalidate(&cache_key).await;
+    }
+
     let db_clone = Arc::clone(&db);
     let txid_clone = txid.clone();
 
@@ -52,7 +67,16 @@ pub async fn tx_v2(
         .await;
 
     match result {
-        Ok(tx) => Ok(Json(tx)),
+        Ok(tx) => {
+            // get_or_compute stores every Ok result; an unconfirmed snapshot must
+            // not linger there for the TTL (it would pin "confirmations: 0" after
+            // the tx is mined). Evict it — the value returned to THIS caller was
+            // computed moments ago and is fresh either way.
+            if tx.get("blockHeight").and_then(|h| h.as_i64()).unwrap_or(0) <= 0 {
+                cache.invalidate(&cache_key).await;
+            }
+            Ok(Json(tx))
+        }
         Err(e) => {
             // 404 ONLY for a genuinely-absent tx. Errors like "transactions CF not
             // found" or a task-join failure are String errors, NOT rocksdb::Error,
@@ -72,6 +96,26 @@ pub async fn tx_v2(
             }
         }
     }
+}
+
+/// Overwrite a cached `/tx` JSON's `confirmations` from the CURRENT chain tip —
+/// the one field of a confirmed transaction that changes with every block, and
+/// therefore the one field that must never be served from a TTL cache.
+/// Returns false for an unconfirmed snapshot (`blockHeight <= 0`): there is no
+/// height to count from, so the caller must recompute instead of serving it.
+/// If chain state is unreadable, the stored count is served as-is — stale-but-sane
+/// beats a confident 0 (mirrors the compute path's `.ok()` on the same read).
+fn freshen_confirmations(db: &Arc<DB>, tx: &mut serde_json::Value) -> bool {
+    let height = tx.get("blockHeight").and_then(|h| h.as_i64()).unwrap_or(0);
+    if height <= 0 {
+        return false;
+    }
+    if let Ok(cs) = get_chain_state(db) {
+        if cs.height > 0 {
+            tx["confirmations"] = serde_json::json!((cs.height as i64 - height + 1).max(0));
+        }
+    }
+    true
 }
 
 /// Read a transaction's stored record (`version(4) ++ height(4) ++ raw_tx`), preferring a
@@ -800,5 +844,52 @@ mod tests {
             futures::executor::block_on(build_unconfirmed_transaction(&db, "aa", "zz")).is_err()
         );
         assert!(futures::executor::block_on(build_unconfirmed_transaction(&db, "aa", "")).is_err());
+    }
+
+    // ---- freshen_confirmations (the /tx stale-cache fix) ----
+
+    fn seed_chain(height: i32) -> (tempfile::TempDir, std::sync::Arc<DB>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = DB::open_cf(&opts, temp.path(), ["chain_state", "chain_metadata"]).unwrap();
+        let cf = db.cf_handle("chain_state").unwrap();
+        db.put_cf(&cf, b"sync_height", height.to_le_bytes())
+            .unwrap();
+        (temp, std::sync::Arc::new(db))
+    }
+
+    // A cache hit must serve confirmations counted from the CURRENT tip, not the
+    // count captured at cache-fill time.
+    #[test]
+    fn freshen_recounts_confirmed_from_current_tip() {
+        let (_t, db) = seed_chain(110);
+        let mut v = serde_json::json!({ "blockHeight": 100, "confirmations": 1 });
+        assert!(freshen_confirmations(&db, &mut v));
+        assert_eq!(v["confirmations"], 11); // 110 - 100 + 1, same formula as compute
+    }
+
+    // An unconfirmed snapshot (blockHeight <= 0) has no height to count from — the
+    // caller must recompute instead of serving it (this is what un-pins a mempool
+    // "confirmations: 0" after the tx is mined).
+    #[test]
+    fn freshen_rejects_unconfirmed_snapshot() {
+        let (_t, db) = seed_chain(110);
+        let mut mempool = serde_json::json!({ "blockHeight": 0, "confirmations": 0 });
+        assert!(!freshen_confirmations(&db, &mut mempool));
+        let mut orphan = serde_json::json!({ "blockHeight": -1, "confirmations": 0 });
+        assert!(!freshen_confirmations(&db, &mut orphan));
+    }
+
+    // Unreadable chain state (seed() has no chain_state CF) serves the STORED count
+    // rather than lying with 0.
+    #[test]
+    fn freshen_serves_stored_count_when_chain_state_unreadable() {
+        let (_t, db, _) = seed();
+        let db = std::sync::Arc::new(db);
+        let mut v = serde_json::json!({ "blockHeight": 100, "confirmations": 7 });
+        assert!(freshen_confirmations(&db, &mut v));
+        assert_eq!(v["confirmations"], 7);
     }
 }
