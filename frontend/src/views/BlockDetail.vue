@@ -27,11 +27,17 @@ async function load() {
 onMounted(load)
 watch(() => props.height, load)
 
-const txType = (t) => { const x = t.tx_type || 'transparent'; return x === 'normal' ? 'transparent' : x }
-const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0' }
-// A tx is shielded if it carries Sapling spends/outputs — orthogonal to tx_type
-// (a transparent tx can be shielded), so it's flagged as an extra badge, not a type.
+// A tx carries Sapling spends/outputs → shielded activity.
 const isShielded = (t) => !!t.sapling && ((t.sapling.shielded_spend_count || 0) > 0 || (t.sapling.shielded_output_count || 0) > 0)
+// Pure z→z (no transparent vin/vout at all) is typed SHIELDED outright — a
+// "transparent" label on a 0-in/0-out tx reads as broken data. A partially
+// shielded tx (t→z / z→t) keeps its transparent type + the SHIELDED badge.
+const txType = (t) => {
+  const x = t.tx_type || 'transparent'
+  if (x !== 'coinbase' && x !== 'coinstake' && isShielded(t) && !(t.vin || []).length && !(t.vout || []).length) return 'shielded'
+  return x === 'normal' ? 'transparent' : x
+}
+const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0', shielded: '#ff5fd0' }
 
 // Block reward (total minted, PIV float) -> satoshi, for recovering the value the
 // cold-staker put in (the backend leaves P2CS coinstake inputs blank).
@@ -61,7 +67,7 @@ const minter = computed(() => {
 })
 
 const typeCounts = computed(() => {
-  const c = { coinbase: 0, coinstake: 0, transparent: 0 }
+  const c = { coinbase: 0, coinstake: 0, transparent: 0, shielded: 0 }
   for (const t of (block.value?.tx || [])) c[txType(t)]++
   return c
 })
@@ -80,6 +86,7 @@ const donutOption = computed(() => {
         { name: 'coinstake', value: c.coinstake, itemStyle: { color: TYPE_COLOR.coinstake } },
         { name: 'coinbase', value: c.coinbase, itemStyle: { color: TYPE_COLOR.coinbase } },
         { name: 'transparent', value: c.transparent, itemStyle: { color: TYPE_COLOR.transparent } },
+        { name: 'shielded', value: c.shielded, itemStyle: { color: TYPE_COLOR.shielded } },
       ].filter((d) => d.value > 0),
     }],
   }
@@ -116,9 +123,9 @@ const totalFees = computed(() =>
       </div>
 
       <div class="split s-37" style="margin-top: var(--space-4)">
-        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent" hero>
+        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent · shielded" hero>
           <div class="donut-wrap">
-            <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent" />
+            <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent, shielded" />
             <div class="donut-legend">
               <div class="dl" v-for="(v,k) in typeCounts" :key="k" v-show="v>0">
                 <span class="dl-dot" :style="{ background: TYPE_COLOR[k] }"></span>
@@ -156,8 +163,8 @@ const totalFees = computed(() =>
       <h2 class="section-title">Transactions ({{ block.tx.length }})</h2>
       <HudPanel v-for="t in block.tx" :key="t.txid" :title="`TX ${truncateHash(t.txid, 8, 6)}`" :id="`${t.vin.length} in · ${t.vout.length} out`" class="txp">
         <template #head>
-          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='transparent' }">{{ txType(t) }}</span>
-          <span v-if="isShielded(t)" class="pill cyan mono" style="margin-left:4px">SHIELDED</span>
+          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='transparent', pink: txType(t)==='shielded' }">{{ txType(t) }}</span>
+          <span v-if="isShielded(t) && txType(t) !== 'shielded'" class="pill pink mono" style="margin-left:4px">SHIELDED</span>
           <RouterLink :to="`/tx/${t.txid}`" class="gbtn">OPEN ↗</RouterLink>
         </template>
         <div class="txflow">

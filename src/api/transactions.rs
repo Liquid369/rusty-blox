@@ -497,12 +497,14 @@ async fn build_transaction_inner(
             0
         };
 
-        // Calculate fees (for non-coinbase)
-        let fees = if value_in > 0 && value_in >= value_out {
-            value_in - value_out
-        } else {
-            0
-        };
+        // Fee = transparent_in + saplingValueBalance − transparent_out (all sats).
+        // Sapling value moves via valueBalance (positive = net flow OUT of the shield
+        // pool), so ignoring it booked the ENTIRE shielded amount as fee on a t→z send
+        // and reported 0 for a pure z→z spend (whose fee IS the valueBalance).
+        // Coinstake mints and unresolved prevouts go negative → clamp to 0, exactly
+        // the shapes the old `value_in >= value_out` guard zeroed.
+        let value_balance = tx.sapling_data.as_ref().map(|s| s.value_balance).unwrap_or(0);
+        let fees = (value_in + value_balance - value_out).max(0);
 
         // Sapling (shielded) detail for version >= 3 transactions. Mirrors the
         // block-detail endpoint's mapping exactly so the tx page renders the same
