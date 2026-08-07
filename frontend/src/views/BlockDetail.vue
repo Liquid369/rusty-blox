@@ -11,6 +11,7 @@ import { formatSats, formatPiv } from '../lib/money.js'
 import { formatDateTime, truncateHash, formatDifficulty, formatCount, timeAgo, compactNumber } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import { coinstakeInputAddresses, coinstakeInputValueSat } from '../lib/coinstake.js'
+import { shieldShape } from '../lib/shield.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
@@ -29,15 +30,19 @@ watch(() => props.height, load)
 
 // A tx carries Sapling spends/outputs → shielded activity.
 const isShielded = (t) => !!t.sapling && ((t.sapling.shielded_spend_count || 0) > 0 || (t.sapling.shielded_output_count || 0) > 0)
-// Pure z→z (no transparent vin/vout at all) is typed SHIELDED outright — a
-// "transparent" label on a 0-in/0-out tx reads as broken data. A partially
-// shielded tx (t→z / z→t) keeps its transparent type + the SHIELDED badge.
+// Sapling txs are typed by direction: shielding (t→s), de-shielding (s→t),
+// shielded (s→s). Coinbase/coinstake are never reclassified; the degenerate
+// vb==0-with-transparent-io record falls back to transparent + SHIELDED badge.
 const txType = (t) => {
   const x = t.tx_type || 'transparent'
-  if (x !== 'coinbase' && x !== 'coinstake' && isShielded(t) && !(t.vin || []).length && !(t.vout || []).length) return 'shielded'
-  return x === 'normal' ? 'transparent' : x
+  if (x === 'coinbase' || x === 'coinstake') return x
+  return shieldShape(t) || (x === 'normal' ? 'transparent' : x)
 }
-const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0', shielded: '#ff5fd0' }
+const SHIELD_TYPES = ['shielding', 'de-shielding', 'shielded']
+const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0', shielding: '#ff8fe0', 'de-shielding': '#e03fa8', shielded: '#ff5fd0' }
+// Directed vb for the pool rows / aggregates: 0 for s→s (its vb is the fee,
+// not a transfer — printing it as a pool amount would misstate private values).
+const vbOf = (t) => { const s = shieldShape(t); return s && s !== 'shielded' ? (t.sapling.value_balance || 0) : 0 }
 
 // Block reward (total minted, PIV float) -> satoshi, for recovering the value the
 // cold-staker put in (the backend leaves P2CS coinstake inputs blank).
@@ -50,8 +55,11 @@ const vinColdValueSat = (t) => {
   if (!(t.vin || []).some((v) => vinCold(t, v))) return null
   return coinstakeInputValueSat(Math.round((t.value_out || 0) * 1e8), rewardSat.value, t.vin.length)
 }
-// Effective tx value-in (PIV): recovered cold-stake input, else the backend's value_in.
-const txIn = (t) => { const s = vinColdValueSat(t); return s != null ? s / 1e8 : t.value_in }
+// Effective tx value-in/out (PIV floats): recovered cold-stake input, plus the
+// shield-pool leg (vb>0 enters as input, vb<0 leaves as output) so the card's
+// in − out = fee identity balances on screen for shielding/de-shielding txs.
+const txIn = (t) => { const s = vinColdValueSat(t); const base = s != null ? s / 1e8 : (t.value_in || 0); return base + Math.max(vbOf(t), 0) }
+const txOut = (t) => (t.value_out || 0) + Math.max(-vbOf(t), 0)
 
 // The block's minter: for a PoS block the staker is in the COINSTAKE (the tx that
 // consumes a real input) — never the empty coinbase. A cold-stake coinstake output is
@@ -67,7 +75,7 @@ const minter = computed(() => {
 })
 
 const typeCounts = computed(() => {
-  const c = { coinbase: 0, coinstake: 0, transparent: 0, shielded: 0 }
+  const c = { coinbase: 0, coinstake: 0, transparent: 0, shielding: 0, 'de-shielding': 0, shielded: 0 }
   for (const t of (block.value?.tx || [])) c[txType(t)]++
   return c
 })
@@ -86,6 +94,8 @@ const donutOption = computed(() => {
         { name: 'coinstake', value: c.coinstake, itemStyle: { color: TYPE_COLOR.coinstake } },
         { name: 'coinbase', value: c.coinbase, itemStyle: { color: TYPE_COLOR.coinbase } },
         { name: 'transparent', value: c.transparent, itemStyle: { color: TYPE_COLOR.transparent } },
+        { name: 'shielding', value: c.shielding, itemStyle: { color: TYPE_COLOR.shielding } },
+        { name: 'de-shielding', value: c['de-shielding'], itemStyle: { color: TYPE_COLOR['de-shielding'] } },
         { name: 'shielded', value: c.shielded, itemStyle: { color: TYPE_COLOR.shielded } },
       ].filter((d) => d.value > 0),
     }],
@@ -123,9 +133,9 @@ const totalFees = computed(() =>
       </div>
 
       <div class="split s-37" style="margin-top: var(--space-4)">
-        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent · shielded" hero>
+        <HudPanel title="TX-TYPE DISTRIBUTION" id="coinstake · coinbase · transparent · ◈ shield flows" hero>
           <div class="donut-wrap">
-            <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent, shielded" />
+            <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent, shielding, de-shielding, shielded" />
             <div class="donut-legend">
               <div class="dl" v-for="(v,k) in typeCounts" :key="k" v-show="v>0">
                 <span class="dl-dot" :style="{ background: TYPE_COLOR[k] }"></span>
@@ -163,8 +173,8 @@ const totalFees = computed(() =>
       <h2 class="section-title">Transactions ({{ block.tx.length }})</h2>
       <HudPanel v-for="t in block.tx" :key="t.txid" :title="`TX ${truncateHash(t.txid, 8, 6)}`" :id="`${t.vin.length} in · ${t.vout.length} out`" class="txp">
         <template #head>
-          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='transparent', pink: txType(t)==='shielded' }">{{ txType(t) }}</span>
-          <span v-if="isShielded(t) && txType(t) !== 'shielded'" class="pill pink mono" style="margin-left:4px">SHIELDED</span>
+          <span class="pill" :class="{ neon: txType(t)==='coinstake', warn: txType(t)==='coinbase', cyan: txType(t)==='transparent', pink: SHIELD_TYPES.includes(txType(t)) }">{{ SHIELD_TYPES.includes(txType(t)) ? '◈ ' + txType(t) : txType(t) }}</span>
+          <span v-if="isShielded(t) && !shieldShape(t)" class="pill pink mono" style="margin-left:4px">SHIELDED</span>
           <RouterLink :to="`/tx/${t.txid}`" class="gbtn">OPEN ↗</RouterLink>
         </template>
         <div class="txflow">
@@ -178,12 +188,17 @@ const totalFees = computed(() =>
               <span v-else class="dim mono">{{ vin.coinbase ? 'coinbase' : (vin.address || '—') }}</span>
               <span class="mono num">{{ vinCold(t, vin) ? (vinColdValueSat(t) != null ? formatSats(vinColdValueSat(t), { decimals: 4 }) : '—') : (vin.value != null ? formatSats(vin.value, { decimals: 4 }) : '—') }}</span>
             </div>
+            <!-- de-shield: the pool is the input side; amount = value_balance (PIV float) -->
+            <div v-if="shieldShape(t) === 'de-shielding' || shieldShape(t) === 'shielded'" class="flow-row shield-row">
+              <span class="mono shield-glyph" title="sapling shield pool — counterparty private">◈ shield pool</span>
+              <span class="mono num">{{ shieldShape(t) === 'shielded' ? '—' : formatPiv(t.sapling.value_balance, { decimals: 4 }) }}</span>
+            </div>
           </div>
           <div class="flow-mid">
             <span class="flow-arrow">→</span>
             <div class="flow-agg mono">
               <span class="dim">in</span> {{ formatPiv(txIn(t), { decimals: 4 }) }}
-              <span class="dim">out</span> {{ formatPiv(t.value_out, { decimals: 4 }) }}
+              <span class="dim">out</span> {{ formatPiv(txOut(t), { decimals: 4 }) }}
               <span class="dim">fee</span> {{ formatPiv(t.fees, { decimals: 8 }) }}
             </div>
           </div>
@@ -196,6 +211,11 @@ const totalFees = computed(() =>
               </span>
               <span v-else class="dim mono">{{ (vout.addresses && vout.addresses[0]) ? vout.addresses[0] : '—' }}</span>
               <span class="mono num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</span>
+            </div>
+            <!-- shielding: the pool is the output side; amount = |value_balance| (PIV float) -->
+            <div v-if="shieldShape(t) === 'shielding' || shieldShape(t) === 'shielded'" class="flow-row shield-row">
+              <span class="mono shield-glyph" title="sapling shield pool — counterparty private">◈ shield pool</span>
+              <span class="mono num strong">{{ shieldShape(t) === 'shielded' ? '—' : formatPiv(-t.sapling.value_balance, { decimals: 4 }) }}</span>
             </div>
           </div>
         </div>

@@ -10,6 +10,7 @@ import { formatSats, formatPiv } from '../lib/money.js'
 import { formatDateTime, truncateHash, formatCount, timeAgo, safeUrl } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import { isCoinstakeTx, isUnresolvedColdVin, coinstakeInputAddresses, coinstakeInputValueSat } from '../lib/coinstake.js'
+import { shieldShape } from '../lib/shield.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
@@ -52,15 +53,13 @@ const isShielded = computed(() => {
   const s = sapling.value
   return !!s && ((s.shielded_spend_count || 0) > 0 || (s.shielded_output_count || 0) > 0)
 })
-// value_balance is a signed PIV FLOAT (not satoshis, so no formatSats): the
-// backend sets it > 0 for unshielding (shield -> transparent), < 0 for shielding
-// (transparent -> shield), 0 for a pure shielded (z->z) transfer.
+// value_balance is a signed PIV FLOAT (not satoshis, so no formatSats).
+// Shape comes from lib/shield.js — structural s→s check first (a pure s→s's
+// vb = +fee, so the old sign-only check mislabeled it "Deshielding").
+const shieldShapeName = computed(() => shieldShape(tx.value))
 const shieldDirection = computed(() => {
-  const vb = sapling.value?.value_balance
-  if (vb == null) return null
-  if (vb < 0) return 'Shielding'
-  if (vb > 0) return 'Deshielding'
-  return 'Shielded transfer'
+  const s = shieldShapeName.value
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : null
 })
 const valueBalance = computed(() => {
   const vb = sapling.value?.value_balance
@@ -195,10 +194,10 @@ const sankeyOption = computed(() => {
 
   // Sapling: draw the net value crossing the shielded-pool boundary as its own
   // node. value_balance (PIV, signed): < 0 shielding (TX -> pool), > 0
-  // deshielding (pool -> TX); 0 (pure z->z) has no transparent flow to show.
+  // deshielding (pool -> TX); 0 (pure s->s) has no transparent flow to show.
   const vb = t.sapling ? Number(t.sapling.value_balance) : 0
   if (vb) {
-    const POOL = '◈ SHIELDED'
+    const POOL = '◈ SHIELD POOL'
     nodes.push({ name: POOL, itemStyle: { color: '#8f5cff' }, label: { color: '#c9a6ff', fontWeight: 700 } })
     if (vb < 0) links.push({ source: TXC, target: POOL, value: Math.abs(vb) })
     else links.push({ source: POOL, target: TXC, value: vb })
@@ -244,15 +243,15 @@ const flowHeight = computed(() => {
       <HudPanel class="txid-panel">
         <div class="txid-row">
           <span class="pill mono" :class="tx.confirmations > 0 ? 'neon' : 'warn'"><span class="dot" :class="tx.confirmations > 0 ? 'neon' : 'warn'"></span>{{ tx.confirmations > 0 ? 'CONFIRMED' : 'UNCONFIRMED' }}</span>
-          <span v-if="isShielded" class="pill cyan mono"><span class="dot cyan"></span>SHIELDED{{ shieldDirection ? ' · ' + shieldDirection.toUpperCase() : '' }}</span>
+          <span v-if="isShielded" class="pill pink mono">◈ {{ (shieldDirection || 'shielded').toUpperCase() }}</span>
           <span v-if="txBudget" class="pill neon mono"><span class="dot neon"></span>{{ txBudget.kind.toUpperCase() }}</span>
           <span class="mono txid-val">{{ tx.txid }}</span>
         </div>
       </HudPanel>
 
       <div class="statgrid cols-4" style="margin-top: var(--space-4)">
-        <Stat k="VALUE OUT" accent><template #v>{{ formatSats(tx.value, { decimals: 4 }) }}</template><template #s>PIV</template></Stat>
-        <Stat k="VALUE IN"><template #v>{{ formatSats(coldInputValueSat != null ? coldInputValueSat : tx.valueIn, { decimals: 4 }) }}</template><template #s>PIV</template></Stat>
+        <Stat k="VALUE OUT" accent><template #v>{{ formatSats(tx.value, { decimals: 4 }) }}</template><template #s>{{ shieldShapeName === 'shielding' ? `PIV · ${formatPiv(-sapling.value_balance, { decimals: 4 })} → ◈ pool` : 'PIV' }}</template></Stat>
+        <Stat k="VALUE IN"><template #v>{{ formatSats(coldInputValueSat != null ? coldInputValueSat : tx.valueIn, { decimals: 4 }) }}</template><template #s>{{ shieldShapeName === 'de-shielding' ? `PIV · +${formatPiv(sapling.value_balance, { decimals: 4 })} from ◈ pool` : 'PIV' }}</template></Stat>
         <Stat k="FEES" glow><template #v>{{ formatSats(tx.fees) }}</template><template #s>PIV</template></Stat>
         <Stat k="CONFIRMATIONS" live><template #v>{{ formatCount(tx.confirmations) }}</template><template #s>{{ tx.confirmations > 0 ? timeAgo(tx.blockTime) : 'in mempool' }}</template></Stat>
       </div>
@@ -284,6 +283,15 @@ const flowHeight = computed(() => {
                 </td>
                 <td class="num strong">{{ vinCold(vin) ? (coldInputValueSat != null ? formatSats(coldInputValueSat, { decimals: 4 }) : '—') : (vin.value != null ? formatSats(vin.value, { decimals: 4 }) : '—') }}</td>
               </tr>
+              <!-- de-shield: pool is the input side; value_balance is a PIV FLOAT (the
+                   one non-sat row in this table) → formatPiv, never formatSats -->
+              <tr v-if="shieldShapeName === 'de-shielding' || shieldShapeName === 'shielded'" class="shield-row">
+                <td>
+                  <span class="mono shield-glyph" title="sapling shield pool — counterparty private">◈ SHIELD POOL</span>
+                  <div class="dim mono" style="font-size:11px;margin-top:2px">{{ formatCount(sapling.shielded_spend_count) }} shielded spend{{ sapling.shielded_spend_count === 1 ? '' : 's' }}</div>
+                </td>
+                <td class="num strong">{{ shieldShapeName === 'shielded' ? '—' : formatPiv(sapling.value_balance, { decimals: 4 }) }}</td>
+              </tr>
             </tbody>
           </table>
         </HudPanel>
@@ -311,6 +319,15 @@ const flowHeight = computed(() => {
                 </td>
                 <td class="num strong">{{ formatSats(vout.value, { decimals: 4 }) }}</td>
                 <td><span class="pill" :class="spentPill(vout).cls">{{ spentPill(vout).text }}</span></td>
+              </tr>
+              <!-- shielding: pool is the output side; |value_balance| PIV FLOAT → formatPiv -->
+              <tr v-if="shieldShapeName === 'shielding' || shieldShapeName === 'shielded'" class="shield-row">
+                <td>
+                  <span class="mono shield-glyph" title="sapling shield pool — counterparty private">◈ SHIELD POOL</span>
+                  <div class="dim mono" style="font-size:11px;margin-top:2px">{{ formatCount(sapling.shielded_output_count) }} shielded output{{ sapling.shielded_output_count === 1 ? '' : 's' }}</div>
+                </td>
+                <td class="num strong">{{ shieldShapeName === 'shielded' ? '—' : formatPiv(-sapling.value_balance, { decimals: 4 }) }}</td>
+                <td><span class="pill pink">pool</span></td>
               </tr>
             </tbody>
           </table>

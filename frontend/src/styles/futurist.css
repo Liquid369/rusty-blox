@@ -200,6 +200,11 @@ body {
 .pill.cyan  { background: rgba(70,230,208,0.12); color: var(--cyan); border-color: rgba(70,230,208,0.35); }
 .pill.pink  { background: rgba(255,95,208,0.12); color: #ff5fd0; border-color: rgba(255,95,208,0.35); }
 
+/* sapling shield-pool pseudo-row: dashed = a boundary, not an address */
+.shield-glyph { color: #ff5fd0; text-shadow: 0 0 6px rgba(255,95,208,0.6); }
+.shield-row > td { background: rgba(255,95,208,0.06); }
+.flow-row.shield-row { border: 1px dashed rgba(255,95,208,0.4); background: rgba(255,95,208,0.06); }
+
 /* live pulse dot */
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 0 rgba(246,211,90,0.6); }
 .dot.live { background: var(--success); animation: pulse 2s infinite; }

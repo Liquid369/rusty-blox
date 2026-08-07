@@ -9,6 +9,7 @@ import { ref, watch, onMounted, computed } from 'vue'
 import { getAddress, getUtxo, setAddress503, isMock } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
 import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
+import { shieldShape, SHIELD_TAG } from '../lib/shield.js'
 import { echarts, baseOption, catAxis, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
 import HudPanel from '../components/HudPanel.vue'
@@ -259,7 +260,10 @@ const addrKind = computed(() => {
             <thead><tr><th>Txid</th><th class="num">Height</th><th>Age</th><th class="num">Amount (PIV)</th><th class="num">Conf.</th></tr></thead>
             <tbody>
               <tr v-for="t in info.transactions" :key="t.txid">
-                <td><RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink></td>
+                <td>
+                  <RouterLink :to="`/tx/${t.txid}`">{{ truncateHash(t.txid, 10, 8) }}</RouterLink>
+                  <span v-if="shieldShape(t)" class="pill pink mono" style="margin-left:6px" :title="shieldShape(t)">◈ {{ SHIELD_TAG[shieldShape(t)] }}</span>
+                </td>
                 <td class="num dim"><span v-if="isUnconfirmedHeight(t.blockHeight)" class="pill warn mono">UNCONFIRMED</span><span v-else>{{ formatCount(t.blockHeight) }}</span></td>
                 <td class="dim">{{ timeAgo(t.blockTime) }}</td>
                 <td class="num strong" :style="{ color: (txDeltas[t.txid] || {}).color }">{{ (txDeltas[t.txid] || {}).str }}</td>
