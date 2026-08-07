@@ -482,8 +482,11 @@ fn enrich_transaction_inputs(
         // Sapling value moves via valueBalance (PIV; 0 for transparent txs);
         // ignoring it booked the entire shielded amount as fee. Clamp to a sane
         // range to reject any residual mis-join.
-        if tx.value_in > 0.0 {
-            let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
+        // value_in == 0 with a positive valueBalance is a pure-shielded (z→z / z→t)
+        // spend: the fee is paid from the shield pool, so it still computes here.
+        // value_in == 0 with NO shielded outflow = unresolved prevouts → fee stays 0.
+        let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
+        if tx.value_in > 0.0 || value_balance > 0.0 {
             let calculated_fee = tx.value_in + value_balance - tx.value_out;
             tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) {
                 0.0
