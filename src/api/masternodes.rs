@@ -4,9 +4,9 @@
 
 use super::helpers::rpc_call_json;
 use axum::{extract::Path as AxumPath, http::StatusCode, Extension, Json};
-use pivx_rpc_rs::MasternodeList;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 use super::types::MNCount;
 use crate::cache::CacheManager;
@@ -26,7 +26,10 @@ pub async fn mn_count_v2(
 
     match result {
         Ok(count) => Ok(Json(count)),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => {
+            warn!(error = %e, "mncount failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
@@ -41,7 +44,7 @@ async fn compute_mn_count() -> Result<MNCount, Box<dyn std::error::Error + Send 
 /// **CACHED**: 60 second TTL
 pub async fn mn_list_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Result<Json<Vec<MasternodeList>>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let result = cache
         .get_or_compute("mn:list", Duration::from_secs(60), || async {
             compute_mn_list().await
@@ -50,14 +53,31 @@ pub async fn mn_list_v2(
 
     match result {
         Ok(list) => Ok(Json(list)),
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        Err(e) => {
+            warn!(error = %e, "mnlist failed");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
     }
 }
 
-async fn compute_mn_list() -> Result<Vec<MasternodeList>, Box<dyn std::error::Error + Send + Sync>>
-{
+/// Pure proxy: serve pivxd's rows UNTYPED. The old strict
+/// `Vec<pivx_rpc_rs::MasternodeList>` round-trip (rigid schema, `outidx: i8`,
+/// no optional fields) 500'd the ENTIRE list the day one row's shape moved —
+/// and the endpoint only re-serializes to JSON, so the typing bought nothing.
+/// The frontend renders row fields defensively.
+async fn compute_mn_list() -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let result = rpc_call_json("listmasternodes", serde_json::json!([])).await?;
-    Ok(serde_json::from_value(result)?)
+    if !result.is_array() {
+        return Err(format!(
+            "listmasternodes returned non-array JSON ({})",
+            match &result {
+                serde_json::Value::Object(_) => "object",
+                other => other.as_str().unwrap_or("scalar"),
+            }
+        )
+        .into());
+    }
+    Ok(result)
 }
 
 /// GET /api/v2/relaymnb/{hex}
