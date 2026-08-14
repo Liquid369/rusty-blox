@@ -179,13 +179,17 @@ const queueHealth = computed(() => counts.value ? (counts.value.inqueue / counts
             </tr>
           </thead>
           <tbody>
-            <tr v-for="n in pageRows" :key="n.txhash">
+            <!-- key + link by OUTPOINT: mass-collateral txs put 100+ masternodes on
+                 one txhash, and duplicate v-for keys corrupt the keyed re-render
+                 (rows painted 3-4×); a bare-txhash detail link resolves to the
+                 wrong node for all but the first. -->
+            <tr v-for="n in pageRows" :key="`${n.txhash}:${n.outidx}`">
               <td class="strong">#{{ n.rank }}</td>
               <td><span class="pill" :class="statusCls(n.status)">{{ n.status }}</span></td>
               <td class="dim">{{ n.type }}</td>
               <td><span class="pill" :class="netCls(n.network)">{{ n.network }}</span></td>
               <td><RouterLink :to="`/address/${n.addr}`">{{ truncateHash(n.addr, 8, 6) }}</RouterLink></td>
-              <td><RouterLink :to="`/masternode/${n.txhash}`">{{ truncateHash(n.txhash, 6, 4) }}:{{ n.outidx }}</RouterLink></td>
+              <td><RouterLink :to="`/masternode/${n.txhash}-${n.outidx}`">{{ truncateHash(n.txhash, 6, 4) }}:{{ n.outidx }}</RouterLink></td>
               <td class="dim">{{ n.lastpaid ? timeAgo(n.lastpaid) : 'never' }}</td>
               <td class="dim">{{ formatDuration(n.activetime) }}</td>
               <td class="dim">{{ timeAgo(n.lastseen) }}</td>
