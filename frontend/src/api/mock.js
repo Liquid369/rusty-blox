@@ -313,6 +313,30 @@ export function utxo(addr) {
   return out.sort((a, b) => a.confirmations - b.confirmations)
 }
 
+// balancehistory: Blockbook-style daily buckets; received/sent = satoshi
+// STRINGS. One large mid-series send so the curve visibly steps DOWN.
+export function balanceHistory() {
+  const out = []
+  let cum = 0n
+  for (let i = 90; i >= 1; i--) {
+    const time = (Math.floor(TIP_TIME / 86400) - i) * 86400
+    let recv = rng() < 0.75 ? BigInt(randInt(500, 40000)) * 100000000n : 0n
+    let sent = 0n
+    if (i === 30 && cum > 0n) sent = cum / 2n // the big withdrawal
+    else if (rng() < 0.1 && cum > 100000000000n) sent = cum / 20n
+    if (recv === 0n && sent === 0n) continue
+    cum += recv - sent
+    out.push({
+      time,
+      txs: randInt(1, 5),
+      received: recv.toString(),
+      sent: sent.toString(),
+      sentToSelf: '0'
+    })
+  }
+  return out
+}
+
 // =====================================================================
 // analytics-suite
 // =====================================================================

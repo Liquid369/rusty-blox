@@ -71,6 +71,12 @@ export const getAddress = (addr, opts = {}) => {
   return getJSON(`/address/${encodeURIComponent(addr)}?${q}`)
 }
 
+// Blockbook-style balance history: per-bucket {time, txs, received, sent,
+// sentToSelf} with satoshi STRINGS; the address page integrates received minus sent
+// (BigInt) into the balance curve. 503s during reindex like /address.
+export const getBalanceHistory = (addr, groupBy = 86400) =>
+  isMock ? Promise.resolve(mock.balanceHistory()) : getJSON(`/balancehistory/${addr}?groupBy=${groupBy}`)
+
 export const getUtxo = (addr) => {
   if (isMock) {
     try { return Promise.resolve(mock.utxo(addr)) } catch (e) { return Promise.reject(e) }
@@ -186,7 +192,7 @@ export const setAddress503 = mock.setAddress503
 
 export default {
   getStatus, getHealth, getRecentBlocks, getBlockDetail, getTx,
-  getAddress, getUtxo, getSupply, getTransactions, getStaking, getNetwork,
+  getAddress, getUtxo, getBalanceHistory, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
   getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,

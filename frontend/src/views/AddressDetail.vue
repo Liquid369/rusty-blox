@@ -6,7 +6,7 @@
    UNITS: all /address + /utxo money fields are satoshi STRINGS.
    ===================================================================== */
 import { ref, watch, onMounted, computed } from 'vue'
-import { getAddress, getUtxo, setAddress503, isMock } from '../api/client.js'
+import { getAddress, getUtxo, getBalanceHistory, setAddress503, isMock } from '../api/client.js'
 import { formatSats } from '../lib/money.js'
 import { timeAgo, truncateHash, formatCount, compactNumber, isUnconfirmedHeight } from '../lib/format.js'
 import { shieldShape, SHIELD_TAG } from '../lib/shield.js'
@@ -26,6 +26,7 @@ const page = ref(1)
 
 async function load() {
   err.value = null; reindexing.value = false; info.value = null; utxos.value = []
+  history.value = null
   loading.value = true; page.value = 1
   try {
     info.value = await getAddress(props.addr, { details: 'txs', page: 1, pageSize: 25 })
@@ -36,6 +37,8 @@ async function load() {
   } finally {
     loading.value = false
   }
+  // Non-fatal: a failed series shows "unavailable" in its panel, never a wrong curve.
+  try { history.value = await getBalanceHistory(props.addr) } catch { history.value = null }
 }
 
 // Server-side ledger pagination: re-fetch just the tx page (the charts + totals
@@ -82,27 +85,26 @@ const txDeltas = computed(() => {
   return m
 })
 
-/* ---------- balance accumulation from the CURRENT UTXO set ----------
-   The address tx list (details=txs) is INCOMPLETE for cold-stake owners — it omits the
-   P2CS coinstake txs that hold most of the balance — so a forward tx-delta sum
-   undercounts badly (it showed ~2.5M for a 34.8M cold-staking account). /utxo carries
-   EVERY current coin, incl. cold-staked ones, with its height, so cumulative-by-creation
-   ends at the TRUE balance. Timestamps are estimated from confirmation depth (~60s PoS). */
+/* ---------- balance over time (/balancehistory) ----------
+   TRUE reconstructed balance: the backend walks the address's full 't' tx list
+   (attribution identical to the r/s index, so the curve ENDS at BALANCE) and
+   returns per-bucket received/sent as satoshi STRINGS. Integrate with BigInt;
+   convert to a PIV Number only at the plot layer (loss past 2^53 sats moves
+   pixels, never displayed money text). null = unavailable, [] = no history. */
+const history = ref(null)
 const balanceOption = computed(() => {
   const p = palette()
-  const u = utxos.value
-  if (!u.length) return baseOption(p)
-  const now = Date.now()
-  const sorted = [...u].filter((x) => x.height > 0).sort((a, b) => a.height - b.height)
-  let bal = 0
-  const pts = sorted.map((x) => {
-    bal += sat2piv(x.value)
-    return [now - (x.confirmations || 0) * 60000, bal]
+  const rows = history.value || []
+  if (!rows.length) return baseOption(p)
+  let cum = 0n
+  const pts = rows.map((b) => {
+    cum += BigInt(b.received) - BigInt(b.sent)
+    return [b.time * 1000, sat2piv(cum.toString())]
   })
   return {
     ...baseOption(p),
     grid: { left: 60, right: 16, top: 18, bottom: 26, containLabel: true },
-    tooltip: { ...baseOption(p).tooltip, formatter: (arr) => `${new Date(arr[0].value[0]).toISOString().slice(0,10)}<br/>${compactNumber(arr[0].value[1])} PIV held` },
+    tooltip: { ...baseOption(p).tooltip, formatter: (arr) => `${new Date(arr[0].value[0]).toISOString().slice(0,10)}<br/>${compactNumber(arr[0].value[1])} PIV balance` },
     xAxis: { type: 'time', axisLine: { lineStyle: { color: 'rgba(150,90,220,0.25)' } }, axisLabel: { color: p.axis, fontSize: 9, fontFamily: 'monospace' }, axisTick: { show: false } },
     yAxis: valAxis(p, { scale: true, axisLabel: { formatter: (v) => compactNumber(v) } }),
     series: [{
@@ -231,8 +233,10 @@ const addrKind = computed(() => {
       </div>
 
       <div class="split s-21" style="margin-top: var(--space-4)">
-        <HudPanel title="BALANCE OVER TIME" id="current holdings · by UTXO creation height" hero>
-          <EChart :option="balanceOption" height="240px" aria-label="Account balance accumulation by UTXO creation height" />
+        <HudPanel title="BALANCE OVER TIME" id="/balancehistory · daily" hero>
+          <EChart v-if="history && history.length" :option="balanceOption" height="240px" aria-label="Reconstructed account balance over time" />
+          <div v-else-if="history" class="loading" style="height:240px">no confirmed history yet</div>
+          <div v-else class="loading" style="height:240px">balance series unavailable</div>
         </HudPanel>
         <HudPanel title="RECEIVED / SENT" id="totalReceived vs totalSent">
           <EChart :option="flowOption" height="160px" aria-label="Received versus sent split" />
