@@ -11,6 +11,8 @@ use rustyblox::api::{
     addr_v2,
     // Root handlers
     api_handler,
+    // Balance history
+    balance_history_v2,
     // Blocks module
     block_index_v2,
     block_stats_v2,
@@ -241,6 +243,7 @@ async fn start_web_server(
         .route("/api/v2/block-stats/{count}", get(block_stats_v2))
         .route("/api/v2/tx/{txid}", get(tx_v2))
         .route("/api/v2/address/{address}", get(addr_v2))
+        .route("/api/v2/balancehistory/{address}", get(balance_history_v2))
         .route("/api/v2/xpub/{xpub}", get(xpub_v2))
         .route("/api/v2/utxo/{address}", get(utxo_v2))
         .route("/api/v2/block/{block_height}", get(block_v2))
