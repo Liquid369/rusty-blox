@@ -2,12 +2,15 @@ import { fileURLToPath, URL } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// NEUTRAL base config for the redesign competition.
-// base './' so a built prototype can be served from any sub-path.
+// base '/' (absolute assets): the app is served at the domain root. The old
+// relative './' base was a competition-era leftover and broke every path-style
+// deep link (/tx/<id> resolved ./assets against /tx/, the SPA fallback served
+// HTML as the script, nosniff refused it, page rendered black in wallets'
+// in-app browsers).
 // Port 5180 (strictPort:false so it hops if busy) keeps it off the legacy app's 3001.
 export default defineConfig({
   plugins: [vue()],
-  base: './',
+  base: '/',
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))
