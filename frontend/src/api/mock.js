@@ -245,7 +245,7 @@ export function address(addr, { details = 'txs', page = 1, pageSize = 25 } = {})
   const txCount = 19
   const txids = Array.from({ length: txCount }, () => fakeHash())
   const transactions =
-    details === 'txs'
+    details === 'txs' || details === 'txslight'
       ? txids.slice(0, pageSize).map((id, i) => buildAddrTx(id, addr || SAMPLE_ADDR, i))
       : undefined
   return {

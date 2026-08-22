@@ -26,11 +26,17 @@ const page = ref(1)
 
 async function load() {
   err.value = null; reindexing.value = false; info.value = null; utxos.value = []
-  history.value = null
+  history.value = undefined // undefined = loading, null = failed, [] = empty
   loading.value = true; page.value = 1
+  // All three fetches in flight AT ONCE: the old serial await chain stacked
+  // ~3 round trips before the page drew anything. txslight drops the raw tx
+  // hex + sapling proofs the ledger never reads (a whale page-1 was ~600KB).
+  const histPromise = getBalanceHistory(props.addr)
   try {
-    info.value = await getAddress(props.addr, { details: 'txs', page: 1, pageSize: 25 })
-    utxos.value = await getUtxo(props.addr)
+    ;[info.value, utxos.value] = await Promise.all([
+      getAddress(props.addr, { details: 'txslight', page: 1, pageSize: 25 }),
+      getUtxo(props.addr)
+    ])
   } catch (e) {
     if (e.status === 503) reindexing.value = true
     else err.value = e.message
@@ -38,7 +44,7 @@ async function load() {
     loading.value = false
   }
   // Non-fatal: a failed series shows "unavailable" in its panel, never a wrong curve.
-  try { history.value = await getBalanceHistory(props.addr) } catch { history.value = null }
+  try { history.value = await histPromise } catch { history.value = null }
 }
 
 // Server-side ledger pagination: re-fetch just the tx page (the charts + totals
@@ -46,7 +52,7 @@ async function load() {
 async function goPage(p) {
   if (p < 1 || p > (info.value?.totalPages || 1)) return
   try {
-    info.value = await getAddress(props.addr, { details: 'txs', page: p, pageSize: 25 })
+    info.value = await getAddress(props.addr, { details: 'txslight', page: p, pageSize: 25 })
     page.value = p
   } catch { /* keep current page */ }
 }
@@ -236,7 +242,8 @@ const addrKind = computed(() => {
         <HudPanel title="BALANCE OVER TIME" id="/balancehistory · daily" hero>
           <EChart v-if="history && history.length" :option="balanceOption" height="240px" aria-label="Reconstructed account balance over time" />
           <div v-else-if="history" class="loading" style="height:240px">no confirmed history yet</div>
-          <div v-else class="loading" style="height:240px">balance series unavailable</div>
+          <div v-else-if="history === null" class="loading" style="height:240px">balance series unavailable</div>
+          <div v-else class="sk" style="height:240px"></div>
         </HudPanel>
         <HudPanel title="RECEIVED / SENT" id="totalReceived vs totalSent">
           <EChart :option="flowOption" height="160px" aria-label="Received versus sent split" />
