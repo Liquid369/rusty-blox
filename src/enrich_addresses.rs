@@ -1873,8 +1873,7 @@ fn is_canonical_hash(
 }
 
 /// Header nTime of the canonical block at `height` (forward map → blocks CF).
-/// Also used by the /balancehistory read path (api/balance_history.rs).
-pub(crate) fn header_ntime_at(
+fn header_ntime_at(
     db: &Arc<DB>,
     cf_metadata: &impl rocksdb::AsColumnFamilyRef,
     cf_blocks: &impl rocksdb::AsColumnFamilyRef,

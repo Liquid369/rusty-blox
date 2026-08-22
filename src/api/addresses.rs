@@ -110,22 +110,6 @@ pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
     }
 }
 
-/// Per-request cap for compute_address_info's one remaining O(history) scan:
-/// the newest-first height-sort. Balances/totals are now always served from the
-/// persisted 'r'/'s' aggregates (O(1)), so this no longer gates any value
-/// recompute — only ordering. Addresses with more than this many txs skip the
-/// height read and serve the stored txid order (unchanged prior over_cap
-/// behavior). Configurable via RUSTYBLOX_ADDR_MAX_TX_SCAN; defaults to 50_000
-/// (well above any normal address; the sort is now a single batched blocking
-/// pass, so this is a safety bound on pathological addresses, not the hot path).
-fn address_recompute_cap() -> usize {
-    std::env::var("RUSTYBLOX_ADDR_MAX_TX_SCAN")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(50_000)
-}
-
 /// Read the exact persisted per-address totals written by the enrichment phase:
 /// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
 /// A MISSING key reads as 0 (a never-seen address genuinely has no totals); a
@@ -252,7 +236,7 @@ async fn compute_address_info(
     // authoritative, so newest-first ordering needs NO per-txid tx-CF lookup. A
     // stride mismatch (stale/legacy blob) is a hard error, surfaced — not silently
     // truncated.
-    let tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
+    let mut tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
 
     // Balance and lifetime totals come straight from the aggregates enrichment
     // already persisted: 'r'+address = totalReceived, 's'+address = totalSent
@@ -274,23 +258,21 @@ async fn compute_address_info(
     let (total_received, total_sent) = read_address_totals(db, address).await?;
     let balance = total_received - total_sent;
 
-    // P1-1: the stored 't' txids are ALREADY canonical display order (parser.rs
-    // hash_txid reverses to display; the tx CF is keyed by 't' + display bytes), so
-    // they are emitted verbatim.
+    // The stored 't' txids are ALREADY canonical display order (parser.rs
+    // hash_txid reverses to display; the tx CF is keyed by 't' + display bytes),
+    // so they hex-encode directly.
     //
-    // Order newest-first by the INLINE block height — no tx-CF lookups, no
-    // spawn_blocking; an O(N log N) in-memory sort on data already loaded. This is
-    // the O(history) cold-load fix (was one get_cf per txid). Above the order cap,
-    // serve the stored order unchanged (preserves the prior over_cap behavior).
-    // Stable sort keeps stored order within an equal height.
-    let order_cap = address_recompute_cap();
-    let all_txids: Vec<String> = if tx_entries.len() > order_cap {
-        tx_entries.iter().map(|(t, _)| hex::encode(t)).collect()
-    } else {
-        let mut ordered = tx_entries.clone();
-        ordered.sort_by(|a, b| b.1.cmp(&a.1));
-        ordered.into_iter().map(|(t, _)| hex::encode(t)).collect()
-    };
+    // ALWAYS order newest-first by the INLINE block height (same ordering as the
+    // UTXO list's confirmations sort): an in-place sort on data already loaded,
+    // no tx-CF lookups. The old >50k RUSTYBLOX_ADDR_MAX_TX_SCAN cap served the
+    // STORED order verbatim for big addresses, and that order is txid-lex (the
+    // enrichment's deterministic build order), so a 230k-tx staker's ledger
+    // paged through garbage. Sorting 230k inline-height records costs ~20ms and
+    // even a pathological multi-million-tx address stays sub-second, so the cap
+    // bought nothing but the bug. Stable sort keeps stored order within an equal
+    // height (deterministic pagination).
+    tx_entries.sort_by(|a, b| b.1.cmp(&a.1));
+    let all_txids: Vec<String> = tx_entries.iter().map(|(t, _)| hex::encode(t)).collect();
 
     // === PAGINATION LOGIC ===
     // Validate and clamp parameters
@@ -332,6 +314,22 @@ async fn compute_address_info(
         "txs" => {
             // Full transaction objects - fetch them
             let txs = fetch_transactions_batch(db, &paginated_txids).await;
+            (None, Some(txs))
+        }
+        "txslight" => {
+            // Blockbook's light mode: full vin/vout (the ledger computes the
+            // address's per-tx delta from them) but WITHOUT the raw tx hex and
+            // the sapling proof blobs, which dominate the payload (a whale's
+            // 25-tx page was ~600KB; light is a fraction of that). Sapling
+            // counts + value_balance stay so shield-flow tags still render.
+            let mut txs = fetch_transactions_batch(db, &paginated_txids).await;
+            for t in &mut txs {
+                t.hex = String::new();
+                if let Some(s) = t.sapling.as_mut() {
+                    s.spends = None;
+                    s.outputs = None;
+                }
+            }
             (None, Some(txs))
         }
         _ => {
@@ -860,6 +858,22 @@ async fn aggregate_xpub_data(
         "txs" => {
             // Full transaction objects - fetch them
             let txs = fetch_transactions_batch(db, &paginated_txids).await;
+            (None, Some(txs))
+        }
+        "txslight" => {
+            // Blockbook's light mode: full vin/vout (the ledger computes the
+            // address's per-tx delta from them) but WITHOUT the raw tx hex and
+            // the sapling proof blobs, which dominate the payload (a whale's
+            // 25-tx page was ~600KB; light is a fraction of that). Sapling
+            // counts + value_balance stay so shield-flow tags still render.
+            let mut txs = fetch_transactions_batch(db, &paginated_txids).await;
+            for t in &mut txs {
+                t.hex = String::new();
+                if let Some(s) = t.sapling.as_mut() {
+                    s.spends = None;
+                    s.outputs = None;
+                }
+            }
             (None, Some(txs))
         }
         "tokens" | "tokenBalances" => {
