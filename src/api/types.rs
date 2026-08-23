@@ -192,6 +192,9 @@ pub struct Transaction {
     #[serde(rename = "valueIn")]
     pub value_in: String,
     pub fees: String,
+    // Empty on the /address details=txslight path (the raw hex dominates the
+    // payload and the ledger never uses it); omitted from JSON when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub hex: String,
     /// Sapling (shielded) detail for version >= 3 transactions. Same shape the
     /// block-detail endpoint emits; omitted entirely for transparent txs.

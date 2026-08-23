@@ -162,6 +162,30 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
+/// 307 a path-style deep link onto the SPA's hash router. The id is echoed into
+/// a Location header, so only plain alphanumerics pass (txids/hashes are hex,
+/// addresses/xpubs base58, heights digits); anything else is a plain 404.
+/// Temporary (not 308) so cached redirects can't outlive a future routing change.
+fn hash_redirect(kind: &str, id: &str) -> Response {
+    if !id.is_empty() && id.len() <= 120 && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        axum::response::Redirect::temporary(&format!("/#/{kind}/{id}")).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+async fn redirect_tx(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    hash_redirect("tx", &id)
+}
+async fn redirect_address(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    hash_redirect("address", &id)
+}
+async fn redirect_block(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    hash_redirect("block", &id)
+}
+async fn redirect_xpub(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    hash_redirect("xpub", &id)
+}
+
 /// Prometheus metrics endpoint handler
 async fn metrics_handler() -> impl IntoResponse {
     let metrics_output = metrics::gather_metrics();
@@ -278,7 +302,15 @@ async fn start_web_server(
         .route("/metrics", get(metrics_handler)) // Prometheus metrics endpoint
         // Merge the rate-bounded broadcast proxies (their tighter concurrency
         // cap is already layered onto this sub-router above).
-        .merge(broadcast_routes);
+        .merge(broadcast_routes)
+        // Path-style deep links (/tx/<id> etc.) are the universal explorer-link
+        // convention wallets template (Cake in-app browser rendered them black:
+        // the SPA fallback served index.html whose relative assets then 404'd).
+        // The SPA routes by HASH, so bounce the conventional paths onto it.
+        .route("/tx/{id}", get(redirect_tx))
+        .route("/address/{id}", get(redirect_address))
+        .route("/block/{id}", get(redirect_block))
+        .route("/xpub/{id}", get(redirect_xpub));
 
     // Serve the built frontend (SPA) for everything that isn't an API route.
     // ServeDir handles the hashed /assets/*.js|css files; unknown paths fall

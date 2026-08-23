@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
-use super::transactions::read_tx_record_orphan_aware;
 use crate::cache::CacheManager;
 use crate::types::CTransaction;
 
@@ -250,13 +249,48 @@ async fn compute_balance_history(
             return Err(TOO_MANY_TXS.to_string());
         }
 
+        // Batch ALL tx-record reads into one multi_get (both key orders per txid;
+        // same semantics as read_tx_record_orphan_aware: body = first len>8 probing
+        // internal then display, orphan if EITHER order carries HEIGHT_ORPHAN).
+        // Serial point-gets cost a cold 17k-tx staker ~30s on the VPS; one batched
+        // multi_get is 1-2 orders of magnitude cheaper on the same data.
+        let tx_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> = canonical
+            .iter()
+            .flat_map(|(txid, _)| {
+                let internal: Vec<u8> = txid.iter().rev().cloned().collect();
+                let mut ik = vec![b't'];
+                ik.extend_from_slice(&internal);
+                let mut dk = vec![b't'];
+                dk.extend_from_slice(txid);
+                [(cf_tx, ik), (cf_tx, dk)]
+            })
+            .collect();
+        let tx_vals = db.multi_get_cf(tx_keys);
+
         let mut own: HashMap<(String, u64), i64> = HashMap::new();
         let mut flows: Vec<TxFlow> = Vec::with_capacity(canonical.len());
-        for (txid_bytes, height) in canonical {
-            // Orphan-aware on a SUMMING path: a reorg orphan-marks only the
-            // display record; counting a disconnected tx would corrupt the curve.
-            let (body, orphan_marked) =
-                read_tx_record_orphan_aware(&db, &cf_tx, txid_bytes).map_err(|e| e.to_string())?;
+        for (i, (txid_bytes, height)) in canonical.iter().enumerate() {
+            let pair = [&tx_vals[2 * i], &tx_vals[2 * i + 1]];
+            let mut body: Option<&Vec<u8>> = None;
+            let mut orphan_marked = false;
+            for v in pair {
+                let d = match v {
+                    Ok(Some(d)) => d,
+                    Ok(None) => continue,
+                    // Orphan-aware on a SUMMING path, and IO errors must stay
+                    // errors: reading a failure as "absent" would drop money.
+                    Err(e) => return Err(e.to_string()),
+                };
+                if d.len() >= 8
+                    && i32::from_le_bytes([d[4], d[5], d[6], d[7]])
+                        == crate::constants::HEIGHT_ORPHAN
+                {
+                    orphan_marked = true;
+                }
+                if d.len() > 8 && body.is_none() {
+                    body = Some(d);
+                }
+            }
             if orphan_marked {
                 continue;
             }
@@ -277,10 +311,47 @@ async fn compute_balance_history(
             });
         }
 
+        // Batch the header-time resolution the same way: distinct heights ->
+        // chain_metadata (height -> display hash) -> blocks CF (internal hash ->
+        // header, nTime at [68..72]). A per-block staker has one distinct height
+        // per tx, which made the closure-per-height path the other half of the 30s.
+        let mut heights: Vec<i32> = flows.iter().map(|f| f.height).collect();
+        heights.sort_unstable();
+        heights.dedup();
+        let hash_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> = heights
+            .iter()
+            .map(|h| (cf_meta, h.to_le_bytes().to_vec()))
+            .collect();
+        let hashes = db.multi_get_cf(hash_keys);
+        let mut header_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> =
+            Vec::with_capacity(heights.len());
+        for v in &hashes {
+            match v {
+                Ok(Some(display)) => {
+                    header_keys.push((cf_blocks, display.iter().rev().cloned().collect()))
+                }
+                // Missing canonical height = index corruption; fail loud rather
+                // than desync the curve. Keep index alignment with a dummy key.
+                Ok(None) => header_keys.push((cf_blocks, vec![])),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        let headers = db.multi_get_cf(header_keys);
+        let mut time_by_height: HashMap<i32, u32> = HashMap::with_capacity(heights.len());
+        for (i, h) in heights.iter().enumerate() {
+            if let Ok(Some(hdr)) = &headers[i] {
+                if hdr.len() >= 72 {
+                    if let Ok(b) = <[u8; 4]>::try_from(&hdr[68..72]) {
+                        time_by_height.insert(*h, u32::from_le_bytes(b));
+                    }
+                }
+            }
+        }
+
         bucket_series(
             &flows,
             &own,
-            |h| crate::enrich_addresses::header_ntime_at(&db, &cf_meta, &cf_blocks, h),
+            |h| time_by_height.get(&h).copied(),
             group_by,
             from,
             to,
