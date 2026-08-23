@@ -1141,11 +1141,30 @@ async fn tail_read_tick(
         }
     };
 
-    // Reindex/truncate guard: a blk file never shrinks in normal operation.
+    // Reindex/truncate guard: a blk file never shrinks below CONSUMED bytes in
+    // normal operation. It DOES legitimately shrink within its trailing zero
+    // padding: Core preallocates block files and TRUNCATES to the real data end
+    // when finalizing on rollover (observed live: watermark 134217728, the
+    // 128MiB allocation, len 134217175, the data end; the old blanket halt then
+    // re-warned every 2s forever). Finalize-truncation can never cut below our
+    // parse offset, so accept that case, persist the clamped watermark (one log,
+    // not one per tick), and let the tick proceed, usually straight into
+    // rollover. Only a shrink below the parse offset (consumed bytes vanished)
+    // signals a real -reindex.
+    let mut cursor = cursor;
     if len < cursor.file_len_watermark {
-        warn!(file = %path.display(), len, watermark = cursor.file_len_watermark,
-            "blk_tail: cursor file shrank — possible -reindex; halting (no advance)");
-        return Ok(0);
+        if len >= cursor.offset {
+            info!(file = %path.display(), len, watermark = cursor.file_len_watermark,
+                "blk_tail: file truncated within trailing padding (finalize on rollover), accepting");
+            cursor.file_len_watermark = len;
+            let mut batch = WriteBatch::default();
+            store.stage_cursor(&mut batch, &cursor)?;
+            store.commit(batch)?;
+        } else {
+            warn!(file = %path.display(), len, offset = cursor.offset, watermark = cursor.file_len_watermark,
+                "blk_tail: cursor file shrank below consumed data, possible -reindex; halting (no advance)");
+            return Ok(0);
+        }
     }
 
     let mut ingested = 0u64;
@@ -2027,6 +2046,52 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// Regression: Core FINALIZES a full blk file on rollover by truncating its
+    /// preallocation padding to the real data end (observed live on blk00143:
+    /// watermark at the 128MiB allocation, len 553 bytes lower). The tick used
+    /// to read ANY shrink as -reindex and halt forever, re-warning every 2s. A
+    /// shrink at/after the parse offset is benign: accept it, clamp the
+    /// watermark, and roll over normally.
+    #[tokio::test]
+    async fn tick_accepts_padding_truncation_and_rolls_over() {
+        let (store, _dbt) = store_with_chain();
+        let bdir = tempfile::TempDir::new().unwrap();
+        let parent = [0xAA; 32];
+        seed_canonical(&store, 10, parent, true, false);
+        let h1 = make_header(1, parent, NBITS);
+        let mut content = frame(PIVX_MAGIC, &h1);
+        let data_end = content.len();
+        content.extend_from_slice(&[0u8; 4096]); // preallocation padding
+        write_blk(bdir.path(), 0, &content);
+        tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        let c = store.load_cursor().unwrap().unwrap();
+        assert_eq!(
+            c.offset as usize, data_end,
+            "cursor parked at padding start"
+        );
+        assert!(
+            c.file_len_watermark as usize > data_end,
+            "watermark saw padding"
+        );
+
+        // Finalize: padding truncated away; the next file appears with a record.
+        write_blk(bdir.path(), 0, &content[..data_end]);
+        let h2 = make_header(1, hash_of(&h1), NBITS);
+        write_blk(bdir.path(), 1, &frame(PIVX_MAGIC, &h2));
+        let n1 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        let n2 = tail_read_tick(&store, bdir.path(), PIVX_MAGIC, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(n1 + n2, 1, "next file's record ingested, no permanent halt");
+        let c = store.load_cursor().unwrap().unwrap();
+        assert_eq!(c.file_no, 1, "rolled past the finalized file");
+        assert_eq!(c.cumulative_blocks, 2);
     }
 
     /// Regression: a daemon crash leaves torn garbage between records. The tick
