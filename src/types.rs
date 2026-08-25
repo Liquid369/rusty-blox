@@ -160,10 +160,41 @@ impl std::fmt::Debug for CBlockHeader {
 pub struct CTransaction {
     pub txid: String,
     pub version: i16,
+    /// PIVX nType (v6 special transactions): 0 = normal, 1-4 = ProTx family,
+    /// 5 = LLMQ quorum commitment. Always 0 for pre-v3 txs (their i32 version's
+    /// high half reads as 0).
+    pub tx_type: u16,
     pub inputs: Vec<CTxIn>,
     pub outputs: Vec<CTxOut>,
     pub lock_time: u32,
     pub sapling_data: Option<SaplingTxData>, // Sapling-specific data for version >= 3
+    /// Raw extraPayload of a special tx (nType != 0); None otherwise.
+    pub extra_payload: Option<Vec<u8>>,
+}
+
+/// Display name for a PIVX v6 special-transaction nType; None for normal (0)
+/// and unknown future types (callers fall back to "Special (type N)").
+pub fn special_tx_name(t: u16) -> Option<&'static str> {
+    match t {
+        1 => Some("Masternode Registration"),
+        2 => Some("Masternode Service Update"),
+        3 => Some("Masternode Registrar Update"),
+        4 => Some("Masternode Revocation"),
+        5 => Some("Quorum Commitment"),
+        _ => None,
+    }
+}
+
+/// Short slug for pills / block-detail tx_type strings.
+pub fn special_tx_slug(t: u16) -> Option<&'static str> {
+    match t {
+        1 => Some("proreg"),
+        2 => Some("proupserv"),
+        3 => Some("proupreg"),
+        4 => Some("prouprev"),
+        5 => Some("quorum"),
+        _ => None,
+    }
 }
 
 impl std::fmt::Debug for CTransaction {

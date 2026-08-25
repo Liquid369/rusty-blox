@@ -244,6 +244,7 @@ const flowHeight = computed(() => {
         <div class="txid-row">
           <span class="pill mono" :class="tx.confirmations > 0 ? 'neon' : 'warn'"><span class="dot" :class="tx.confirmations > 0 ? 'neon' : 'warn'"></span>{{ tx.confirmations > 0 ? 'CONFIRMED' : 'UNCONFIRMED' }}</span>
           <span v-if="isShielded" class="pill pink mono">◈ {{ (shieldDirection || 'shielded').toUpperCase() }}</span>
+          <span v-if="tx.specialTypeName" class="pill neon mono">⬢ {{ tx.specialTypeName.toUpperCase() }}</span>
           <span v-if="txBudget" class="pill neon mono"><span class="dot neon"></span>{{ txBudget.kind.toUpperCase() }}</span>
           <span class="mono txid-val">{{ tx.txid }}</span>
         </div>
@@ -259,7 +260,11 @@ const flowHeight = computed(() => {
       <h2 class="section-title">Value flow</h2>
       <HudPanel title="VIN → VOUT VALUE-FLOW" :id="isShielded ? 'transparent + shielded pool' : 'sankey · satoshi → PIV'" hero>
         <template #head><span class="pill cyan mono">{{ tx.vin.length }} in</span><span class="pill neon mono">{{ tx.vout.length }} out</span></template>
-        <EChart :option="sankeyOption" :height="flowHeight" aria-label="Transaction value flow from inputs to outputs" />
+        <!-- a special tx with zero io (quorum commitment) has no flow to draw -->
+        <div v-if="tx.specialTypeName && !tx.vin.length && !tx.vout.length" class="loading" style="height:120px">
+          {{ tx.specialTypeName.toLowerCase() }} · protocol transaction, carries no transparent value
+        </div>
+        <EChart v-else :option="sankeyOption" :height="flowHeight" aria-label="Transaction value flow from inputs to outputs" />
       </HudPanel>
 
       <div class="split s-2" style="margin-top: var(--space-4)">
@@ -434,6 +439,11 @@ const flowHeight = computed(() => {
           </template>
           <dt>Size</dt><dd>{{ formatCount(tx.size) }} B · vsize {{ formatCount(tx.vsize) }} B</dd>
           <dt>Version</dt><dd>{{ tx.version }} · locktime {{ tx.lockTime }}</dd>
+          <template v-if="tx.specialTypeName">
+            <dt>Special type</dt><dd>{{ tx.specialTypeName }} <span class="dim mono">(nType {{ tx.specialType }})</span></dd>
+            <dt v-if="tx.specialPayload">Payload</dt>
+            <dd v-if="tx.specialPayload"><Copyable :value="tx.specialPayload">{{ truncateHash(tx.specialPayload, 18, 14) }}</Copyable> <span class="dim mono">· {{ formatCount(tx.specialPayload.length / 2) }} B consensus data</span></dd>
+          </template>
         </dl>
       </HudPanel>
 

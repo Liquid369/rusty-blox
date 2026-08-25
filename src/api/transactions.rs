@@ -539,6 +539,13 @@ async fn build_transaction_inner(
         Ok(Transaction {
             txid: tx.txid,
             version: Some(tx.version as i32),
+            special_type: (tx.tx_type != 0).then_some(tx.tx_type),
+            special_type_name: (tx.tx_type != 0).then(|| {
+                crate::types::special_tx_name(tx.tx_type)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Special (type {})", tx.tx_type))
+            }),
+            special_payload: tx.extra_payload.as_ref().map(hex::encode),
             lock_time: Some(tx.lock_time),
             vin,
             vout,

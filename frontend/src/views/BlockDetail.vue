@@ -76,7 +76,9 @@ const minter = computed(() => {
 
 const typeCounts = computed(() => {
   const c = { coinbase: 0, coinstake: 0, transparent: 0, shielding: 0, 'de-shielding': 0, shielded: 0 }
-  for (const t of (block.value?.tx || [])) c[txType(t)]++
+  // Generic bump: v6 special-tx slugs (proreg, quorum, ...) arrive from the
+  // backend as-is; a fixed-key ++ would produce NaN for them.
+  for (const t of (block.value?.tx || [])) { const k = txType(t); c[k] = (c[k] || 0) + 1 }
   return c
 })
 
@@ -90,14 +92,11 @@ const donutOption = computed(() => {
       type: 'pie', radius: ['58%', '84%'], center: ['50%', '50%'],
       itemStyle: { borderColor: 'rgba(10,6,20,0.9)', borderWidth: 3 },
       label: { show: false }, labelLine: { show: false },
-      data: [
-        { name: 'coinstake', value: c.coinstake, itemStyle: { color: TYPE_COLOR.coinstake } },
-        { name: 'coinbase', value: c.coinbase, itemStyle: { color: TYPE_COLOR.coinbase } },
-        { name: 'transparent', value: c.transparent, itemStyle: { color: TYPE_COLOR.transparent } },
-        { name: 'shielding', value: c.shielding, itemStyle: { color: TYPE_COLOR.shielding } },
-        { name: 'de-shielding', value: c['de-shielding'], itemStyle: { color: TYPE_COLOR['de-shielding'] } },
-        { name: 'shielded', value: c.shielded, itemStyle: { color: TYPE_COLOR.shielded } },
-      ].filter((d) => d.value > 0),
+      // Known types in stable order, then any other slug (v6 special txs) in
+      // violet so a quorum-commitment block still draws a complete donut.
+      data: Object.entries(c)
+        .map(([name, value]) => ({ name, value, itemStyle: { color: TYPE_COLOR[name] || '#8f5cff' } }))
+        .filter((d) => d.value > 0),
     }],
   }
 })
@@ -138,7 +137,7 @@ const totalFees = computed(() =>
             <EChart :option="donutOption" height="200px" aria-label="Transaction-type distribution: coinstake, coinbase, transparent, shielding, de-shielding, shielded" />
             <div class="donut-legend">
               <div class="dl" v-for="(v,k) in typeCounts" :key="k" v-show="v>0">
-                <span class="dl-dot" :style="{ background: TYPE_COLOR[k] }"></span>
+                <span class="dl-dot" :style="{ background: TYPE_COLOR[k] || '#8f5cff' }"></span>
                 <span class="mono">{{ k }}</span>
                 <span class="mono strong dl-v">{{ v }}</span>
               </div>

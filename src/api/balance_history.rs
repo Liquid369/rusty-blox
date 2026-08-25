@@ -392,10 +392,12 @@ mod tests {
         CTransaction {
             txid: String::new(),
             version: 1,
+            tx_type: 0,
             inputs,
             outputs,
             lock_time: 0,
             sapling_data: None,
+            extra_payload: None,
         }
     }
 

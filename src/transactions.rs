@@ -328,10 +328,12 @@ async fn process_transaction_v1(
     let transaction = CTransaction {
         txid: hex::encode(reversed_txid.clone()),
         version: tx_ver_out,
+        tx_type,
         inputs,
         outputs: outputs.clone(),
         lock_time: lock_time_buff,
         sapling_data: None, // File-based indexing doesn't parse Sapling details (stored as raw bytes)
+        extra_payload: None, // same: raw bytes are stored; display re-parses them
     };
 
     // UTXO tracking and address indexing

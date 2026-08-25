@@ -299,13 +299,14 @@ pub async fn deserialize_transaction(data: &[u8]) -> Result<CTransaction, std::i
     // For Sapling transactions (version >= 3), parse the Sapling-specific data.
     // PIVX Core serializes sapData as Optional<SaplingTxData>: a 1-byte discriminant
     // (0x00 = absent, 0x01 = present) followed by the payload when present.
+    let mut extra_payload: Option<Vec<u8>> = None;
     let sapling_data =
         if is_sapling {
             let has_sap_data = cursor.read_u8()? != 0;
             if !has_sap_data {
                 // Optional discriminant 0x00 — no sapling payload. extraPayload (if any)
                 // is handled below.
-                read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+                extra_payload = read_extra_payload(&mut cursor, tx_type, data.len()).await?;
                 None
             } else {
                 // Read valueBalance (net value of spends - outputs)
@@ -400,8 +401,8 @@ pub async fn deserialize_transaction(data: &[u8]) -> Result<CTransaction, std::i
                 let mut binding_sig = [0u8; 64];
                 cursor.read_exact(&mut binding_sig)?;
 
-                // For special transaction types (nType != 0), consume extraPayload
-                read_extra_payload(&mut cursor, tx_type, data.len()).await?;
+                // For special transaction types (nType != 0), read extraPayload
+                extra_payload = read_extra_payload(&mut cursor, tx_type, data.len()).await?;
 
                 Some(SaplingTxData {
                     value_balance,
@@ -417,10 +418,12 @@ pub async fn deserialize_transaction(data: &[u8]) -> Result<CTransaction, std::i
     Ok(CTransaction {
         txid,
         version: version as i16,
+        tx_type,
         inputs,
         outputs,
         lock_time,
         sapling_data,
+        extra_payload,
     })
 }
 
@@ -435,28 +438,32 @@ async fn read_extra_payload(
     cursor: &mut Cursor<&[u8]>,
     tx_type: u16,
     data_len: usize,
-) -> Result<(), std::io::Error> {
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     if tx_type == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let has_payload = cursor.read_u8()? != 0;
-    if has_payload {
-        let payload_size = read_varint(cursor).await?;
-        let new_pos = cursor.position().checked_add(payload_size).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "extraPayload size overflow",
-            )
-        })?;
-        if new_pos > data_len as u64 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("extraPayload size {payload_size} exceeds transaction bounds"),
-            ));
-        }
-        cursor.set_position(new_pos);
+    if !has_payload {
+        return Ok(None);
     }
-    Ok(())
+    let payload_size = read_varint(cursor).await?;
+    let new_pos = cursor.position().checked_add(payload_size).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "extraPayload size overflow",
+        )
+    })?;
+    if new_pos > data_len as u64 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("extraPayload size {payload_size} exceeds transaction bounds"),
+        ));
+    }
+    // Keep the bytes: the API labels special txs and shows the payload (a
+    // future ProTx decoder reads DMN keys/service data out of it).
+    let mut payload = vec![0u8; payload_size as usize];
+    cursor.read_exact(&mut payload)?;
+    Ok(Some(payload))
 }
 
 /// Blocking wrapper for `deserialize_transaction` for use in synchronous contexts.
@@ -839,6 +846,42 @@ mod golden_script_tests {
                 "DSy3LAbb93vd7xqqNcPQW2bsFwU6JsdTiF".to_string(), // owner  (Core addresses[1])
             ]
         );
+    }
+
+    /// Real PIVX v6 testnet quorum commitment (nType 5), tx 68a0249f...cd7a87:
+    /// 0 transparent io, a present-but-empty sapling stanza, 329-byte
+    /// extraPayload. Regression: nType and the payload were read and DISCARDED
+    /// (no CTransaction fields), so the API served an unlabeled empty tx.
+    #[test]
+    fn parses_v6_quorum_commitment_special_tx() {
+        let raw = hex::decode(concat!(
+            "030005000000000000000100000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "0000000000000000000000000000000000000001fd49010100d01300000100010e",
+            "b0c147e1fd83c06c62a87e07363f4ffa15e3e2d75d01e102b64a24ad4a47453200",
+            "000000000000320000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000000",
+            "00000000000000000000000000000000000000000000",
+        ))
+        .unwrap();
+        assert_eq!(raw.len(), 418);
+        let mut framed = vec![0u8; 4]; // dummy block_version prefix
+        framed.extend_from_slice(&raw);
+        let tx = super::deserialize_transaction_blocking(&framed).unwrap();
+        assert_eq!((tx.version, tx.tx_type), (3, 5));
+        assert!(tx.inputs.is_empty() && tx.outputs.is_empty());
+        let sap = tx
+            .sapling_data
+            .expect("empty sapling stanza is PRESENT on the wire");
+        assert_eq!(sap.value_balance, 0);
+        assert!(sap.vshielded_spend.is_empty() && sap.vshielded_output.is_empty());
+        assert_eq!(tx.extra_payload.expect("commitment payload").len(), 329);
     }
 
     /// Same P2CS with OP_CHECKCOLDSTAKEVERIFY (0xd2) — Core decodescript: same addresses
