@@ -172,6 +172,16 @@ pub struct Transaction {
     pub txid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<i32>,
+    /// PIVX v6 special-tx nType (1-4 ProTx family, 5 quorum commitment);
+    /// absent for normal txs.
+    #[serde(rename = "specialType", skip_serializing_if = "Option::is_none")]
+    pub special_type: Option<u16>,
+    #[serde(rename = "specialTypeName", skip_serializing_if = "Option::is_none")]
+    pub special_type_name: Option<String>,
+    /// Raw extraPayload hex of a special tx; the payload is consensus data
+    /// (DMN registration fields, quorum commitments), not value transfer.
+    #[serde(rename = "specialPayload", skip_serializing_if = "Option::is_none")]
+    pub special_payload: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "lockTime")]
     pub lock_time: Option<u32>,

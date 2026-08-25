@@ -455,9 +455,11 @@ fn enrich_transaction_inputs(
     // Recalculate value_in and fees after enrichment (convert satoshis to PIV)
     tx.value_in = tx.vin.iter().filter_map(|i| i.value).sum::<f64>() / 100_000_000.0;
 
-    // Calculate fees and rewards based on transaction type
-    if let Some(ref tx_type) = tx.tx_type {
-        if tx_type == "coinstake" {
+    // Calculate fees and rewards based on transaction type. Special-tx slugs
+    // (proreg etc.) fall through to the normal-fee arm: ProTx types pay real
+    // fees from real inputs; a quorum commitment has zero io and computes 0.
+    match tx.tx_type.as_deref() {
+        Some("coinstake") => {
             // Coinstake reward = newly minted = outputs - inputs. That formula
             // is only valid when EVERY input value resolved: a zerocoin-stake
             // (zPoS) input is a serial number with no UTXO prevout, so its value
@@ -473,28 +475,30 @@ fn enrich_transaction_inputs(
             };
             tx.reward = Some(reward);
             tx.fees = 0.0;
-        } else if tx_type == "coinbase" {
+        }
+        Some("coinbase") => {
             // Coinbase: reward already set to value_out in parse_transaction_binary
             tx.fees = 0.0;
         }
-    } else {
-        // Normal transaction fee = transparent_in + valueBalance - transparent_out.
-        // Sapling value moves via valueBalance (PIV; 0 for transparent txs);
-        // ignoring it booked the entire shielded amount as fee. Clamp to a sane
-        // range to reject any residual mis-join.
-        // value_in == 0 with a positive valueBalance is a pure-shielded (z→z / z→t)
-        // spend: the fee is paid from the shield pool, so it still computes here.
-        // value_in == 0 with NO shielded outflow = unresolved prevouts → fee stays 0.
-        let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
-        if tx.value_in > 0.0 || value_balance > 0.0 {
-            let calculated_fee = tx.value_in + value_balance - tx.value_out;
-            tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) {
-                0.0
+        _ => {
+            // Normal transaction fee = transparent_in + valueBalance - transparent_out.
+            // Sapling value moves via valueBalance (PIV; 0 for transparent txs);
+            // ignoring it booked the entire shielded amount as fee. Clamp to a sane
+            // range to reject any residual mis-join.
+            // value_in == 0 with a positive valueBalance is a pure-shielded (z→z / z→t)
+            // spend: the fee is paid from the shield pool, so it still computes here.
+            // value_in == 0 with NO shielded outflow = unresolved prevouts → fee stays 0.
+            let value_balance = tx.sapling.as_ref().map(|s| s.value_balance).unwrap_or(0.0);
+            if tx.value_in > 0.0 || value_balance > 0.0 {
+                let calculated_fee = tx.value_in + value_balance - tx.value_out;
+                tx.fees = if !(0.0..=1000.0).contains(&calculated_fee) {
+                    0.0
+                } else {
+                    calculated_fee
+                };
             } else {
-                calculated_fee
-            };
-        } else {
-            tx.fees = 0.0;
+                tx.fees = 0.0;
+            }
         }
     }
 }
@@ -700,7 +704,15 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
         .first()
         .is_some_and(|o| o.value == 0.0 && o.addresses.is_empty());
 
-    let (tx_type, reward) = if has_coinbase_input {
+    let (tx_type, reward) = if tx.tx_type != 0 {
+        // v6 special transaction (ProTx family / quorum commitment): label by
+        // slug, never mis-bucket via the coinbase/coinstake heuristics (a
+        // quorum commitment has zero io and would otherwise read as "normal").
+        let slug = crate::types::special_tx_slug(tx.tx_type)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("special{}", tx.tx_type));
+        (Some(slug), None)
+    } else if has_coinbase_input {
         // Has coinbase input
         if first_output_empty && vout.len() > 1 {
             // Should not happen in practice (coinbase with empty output)
