@@ -99,7 +99,10 @@ const donutOption = computed(() => {
 /* ---------- cumulative net-approval timeline ---------- */
 const timelineOption = computed(() => {
   const p = palette()
-  const rows = valid.value
+  // /budgetvotes returns Core's map order (keyed by masternode outpoint), NOT
+  // time order; an unsorted cumulative walk scribbles the polyline back and
+  // forth across the x axis. Sort a copy by vote time before integrating.
+  const rows = [...valid.value].sort((a, b) => a.nTime - b.nTime)
   if (!rows.length) return baseOption(p)
   let cum = 0
   const pts = rows.map((v) => {
