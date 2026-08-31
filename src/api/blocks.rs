@@ -348,6 +348,32 @@ async fn compute_blockbook_block(
             .flatten()
             .map(hex::encode);
 
+        // Whole-block serialized size from EVERY tx record's length (one batched
+        // read), so it is identical on every page of a paginated block.
+        let mut size_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> =
+            Vec::with_capacity(tx_ids.len() * 2);
+        for txid_hex in &tx_ids {
+            if let Ok(display) = hex::decode(txid_hex) {
+                let internal: Vec<u8> = display.iter().rev().cloned().collect();
+                let mut ik = vec![b't'];
+                ik.extend_from_slice(&internal);
+                let mut dk = vec![b't'];
+                dk.extend_from_slice(&display);
+                size_keys.push((cf_transactions, ik));
+                size_keys.push((cf_transactions, dk));
+            }
+        }
+        let mut txs_bytes = 0usize;
+        for pair in db_clone.multi_get_cf(size_keys).chunks(2) {
+            let len = pair
+                .iter()
+                .filter_map(|r| r.as_ref().ok().and_then(|v| v.as_ref()))
+                .map(|v| v.len())
+                .find(|l| *l > 8)
+                .unwrap_or(8);
+            txs_bytes += len - 8;
+        }
+
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
             (
                 header.n_version,
@@ -368,7 +394,7 @@ async fn compute_blockbook_block(
             tx_ids,
             previousblockhash,
             nextblockhash,
-            header_bytes.len(),
+            header_bytes.len() + txs_bytes,
         ))
     })
     .await
@@ -386,11 +412,9 @@ async fn compute_blockbook_block(
     // money, live confirmations, sapling + special-type extras).
     let txs = crate::api::transactions::fetch_transactions_batch(db, &page_txids).await;
 
-    // Approximate size: header + serialized tx bytes of THIS page. Exact
-    // whole-block size would need every body regardless of page; PIVX blocks
-    // fit one page in practice, where this IS the full figure (minus var-int
-    // framing, same approximation /block-detail has always used).
-    let size = header_len + txs.iter().filter_map(|t| t.size).sum::<usize>();
+    // header + all tx record bytes, page-independent (var-int framing between
+    // records is the only omission, same approximation /block-detail uses).
+    let size = header_len;
 
     let current_height = get_chain_state(db).map(|s| s.height).unwrap_or(height);
     let confirmations = (current_height - height + 1).max(0);

@@ -220,20 +220,43 @@ pub async fn addr_v2(
 /// Overlay the live mempool view onto a (cached) /address response: real
 /// unconfirmedBalance/unconfirmedTxs, and pending txs prepended on page 1 when
 /// no height filter is active. Never touches confirmed figures.
-/// Mempool overlay for an xpub account: sum pending deltas across the derived
-/// addresses (token names). details=basic has no token list to walk, so it
-/// keeps zeros; wallets use tokens/txs modes. Shared by REST and websocket.
+/// Mempool overlay for an xpub account: sum pending deltas across the account
+/// addresses. With a token list present, use it (covers deep-used accounts);
+/// without one (details=basic/txids/txs) derive a bounded window per chain so
+/// pending activity still shows. Shared by REST and websocket.
 pub(crate) async fn apply_xpub_mempool_overlay(
     mempool: &Arc<crate::mempool::MempoolState>,
+    xpub_str: &str,
+    gap: u32,
     info: &mut XPubInfo,
 ) {
-    let Some(tokens) = info.tokens.as_ref() else {
+    // Nothing pending anywhere = nothing to overlay; skip derivation entirely.
+    if mempool.address_index.read().await.by_address.is_empty() {
         return;
+    }
+    let addresses: Vec<String> = if let Some(tokens) = info.tokens.as_ref() {
+        tokens.iter().map(|t| t.name.clone()).collect()
+    } else {
+        use std::str::FromStr;
+        let Ok(xpub) = bitcoin::util::bip32::ExtendedPubKey::from_str(xpub_str) else {
+            return;
+        };
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let window = gap.clamp(20, 200);
+        let mut out = Vec::with_capacity((window as usize) * 2);
+        for chain in [0u32, 1] {
+            for i in 0..window {
+                if let Ok((addr, _)) = derive_address(&xpub, &secp, chain, i, xpub.depth) {
+                    out.push(addr);
+                }
+            }
+        }
+        out
     };
     let mut delta = 0i64;
     let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for t in tokens {
-        if let Some((d, txids)) = mempool.pending_for_address(&t.name).await {
+    for addr in &addresses {
+        if let Some((d, txids)) = mempool.pending_for_address(addr).await {
             delta += d;
             pending.extend(txids);
         }
@@ -256,7 +279,14 @@ pub(crate) async fn apply_utxo_mempool_overlay(
     if !spent.is_empty() {
         utxos.retain(|u| !spent.contains(&(u.txid.clone(), u.vout)));
     }
+    // A tx that confirmed between the block connect and the next mempool poll
+    // is in BOTH views; the confirmed entry wins.
+    let existing: std::collections::HashSet<(String, u32)> =
+        utxos.iter().map(|u| (u.txid.clone(), u.vout)).collect();
     for (txid, vout, value) in created.into_iter().rev() {
+        if existing.contains(&(txid.clone(), vout)) {
+            continue;
+        }
         utxos.insert(
             0,
             UTXO {
@@ -544,7 +574,13 @@ pub async fn xpub_v2(
 
     match result {
         Ok(mut info) => {
-            apply_xpub_mempool_overlay(&mempool, &mut info).await;
+            apply_xpub_mempool_overlay(
+                &mempool,
+                &xpub_str,
+                params.gap_limit.unwrap_or(20),
+                &mut info,
+            )
+            .await;
             Ok(Json(info))
         }
         Err(e) => {

@@ -250,7 +250,11 @@ async fn parse_mempool_tx(
 /// PIVX mempool is tiny and a rebuild cannot drift).
 fn rebuild_index(parsed: &HashMap<String, ParsedMempoolTx>) -> MempoolAddressIndex {
     let mut idx = MempoolAddressIndex::default();
-    for (txid, p) in parsed {
+    // Sorted iteration: HashMap order made the pending txid lists flap
+    // between polls, which paginating clients see as reordering.
+    let mut ordered: Vec<(&String, &ParsedMempoolTx)> = parsed.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+    for (txid, p) in ordered.iter().map(|(t, p)| (*t, *p)) {
         for (addr, _, val) in &p.credits {
             let e = idx.by_address.entry(addr.clone()).or_default();
             e.0 += val;
@@ -268,7 +272,9 @@ fn rebuild_index(parsed: &HashMap<String, ParsedMempoolTx>) -> MempoolAddressInd
         }
     }
     // Mempool-created UTXOs, minus any consumed by another mempool tx.
-    for (txid, p) in parsed {
+    let mut ordered: Vec<(&String, &ParsedMempoolTx)> = parsed.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+    for (txid, p) in ordered.iter().map(|(t, p)| (*t, *p)) {
         for (addr, vout, val) in &p.credits {
             if !idx.spent_outpoints.contains(&(txid.clone(), *vout)) {
                 idx.created_utxos.entry(addr.clone()).or_default().push((
@@ -409,17 +415,31 @@ pub async fn run_mempool_monitor(
                 .cloned()
                 .collect()
         };
-        for txid in need {
-            let parents = mempool_state.parsed.read().await.clone();
-            if let Some(p) = parse_mempool_tx(&db, &txid, &parents).await {
-                {
-                    let mut txs = mempool_state.transactions.write().await;
-                    if let Some(t) = txs.get_mut(&txid) {
-                        t.size = Some(p.size);
-                        t.fee = p.fee_sats.map(|f| f as f64 / 100_000_000.0);
+        // Two passes: a child can arrive in `need` before its mempool parent;
+        // the second pass resolves it once the parent is parsed.
+        for _ in 0..2 {
+            let pass: Vec<String> = {
+                let parsed = mempool_state.parsed.read().await;
+                need.iter()
+                    .filter(|t| parsed.get(*t).map(|p| p.fee_sats.is_none()).unwrap_or(true))
+                    .cloned()
+                    .collect()
+            };
+            if pass.is_empty() {
+                break;
+            }
+            for txid in pass {
+                let parents = mempool_state.parsed.read().await.clone();
+                if let Some(p) = parse_mempool_tx(&db, &txid, &parents).await {
+                    {
+                        let mut txs = mempool_state.transactions.write().await;
+                        if let Some(t) = txs.get_mut(&txid) {
+                            t.size = Some(p.size);
+                            t.fee = p.fee_sats.map(|f| f as f64 / 100_000_000.0);
+                        }
                     }
+                    mempool_state.parsed.write().await.insert(txid, p);
                 }
-                mempool_state.parsed.write().await.insert(txid, p);
             }
         }
         let idx = rebuild_index(&*mempool_state.parsed.read().await);

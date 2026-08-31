@@ -251,7 +251,13 @@ async fn dispatch(
                 let mut info = super::addresses::compute_xpub_info(&ctx.db, &descriptor, &q)
                     .await
                     .map_err(|e| e.to_string())?;
-                super::addresses::apply_xpub_mempool_overlay(&ctx.mempool, &mut info).await;
+                super::addresses::apply_xpub_mempool_overlay(
+                    &ctx.mempool,
+                    &descriptor,
+                    q.gap_limit.unwrap_or(20),
+                    &mut info,
+                )
+                .await;
                 serde_json::to_value(info).map_err(|e| e.to_string())
             } else {
                 if !super::addresses::is_valid_address(&descriptor) {

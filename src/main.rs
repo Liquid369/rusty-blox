@@ -386,9 +386,6 @@ async fn start_web_server(
     };
 
     let app = app
-        // Uniform {"error":"..."} bodies on every /api error, including
-        // extractor rejections and 405s that never reach a handler.
-        .layer(middleware::from_fn(blockbookify_api_errors))
         // Stamp hardening headers on every response (P2-1).
         .layer(middleware::from_fn(security_headers))
         .layer(cors)
@@ -407,6 +404,9 @@ async fn start_web_server(
         .layer(middleware::from_fn(move |req, next| {
             concurrency_limit(global_limit.clone(), req, next)
         }))
+        // OUTERMOST for /api: even limiter 503s and timeout 408s produced by
+        // inner layers leave as {"error":"..."} JSON.
+        .layer(middleware::from_fn(blockbookify_api_errors))
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
