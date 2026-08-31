@@ -247,15 +247,11 @@ pub struct TxOutput {
     pub spent: Option<bool>,
 }
 
+/// Blockbook success shape: {"result": "<txid>"} and nothing else; failures
+/// are BlockbookError string bodies, never an error field here.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendTxResponse {
-    pub result: Option<String>,
-    pub error: Option<TxError>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TxError {
-    pub message: String,
+    pub result: String,
 }
 
 // ========== Block Types ==========
@@ -394,23 +390,18 @@ pub struct UtxoQuery {
 
 // ========== Error Types ==========
 
-/// Blockbook-compatible error response wrapper
+/// Blockbook v2 error contract: {"error": "<message>"}, a plain STRING, not an
+/// object (verified against live Blockbook 0.6.0). Drop-in parity requires the
+/// exact shape; the old {"error":{"message":...}} wrapper broke that.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlockbookError {
-    pub error: ErrorDetail,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ErrorDetail {
-    pub message: String,
+    pub error: String,
 }
 
 impl BlockbookError {
     pub fn new(message: impl Into<String>) -> Self {
         BlockbookError {
-            error: ErrorDetail {
-                message: message.into(),
-            },
+            error: message.into(),
         }
     }
 }

@@ -239,7 +239,8 @@ export function address(addr, { details = 'txs', page = 1, pageSize = 25 } = {})
   if (ADDRESS_503) {
     const err = new Error('Address index is reindexing; please retry shortly')
     err.status = 503
-    err.body = { error: { message: 'Address index is reindexing; please retry shortly' } }
+    // Blockbook error contract: {"error":"<string>"}
+    err.body = { error: 'Address index is reindexing; please retry shortly' }
     throw err
   }
   const txCount = 19

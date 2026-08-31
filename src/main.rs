@@ -9,20 +9,22 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use rustyblox::api::{
     // Addresses module
     addr_v2,
-    // Root handlers
-    api_handler,
+    // Blockbook drop-in surface
+    api_not_found,
     // Balance history
     balance_history_v2,
     // Blocks module
     block_index_v2,
     block_stats_v2,
     block_v2,
+    blockbook_root_v2,
     // Governance module
     budget_info_v2,
     budget_projection_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
+    estimate_fee_v2,
     finalized_budgets_v2,
     health_check_v2,
     hodl_analytics,
@@ -50,6 +52,7 @@ use rustyblox::api::{
     supply_analytics,
     transaction_analytics,
     treasury_analytics,
+    tx_specific_v2,
     // Transactions module
     tx_v2,
     utxo_v2,
@@ -75,7 +78,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
@@ -244,9 +247,16 @@ async fn start_web_server(
 
     // We just want to mimic blockbook API endpoints and structure for compatibility
     let app = Router::new()
-        .route("/api", get(api_handler))
-        .route("/api/", get(status_v2)) // Same as /api/v2/status
-        .route("/api/endpoint", get(api_handler))
+        // Blockbook status envelope: the FIRST thing every Blockbook client
+        // probes. All four root spellings serve it (previously HTML/stubs).
+        .route("/api", get(blockbook_root_v2))
+        .route("/api/", get(blockbook_root_v2))
+        .route("/api/v2", get(blockbook_root_v2))
+        .route("/api/v2/", get(blockbook_root_v2))
+        .route("/api/v2/estimatefee/{blocks}", get(estimate_fee_v2))
+        .route("/api/v2/tx-specific/{txid}", get(tx_specific_v2))
+        // Any OTHER /api path is a JSON 404, never the SPA's HTML-with-200.
+        .route("/api/{*rest}", any(api_not_found))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/health", get(health_check_v2))
         // NOTE (P3-3): /api/v2/cache/stats and /metrics (below) are operational
@@ -278,10 +288,6 @@ async fn start_web_server(
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
-        .route(
-            "/api/v2/mnrawbudgetvote/{raw_vote_params}",
-            get(api_handler),
-        )
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))
         .route("/api/v2/analytics/staking", get(staking_analytics))

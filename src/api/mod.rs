@@ -6,6 +6,7 @@
 pub mod addresses;
 pub mod analytics;
 pub mod balance_history;
+pub mod blockbook_status;
 pub mod blocks;
 pub mod governance;
 pub mod helpers;
@@ -23,6 +24,7 @@ mod xpub_tests;
 pub use addresses::*;
 pub use analytics::*;
 pub use balance_history::*;
+pub use blockbook_status::*;
 pub use blocks::*;
 pub use governance::*;
 pub use helpers::*;

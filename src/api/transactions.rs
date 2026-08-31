@@ -687,10 +687,7 @@ async fn send_transaction_internal(
                 .as_str()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| txid.to_string());
-            Ok(Json(SendTxResponse {
-                result: Some(txid_str),
-                error: None,
-            }))
+            Ok(Json(SendTxResponse { result: txid_str }))
         }
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
