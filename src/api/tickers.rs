@@ -203,6 +203,18 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
         info!("fiat sampler disabled (price.fiat_sampler = false)");
         return;
     }
+    // Mainnet only: CoinGecko rates describe mainnet PIVX; a testnet twin
+    // sampling them writes irrelevant data and doubles the API quota use.
+    let chain = crate::api::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
+        .await
+        .ok()
+        .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from));
+    if let Some(c) = chain {
+        if c != "main" {
+            info!(chain = %c, "fiat sampler disabled on non-mainnet chain");
+            return;
+        }
+    }
     if load_rate_series(&db).len() < 30 {
         info!("fiat sampler: store empty, backfilling from CoinGecko market_chart");
         match backfill(&db).await {

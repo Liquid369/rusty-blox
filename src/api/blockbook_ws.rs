@@ -150,7 +150,15 @@ async fn push_tx_events(
             None => None,
         }
     } else {
-        crate::api::transactions::compute_transaction_details(&ctx.db, txid)
+        // Shared 300s cache, REST-identical key: one build per tx per block
+        // no matter how many sockets subscribe (a 2k-tx block with N sockets
+        // otherwise rebuilds 2k*N times on arrival).
+        let db = Arc::clone(&ctx.db);
+        let t = txid.to_string();
+        ctx.cache
+            .get_or_compute(&format!("tx:{txid}"), std::time::Duration::from_secs(300), || async move {
+                crate::api::transactions::compute_transaction_details(&db, &t).await
+            })
             .await
             .ok()
     };
@@ -258,15 +266,23 @@ async fn dispatch(
                 Ok(cs) => (cs.height, cs.hash),
                 Err(_) => (0, String::new()),
             };
+            // Network identity from the node, not hardcoded: a testnet
+            // instance must not present itself as mainnet.
+            let chain = super::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
+                .await
+                .ok()
+                .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
+                .unwrap_or_else(|| "main".to_string());
+            let testnet = chain != "main";
             Ok(serde_json::json!({
-                "name": "PIVX",
-                "shortcut": "PIVX",
+                "name": if testnet { "PIVX Testnet" } else { "PIVX" },
+                "shortcut": if testnet { "tPIVX" } else { "PIVX" },
                 "network": "PIVX",
                 "decimals": 8,
                 "version": env!("CARGO_PKG_VERSION"),
                 "bestHeight": height,
                 "bestHash": hash,
-                "testnet": false,
+                "testnet": testnet,
                 "backend": { "version": "", "subversion": "" },
             }))
         }

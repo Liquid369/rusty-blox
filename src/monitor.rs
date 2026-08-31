@@ -1545,8 +1545,10 @@ async fn index_block_from_rpc(
 
     // Processing marker will be cleaned up automatically by the guard's Drop impl
 
-    // Broadcast new block event if broadcaster is available
-    if let Some(bc) = broadcaster {
+    // Broadcast only on a REAL tip advance: crash recovery and heightless
+    // backfill re-apply historical blocks through this path, and pushing those
+    // would feed websocket subscribers old transactions as new events.
+    if let (Some(bc), true) = (broadcaster, is_tip_advance) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))

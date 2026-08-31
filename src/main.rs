@@ -212,17 +212,26 @@ async fn blockbookify_api_errors(request: Request, next: Next) -> Response {
         return response;
     }
     let status = response.status();
+    // Keep the original headers (Retry-After on limiter 503s is a real
+    // backoff signal); only the body and content type change.
+    let headers = response.headers().clone();
     // Salvage the extractor's message when it fits one line; it names the
     // offending field, which beats a bare canonical reason.
     let msg = match axum::body::to_bytes(response.into_body(), 1024).await {
         Ok(bytes) if !bytes.is_empty() => String::from_utf8_lossy(&bytes).into_owned(),
         _ => status.canonical_reason().unwrap_or("Error").to_string(),
     };
-    (
+    let mut wrapped = (
         status,
         axum::Json(rustyblox::api::types::BlockbookError::new(msg)),
     )
-        .into_response()
+        .into_response();
+    for (k, v) in headers.iter() {
+        if k != axum::http::header::CONTENT_TYPE && k != axum::http::header::CONTENT_LENGTH {
+            wrapped.headers_mut().insert(k.clone(), v.clone());
+        }
+    }
+    wrapped
 }
 
 /// Prometheus metrics endpoint handler
