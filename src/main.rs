@@ -227,7 +227,10 @@ async fn blockbookify_api_errors(request: Request, next: Next) -> Response {
     )
         .into_response();
     for (k, v) in headers.iter() {
-        if k != axum::http::header::CONTENT_TYPE && k != axum::http::header::CONTENT_LENGTH {
+        if k != axum::http::header::CONTENT_TYPE
+            && k != axum::http::header::CONTENT_LENGTH
+            && k != axum::http::header::TRANSFER_ENCODING
+        {
             wrapped.headers_mut().insert(k.clone(), v.clone());
         }
     }

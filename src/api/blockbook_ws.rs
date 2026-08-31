@@ -267,12 +267,23 @@ async fn dispatch(
                 Err(_) => (0, String::new()),
             };
             // Network identity from the node, not hardcoded: a testnet
-            // instance must not present itself as mainnet.
-            let chain = super::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
+            // instance must not present itself as mainnet. Cached 60s; the
+            // chain name cannot change under a running node.
+            let chain = ctx
+                .cache
+                .get_or_compute("bb:chain", std::time::Duration::from_secs(60), || async {
+                    let v =
+                        super::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
+                            .await?;
+                    Ok::<String, Box<dyn std::error::Error + Send + Sync>>(
+                        v.get("chain")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("main")
+                            .to_string(),
+                    )
+                })
                 .await
-                .ok()
-                .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from))
-                .unwrap_or_else(|| "main".to_string());
+                .unwrap_or_else(|_| "main".to_string());
             let testnet = chain != "main";
             Ok(serde_json::json!({
                 "name": if testnet { "PIVX Testnet" } else { "PIVX" },
