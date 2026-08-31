@@ -110,7 +110,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
 /// Shared handshake gate: enforce the Origin allowlist and the global
 /// connection cap before upgrading. On success returns the acquired permit,
 /// which is moved into the socket handler so it is released on disconnect.
-fn ws_guard(headers: &HeaderMap) -> Result<OwnedSemaphorePermit, Response> {
+pub(crate) fn ws_guard(headers: &HeaderMap) -> Result<OwnedSemaphorePermit, Response> {
     if !origin_allowed(headers) {
         return Err((StatusCode::FORBIDDEN, "origin not allowed").into_response());
     }

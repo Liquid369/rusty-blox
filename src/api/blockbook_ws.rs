@@ -17,6 +17,19 @@ use crate::cache::CacheManager;
 use crate::mempool::MempoolState;
 use crate::websocket::{BlockchainEvent, EventBroadcaster};
 
+/// Mirrors the REST broadcast cap: ws sendTransaction writes to the node and
+/// must not become an uncapped side door.
+static WS_SEND_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// Ws-side reindex gate, same contract as the REST 503.
+fn require_addr_index(ctx: &Ctx) -> Result<(), String> {
+    if crate::chain_state::addr_index_ready(&ctx.db) {
+        Ok(())
+    } else {
+        Err("Address index is reindexing; please retry shortly".to_string())
+    }
+}
+
 struct Ctx {
     db: Arc<DB>,
     cache: Arc<CacheManager>,
@@ -25,19 +38,30 @@ struct Ctx {
 
 #[derive(Default)]
 struct Subs {
-    new_block: Option<String>,
-    new_tx: Option<String>,
-    addresses: Option<(String, HashSet<String>)>,
+    new_block: Option<serde_json::Value>,
+    new_tx: Option<serde_json::Value>,
+    addresses: Option<(serde_json::Value, HashSet<String>)>,
 }
 
 pub async fn blockbook_websocket_handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
     Extension(mempool): Extension<Arc<MempoolState>>,
     Extension(broadcaster): Extension<Arc<EventBroadcaster>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_connection(socket, Ctx { db, cache, mempool }, broadcaster))
+    // Same connection cap + origin policy as the /ws/* channels; the permit
+    // lives for the socket lifetime. 1MB frame cap bounds request parsing.
+    let permit = match crate::websocket::ws_guard(&headers) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    ws.max_message_size(1 << 20)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            handle_connection(socket, Ctx { db, cache, mempool }, broadcaster).await;
+        })
 }
 
 async fn handle_connection(mut socket: WebSocket, ctx: Ctx, broadcaster: Arc<EventBroadcaster>) {
@@ -199,32 +223,32 @@ fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) ->
     serde_json::Value::Object(out)
 }
 
-fn envelope(id: &str, data: serde_json::Value) -> String {
+fn envelope(id: &serde_json::Value, data: serde_json::Value) -> String {
     serde_json::json!({ "id": id, "data": data }).to_string()
 }
 
-fn err_envelope(id: &str, msg: &str) -> String {
+fn err_envelope(id: &serde_json::Value, msg: &str) -> String {
     envelope(id, serde_json::json!({ "error": { "message": msg } }))
 }
 
 async fn handle_request(ctx: &Ctx, subs: &mut Subs, text: &str) -> String {
     let Ok(req) = serde_json::from_str::<serde_json::Value>(text) else {
-        return err_envelope("", "invalid JSON");
+        return err_envelope(&serde_json::Value::Null, "invalid JSON");
     };
-    let id = req.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(serde_json::json!({}));
 
-    match dispatch(ctx, subs, id, method, params).await {
-        Ok(data) => envelope(id, data),
-        Err(msg) => err_envelope(id, &msg),
+    match dispatch(ctx, subs, &id, method, params).await {
+        Ok(data) => envelope(&id, data),
+        Err(msg) => err_envelope(&id, &msg),
     }
 }
 
 async fn dispatch(
     ctx: &Ctx,
     subs: &mut Subs,
-    id: &str,
+    id: &serde_json::Value,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -261,21 +285,34 @@ async fn dispatch(
             }
         }
         "getAccountInfo" => {
+            require_addr_index(ctx)?;
             let descriptor = params
                 .get("descriptor")
                 .and_then(|v| v.as_str())
                 .ok_or("missing descriptor")?
                 .to_string();
+            let details_given = params.get("details").is_some();
             let mut q: super::types::AddressQuery =
                 serde_json::from_value(params).map_err(|e| format!("bad params: {e}"))?;
-            if q.details.is_empty() {
+            if !details_given {
+                // Blockbook's ws default; AddressQuery's serde default is the
+                // REST "txids".
                 q.details = "basic".to_string();
             }
             if descriptor.starts_with("xpub") {
                 if !super::addresses::is_valid_xpub(&descriptor) {
                     return Err("Invalid xpub".to_string());
                 }
-                let mut info = super::addresses::compute_xpub_info(&ctx.db, &descriptor, &q)
+                let db = Arc::clone(&ctx.db);
+                let d = descriptor.clone();
+                let qc = q.clone();
+                let mut info = ctx
+                    .cache
+                    .get_or_compute(
+                        &format!("xpub:{descriptor}:{q:?}"),
+                        std::time::Duration::from_secs(300),
+                        || async move { super::addresses::compute_xpub_info(&db, &d, &qc).await },
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 super::addresses::apply_xpub_mempool_overlay(
@@ -290,7 +327,16 @@ async fn dispatch(
                 if !super::addresses::is_valid_address(&descriptor) {
                     return Err(format!("Invalid address '{descriptor}'"));
                 }
-                let mut info = super::addresses::compute_address_info(&ctx.db, &descriptor, &q)
+                let db = Arc::clone(&ctx.db);
+                let d = descriptor.clone();
+                let qc = q.clone();
+                let mut info = ctx
+                    .cache
+                    .get_or_compute(
+                        &format!("addr:{descriptor}:{q:?}"),
+                        std::time::Duration::from_secs(30),
+                        || async move { super::addresses::compute_address_info(&db, &d, &qc).await },
+                    )
                     .await
                     .map_err(|e| e.to_string())?;
                 super::addresses::apply_address_mempool_overlay(
@@ -314,7 +360,16 @@ async fn dispatch(
             if !super::addresses::is_valid_address(descriptor) {
                 return Err(format!("Invalid address '{descriptor}'"));
             }
-            let mut utxos = super::addresses::compute_utxos(&ctx.db, descriptor)
+            require_addr_index(ctx)?;
+            let db = Arc::clone(&ctx.db);
+            let d = descriptor.to_string();
+            let mut utxos = ctx
+                .cache
+                .get_or_compute(
+                    &format!("utxo:{descriptor}:false"),
+                    std::time::Duration::from_secs(30),
+                    || async move { super::addresses::compute_utxos(&db, &d).await },
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             super::addresses::apply_utxo_mempool_overlay(&ctx.mempool, descriptor, &mut utxos)
@@ -362,11 +417,23 @@ async fn dispatch(
                 .clamp(60, 2_592_000);
             let from = params.get("from").and_then(|v| v.as_u64());
             let to = params.get("to").and_then(|v| v.as_u64());
-            let mut series = crate::api::balance_history::compute_balance_history(
-                &ctx.db, descriptor, group_by, from, to,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            require_addr_index(ctx)?;
+            let db = Arc::clone(&ctx.db);
+            let d = descriptor.to_string();
+            let mut series = ctx
+                .cache
+                .get_or_compute(
+                    &format!("balhist:{descriptor}:{group_by}:{from:?}:{to:?}"),
+                    std::time::Duration::from_secs(300),
+                    || async move {
+                        crate::api::balance_history::compute_balance_history(
+                            &db, &d, group_by, from, to,
+                        )
+                        .await
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
             crate::api::balance_history::attach_rates(
                 &ctx.db,
                 &ctx.cache,
@@ -408,6 +475,9 @@ async fn dispatch(
             {
                 return Err("Invalid transaction hex".to_string());
             }
+            let _permit = WS_SEND_LIMIT
+                .try_acquire()
+                .map_err(|_| "server busy: broadcast limit reached".to_string())?;
             match super::helpers::rpc_call_json("sendrawtransaction", serde_json::json!([hex_tx]))
                 .await
             {
@@ -422,7 +492,7 @@ async fn dispatch(
             }
         }
         "subscribeNewBlock" => {
-            subs.new_block = Some(id.to_string());
+            subs.new_block = Some(id.clone());
             Ok(serde_json::json!({ "subscribed": true }))
         }
         "unsubscribeNewBlock" => {
@@ -430,7 +500,7 @@ async fn dispatch(
             Ok(serde_json::json!({ "subscribed": false }))
         }
         "subscribeNewTransaction" => {
-            subs.new_tx = Some(id.to_string());
+            subs.new_tx = Some(id.clone());
             Ok(serde_json::json!({ "subscribed": true }))
         }
         "unsubscribeNewTransaction" => {
@@ -454,7 +524,7 @@ async fn dispatch(
                 return Err("too many addresses".to_string());
             }
             debug!(count = addrs.len(), "ws subscribeAddresses");
-            subs.addresses = Some((id.to_string(), addrs));
+            subs.addresses = Some((id.clone(), addrs));
             Ok(serde_json::json!({ "subscribed": true }))
         }
         "unsubscribeAddresses" => {
@@ -504,7 +574,7 @@ async fn dispatch(
         }
         "ping" => Ok(serde_json::json!({})),
         other => {
-            warn!(method = %other, "ws unknown method");
+            debug!(method = %other, "ws unknown method");
             Err(format!("unknown method '{other}'"))
         }
     }

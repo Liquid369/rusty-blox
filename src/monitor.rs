@@ -1552,6 +1552,17 @@ async fn index_block_from_rpc(
             .unwrap_or(std::time::Duration::from_secs(0))
             .as_secs();
         bc.broadcast_block(height, block_hash, timestamp, tx_count);
+        // Per-tx events feed the websocket address/tx subscriptions; without
+        // these the subscribe channels acknowledge but never fire.
+        for tx in tx_array {
+            let txid = tx
+                .get("txid")
+                .and_then(|t| t.as_str())
+                .or_else(|| tx.as_str());
+            if let Some(txid) = txid {
+                bc.broadcast_transaction(txid.to_string(), Some(height), None);
+            }
+        }
     }
 
     Ok(())

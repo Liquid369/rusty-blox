@@ -727,8 +727,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so pending txs resolve their prevouts for the per-address mempool view.
     let mempool_clone = Arc::clone(&mempool_state);
     let mempool_db = Arc::clone(&db_arc);
+    let mempool_bc = Arc::clone(&broadcaster);
     tokio::spawn(async move {
-        if let Err(e) = run_mempool_monitor(mempool_clone, mempool_db, 10).await {
+        if let Err(e) = run_mempool_monitor(mempool_clone, mempool_db, Some(mempool_bc), 10).await {
             error!(error = ?e, "Mempool monitor error");
         }
     });

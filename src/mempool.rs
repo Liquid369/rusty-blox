@@ -292,6 +292,7 @@ fn rebuild_index(parsed: &HashMap<String, ParsedMempoolTx>) -> MempoolAddressInd
 pub async fn run_mempool_monitor(
     mempool_state: Arc<MempoolState>,
     db: Arc<rocksdb::DB>,
+    broadcaster: Option<Arc<crate::websocket::EventBroadcaster>>,
     poll_interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize RPC client
@@ -377,6 +378,20 @@ pub async fn run_mempool_monitor(
         };
 
         let current_txids: std::collections::HashSet<String> = txids.iter().cloned().collect();
+        let (added, removed) = {
+            let txs = mempool_state.transactions.read().await;
+            let added: Vec<String> = current_txids
+                .iter()
+                .filter(|t| !txs.contains_key(*t))
+                .cloned()
+                .collect();
+            let removed: Vec<String> = txs
+                .keys()
+                .filter(|t| !current_txids.contains(*t))
+                .cloned()
+                .collect();
+            (added, removed)
+        };
         {
             let mut txs = mempool_state.transactions.write().await;
             // Remove confirmed transactions (keep only those still in mempool)
@@ -444,5 +459,16 @@ pub async fn run_mempool_monitor(
         }
         let idx = rebuild_index(&*mempool_state.parsed.read().await);
         *mempool_state.address_index.write().await = idx;
+
+        // Events AFTER the parsed cache is ready, so websocket pushes can
+        // build the pending tx from state.
+        if let Some(bc) = &broadcaster {
+            for txid in &added {
+                bc.broadcast_mempool_update(txid.clone(), "added".to_string());
+            }
+            for txid in &removed {
+                bc.broadcast_mempool_update(txid.clone(), "removed".to_string());
+            }
+        }
     }
 }

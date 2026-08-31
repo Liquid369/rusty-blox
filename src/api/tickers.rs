@@ -89,15 +89,16 @@ pub(crate) fn load_rate_series(db: &Arc<DB>) -> BTreeMap<u64, DayRates> {
     out
 }
 
-/// Rate entry Blockbook-style for a requested timestamp: first at-or-after,
-/// else the latest available. None only when the store is empty.
+/// Rate entry Blockbook-style for a requested timestamp: first at-or-after
+/// the RAW timestamp (matching Blockbook's findTicker), else the latest
+/// available. None only when the store is empty.
 pub(crate) fn rate_at(
     series: &BTreeMap<u64, DayRates>,
     ts: Option<u64>,
 ) -> Option<(u64, DayRates)> {
     match ts {
         Some(t) => series
-            .range(day_start(t)..)
+            .range(t..)
             .next()
             .or_else(|| series.iter().next_back())
             .map(|(k, v)| (*k, *v)),
@@ -176,9 +177,16 @@ async fn backfill(db: &Arc<DB>) -> Result<usize, String> {
         // CoinGecko free tier is unhappy about burst calls.
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let n = merged.len();
+    // Never overwrite a live-sampled day: the sampler's simple-price points
+    // beat market_chart's coarser series.
+    let existing = load_rate_series(db);
+    let mut n = 0usize;
     for (day, rates) in merged {
+        if existing.contains_key(&day) {
+            continue;
+        }
         write_day(db, day, rates)?;
+        n += 1;
     }
     Ok(n)
 }
@@ -186,6 +194,15 @@ async fn backfill(db: &Arc<DB>) -> Result<usize, String> {
 /// Background task: self-backfill once when the store is (near) empty, then
 /// upsert today's rates every 15 minutes from the live price fetch.
 pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
+    // Config gate: one instance per site should sample (a testnet twin polling
+    // CoinGecko doubles the rate-limit load for identical data).
+    let enabled = crate::config::get_global_config()
+        .get_bool("price.fiat_sampler")
+        .unwrap_or(true);
+    if !enabled {
+        info!("fiat sampler disabled (price.fiat_sampler = false)");
+        return;
+    }
     if load_rate_series(&db).len() < 30 {
         info!("fiat sampler: store empty, backfilling from CoinGecko market_chart");
         match backfill(&db).await {
