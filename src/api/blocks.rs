@@ -167,8 +167,46 @@ pub async fn block_index_v2(
     }
 }
 
-/// GET /api/v2/block/{heightOrHash}
-/// Returns full block details with all transactions.
+/// Blockbook's fixed page size for block transactions.
+const BLOCK_TXS_PER_PAGE: usize = 1000;
+
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct BlockPageQuery {
+    pub page: Option<u32>,
+}
+
+/// Blockbook v2 block shape: paginated FULL tx objects, camelCase hash links,
+/// string nonce/difficulty. Replaces the old custom header+txid-list shape
+/// (decision D4: dropped outright, nothing of ours consumed it).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlockbookBlock {
+    pub page: u32,
+    #[serde(rename = "totalPages")]
+    pub total_pages: u32,
+    #[serde(rename = "itemsOnPage")]
+    pub items_on_page: u32,
+    pub hash: String,
+    #[serde(rename = "previousBlockHash", skip_serializing_if = "Option::is_none")]
+    pub previous_block_hash: Option<String>,
+    #[serde(rename = "nextBlockHash", skip_serializing_if = "Option::is_none")]
+    pub next_block_hash: Option<String>,
+    pub height: i32,
+    pub confirmations: i32,
+    pub size: usize,
+    pub time: u32,
+    pub version: u32,
+    #[serde(rename = "merkleRoot")]
+    pub merkle_root: String,
+    pub nonce: String,
+    pub bits: String,
+    pub difficulty: String,
+    #[serde(rename = "txCount")]
+    pub tx_count: usize,
+    pub txs: Vec<super::types::Transaction>,
+}
+
+/// GET /api/v2/block/{heightOrHash}?page=N
+/// Blockbook-shaped block with paginated full transactions.
 ///
 /// Accepts EITHER a decimal block height OR a 64-char hex block hash
 /// (display byte order); the hash is resolved to a height via chain_metadata.
@@ -176,14 +214,16 @@ pub async fn block_index_v2(
 /// **CACHED**: 60-300s TTL (recent blocks 60s, older blocks 300s)
 pub async fn block_v2(
     Path(param): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<BlockPageQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
-) -> Result<Json<crate::types::Block>, (StatusCode, Json<BlockbookError>)> {
+) -> Result<Json<BlockbookBlock>, (StatusCode, Json<BlockbookError>)> {
     let height = match resolve_block_height(&db, &param) {
         Some(h) => h,
         None => return Err(not_found("Block not found")),
     };
-    let cache_key = format!("block:height:{height}");
+    let page = q.page.unwrap_or(1).max(1);
+    let cache_key = format!("block:bb:{height}:{page}");
     let db_clone = Arc::clone(&db);
 
     // Determine TTL based on block age
@@ -197,7 +237,7 @@ pub async fn block_v2(
 
     let result = cache
         .get_or_compute(&cache_key, ttl, || async move {
-            compute_block_details(&db_clone, height).await
+            compute_blockbook_block(&db_clone, height, page).await
         })
         .await;
 
@@ -217,13 +257,22 @@ pub async fn block_v2(
     }
 }
 
-async fn compute_block_details(
+async fn compute_blockbook_block(
     db: &Arc<DB>,
     height: i32,
-) -> Result<crate::types::Block, Box<dyn std::error::Error + Send + Sync>> {
+    page: u32,
+) -> Result<BlockbookBlock, Box<dyn std::error::Error + Send + Sync>> {
     let db_clone = Arc::clone(db);
 
-    tokio::task::spawn_blocking(move || {
+    // Blocking phase: header, canonical txid list, neighbor hashes.
+    #[allow(clippy::type_complexity)]
+    let (header_parts, tx_ids, prev_hash, next_hash, header_len): (
+        (u32, String, u32, u32, u32, f64, String),
+        Vec<String>,
+        Option<String>,
+        Option<String>,
+        usize,
+    ) = tokio::task::spawn_blocking(move || {
         let height_bytes = height.to_le_bytes();
 
         // Get block hash from chain_metadata
@@ -292,28 +341,79 @@ async fn compute_block_details(
             None
         };
 
-        Ok(crate::types::Block {
-            hash: hex::encode(block_hash),
-            height: height as u32,
-            version: header.n_version,
-            merkleroot: hex::encode(
-                header
-                    .hash_merkle_root
-                    .iter()
-                    .rev()
-                    .cloned()
-                    .collect::<Vec<u8>>(),
+        // Next block hash from the forward map (None at the tip).
+        let nextblockhash = db_clone
+            .get_cf(&cf_metadata, (height + 1).to_le_bytes())
+            .ok()
+            .flatten()
+            .map(hex::encode);
+
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            (
+                header.n_version,
+                hex::encode(
+                    header
+                        .hash_merkle_root
+                        .iter()
+                        .rev()
+                        .cloned()
+                        .collect::<Vec<u8>>(),
+                ),
+                header.n_time,
+                header.n_nonce,
+                header.n_bits,
+                difficulty,
+                hex::encode(block_hash),
             ),
-            time: header.n_time,
-            nonce: header.n_nonce,
-            bits: format!("{:08x}", header.n_bits),
-            difficulty,
-            tx: tx_ids,
+            tx_ids,
             previousblockhash,
-        })
+            nextblockhash,
+            header_bytes.len(),
+        ))
     })
     .await
-    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)??;
+
+    let (version, merkle_root, time, nonce, n_bits, difficulty, hash) = header_parts;
+    let tx_count = tx_ids.len();
+    let total_pages = (tx_count.max(1)).div_ceil(BLOCK_TXS_PER_PAGE) as u32;
+    let page = page.min(total_pages.max(1));
+    let start = (page as usize - 1) * BLOCK_TXS_PER_PAGE;
+    let end = (start + BLOCK_TXS_PER_PAGE).min(tx_count);
+    let page_txids: Vec<String> = tx_ids[start.min(tx_count)..end].to_vec();
+
+    // Full Blockbook tx objects via the SAME builder /tx uses (sat-string
+    // money, live confirmations, sapling + special-type extras).
+    let txs = crate::api::transactions::fetch_transactions_batch(db, &page_txids).await;
+
+    // Approximate size: header + serialized tx bytes of THIS page. Exact
+    // whole-block size would need every body regardless of page; PIVX blocks
+    // fit one page in practice, where this IS the full figure (minus var-int
+    // framing, same approximation /block-detail has always used).
+    let size = header_len + txs.iter().filter_map(|t| t.size).sum::<usize>();
+
+    let current_height = get_chain_state(db).map(|s| s.height).unwrap_or(height);
+    let confirmations = (current_height - height + 1).max(0);
+
+    Ok(BlockbookBlock {
+        page,
+        total_pages,
+        items_on_page: BLOCK_TXS_PER_PAGE as u32,
+        hash,
+        previous_block_hash: prev_hash,
+        next_block_hash: next_hash,
+        height,
+        confirmations,
+        size,
+        time,
+        version,
+        merkle_root,
+        nonce: nonce.to_string(),
+        bits: format!("{n_bits:08x}"),
+        difficulty: format!("{difficulty}"),
+        tx_count,
+        txs,
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

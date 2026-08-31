@@ -272,6 +272,17 @@ async fn compute_address_info(
     // bought nothing but the bug. Stable sort keeps stored order within an equal
     // height (deterministic pagination).
     tx_entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Blockbook from/to: inclusive block-height filters on the returned tx set
+    // (they were accepted-but-ignored before, silently serving the full list).
+    // Filtering happens BEFORE paging so totalPages reflects the filtered set,
+    // while the all-time `txs` count stays unfiltered (matches Blockbook).
+    let lifetime_tx_count = tx_entries.len();
+    if params.from.is_some() || params.to.is_some() {
+        let lo = params.from.unwrap_or(0) as i32;
+        let hi = params.to.map(|t| t as i32).unwrap_or(i32::MAX);
+        tx_entries.retain(|(_, h)| *h >= lo && *h <= hi);
+    }
     let all_txids: Vec<String> = tx_entries.iter().map(|(t, _)| hex::encode(t)).collect();
 
     // === PAGINATION LOGIC ===
@@ -348,7 +359,7 @@ async fn compute_address_info(
         total_sent: total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_tx_count as u32, // Total tx count (not paginated count)
+        txs: lifetime_tx_count as u32, // all-time count, unaffected by from/to
         txids,
         transactions,
     })
@@ -816,6 +827,12 @@ async fn aggregate_xpub_data(
 
     // Sort by height descending (newest first = highest block)
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+    // Blockbook from/to: inclusive height filter before paging (mirrors /address).
+    if params.from.is_some() || params.to.is_some() {
+        let lo = params.from.unwrap_or(0) as i32;
+        let hi = params.to.map(|t| t as i32).unwrap_or(i32::MAX);
+        txid_heights.retain(|(_, h)| *h >= lo && *h <= hi);
+    }
     let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
 
     // === PAGINATION LOGIC (same as address endpoint) ===

@@ -33,6 +33,7 @@ use rustyblox::api::{
     // Masternodes module
     mn_count_v2,
     mn_list_v2,
+    mn_raw_budget_vote_v2,
     money_supply_v2,
     network_health_analytics,
     // Price module
@@ -241,6 +242,8 @@ async fn start_web_server(
         .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
         .route("/api/v2/sendtx", post(send_tx_post_v2)) // Blockbook-compatible POST endpoint
         .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
+        // PIVX extension: submit a pre-signed governance vote (node write).
+        .route("/api/v2/mnrawbudgetvote", post(mn_raw_budget_vote_v2))
         .layer(middleware::from_fn(move |req, next| {
             concurrency_limit(broadcast_limit.clone(), req, next)
         }));
