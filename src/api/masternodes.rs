@@ -114,15 +114,15 @@ pub async fn mn_raw_budget_vote_v2(
     if v.vote != "yes" && v.vote != "no" {
         return bad("vote must be \"yes\" or \"no\"");
     }
-    // Base64 signature, bounded; charset-checked before it reaches the node.
-    if v.vote_sig.is_empty()
-        || v.vote_sig.len() > 200
-        || !v
-            .vote_sig
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
-    {
-        return bad("voteSig must be base64");
+    // Collateral vout indices are tiny; junk never reaches the node.
+    if v.mn_tx_index > 10_000 {
+        return bad("mnTxIndex out of range");
+    }
+    // Real base64 decode + compact-signature size check on the bytes.
+    use base64::Engine;
+    match base64::engine::general_purpose::STANDARD.decode(&v.vote_sig) {
+        Ok(sig) if (60..=80).contains(&sig.len()) => {}
+        _ => return bad("voteSig must be a base64 compact signature"),
     }
 
     match rpc_call_json(

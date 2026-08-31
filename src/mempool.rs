@@ -31,9 +31,40 @@ pub struct MempoolInfo {
     pub transactions: Vec<MempoolTransaction>,
 }
 
+/// One parsed mempool tx's transparent footprint, kept across polls so each
+/// tx is fetched and prevout-resolved exactly once.
+#[derive(Debug, Clone)]
+pub struct ParsedMempoolTx {
+    pub raw_hex: String,
+    /// (address, vout index, value sats) created by this tx.
+    pub credits: Vec<(String, u32, i64)>,
+    /// (address, value sats, prev display txid, prev vout) spent by this tx.
+    pub debits: Vec<(String, i64, String, u32)>,
+    pub size: usize,
+    /// in + valueBalance - out, sats; None when any prevout is unresolvable.
+    pub fee_sats: Option<i64>,
+}
+
+/// Address-keyed view over the current mempool, rebuilt on every poll (the
+/// PIVX mempool is tiny, so a full rebuild is cheaper than incremental
+/// bookkeeping and cannot drift).
+#[derive(Debug, Default)]
+pub struct MempoolAddressIndex {
+    /// addr -> (net pending delta sats, touching txids newest-last)
+    pub by_address: HashMap<String, (i64, Vec<String>)>,
+    /// Confirmed outpoints (display txid, vout) spent by a mempool tx; /utxo
+    /// must hide these or a wallet double-spends its own pending change.
+    pub spent_outpoints: std::collections::HashSet<(String, u32)>,
+    /// addr -> UTXOs created in the mempool: (txid, vout, value sats).
+    pub created_utxos: HashMap<String, Vec<(String, u32, i64)>>,
+}
+
 /// Shared mempool state
 pub struct MempoolState {
     pub transactions: RwLock<HashMap<String, MempoolTransaction>>,
+    /// Parsed footprints, keyed by txid (retained while the tx stays pending).
+    pub parsed: RwLock<HashMap<String, ParsedMempoolTx>>,
+    pub address_index: RwLock<MempoolAddressIndex>,
 }
 
 impl Default for MempoolState {
@@ -46,6 +77,8 @@ impl MempoolState {
     pub fn new() -> Self {
         Self {
             transactions: RwLock::new(HashMap::new()),
+            parsed: RwLock::new(HashMap::new()),
+            address_index: RwLock::new(MempoolAddressIndex::default()),
         }
     }
 
@@ -64,11 +97,195 @@ impl MempoolState {
         let txs = self.transactions.read().await;
         txs.get(txid).cloned()
     }
+
+    /// Pending view for one address: (net delta sats, txids touching it).
+    pub async fn pending_for_address(&self, address: &str) -> Option<(i64, Vec<String>)> {
+        self.address_index
+            .read()
+            .await
+            .by_address
+            .get(address)
+            .cloned()
+    }
+
+    /// Raw hex of a pending tx (for building full unconfirmed tx objects
+    /// without another node round trip).
+    pub async fn raw_hex(&self, txid: &str) -> Option<String> {
+        self.parsed
+            .read()
+            .await
+            .get(txid)
+            .map(|p| p.raw_hex.clone())
+    }
+
+    /// Mempool adjustments for /utxo: (created utxos for addr, spent outpoints).
+    pub async fn utxo_overlay(
+        &self,
+        address: &str,
+    ) -> (
+        Vec<(String, u32, i64)>,
+        std::collections::HashSet<(String, u32)>,
+    ) {
+        let idx = self.address_index.read().await;
+        (
+            idx.created_utxos.get(address).cloned().unwrap_or_default(),
+            idx.spent_outpoints.clone(),
+        )
+    }
+}
+
+/// Parse one mempool tx and resolve its transparent footprint. Prevouts are
+/// resolved from already-parsed mempool parents first, then the confirmed tx
+/// index (stub-safe reader). An unresolvable prevout leaves fee_sats None and
+/// contributes no debit; the next poll retries it (mempool parent chains).
+async fn parse_mempool_tx(
+    db: &Arc<rocksdb::DB>,
+    txid: &str,
+    parents: &HashMap<String, ParsedMempoolTx>,
+) -> Option<ParsedMempoolTx> {
+    let raw = crate::api::helpers::rpc_call_json("getrawtransaction", serde_json::json!([txid, 0]))
+        .await
+        .ok()?;
+    let raw_hex = raw.as_str()?.to_string();
+    let raw_bytes = hex::decode(&raw_hex).ok()?;
+    let size = raw_bytes.len();
+
+    // Resolve parent outputs from the mempool view before touching the DB.
+    let parent_outputs: HashMap<(String, u32), Vec<(String, i64)>> = parents
+        .iter()
+        .flat_map(|(ptxid, p)| {
+            let mut grouped: HashMap<u32, Vec<(String, i64)>> = HashMap::new();
+            for (addr, vout, val) in &p.credits {
+                grouped.entry(*vout).or_default().push((addr.clone(), *val));
+            }
+            grouped
+                .into_iter()
+                .map(move |(vout, addrs)| ((ptxid.clone(), vout), addrs))
+        })
+        .collect();
+
+    let db = Arc::clone(db);
+    tokio::task::spawn_blocking(move || -> Option<ParsedMempoolTx> {
+        let mut framed = Vec::with_capacity(4 + raw_bytes.len());
+        framed.extend_from_slice(&[0u8; 4]);
+        framed.extend_from_slice(&raw_bytes);
+        let tx = crate::parser::deserialize_transaction_blocking(&framed).ok()?;
+
+        let mut credits = Vec::new();
+        let mut value_out = 0i64;
+        for o in &tx.outputs {
+            value_out += o.value;
+            for addr in &o.address {
+                credits.push((addr.clone(), o.index as u32, o.value));
+            }
+        }
+
+        let cf_tx = db.cf_handle("transactions")?;
+        let mut debits = Vec::new();
+        let mut value_in = 0i64;
+        let mut unresolved = false;
+        for input in tx.inputs.iter().filter(|i| i.coinbase.is_none()) {
+            let Some(prev) = input.prevout.as_ref() else {
+                continue;
+            };
+            // Mempool parent first, then the confirmed index.
+            if let Some(addrs) = parent_outputs.get(&(prev.hash.clone(), prev.n)) {
+                if let Some((_, val)) = addrs.first() {
+                    value_in += val;
+                }
+                for (addr, val) in addrs {
+                    debits.push((addr.clone(), *val, prev.hash.clone(), prev.n));
+                }
+                continue;
+            }
+            let resolved = hex::decode(&prev.hash).ok().and_then(|ptx_bytes| {
+                crate::api::transactions::read_valid_tx_record(&db, &cf_tx, &ptx_bytes)
+                    .ok()
+                    .flatten()
+            });
+            let Some(rec) = resolved else {
+                unresolved = true;
+                continue;
+            };
+            let mut pframed = Vec::with_capacity(4 + rec.len() - 8);
+            pframed.extend_from_slice(&[0u8; 4]);
+            pframed.extend_from_slice(&rec[8..]);
+            let Ok(ptx) = crate::parser::deserialize_transaction_blocking(&pframed) else {
+                unresolved = true;
+                continue;
+            };
+            let Some(out) = ptx.outputs.iter().find(|o| o.index as u32 == prev.n) else {
+                unresolved = true;
+                continue;
+            };
+            value_in += out.value;
+            for addr in &out.address {
+                debits.push((addr.clone(), out.value, prev.hash.clone(), prev.n));
+            }
+        }
+
+        let vb = tx
+            .sapling_data
+            .as_ref()
+            .map(|s| s.value_balance)
+            .unwrap_or(0);
+        let fee_sats = if unresolved {
+            None
+        } else {
+            Some((value_in + vb - value_out).max(0))
+        };
+        Some(ParsedMempoolTx {
+            raw_hex,
+            credits,
+            debits,
+            size,
+            fee_sats,
+        })
+    })
+    .await
+    .ok()?
+}
+
+/// Rebuild the address view from the parsed set (full rebuild per poll; the
+/// PIVX mempool is tiny and a rebuild cannot drift).
+fn rebuild_index(parsed: &HashMap<String, ParsedMempoolTx>) -> MempoolAddressIndex {
+    let mut idx = MempoolAddressIndex::default();
+    for (txid, p) in parsed {
+        for (addr, _, val) in &p.credits {
+            let e = idx.by_address.entry(addr.clone()).or_default();
+            e.0 += val;
+            if !e.1.contains(txid) {
+                e.1.push(txid.clone());
+            }
+        }
+        for (addr, val, ptx, pvout) in &p.debits {
+            let e = idx.by_address.entry(addr.clone()).or_default();
+            e.0 -= val;
+            if !e.1.contains(txid) {
+                e.1.push(txid.clone());
+            }
+            idx.spent_outpoints.insert((ptx.clone(), *pvout));
+        }
+    }
+    // Mempool-created UTXOs, minus any consumed by another mempool tx.
+    for (txid, p) in parsed {
+        for (addr, vout, val) in &p.credits {
+            if !idx.spent_outpoints.contains(&(txid.clone(), *vout)) {
+                idx.created_utxos.entry(addr.clone()).or_default().push((
+                    txid.clone(),
+                    *vout,
+                    *val,
+                ));
+            }
+        }
+    }
+    idx
 }
 
 /// Monitor mempool for new transactions
 pub async fn run_mempool_monitor(
     mempool_state: Arc<MempoolState>,
+    db: Arc<rocksdb::DB>,
     poll_interval_secs: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize RPC client
@@ -153,30 +370,59 @@ pub async fn run_mempool_monitor(
             }
         };
 
-        let mut txs = mempool_state.transactions.write().await;
-
-        // Remove confirmed transactions (keep only those still in mempool)
         let current_txids: std::collections::HashSet<String> = txids.iter().cloned().collect();
-        txs.retain(|txid, _| current_txids.contains(txid));
-
-        // Add new transactions
-        for txid in txids {
-            if !txs.contains_key(&txid) {
-                txs.insert(
-                    txid.clone(),
-                    MempoolTransaction {
-                        txid: txid.clone(),
-                        size: None,
-                        fee: None,
-                        time: Some(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or(std::time::Duration::from_secs(0))
-                                .as_secs(),
-                        ),
-                    },
-                );
+        {
+            let mut txs = mempool_state.transactions.write().await;
+            // Remove confirmed transactions (keep only those still in mempool)
+            txs.retain(|txid, _| current_txids.contains(txid));
+            for txid in &txids {
+                if !txs.contains_key(txid) {
+                    txs.insert(
+                        txid.clone(),
+                        MempoolTransaction {
+                            txid: txid.clone(),
+                            size: None,
+                            fee: None,
+                            time: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or(std::time::Duration::from_secs(0))
+                                    .as_secs(),
+                            ),
+                        },
+                    );
+                }
             }
         }
+
+        // Maintain the parsed footprints: drop confirmed, parse new arrivals,
+        // and retry any whose prevouts were unresolvable (mempool chains).
+        {
+            let mut parsed = mempool_state.parsed.write().await;
+            parsed.retain(|txid, _| current_txids.contains(txid));
+        }
+        let need: Vec<String> = {
+            let parsed = mempool_state.parsed.read().await;
+            current_txids
+                .iter()
+                .filter(|t| parsed.get(*t).map(|p| p.fee_sats.is_none()).unwrap_or(true))
+                .cloned()
+                .collect()
+        };
+        for txid in need {
+            let parents = mempool_state.parsed.read().await.clone();
+            if let Some(p) = parse_mempool_tx(&db, &txid, &parents).await {
+                {
+                    let mut txs = mempool_state.transactions.write().await;
+                    if let Some(t) = txs.get_mut(&txid) {
+                        t.size = Some(p.size);
+                        t.fee = p.fee_sats.map(|f| f as f64 / 100_000_000.0);
+                    }
+                }
+                mempool_state.parsed.write().await.insert(txid, p);
+            }
+        }
+        let idx = rebuild_index(&*mempool_state.parsed.read().await);
+        *mempool_state.address_index.write().await = idx;
     }
 }

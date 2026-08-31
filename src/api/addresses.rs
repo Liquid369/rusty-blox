@@ -152,6 +152,7 @@ pub async fn addr_v2(
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<AddressInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: reject invalid/mistyped addresses with 400 instead of serving a
     // fake zero account (HTTP 200, balance:0). Matches Blockbook and the
@@ -193,7 +194,13 @@ pub async fn addr_v2(
         .await;
 
     match result {
-        Ok(info) => Ok(Json(info)),
+        Ok(mut info) => {
+            // Live mempool overlay AFTER the 30s cache: unconfirmed balance,
+            // pending tx count, and (page 1, unfiltered) the pending txs
+            // themselves at blockHeight -1, exactly as Blockbook serves them.
+            apply_address_mempool_overlay(&db, &mempool, &mut info, &params).await;
+            Ok(Json(info))
+        }
         Err(e) => {
             // A transient DB/compute error for a checksum-valid address must FAIL
             // the request. Returning a zeroed account here (as this used to) is a
@@ -207,6 +214,65 @@ pub async fn addr_v2(
                 )),
             ))
         }
+    }
+}
+
+/// Overlay the live mempool view onto a (cached) /address response: real
+/// unconfirmedBalance/unconfirmedTxs, and pending txs prepended on page 1 when
+/// no height filter is active. Never touches confirmed figures.
+async fn apply_address_mempool_overlay(
+    db: &Arc<DB>,
+    mempool: &Arc<crate::mempool::MempoolState>,
+    info: &mut AddressInfo,
+    params: &AddressQuery,
+) {
+    let Some((delta, pending_txids)) = mempool.pending_for_address(&info.address).await else {
+        return;
+    };
+    info.unconfirmed_balance = delta.to_string();
+    info.unconfirmed_txs = pending_txids.len() as u32;
+
+    if params.page > 1 || params.from.is_some() || params.to.is_some() {
+        return;
+    }
+    match params.details.as_str() {
+        "txids" => {
+            let list = info.txids.get_or_insert_with(Vec::new);
+            for txid in pending_txids.iter().rev() {
+                list.insert(0, txid.clone());
+            }
+        }
+        "txs" | "txslight" => {
+            let mut pending = Vec::new();
+            for txid in &pending_txids {
+                let Some(raw_hex) = mempool.raw_hex(txid).await else {
+                    continue;
+                };
+                match crate::api::transactions::build_unconfirmed_transaction(db, txid, &raw_hex)
+                    .await
+                {
+                    Ok(mut t) => {
+                        if params.details == "txslight" {
+                            t.hex = String::new();
+                            if let Some(s) = t.sapling.as_mut() {
+                                s.spends = None;
+                                s.outputs = None;
+                            }
+                        }
+                        pending.push(t);
+                    }
+                    Err(e) => {
+                        warn!(txid = %txid, error = %e, "pending tx build failed; omitted")
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                let list = info.transactions.get_or_insert_with(Vec::new);
+                pending.append(list);
+                *list = pending;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -279,8 +345,13 @@ async fn compute_address_info(
     // while the all-time `txs` count stays unfiltered (matches Blockbook).
     let lifetime_tx_count = tx_entries.len();
     if params.from.is_some() || params.to.is_some() {
-        let lo = params.from.unwrap_or(0) as i32;
-        let hi = params.to.map(|t| t as i32).unwrap_or(i32::MAX);
+        // Saturate into i32: a from/to above i32::MAX must not wrap
+        // negative and invert the filter.
+        let lo = params.from.unwrap_or(0).min(i32::MAX as u32) as i32;
+        let hi = params
+            .to
+            .map(|t| t.min(i32::MAX as u32) as i32)
+            .unwrap_or(i32::MAX);
         tx_entries.retain(|(_, h)| *h >= lo && *h <= hi);
     }
     let all_txids: Vec<String> = tx_entries.iter().map(|(t, _)| hex::encode(t)).collect();
@@ -374,6 +445,7 @@ pub async fn xpub_v2(
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<XPubInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: cheaply reject obviously-not-an-xpub input up front (before the
     // cache/derivation machinery) so a typo/garbage string gets a 400 rather
@@ -416,7 +488,27 @@ pub async fn xpub_v2(
         .await;
 
     match result {
-        Ok(info) => Ok(Json(info)),
+        Ok(mut info) => {
+            // Live mempool overlay for the account: sum pending deltas across
+            // the derived addresses (token names). details=basic has no token
+            // list to walk, so it keeps zeros; wallets use tokens/txs modes.
+            if let Some(tokens) = info.tokens.as_ref() {
+                let mut delta = 0i64;
+                let mut pending: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for t in tokens {
+                    if let Some((d, txids)) = mempool.pending_for_address(&t.name).await {
+                        delta += d;
+                        pending.extend(txids);
+                    }
+                }
+                if !pending.is_empty() {
+                    info.unconfirmed_balance = delta.to_string();
+                    info.unconfirmed_txs = pending.len() as u32;
+                }
+            }
+            Ok(Json(info))
+        }
         Err(e) => {
             warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
             // is_valid_xpub already 400s malformed input up front, so a residual
@@ -829,8 +921,13 @@ async fn aggregate_xpub_data(
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
     // Blockbook from/to: inclusive height filter before paging (mirrors /address).
     if params.from.is_some() || params.to.is_some() {
-        let lo = params.from.unwrap_or(0) as i32;
-        let hi = params.to.map(|t| t as i32).unwrap_or(i32::MAX);
+        // Saturate into i32: a from/to above i32::MAX must not wrap
+        // negative and invert the filter.
+        let lo = params.from.unwrap_or(0).min(i32::MAX as u32) as i32;
+        let hi = params
+            .to
+            .map(|t| t.min(i32::MAX as u32) as i32)
+            .unwrap_or(i32::MAX);
         txid_heights.retain(|(_, h)| *h >= lo && *h <= hi);
     }
     let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
@@ -1066,6 +1163,7 @@ pub async fn utxo_v2(
     Query(query): Query<UtxoQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<Vec<UTXO>>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: reject invalid/mistyped addresses with 400 instead of serving an
     // empty UTXO list (HTTP 200, []) for a non-existent/typo'd account.
@@ -1099,7 +1197,36 @@ pub async fn utxo_v2(
         .await;
 
     match result {
-        Ok(utxos) => Ok(Json(utxos)),
+        Ok(mut utxos) => {
+            // Live mempool overlay AFTER the cache, unless confirmed=true
+            // (which the old code accepted but ignored): outputs a mempool tx
+            // spends disappear (a wallet re-spending them double-spends its own
+            // pending change), outputs a mempool tx creates appear at 0 conf.
+            if !query.confirmed {
+                let (created, spent) = mempool.utxo_overlay(&address).await;
+                if !spent.is_empty() {
+                    utxos.retain(|u| !spent.contains(&(u.txid.clone(), u.vout as u32)));
+                }
+                for (txid, vout, value) in created.into_iter().rev() {
+                    utxos.insert(
+                        0,
+                        UTXO {
+                            txid,
+                            vout,
+                            value: value.to_string(),
+                            confirmations: 0,
+                            lock_time: None,
+                            height: None,
+                            coinbase: None,
+                            coinstake: None,
+                            spendable: Some(true),
+                            blocks_until_spendable: None,
+                        },
+                    );
+                }
+            }
+            Ok(Json(utxos))
+        }
         Err(e) => {
             // An internal error must FAIL the request: a 200 [] tells a wallet
             // "no coins to spend" — a confident false statement it will act on.

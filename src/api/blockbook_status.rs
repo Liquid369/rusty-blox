@@ -39,9 +39,11 @@ pub async fn blockbook_root_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
     Extension(mempool): Extension<Arc<MempoolState>>,
 ) -> Json<serde_json::Value> {
-    let (height, in_sync) = match crate::chain_state::get_chain_state(&db) {
-        Ok(cs) => (cs.height, cs.synced),
-        Err(_) => (0, false),
+    // Unreadable chain state = height 0, inSync false, epoch lastBlockTime.
+    // Never a fresh-looking envelope over a dead index.
+    let (height, in_sync, state_ok) = match crate::chain_state::get_chain_state(&db) {
+        Ok(cs) => (cs.height, cs.synced, true),
+        Err(_) => (0, false, false),
     };
 
     // Tip header nTime for lastBlockTime (chain_metadata height -> hash,
@@ -58,7 +60,16 @@ pub async fn blockbook_root_v2(
             None
         }
     })()
-    .unwrap_or_else(now_secs);
+    // A resolvable tip that merely missed a read races the monitor: "now" is
+    // honest enough. A dead/empty chain state gets the epoch, which no
+    // monitoring mistakes for healthy.
+    .unwrap_or_else(|| {
+        if state_ok && height > 0 {
+            now_secs()
+        } else {
+            0
+        }
+    });
 
     let mempool_size = mempool.get_info().await.size;
 
@@ -126,6 +137,7 @@ pub async fn estimate_fee_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Json<serde_json::Value> {
     const RELAY_FLOOR: f64 = 0.0001;
+    const MAX_SANE_FEE: f64 = 1.0; // PIV/kB; orders of magnitude above any real PIVX fee
     let n = blocks.clamp(1, 1008);
     let rate = cache
         .get_or_compute(
@@ -140,8 +152,10 @@ pub async fn estimate_fee_v2(
                         .ok()
                         .and_then(|v| v.as_f64()),
                 };
+                // Floor for no-estimate (-1); ceiling so a wallet can
+                // never be told to overpay an absurd node answer.
                 Ok::<f64, Box<dyn std::error::Error + Send + Sync>>(match rate {
-                    Some(r) if r > 0.0 => r,
+                    Some(r) if r > 0.0 => r.clamp(RELAY_FLOOR, MAX_SANE_FEE),
                     _ => RELAY_FLOOR,
                 })
             },

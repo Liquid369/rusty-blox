@@ -570,7 +570,7 @@ async fn build_transaction_inner(
 /// `getrawtransaction`). Rendered through the shared path with height 0, so it comes
 /// back with `confirmations: 0`, no block hash/height/time, and `spent: null` on its
 /// own outputs (they are not in the UTXO index yet).
-async fn build_unconfirmed_transaction(
+pub(crate) async fn build_unconfirmed_transaction(
     db: &Arc<DB>,
     txid: &str,
     raw_hex: &str,
@@ -579,9 +579,12 @@ async fn build_unconfirmed_transaction(
     if raw.is_empty() {
         return Err("Node returned empty raw tx".into());
     }
-    // Synthetic index-style record: block_version(4)=0 ++ height(4)=0 ++ raw_tx.
+    // Synthetic index-style record: block_version(4)=0 ++ height(4)=-1 ++ raw_tx.
+    // Blockbook marks mempool txs blockHeight -1 (we previously emitted 0); the
+    // sentinel never persists, it only flows through the response builder.
     let mut record = Vec::with_capacity(8 + raw.len());
-    record.extend_from_slice(&[0u8; 8]);
+    record.extend_from_slice(&[0u8; 4]);
+    record.extend_from_slice(&(-1i32).to_le_bytes());
     record.extend_from_slice(&raw);
     build_transaction_inner(db, txid, Some(record)).await
 }

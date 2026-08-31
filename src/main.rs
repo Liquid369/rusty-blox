@@ -190,6 +190,38 @@ async fn redirect_xpub(axum::extract::Path(id): axum::extract::Path<String>) -> 
     hash_redirect("xpub", &id)
 }
 
+/// Every /api error must be {"error":"..."} JSON. axum's extractor
+/// rejections (bad Path/Query/Json) and 405s emit plain text; rewrap any
+/// non-JSON /api error here. Handler-produced JSON errors pass untouched.
+async fn blockbookify_api_errors(request: Request, next: Next) -> Response {
+    let is_api = request.uri().path().starts_with("/api");
+    let response = next.run(request).await;
+    if !is_api || !(response.status().is_client_error() || response.status().is_server_error()) {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false);
+    if is_json {
+        return response;
+    }
+    let status = response.status();
+    // Salvage the extractor's message when it fits one line; it names the
+    // offending field, which beats a bare canonical reason.
+    let msg = match axum::body::to_bytes(response.into_body(), 1024).await {
+        Ok(bytes) if !bytes.is_empty() => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => status.canonical_reason().unwrap_or("Error").to_string(),
+    };
+    (
+        status,
+        axum::Json(rustyblox::api::types::BlockbookError::new(msg)),
+    )
+        .into_response()
+}
+
 /// Prometheus metrics endpoint handler
 async fn metrics_handler() -> impl IntoResponse {
     let metrics_output = metrics::gather_metrics();
@@ -352,6 +384,9 @@ async fn start_web_server(
     };
 
     let app = app
+        // Uniform {"error":"..."} bodies on every /api error, including
+        // extractor rejections and 405s that never reach a handler.
+        .layer(middleware::from_fn(blockbookify_api_errors))
         // Stamp hardening headers on every response (P2-1).
         .layer(middleware::from_fn(security_headers))
         .layer(cors)
@@ -676,10 +711,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rustyblox::db_sampler::start_db_size_sampler(sampler_db, 60).await;
     });
 
-    // Spawn mempool monitor service (can start early)
+    // Spawn mempool monitor service (can start early). Carries the DB handle
+    // so pending txs resolve their prevouts for the per-address mempool view.
     let mempool_clone = Arc::clone(&mempool_state);
+    let mempool_db = Arc::clone(&db_arc);
     tokio::spawn(async move {
-        if let Err(e) = run_mempool_monitor(mempool_clone, 10).await {
+        if let Err(e) = run_mempool_monitor(mempool_clone, mempool_db, 10).await {
             error!(error = ?e, "Mempool monitor error");
         }
     });
