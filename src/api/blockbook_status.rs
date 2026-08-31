@@ -136,10 +136,18 @@ pub async fn estimate_fee_v2(
     AxumPath(blocks): AxumPath<u32>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Json<serde_json::Value> {
+    let rate = estimate_fee_rate(&cache, blocks).await;
+    Json(serde_json::json!({ "result": format!("{rate:.8}") }))
+}
+
+/// Fee rate in PIV/kB for a confirmation target, floored at the relay minimum
+/// and capped at a sane ceiling. Shared by REST /estimatefee and the websocket
+/// estimateFee method. 15s cache per target.
+pub(crate) async fn estimate_fee_rate(cache: &Arc<CacheManager>, blocks: u32) -> f64 {
     const RELAY_FLOOR: f64 = 0.0001;
     const MAX_SANE_FEE: f64 = 1.0; // PIV/kB; orders of magnitude above any real PIVX fee
     let n = blocks.clamp(1, 1008);
-    let rate = cache
+    cache
         .get_or_compute(
             &format!("bb:fee:{n}"),
             Duration::from_secs(15),
@@ -161,8 +169,7 @@ pub async fn estimate_fee_v2(
             },
         )
         .await
-        .unwrap_or(RELAY_FLOOR);
-    Json(serde_json::json!({ "result": format!("{rate:.8}") }))
+        .unwrap_or(RELAY_FLOOR)
 }
 
 /// GET /api/v2/tx-specific/{txid}: the node's verbose getrawtransaction,

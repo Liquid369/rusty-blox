@@ -220,7 +220,62 @@ pub async fn addr_v2(
 /// Overlay the live mempool view onto a (cached) /address response: real
 /// unconfirmedBalance/unconfirmedTxs, and pending txs prepended on page 1 when
 /// no height filter is active. Never touches confirmed figures.
-async fn apply_address_mempool_overlay(
+/// Mempool overlay for an xpub account: sum pending deltas across the derived
+/// addresses (token names). details=basic has no token list to walk, so it
+/// keeps zeros; wallets use tokens/txs modes. Shared by REST and websocket.
+pub(crate) async fn apply_xpub_mempool_overlay(
+    mempool: &Arc<crate::mempool::MempoolState>,
+    info: &mut XPubInfo,
+) {
+    let Some(tokens) = info.tokens.as_ref() else {
+        return;
+    };
+    let mut delta = 0i64;
+    let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for t in tokens {
+        if let Some((d, txids)) = mempool.pending_for_address(&t.name).await {
+            delta += d;
+            pending.extend(txids);
+        }
+    }
+    if !pending.is_empty() {
+        info.unconfirmed_balance = delta.to_string();
+        info.unconfirmed_txs = pending.len() as u32;
+    }
+}
+
+/// Mempool overlay for a UTXO list: outputs a mempool tx spends disappear (a
+/// wallet re-spending them double-spends its own pending change); outputs a
+/// mempool tx creates appear at 0 confirmations. Shared by REST and websocket.
+pub(crate) async fn apply_utxo_mempool_overlay(
+    mempool: &Arc<crate::mempool::MempoolState>,
+    address: &str,
+    utxos: &mut Vec<UTXO>,
+) {
+    let (created, spent) = mempool.utxo_overlay(address).await;
+    if !spent.is_empty() {
+        utxos.retain(|u| !spent.contains(&(u.txid.clone(), u.vout)));
+    }
+    for (txid, vout, value) in created.into_iter().rev() {
+        utxos.insert(
+            0,
+            UTXO {
+                txid,
+                vout,
+                value: value.to_string(),
+                confirmations: 0,
+                lock_time: None,
+                height: None,
+                coinbase: None,
+                coinstake: None,
+                spendable: Some(true),
+                blocks_until_spendable: None,
+            },
+        );
+    }
+}
+
+pub(crate) async fn apply_address_mempool_overlay(
     db: &Arc<DB>,
     mempool: &Arc<crate::mempool::MempoolState>,
     info: &mut AddressInfo,
@@ -276,7 +331,7 @@ async fn apply_address_mempool_overlay(
     }
 }
 
-async fn compute_address_info(
+pub(crate) async fn compute_address_info(
     db: &Arc<DB>,
     address: &str,
     params: &AddressQuery,
@@ -489,24 +544,7 @@ pub async fn xpub_v2(
 
     match result {
         Ok(mut info) => {
-            // Live mempool overlay for the account: sum pending deltas across
-            // the derived addresses (token names). details=basic has no token
-            // list to walk, so it keeps zeros; wallets use tokens/txs modes.
-            if let Some(tokens) = info.tokens.as_ref() {
-                let mut delta = 0i64;
-                let mut pending: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for t in tokens {
-                    if let Some((d, txids)) = mempool.pending_for_address(&t.name).await {
-                        delta += d;
-                        pending.extend(txids);
-                    }
-                }
-                if !pending.is_empty() {
-                    info.unconfirmed_balance = delta.to_string();
-                    info.unconfirmed_txs = pending.len() as u32;
-                }
-            }
+            apply_xpub_mempool_overlay(&mempool, &mut info).await;
             Ok(Json(info))
         }
         Err(e) => {
@@ -533,7 +571,7 @@ pub async fn xpub_v2(
     }
 }
 
-async fn compute_xpub_info(
+pub(crate) async fn compute_xpub_info(
     db: &Arc<DB>,
     xpub_str: &str,
     params: &AddressQuery,
@@ -1198,32 +1236,8 @@ pub async fn utxo_v2(
 
     match result {
         Ok(mut utxos) => {
-            // Live mempool overlay AFTER the cache, unless confirmed=true
-            // (which the old code accepted but ignored): outputs a mempool tx
-            // spends disappear (a wallet re-spending them double-spends its own
-            // pending change), outputs a mempool tx creates appear at 0 conf.
             if !query.confirmed {
-                let (created, spent) = mempool.utxo_overlay(&address).await;
-                if !spent.is_empty() {
-                    utxos.retain(|u| !spent.contains(&(u.txid.clone(), u.vout as u32)));
-                }
-                for (txid, vout, value) in created.into_iter().rev() {
-                    utxos.insert(
-                        0,
-                        UTXO {
-                            txid,
-                            vout,
-                            value: value.to_string(),
-                            confirmations: 0,
-                            lock_time: None,
-                            height: None,
-                            coinbase: None,
-                            coinstake: None,
-                            spendable: Some(true),
-                            blocks_until_spendable: None,
-                        },
-                    );
-                }
+                apply_utxo_mempool_overlay(&mempool, &address, &mut utxos).await;
             }
             Ok(Json(utxos))
         }
@@ -1241,7 +1255,7 @@ pub async fn utxo_v2(
     }
 }
 
-async fn compute_utxos(
+pub(crate) async fn compute_utxos(
     db: &Arc<DB>,
     address: &str,
 ) -> Result<Vec<UTXO>, Box<dyn std::error::Error + Send + Sync>> {

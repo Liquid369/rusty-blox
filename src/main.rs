@@ -18,6 +18,7 @@ use rustyblox::api::{
     block_stats_v2,
     block_v2,
     blockbook_root_v2,
+    blockbook_websocket_handler,
     // Governance module
     budget_info_v2,
     budget_projection_v2,
@@ -337,6 +338,7 @@ async fn start_web_server(
         .route("/api/v2/analytics/treasury", get(treasury_analytics))
         .route("/api/v2/analytics/coldstaking", get(coldstaking_analytics))
         .route("/api/v2/price", get(price_v2)) // PIVX price data endpoint
+        .route("/websocket", get(blockbook_websocket_handler))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))

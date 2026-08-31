@@ -105,7 +105,7 @@ pub async fn tx_v2(
 /// height to count from, so the caller must recompute instead of serving it.
 /// If chain state is unreadable, the stored count is served as-is — stale-but-sane
 /// beats a confident 0 (mirrors the compute path's `.ok()` on the same read).
-fn freshen_confirmations(db: &Arc<DB>, tx: &mut serde_json::Value) -> bool {
+pub(crate) fn freshen_confirmations(db: &Arc<DB>, tx: &mut serde_json::Value) -> bool {
     let height = tx.get("blockHeight").and_then(|h| h.as_i64()).unwrap_or(0);
     if height <= 0 {
         return false;
@@ -589,7 +589,7 @@ pub(crate) async fn build_unconfirmed_transaction(
     build_transaction_inner(db, txid, Some(record)).await
 }
 
-async fn compute_transaction_details(
+pub(crate) async fn compute_transaction_details(
     db: &Arc<DB>,
     txid: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {

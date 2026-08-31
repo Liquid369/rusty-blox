@@ -212,7 +212,7 @@ fn bucket_series(
         .collect())
 }
 
-async fn compute_balance_history(
+pub(crate) async fn compute_balance_history(
     db: &Arc<DB>,
     address: &str,
     group_by: u64,
