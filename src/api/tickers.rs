@@ -179,16 +179,21 @@ async fn backfill(db: &Arc<DB>) -> Result<usize, String> {
     }
     // Never overwrite a live-sampled day: the sampler's simple-price points
     // beat market_chart's coarser series.
-    let existing = load_rate_series(db);
-    let mut n = 0usize;
-    for (day, rates) in merged {
-        if existing.contains_key(&day) {
-            continue;
+    let db2 = Arc::clone(db);
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let existing = load_rate_series(&db2);
+        let mut n = 0usize;
+        for (day, rates) in merged {
+            if existing.contains_key(&day) {
+                continue;
+            }
+            write_day(&db2, day, rates)?;
+            n += 1;
         }
-        write_day(db, day, rates)?;
-        n += 1;
-    }
-    Ok(n)
+        Ok(n)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Background task: self-backfill once when the store is (near) empty, then
@@ -205,14 +210,22 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
     }
     // Mainnet only: CoinGecko rates describe mainnet PIVX; a testnet twin
     // sampling them writes irrelevant data and doubles the API quota use.
-    let chain = crate::api::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
-        .await
-        .ok()
-        .and_then(|v| v.get("chain").and_then(|c| c.as_str()).map(String::from));
-    if let Some(c) = chain {
-        if c != "main" {
-            info!(chain = %c, "fiat sampler disabled on non-mainnet chain");
-            return;
+    // Fail CLOSED: no sampling until the node confirms the chain (an RPC-down
+    // boot on a testnet box must not start a mainnet backfill).
+    loop {
+        match crate::api::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([])).await {
+            Ok(v) => {
+                let chain = v.get("chain").and_then(|c| c.as_str()).unwrap_or("");
+                if chain == "main" {
+                    break;
+                }
+                info!(chain = %chain, "fiat sampler disabled on non-mainnet chain");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, "fiat sampler: chain unknown (RPC down); retrying in 60s");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
         }
     }
     if load_rate_series(&db).len() < 30 {
@@ -233,7 +246,11 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
                     eur: p.eur,
                     btc: p.btc,
                 };
-                if let Err(e) = write_day(&db, day, rates) {
+                let db2 = Arc::clone(&db);
+                let write = tokio::task::spawn_blocking(move || write_day(&db2, day, rates))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                if let Err(e) = write {
                     warn!(error = %e, "fiat sampler: write failed");
                 }
             }

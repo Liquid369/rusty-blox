@@ -288,6 +288,7 @@ async fn start_web_server(
     let broadcast_routes = Router::new()
         .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
         .route("/api/v2/sendtx", post(send_tx_post_v2)) // Blockbook-compatible POST endpoint
+        .route("/api/v2/sendtx/", post(send_tx_post_v2)) // spec URL carries a trailing slash
         .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
         // PIVX extension: submit a pre-signed governance vote (node write).
         .route("/api/v2/mnrawbudgetvote", post(mn_raw_budget_vote_v2))

@@ -422,7 +422,7 @@ async fn compute_blockbook_block(
     Ok(BlockbookBlock {
         page,
         total_pages,
-        items_on_page: BLOCK_TXS_PER_PAGE as u32,
+        items_on_page: txs.len() as u32,
         hash,
         previous_block_hash: prev_hash,
         next_block_hash: next_hash,

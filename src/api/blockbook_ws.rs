@@ -161,6 +161,12 @@ async fn push_tx_events(
             })
             .await
             .ok()
+            .map(|mut v| {
+                // Same freshen REST /tx applies on cache hits: a cached entry
+                // written mid-connect can hold confirmations 0 for a mined tx.
+                crate::api::transactions::freshen_confirmations(&ctx.db, &mut v);
+                v
+            })
     };
     let Some(tx_value) = tx_value else {
         return Ok(());
@@ -285,6 +291,13 @@ async fn dispatch(
                 .await
                 .unwrap_or_else(|_| "main".to_string());
             let testnet = chain != "main";
+            // Genesis hash straight from the index; correct on any network.
+            let block0 = ctx
+                .db
+                .cf_handle("chain_metadata")
+                .and_then(|cf| ctx.db.get_cf(&cf, 0i32.to_le_bytes()).ok().flatten())
+                .map(hex::encode)
+                .unwrap_or_default();
             Ok(serde_json::json!({
                 "name": if testnet { "PIVX Testnet" } else { "PIVX" },
                 "shortcut": if testnet { "tPIVX" } else { "PIVX" },
@@ -293,6 +306,7 @@ async fn dispatch(
                 "version": env!("CARGO_PKG_VERSION"),
                 "bestHeight": height,
                 "bestHash": hash,
+                "block0Hash": block0,
                 "testnet": testnet,
                 "backend": { "version": "", "subversion": "" },
             }))

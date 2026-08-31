@@ -101,8 +101,11 @@ pub async fn blockbook_root_v2(
     Json(serde_json::json!({
         "blockbook": {
             "coin": "PIVX",
+            "network": "PIVX",
             "host": std::env::var("HOSTNAME").unwrap_or_else(|_| "rustyblox".to_string()),
             "version": env!("CARGO_PKG_VERSION"),
+            "gitCommit": option_env!("RUSTYBLOX_GIT_COMMIT").unwrap_or("unknown"),
+            "buildTime": option_env!("RUSTYBLOX_BUILD_TIME").unwrap_or(""),
             "syncMode": true,
             "initialSync": false,
             "inSync": in_sync,
