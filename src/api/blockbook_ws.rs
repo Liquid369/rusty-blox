@@ -172,6 +172,33 @@ fn tx_addresses(tx: &serde_json::Value) -> HashSet<String> {
     out
 }
 
+/// Rates object honoring an optional ws `currencies` filter list.
+fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) -> serde_json::Value {
+    let filter: Option<Vec<String>> =
+        params
+            .get("currencies")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c.as_str())
+                    .map(|c| c.to_lowercase())
+                    .collect()
+            });
+    let mut out = serde_json::Map::new();
+    for cur in crate::api::tickers::CURRENCIES {
+        if filter
+            .as_ref()
+            .map(|f| f.iter().any(|c| c == cur))
+            .unwrap_or(true)
+        {
+            if let Some(v) = rates.get(cur) {
+                out.insert(cur.to_string(), serde_json::json!(v));
+            }
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 fn envelope(id: &str, data: serde_json::Value) -> String {
     serde_json::json!({ "id": id, "data": data }).to_string()
 }
@@ -335,11 +362,18 @@ async fn dispatch(
                 .clamp(60, 2_592_000);
             let from = params.get("from").and_then(|v| v.as_u64());
             let to = params.get("to").and_then(|v| v.as_u64());
-            let series = crate::api::balance_history::compute_balance_history(
+            let mut series = crate::api::balance_history::compute_balance_history(
                 &ctx.db, descriptor, group_by, from, to,
             )
             .await
             .map_err(|e| e.to_string())?;
+            crate::api::balance_history::attach_rates(
+                &ctx.db,
+                &ctx.cache,
+                &mut series,
+                params.get("fiatcurrency").and_then(|v| v.as_str()),
+            )
+            .await;
             serde_json::to_value(series).map_err(|e| e.to_string())
         }
         "estimateFee" => {
@@ -427,11 +461,46 @@ async fn dispatch(
             subs.addresses = None;
             Ok(serde_json::json!({ "subscribed": false }))
         }
-        // Fiat rates land with the tickers work; honest refusals until then.
+        // Fiat pushes are not implemented (clients poll getCurrentFiatRates);
+        // subscribed:false tells them so honestly.
         "subscribeFiatRates" => Ok(serde_json::json!({ "subscribed": false })),
         "unsubscribeFiatRates" => Ok(serde_json::json!({ "subscribed": false })),
-        "getCurrentFiatRates" | "getFiatRatesForTimestamps" | "getFiatRatesTickersList" => {
-            Err("fiat rates not available".to_string())
+        "getCurrentFiatRates" => {
+            let series = super::tickers::cached_series_pub(&ctx.db, &ctx.cache).await;
+            let (ts, rates) =
+                super::tickers::rate_at(&series, None).ok_or("no fiat rates available")?;
+            Ok(serde_json::json!({ "ts": ts, "rates": ws_rates(&params, rates) }))
+        }
+        "getFiatRatesForTimestamps" => {
+            let series = super::tickers::cached_series_pub(&ctx.db, &ctx.cache).await;
+            let stamps: Vec<u64> = params
+                .get("timestamps")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|t| t.as_u64()).collect())
+                .unwrap_or_default();
+            if stamps.is_empty() {
+                return Err("missing timestamps".to_string());
+            }
+            let tickers: Vec<serde_json::Value> = stamps
+                .iter()
+                .map(|t| match super::tickers::rate_at(&series, Some(*t)) {
+                    Some((ts, rates)) => {
+                        serde_json::json!({ "ts": ts, "rates": ws_rates(&params, rates) })
+                    }
+                    None => serde_json::json!({ "ts": t, "rates": {} }),
+                })
+                .collect();
+            Ok(serde_json::json!({ "tickers": tickers }))
+        }
+        "getFiatRatesTickersList" => {
+            let series = super::tickers::cached_series_pub(&ctx.db, &ctx.cache).await;
+            let (ts, _) =
+                super::tickers::rate_at(&series, params.get("timestamp").and_then(|v| v.as_u64()))
+                    .ok_or("no fiat rates available")?;
+            Ok(serde_json::json!({
+                "ts": ts,
+                "available_currencies": super::tickers::CURRENCIES,
+            }))
         }
         "ping" => Ok(serde_json::json!({})),
         other => {

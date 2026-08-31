@@ -15,6 +15,7 @@ pub mod masternodes;
 pub mod network;
 pub mod price;
 pub mod search;
+pub mod tickers;
 pub mod transactions;
 pub mod types;
 
@@ -34,6 +35,7 @@ pub use masternodes::*;
 pub use network::*;
 pub use price::*;
 pub use search::*;
+pub use tickers::*;
 pub use transactions::*;
 pub use types::*;
 

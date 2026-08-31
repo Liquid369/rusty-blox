@@ -52,6 +52,8 @@ use rustyblox::api::{
     status_v2,
     // Analytics module
     supply_analytics,
+    tickers_list_v2,
+    tickers_v2,
     transaction_analytics,
     treasury_analytics,
     tx_specific_v2,
@@ -337,7 +339,9 @@ async fn start_web_server(
         .route("/api/v2/analytics/snapshots", get(snapshots_analytics))
         .route("/api/v2/analytics/treasury", get(treasury_analytics))
         .route("/api/v2/analytics/coldstaking", get(coldstaking_analytics))
-        .route("/api/v2/price", get(price_v2)) // PIVX price data endpoint
+        .route("/api/v2/price", get(price_v2))
+        .route("/api/v2/tickers", get(tickers_v2))
+        .route("/api/v2/tickers-list", get(tickers_list_v2)) // PIVX price data endpoint
         .route("/websocket", get(blockbook_websocket_handler))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
@@ -711,6 +715,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sampler_db = Arc::clone(&db_arc);
     tokio::spawn(async move {
         rustyblox::db_sampler::start_db_size_sampler(sampler_db, 60).await;
+    });
+
+    // Fiat rate sampler: self-backfills the daily series once, then samples.
+    let fiat_db = Arc::clone(&db_arc);
+    tokio::spawn(async move {
+        rustyblox::api::tickers::run_fiat_rate_sampler(fiat_db).await;
     });
 
     // Spawn mempool monitor service (can start early). Carries the DB handle
