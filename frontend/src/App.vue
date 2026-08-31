@@ -146,6 +146,8 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pri
       <span class="mono">RUSTYBLOX EXPLORER</span>
       <span class="foot-sep">·</span>
       <span class="mono dim">{{ isMock ? 'offline mock telemetry' : 'live telemetry' }} — units via money.js</span>
+      <span class="foot-sep">·</span>
+      <RouterLink to="/api" class="mono dim">API</RouterLink>
       <span class="navrail-fill"></span>
       <span class="mono dim">⌘K JUMP-CONSOLE · / FOCUS</span>
     </footer>

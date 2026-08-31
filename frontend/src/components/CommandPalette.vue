@@ -20,6 +20,7 @@ const NAV = [
   { kind: 'NAV', label: 'Blocks', hint: 'recent block ledger', to: '/blocks' },
   { kind: 'NAV', label: 'Mempool', hint: 'pending transactions', to: '/mempool' },
   { kind: 'NAV', label: 'Masternodes', hint: 'node network · /mnlist', to: '/masternodes' },
+  { kind: 'NAV', label: 'API Reference', hint: 'blockbook drop-in + extensions', to: '/api' },
   { kind: 'NAV', label: 'Governance', hint: 'budget proposals · superblock', to: '/governance' },
   { kind: 'NAV', label: 'Analytics Deck', hint: 'HODL · wealth · staking', to: '/analytics' },
   { kind: 'SAMPLE', label: 'Block #5475000', hint: 'block-detail', to: '/block/5475000' },

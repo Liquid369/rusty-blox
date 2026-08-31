@@ -16,6 +16,7 @@ const routes = [
   { path: '/proposal/:name', name: 'proposal', component: () => import('./views/ProposalDetail.vue'), props: true },
   { path: '/analytics', name: 'analytics', component: () => import('./views/Analytics.vue') },
   { path: '/search/:query', name: 'search', component: () => import('./views/SearchResults.vue'), props: true },
+  { path: '/api', name: 'api', component: () => import('./views/ApiDocs.vue') },
   { path: '/:pathMatch(.*)*', name: 'notfound', component: () => import('./views/NotFound.vue') }
 ]
 
