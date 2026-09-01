@@ -1,4 +1,4 @@
-//! Live daily-analytics updater — Lane I (per-block incremental).
+//! Live daily-analytics updater: Lane I (per-block incremental).
 //!
 //! See `DESIGN-live-analytics-update.md`. Lane I keeps the `analytics_tx_day:
 //! <date>` blobs current as the monitor connects canonical blocks, reusing the
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 /// Opt-in: auto-trigger a full re-enrich to re-green the gate after a deep reorg
-/// (`sync.live_analytics_auto_reenrich`, default false — a full enrich is ~heavy,
+/// (`sync.live_analytics_auto_reenrich`, default false; a full enrich is ~heavy,
 /// so default to logging + a manual re-enrich).
 pub const AUTO_REENRICH_KEY: &str = "sync.live_analytics_auto_reenrich";
 
@@ -27,8 +27,8 @@ pub const AUTO_REENRICH_KEY: &str = "sync.live_analytics_auto_reenrich";
 static REENRICH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// RAII single-flight guard for the full join enrich. Acquire via
-/// `ReenrichGuard::try_acquire`; it releases automatically on drop — covering EVERY
-/// exit path (normal return, `?` error propagation, panic unwind) — so the guard can
+/// `ReenrichGuard::try_acquire`; it releases automatically on drop, covering EVERY
+/// exit path (normal return, `?` error propagation, panic unwind), so the guard can
 /// never leak and permanently brick future re-enrich. Shares the same atomic as
 /// `run_full_analytics_enrich`, so the startup interrupted-enrich recovery and the
 /// monitor's auto-reenrich can never overlap.
@@ -53,7 +53,7 @@ impl Drop for ReenrichGuard {
 
 /// Is a full re-enrich (Pass-1/2b addr_index rewrite) running in this process?
 /// The monitor pauses live indexing while true: its 'a'/'r'/'s'/'t' RMWs would
-/// land on rows the rebuild then overwrites from its snapshot — lost forever.
+/// land on rows the rebuild then overwrites from its snapshot, lost forever.
 pub fn reenrich_in_progress() -> bool {
     REENRICH_IN_PROGRESS.load(Ordering::SeqCst)
 }
@@ -107,7 +107,7 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
             info!("live-analytics: full re-enrich starting (re-green)");
             // Drop the readiness marker for the REBUILD's duration: Pass-2b
             // overwrites 'a'/'r'/'s'/'t' wholesale, so serving from the index
-            // mid-rebuild returns torn balances (half old, half new) — and a
+            // mid-rebuild returns torn balances (half old, half new), and a
             // kill mid-rebuild used to leave that torn state marked complete
             // forever. Cleared, the /address 503 gate holds during the rebuild
             // and a boot after a kill re-runs enrichment (sync.rs re-enriches
@@ -122,7 +122,7 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
                 Ok(()) => {
                     if let Some(cf) = db_bg.cf_handle("chain_state") {
                         if let Err(e) = db_bg.put_cf(&cf, b"address_index_complete", [1u8]) {
-                            error!(error = %e, "re-enrich: rebuilt OK but failed to restore readiness marker — /address serves 503 until restart re-enriches");
+                            error!(error = %e, "re-enrich: rebuilt OK but failed to restore readiness marker; /address serves 503 until restart re-enriches");
                         }
                     }
                 }
@@ -138,7 +138,7 @@ pub fn run_full_analytics_enrich(db: &Arc<DB>) {
 
 /// Lane-R live window in calendar days (set fields + orphan_blocks recompute).
 pub const R_DAYS: i64 = 3;
-/// Reorg-depth threshold in BLOCKS (distinct from R_DAYS) — deeper ⇒ full enrich.
+/// Reorg-depth threshold in BLOCKS (distinct from R_DAYS); deeper ⇒ full enrich.
 pub const R_BLOCKS: i32 = 4320;
 /// Lane-R recompute + orphan-mark cadence in blocks (~hourly).
 pub const R_INTERVAL: i32 = 60;
@@ -256,7 +256,7 @@ pub fn key_prefix() -> &'static str {
 }
 
 /// Steady-state live tick: drive Lane I forward over `(watermark, sync_height]`
-/// (idempotent — `apply_block` no-ops at/under the watermark, so this also
+/// (idempotent; `apply_block` no-ops at/under the watermark, so this also
 /// backfills blocks the monitor connected during the detached enrich window), then
 /// run the Lane-R recompute on an `R_INTERVAL`-block cadence. No-ops unless the
 /// feature is enabled AND the live baseline is ready. Call INLINE from the
@@ -273,7 +273,7 @@ pub async fn tick(db: &Arc<DB>) {
     }
     let count = tip - start;
     if count > 10 {
-        // A real backfill (gap > 10 blocks) — make it visible.
+        // A real backfill (gap > 10 blocks); make it visible.
         info!(
             from = start + 1,
             to = tip,
@@ -303,7 +303,7 @@ pub async fn tick(db: &Arc<DB>) {
         info!(watermark = wm, "live-analytics: backfill complete");
     }
     // Lane R every R_INTERVAL: recompute the O(window) set fields AND persist any
-    // new orphans from blk-tail (tail-only, cheap — no blocks-CF iterate), so
+    // new orphans from blk-tail (tail-only, cheap, no blocks-CF iterate), so
     // orphan_blocks is at most ~1h stale.
     if wm / R_INTERVAL != start / R_INTERVAL {
         if let Err(e) = recompute_window(db, tip, prefix, true).await {
@@ -312,20 +312,20 @@ pub async fn tick(db: &Arc<DB>) {
     }
 }
 
-/// Live reorg handler — keep the Lane-I day blobs correct across a rollback. Runs
+/// Live reorg handler: keep the Lane-I day blobs correct across a rollback. Runs
 /// INLINE in the monitor task (right after `handle_reorg`, before the new chain is
 /// re-indexed), so it cannot interleave with `tick`. It DELETES every live day blob
 /// (+ its difficulty/interval side keys) on or after the fork date and resets the
 /// watermark to just before the fork date's first block, so subsequent ticks
 /// REBUILD those days from scratch as the new chain is indexed (delete-then-rebuild
 /// ⇒ no double-count, and no need for old-chain data). A DEEP reorg (> `R_BLOCKS`)
-/// clears the gate instead — older affected days fall outside Lane R's window, so a
+/// clears the gate instead; older affected days fall outside Lane R's window, so a
 /// full re-enrich must re-green it. No-ops unless the feature is enabled.
 pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     if !is_enabled() {
         return;
     }
-    // A no-op reorg (fork == tip, nothing rolled back — e.g. the canonical-tip
+    // A no-op reorg (fork == tip, nothing rolled back, e.g. the canonical-tip
     // probe fired on a flapping node and find_fork_point resolved at the tip)
     // changes no chain state: deleting day blobs / rewinding the watermark here
     // would thrash today's analytics for nothing.
@@ -346,22 +346,22 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     }
     if orphaned_blocks > R_BLOCKS {
         // Failing to clear the gate means live analytics keep serving over a
-        // known-bad baseline — fail-open. Nothing to retry against a broken DB,
+        // known-bad baseline; fail-open. Nothing to retry against a broken DB,
         // but it must be surfaced as the error it is, not swallowed.
         if let Err(e) = db.put_cf(&cf_state, K_READY, [0u8]) {
             error!(orphaned_blocks, error = %e,
-                "live-analytics: FAILED to clear ready gate after deep reorg — series may serve stale/bad data");
+                "live-analytics: FAILED to clear ready gate after deep reorg; series may serve stale/bad data");
         }
         if auto_reenrich() {
             warn!(
                 orphaned_blocks,
-                "live-analytics: deep reorg — gate cleared, auto re-enrich starting"
+                "live-analytics: deep reorg: gate cleared, auto re-enrich starting"
             );
             run_full_analytics_enrich(db);
         } else {
             warn!(
                 orphaned_blocks,
-                "live-analytics: deep reorg — gate cleared; run a full re-enrich to re-green (or set sync.live_analytics_auto_reenrich=true)"
+                "live-analytics: deep reorg: gate cleared; run a full re-enrich to re-green (or set sync.live_analytics_auto_reenrich=true)"
             );
         }
         return;
@@ -417,14 +417,14 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
     batch.put_cf(&cf_state, K_WATERMARK, (h_first - 1).to_le_bytes());
     // A failed cleanup batch must not be LOGGED AS SUCCESS: orphaned-chain
     // contributions would stay in the day blobs AND the un-rewound watermark
-    // would make Lane I skip re-applying those heights — permanently wrong
+    // would make Lane I skip re-applying those heights: permanently wrong
     // daily analytics behind a log line claiming they were cleared.
     if let Err(e) = db.write(batch) {
         error!(fork_height, error = %e,
-            "live-analytics: reorg cleanup write FAILED — day blobs may retain orphaned data until the next full enrich");
+            "live-analytics: reorg cleanup write FAILED; day blobs may retain orphaned data until the next full enrich");
         return;
     }
-    warn!(fork_height, h_first, %delete_from, "live-analytics: reorg — cleared affected days, watermark reset (will rebuild)");
+    warn!(fork_height, h_first, %delete_from, "live-analytics: reorg; cleared affected days, watermark reset (will rebuild)");
 }
 
 /// Read a canonical block header's (nTime, nBits), mirroring `build_block_times`
@@ -485,19 +485,19 @@ fn seed_day_state(db: &Arc<DB>, date: &str, up_to_height: i32) -> (f64, HashMap<
 
 /// The resolved `transactions`-CF VALUE bytes (`[version 4][height 4][raw tx]`) of
 /// each tx in a canonical block, deduped, via the `'B' + height(4 LE) + index`
-/// block index. The `'B'` VALUE orientation is NOT uniform — the parse/`.blk` path
+/// block index. The `'B'` VALUE orientation is NOT uniform: the parse/`.blk` path
 /// stores hex-of-internal while the monitor/RPC path stores hex-of-display (both
 /// 13-byte key), and the degraded-rebuild path stores the raw 32-byte suffix
 /// (9-byte key). So for each entry we DUAL-PROBE both byte orderings of the decoded
 /// txid against the CF and return the `'t'` value of whichever `b't'+suffix`
-/// actually exists — robust to every writer. Probe order is RAW-FIRST: the live hot
+/// actually exists, robust to every writer. Probe order is RAW-FIRST: the live hot
 /// path (`apply_block` via the monitor tick) processes monitor-written values
 /// (hex-of-display), so raw=display hits on the first probe; the parse path
 /// resolves on the reversed probe. Returning the resolved value (not the suffix)
 /// also saves the caller a second lookup; dedup (by resolved suffix) guards against
 /// a stale `'B'` entry at a shifted index. **Fallible:** a real RocksDB read error
 /// propagates (it must NOT collapse into a silent miss, which would under-count the
-/// day and then advance the watermark past the gap — the enrich propagates such
+/// day and then advance the watermark past the gap; the enrich propagates such
 /// errors via `?`, so Lane I must too).
 fn block_tx_values(
     db: &Arc<DB>,
@@ -550,7 +550,7 @@ fn block_tx_values(
     Ok(out)
 }
 
-/// Per-input resolved prevout (value, creation height, is-coldstake) — resolved
+/// Per-input resolved prevout (value, creation height, is-coldstake), resolved
 /// via the `transactions` CF, the same bytes the enrich's `packed` is built from.
 struct ResolvedInput {
     value: i64,
@@ -559,7 +559,7 @@ struct ResolvedInput {
 }
 
 /// Resolve one input's prevout through the `transactions` CF. Returns None for an
-/// UNRESOLVED input (lookup MISS — incl. zPoS/zerocoin null prevouts — or a
+/// UNRESOLVED input (lookup MISS, incl. zPoS/zerocoin null prevouts, or a
 /// NEGATIVE stored height), exactly as the enrich's `tx_index` miss / sentinel
 /// path, so the clamp suppresses fee/minted. A resolved height of 0 (genesis) is
 /// counted.
@@ -595,7 +595,7 @@ async fn resolve_prevout(
 }
 
 /// Apply ONE canonical block's Lane-I contribution to its day blob (RMW), plus
-/// the running difficulty sum, the interval array, and the watermark — all in one
+/// the running difficulty sum, the interval array, and the watermark, all in one
 /// `WriteBatch`. No-ops unless `analytics_live_ready == 1` and `height >
 /// watermark`. `key_prefix` selects the live blobs (`analytics_tx_day:`) or the
 /// Phase-0 shadow blobs (`shadow_tx_day:`).
@@ -630,7 +630,7 @@ pub(crate) async fn apply_block_core(
         .ok_or("transactions CF not found")?;
 
     let Some((ntime, nbits)) = header_time_bits(db, height) else {
-        return Ok(()); // can't date the block yet — leave the watermark, retry later
+        return Ok(()); // can't date the block yet; leave the watermark, retry later
     };
     if ntime == 0 {
         return Ok(());
@@ -761,7 +761,7 @@ pub(crate) async fn apply_block_core(
     // Boundary-day resume: the enrich populates the day blob's avg_difficulty +
     // intervals but NOT these side keys, so on the first post-handoff block of the
     // tip's date (side keys absent, but the blob already counted blocks) we must
-    // reconstruct the running state from the date's headers — otherwise the running
+    // reconstruct the running state from the date's headers; otherwise the running
     // sum restarts at 0 and clobbers the enrich's correct boundary-day values.
     let (mut diffsum, mut intervals): (f64, HashMap<i32, u32>) =
         if diffsum_raw.is_none() && intervals_raw.is_none() && prior_blocks > 0 {
@@ -843,7 +843,7 @@ fn side_key(prefix: &[u8], date: &str) -> Vec<u8> {
     k
 }
 
-/// Lane R — recompute the day-local SET fields (`unique_stakers`, `top10_blocks`,
+/// Lane R: recompute the day-local SET fields (`unique_stakers`, `top10_blocks`,
 /// `active_addresses`) for the last `R_DAYS` calendar days from the canonical DB,
 /// and set `orphan_blocks` from the PERSISTENT orphan index; RMW ONLY those four
 /// fields into each window day's blob (preserving every Lane-I field and
@@ -950,7 +950,7 @@ pub async fn recompute_window(
     }
 
     // Persist any NEW orphans from blk-tail's ephemeral tail_blocks (live path
-    // only; cheap — no blocks-CF iterate). The count is read per-day from the
+    // only; cheap, no blocks-CF iterate). The count is read per-day from the
     // persistent index below, so it is restored even on a fresh/rebuilt blob.
     if do_mark {
         crate::enrich_addresses::mark_orphans(db, tip, tip_time, true)?;
@@ -988,7 +988,7 @@ pub async fn recompute_window(
 
 /// On-demand Phase-0 validator. Re-runs Lane I (`apply_block_core`) + Lane R
 /// (`recompute_window`) over the last `days_back` days into the `shadow_tx_day:`
-/// keyspace — the EXACT live code, just driven explicitly — then diffs each
+/// keyspace (the EXACT live code, just driven explicitly), then diffs each
 /// COMPLETE day against the full-enrich `analytics_tx_day:` blob field-by-field.
 /// Integer fields must match exactly; the two f64 fields (`avg_difficulty`,
 /// `coin_days_destroyed`) use a relative epsilon (their accumulation order differs
@@ -1046,7 +1046,7 @@ pub async fn shadow_validate(
         apply_block_core(db, h, "shadow_tx_day:", false).await?;
     }
     // do_mark=false: validation must not mutate the real orphan index. NOTE: this
-    // means orphan_blocks is NOT meaningfully diffed by shadow_validate — both the
+    // means orphan_blocks is NOT meaningfully diffed by shadow_validate; both the
     // shadow and the real blob read the SAME persistent orphan_count, so the diff is
     // structurally always 0 for that field (a coverage gap, not a correctness risk).
     recompute_window(db, tip, "shadow_tx_day:", false).await?;
@@ -1059,7 +1059,7 @@ pub async fn shadow_validate(
     let mut enrich_tx_total = 0u64;
     for d in &dates {
         if *d >= tip_date {
-            continue; // tip day is partial — not comparable
+            continue; // tip day is partial, not comparable
         }
         let shadow: Option<TxDayAgg> = db
             .get_cf(&cf_state, side_key(b"shadow_tx_day:", d))?
@@ -1087,7 +1087,7 @@ pub async fn shadow_validate(
                 report.push_str(&format!("  {d}: shadow blob MISSING\n"));
             }
             (_, None) => {
-                report.push_str(&format!("  {d}: (no enrich blob — skipped)\n"));
+                report.push_str(&format!("  {d}: (no enrich blob, skipped)\n"));
             }
         }
     }
@@ -1095,7 +1095,7 @@ pub async fn shadow_validate(
     // the 'B'→'t' lookup is broken (the whole per-tx pipeline is inert).
     let sanity = if enrich_tx_total > 0 && shadow_tx_total == 0 {
         format!(
-            "  *** SANITY FAIL: Lane I resolved 0 txs but the enrich has {enrich_tx_total} — \
+            "  *** SANITY FAIL: Lane I resolved 0 txs but the enrich has {enrich_tx_total}; \
              txid byte-order / 'B'-index wiring is broken ***\n"
         )
     } else {
@@ -1173,7 +1173,7 @@ mod tests {
     use super::*;
     use rocksdb::{Options, DB};
 
-    /// The single-flight guard must release on drop and be re-acquirable — pins the
+    /// The single-flight guard must release on drop and be re-acquirable; pins the
     /// RAII contract that closes the prior put_cf(...)? guard-leak.
     #[test]
     fn reenrich_guard_releases_on_drop() {

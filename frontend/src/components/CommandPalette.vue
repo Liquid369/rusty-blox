@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   COMMAND PALETTE (Cmd/Ctrl+K) — universal HUD jump console.
+   COMMAND PALETTE (Cmd/Ctrl+K): universal HUD jump console.
    Mirrors the backend /search classifier:
      digits -> block, 64-hex -> /search (block OR tx), D/S/6/7/E… -> address.
    Also exposes quick nav destinations + sample deep-links.
@@ -32,7 +32,7 @@ const NAV = [
 function classify(s) {
   if (!s) return null
   if (/^\d+$/.test(s)) return { type: 'BLOCK', to: `/block/${s}`, label: `Block #${s}`, hint: 'height → block-detail' }
-  // A 64-hex string is ambiguous (block hash OR txid) — let the backend /search
+  // A 64-hex string is ambiguous (block hash OR txid); let the backend /search
   // classifier decide instead of forcing /tx (a block hash → broken tx page).
   if (/^[0-9a-fA-F]{64}$/.test(s)) return { type: 'HASH', to: `/search/${s}`, label: 'Block or transaction', hint: '64-hex → classify' }
   if (/^(xpub)/i.test(s)) return { type: 'XPUB', to: `/xpub/${s}`, label: 'Extended pubkey', hint: 'xpub → account' }

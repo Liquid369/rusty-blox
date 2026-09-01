@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   API REFERENCE — public docs for the /api/v2 surface: a Blockbook v2
+   API REFERENCE: public docs for the /api/v2 surface, a Blockbook v2
    drop-in plus PIVX extensions, rendered from a static descriptor table
    so it stays maintainable next to the code. The money-units section
    mirrors lib/money.js: it is the single most important thing an

@@ -236,7 +236,7 @@ pub async fn fix_zero_height_transactions(
 /// Promote a canonical block's transactions from a negative stored height to `height`.
 ///
 /// The authoritative txid list is supplied by the caller (RPC `getblock`, canonical), so
-/// leaked/stale `'B'` entries can never cause a wrong re-confirmation — an orphaned tx
+/// leaked/stale `'B'` entries can never cause a wrong re-confirmation; an orphaned tx
 /// simply isn't in the list and is left untouched. This is the reorg-proof heal for the
 /// historic stuck `-1` windows.
 ///
@@ -244,7 +244,7 @@ pub async fn fix_zero_height_transactions(
 /// live-tip records are DISPLAY-keyed (monitor.rs:638). Match the readers: internal key
 /// first, display fallback only if absent (block_detail.rs:360, api/transactions.rs:66).
 /// Only a NEGATIVE stored height is rewritten (no-op if already resolved). Value layout is
-/// version(4) ++ height(i32 LE, 4) ++ tx_bytes — only bytes 4..8 change.
+/// version(4) ++ height(i32 LE, 4) ++ tx_bytes; only bytes 4..8 change.
 pub fn promote_block_txs_to_height(
     db: &Arc<DB>,
     height: i32,
@@ -278,7 +278,7 @@ pub fn promote_block_txs_to_height(
         }
         let stored = i32::from_le_bytes([value[4], value[5], value[6], value[7]]);
         if stored >= 0 {
-            continue; // already canonical — leave byte-for-byte
+            continue; // already canonical; leave byte-for-byte
         }
 
         let mut new_value = value[0..4].to_vec();
@@ -297,8 +297,8 @@ pub fn promote_block_txs_to_height(
 /// Find the distinct block heights that contain at least one heightless (`< 0`) transaction,
 /// resolved via the `'B'` index. These are the candidate blocks to re-resolve from the node.
 ///
-/// A stale/leaked `'B'` entry can only OVER-nominate a height (a harmless no-op re-resolution
-/// — promotion trusts the node's canonical list, never `'B'`, so it can't wrongly confirm).
+/// A stale/leaked `'B'` entry can only OVER-nominate a height (a harmless no-op re-resolution;
+/// promotion trusts the node's canonical list, never `'B'`, so it can't wrongly confirm).
 /// Targets the historic INTERNAL-keyed stuck records (matches the `'B'` display value reversed
 /// to internal); transient live-tip mempool `-1` records are the monitor's job, not this pass.
 pub fn nominate_heightless_heights(
@@ -332,7 +332,7 @@ pub fn nominate_heightless_heights(
             let h = i32::from_le_bytes([key[1], key[2], key[3], key[4]]);
             if let Ok(display) = hex::decode(String::from_utf8_lossy(&value).as_ref()) {
                 // A stuck 't' key may be stored INTERNAL (historic parse) or DISPLAY
-                // (live-tip index_block_from_rpc) — match either form so both are
+                // (live-tip index_block_from_rpc); match either form so both are
                 // nominated. (promote then re-checks against the node's canonical list,
                 // so a spurious match is a harmless no-op, never a wrong promotion.)
                 let internal: Vec<u8> = display.iter().rev().cloned().collect();
@@ -353,7 +353,7 @@ pub fn nominate_heightless_heights(
 /// Requires RPC. Run as a startup one-shot (before the live monitor) so it never races the
 /// tip; it only touches historic (already-buried) heights, which the monitor never rewrites.
 /// Returns (blocks_processed, txs_promoted). RPC failures skip the block (retry next run),
-/// never abort — a partial heal is safe and idempotent.
+/// never abort; a partial heal is safe and idempotent.
 pub async fn reresolve_heightless_blocks(
     db: &Arc<DB>,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
@@ -434,7 +434,7 @@ pub async fn reresolve_heightless_blocks(
 /// Delete malformed "phantom stub" transaction records: `'t' + txid(32)` entries whose
 /// value is too short (< 8 bytes) to hold `version(4) + height(4)`. They can't be a real
 /// transaction and only serve to SHADOW the valid record at the other key order (the `/tx`
-/// 404 bug). Deleting them is safe — a `< 8`-byte value carries no recoverable tx data.
+/// 404 bug). Deleting them is safe; a `< 8`-byte value carries no recoverable tx data.
 /// Returns the count deleted. Idempotent.
 pub fn delete_stub_tx_records(db: &Arc<DB>) -> Result<usize, Box<dyn std::error::Error>> {
     let cf = db

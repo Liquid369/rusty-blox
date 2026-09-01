@@ -218,7 +218,7 @@ pub async fn rollback_to_height(
     // address index) INCLUDING the sync_height watermark. Writing sync_height as
     // a separate put after the flush left a crash window where the watermark
     // still pointed at metadata the batch had just deleted (rollback deletes
-    // top-down) — the monitor then error-looped on get_db_chain_tip forever,
+    // top-down); the monitor then error-looped on get_db_chain_tip forever,
     // with nothing repairing it on restart.
     writer.put(
         "chain_state",
@@ -264,7 +264,7 @@ async fn get_block_transactions(
 
             // Key format: 'B' + height(4) + index(8). The transactions CF uses a
             // fixed_prefix(1) extractor (main.rs:534), so prefix_iterator_cf over-scans
-            // EVERY 'B' key past the seek — and LE heights are not numerically ordered,
+            // EVERY 'B' key past the seek, and LE heights are not numerically ordered,
             // so those foreign keys belong to scattered other heights. Bound to THIS
             // height's exact 5-byte prefix and break at the first non-match (the run is
             // contiguous); otherwise disconnect_transaction would orphan-mark unrelated
@@ -311,7 +311,7 @@ async fn disconnect_transaction(
     // (transactions.rs stores 'u' + reversed_txid). Keep both orders so each CF is
     // keyed correctly. NOTE: for live-tip reorgs the 'utxo' CF and utxo_undo are not
     // maintained (the monitor never writes them; store_spent_utxo has no callers)
-    // and nothing reads 'utxo', so the UTXO ops below are effectively no-ops — the
+    // and nothing reads 'utxo', so the UTXO ops below are effectively no-ops; the
     // user-visible effect of this function is correctly orphan-marking the
     // disconnected tx record (display-keyed) so it is no longer served as confirmed.
     let txid_internal: Vec<u8> = txid_display.iter().rev().cloned().collect();
@@ -398,7 +398,7 @@ async fn disconnect_transaction(
     // CRITICAL: only when we actually have the body to preserve. Writing a body-LESS 8-byte
     // record (version + height, no tx bytes) is exactly the stub that makes /tx return
     // "Empty transaction data". If the body isn't at this (display) key it lives untouched at
-    // the internal key (initial-sync), and read_valid_tx_record serves it from there — so
+    // the internal key (initial-sync), and read_valid_tx_record serves it from there, so
     // skipping the write here never loses data, and never manufactures a phantom stub.
     if let Some(ref data) = tx_data {
         if data.len() > 8 {
@@ -422,8 +422,8 @@ async fn disconnect_transaction(
 /// The forward map value is the hash in DISPLAY order (both writers), so we read
 /// it first, then delete `'h'+display` and `'h'+reversed(display)=internal`.
 ///
-/// (Prior bug: this deleted `'h' + height` from the `blocks` CF — a key that is
-/// never written — so the real `'h' + hash` entries in `chain_metadata` leaked on
+/// (Prior bug: this deleted `'h' + height` from the `blocks` CF, a key that is
+/// never written, so the real `'h' + hash` entries in `chain_metadata` leaked on
 /// every reorg.)
 fn delete_block_metadata(
     writer: &mut AtomicBatchWriter,
@@ -450,11 +450,11 @@ fn delete_block_metadata(
     }
 
     // Delete the block-transaction index ('B' + height(4) + tx_index(8) -> txid).
-    // Reorg previously left these — so 'B' membership meant "was ever a tip" rather
+    // Reorg previously left these, so 'B' membership meant "was ever a tip" rather
     // than "is canonical now", polluting block-detail (which reads 'B') and any
     // height repair that trusts it. Remove them so 'B'+height reflects only the
     // current canonical block (the replacement block re-writes its own on connect).
-    // Bounded to THIS height's exact 5-byte prefix — a delete must never over-scan.
+    // Bounded to THIS height's exact 5-byte prefix; a delete must never over-scan.
     if let Some(cf_transactions) = db.cf_handle("transactions") {
         let mut prefix = vec![b'B'];
         prefix.extend_from_slice(&height_key);
@@ -635,7 +635,7 @@ mod tests {
         delete_block_metadata(&mut writer, &db, height).unwrap();
         writer.flush().await.unwrap();
 
-        // No stale entry may survive — forward and BOTH reverse 'h' keys gone.
+        // No stale entry may survive: forward and BOTH reverse 'h' keys gone.
         assert!(
             db.get_cf(&cf, &height_key).unwrap().is_none(),
             "forward height->hash leaked"
@@ -687,7 +687,7 @@ mod tests {
 
     /// Disconnect must orphan-mark the REAL tx record at the DISPLAY key (so it is no
     /// longer served as confirmed) and must NOT leave a phantom stub at the internal
-    /// key (the prior bug). deserialize of the dummy body fails — orphan-marking
+    /// key (the prior bug). deserialize of the dummy body fails; orphan-marking
     /// happens regardless, which is the user-visible effect for a live reorg.
     #[tokio::test]
     async fn disconnect_orphan_marks_real_tx_at_display_key() {
@@ -738,7 +738,7 @@ mod tests {
 
     /// Reorg must NEVER manufacture a body-less 8-byte stub. When the tx body lives only at
     /// the INTERNAL key (initial-sync style), disconnect reads the display key, finds nothing,
-    /// and must SKIP the write — not write version+HEIGHT_ORPHAN (8 bytes) at the display key.
+    /// and must SKIP the write, not write version+HEIGHT_ORPHAN (8 bytes) at the display key.
     /// That 8-byte record is exactly what makes /tx return "Empty transaction data".
     #[tokio::test]
     async fn disconnect_never_writes_bodyless_stub() {
@@ -782,7 +782,7 @@ mod tests {
 
     /// Reorg rollback must DELETE the disconnected block's 'B' (block-tx) index
     /// entries, not just orphan-mark the tx records. Leaving them makes 'B'
-    /// membership mean "was ever a tip", not "is canonical now" — polluting
+    /// membership mean "was ever a tip", not "is canonical now", polluting
     /// block-detail (which reads 'B') and any height repair that trusts it. Only
     /// THIS height's entries may be removed; a neighbour's must survive.
     #[tokio::test]
@@ -795,7 +795,7 @@ mod tests {
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
         // Match production (main.rs:534): fixed_prefix(1) makes prefix_iterator_cf
-        // over-scan every 'B' key past the seek — so the neighbour survives ONLY if
+        // over-scan every 'B' key past the seek, so the neighbour survives ONLY if
         // the height guard + break actually bound the delete.
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(1));
         let db =
@@ -831,7 +831,7 @@ mod tests {
     /// get_block_transactions(H) must return ONLY height H's txids. Under the
     /// production fixed_prefix(1) extractor, prefix_iterator_cf over-scans every
     /// 'B' key past the seek (LE heights are not numerically ordered), so without a
-    /// height guard it returns foreign heights' txids — which disconnect_transaction
+    /// height guard it returns foreign heights' txids, which disconnect_transaction
     /// would then orphan-mark, corrupting unrelated canonical blocks on every reorg.
     #[tokio::test]
     async fn get_block_transactions_does_not_overscan_other_heights() {

@@ -35,7 +35,7 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
 
 /// P2-B: validate a PIVX transparent address before treating it as a real
 /// account. The prior handlers accepted any string, so a one-char typo of a
-/// real address returned HTTP 200 with balance:0 (a fake zero account) — the
+/// real address returned HTTP 200 with balance:0 (a fake zero account); the
 /// reference Blockbook returns 400 on a checksum mismatch, and `/search`
 /// already NotFounds the same string.
 ///
@@ -113,7 +113,7 @@ pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
 /// Read the exact persisted per-address totals written by the enrichment phase:
 /// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
 /// A MISSING key reads as 0 (a never-seen address genuinely has no totals); a
-/// read ERROR propagates — folding it into 0 served a confident zeroed account
+/// read ERROR propagates; folding it into 0 served a confident zeroed account
 /// for a rich address, minting the exact failure the handler's 500-on-error
 /// path exists to catch, one layer below it.
 async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), String> {
@@ -129,7 +129,7 @@ async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), 
             match db_clone.get_cf(&cf, key).map_err(|e| e.to_string())? {
                 // A MISSING key is a genuine 0 (never-seen address).
                 None => Ok(0),
-                // A PRESENT but wrong-width value is corruption — erroring beats
+                // A PRESENT but wrong-width value is corruption; erroring beats
                 // folding it to 0 and serving a confident zeroed balance.
                 Some(bytes) => <[u8; 8]>::try_from(bytes.as_slice())
                     .map(i64::from_le_bytes)
@@ -204,7 +204,7 @@ pub async fn addr_v2(
         Err(e) => {
             // A transient DB/compute error for a checksum-valid address must FAIL
             // the request. Returning a zeroed account here (as this used to) is a
-            // confident false statement — "this address holds nothing" — that a
+            // confident false statement ("this address holds nothing") that a
             // wallet will act on; Blockbook 5xxs the same case.
             warn!(address = %address, error = %e, "address compute failed");
             Err((
@@ -385,7 +385,7 @@ pub(crate) async fn compute_address_info(
 
     // v2 't' records are 36 bytes (txid(32) + height(i32 LE)). The inline height is
     // authoritative, so newest-first ordering needs NO per-txid tx-CF lookup. A
-    // stride mismatch (stale/legacy blob) is a hard error, surfaced — not silently
+    // stride mismatch (stale/legacy blob) is a hard error, surfaced, not silently
     // truncated.
     let mut tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
 
@@ -394,18 +394,18 @@ pub(crate) async fn compute_address_info(
     // (both i64 LE). By the UTXO-accounting identity, confirmed
     //     balance == totalReceived - totalSent
     // and this INCLUDES immature coinbase/coinstake outputs (both 'r' and the
-    // unspent set count them, so the identity still holds — the prior balance
+    // unspent set count them, so the identity still holds; the prior balance
     // loop deliberately included immature outputs for Blockbook parity).
     //
     // This replaces the former per-UTXO balance loop AND the per-tx
-    // total_received rescan — together ~2x len(txs) sequential
+    // total_received rescan (together ~2x len(txs) sequential
     // spawn_blocking().await round-trips whose scheduling overhead (~0.65ms
-    // each) pushed 5k-50k-tx addresses past the 30s HTTP timeout — with two
+    // each) pushed 5k-50k-tx addresses past the 30s HTTP timeout) with two
     // point lookups. The >50k-tx ("over_cap") path already served these exact
     // aggregates in production; this just makes them the path for every address
     // size, so the values are unchanged while the work drops from O(history) to
     // O(1). Missing keys read as 0 (an unenriched-but-indexed address shows
-    // 0/0/0 rather than erroring — same as the prior fallback).
+    // 0/0/0 rather than erroring, same as the prior fallback).
     let (total_received, total_sent) = read_address_totals(db, address).await?;
     let balance = total_received - total_sent;
 
@@ -564,7 +564,7 @@ pub async fn xpub_v2(
         ));
     }
 
-    // See addr_v2: key on the full query — gap/tokens/maxScan/tokensPage/pageSize all
+    // See addr_v2: key on the full query: gap/tokens/maxScan/tokensPage/pageSize all
     // shape the xpub response, so keying on only page+details collided distinct requests.
     let cache_key = format!("xpub:{xpub_str}:{params:?}");
     let db_clone = Arc::clone(&db);
@@ -593,7 +593,7 @@ pub async fn xpub_v2(
             // is_valid_xpub already 400s malformed input up front, so a residual
             // parse rejection stays client-shaped (400); anything else is a
             // storage/derivation failure that must be 500. A blanket 400 told
-            // wallets a valid xpub was permanently invalid — and leaked internals.
+            // wallets a valid xpub was permanently invalid, and leaked internals.
             let msg = e.to_string();
             if msg.starts_with("Invalid xpub") {
                 Err((
@@ -841,7 +841,7 @@ async fn aggregate_xpub_data(
                 .map(|k| (&cf_addr_index, k.as_slice()))
                 .collect();
             // Absent key (None) = unused derived address, a legitimate zero.
-            // A per-key read ERROR must fail the request — folded into None it
+            // A per-key read ERROR must fail the request; folded into None it
             // reads as "unused" and silently undercuts the xpub money totals.
             let utxo_results: Vec<Option<Vec<u8>>> = db_clone
                 .multi_get_cf(utxo_batch)
@@ -878,7 +878,7 @@ async fn aggregate_xpub_data(
         let utxos = crate::parser::deserialize_addr_utxos(&utxo_data).await?;
 
         // Blockbook parity: include immature outputs in xpub balances. Balance is the
-        // sum of the inline 'a' values — the inline value IS the unspent output value,
+        // sum of the inline 'a' values; the inline value IS the unspent output value,
         // so the result is unchanged while the per-UTXO tx-CF parse is eliminated.
         let address_balance: i64 = utxos.iter().map(|(_, _, value, _)| *value).sum();
 
@@ -900,7 +900,7 @@ async fn aggregate_xpub_data(
         // + async parse hop made large xpubs pay thousands of dispatches per uncached
         // request once the stub-safe reader started actually finding historical txs).
         // Reads are orphan-AWARE: a reorg orphan-marks only the display record, and
-        // the internal-first body read would otherwise count a disconnected tx —
+        // the internal-first body read would otherwise count a disconnected tx,
         // permanently inflating totalReceived. A read ERROR propagates (fails the
         // request): swallowing it would silently undercount a money total under 200.
         let txids_clone: Vec<Vec<u8>> = txids.clone();
@@ -1297,7 +1297,7 @@ pub async fn utxo_v2(
         }
         Err(e) => {
             // An internal error must FAIL the request: a 200 [] tells a wallet
-            // "no coins to spend" — a confident false statement it will act on.
+            // "no coins to spend", a confident false statement it will act on.
             warn!(address = %address, error = %e, "utxo compute failed");
             Err((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1338,7 +1338,7 @@ pub(crate) async fn compute_utxos(
     // a dust-spammed / exchange-payout address with tens of thousands of UTXOs blew
     // past the 30s request timeout (the exact anti-pattern already removed from
     // /address). Height/confirmations/orphan are still derived LIVE from the tx CF
-    // (not the inline 'a' fields) via the stub-safe reader — only the per-UTXO task
+    // (not the inline 'a' fields) via the stub-safe reader; only the per-UTXO task
     // hop is removed. The rare confirmations==0 lock_time parse now also runs inside
     // this blocking task instead of blocking the async worker inline.
     let db_blocking = Arc::clone(db);
@@ -1448,7 +1448,7 @@ mod tests {
     }
 
     /// P2-B: every real PIVX transparent address class must pass validation.
-    /// Asymmetric risk — a validator that rejects a VALID address is worse than
+    /// Asymmetric risk: a validator that rejects a VALID address is worse than
     /// the original fake-zero-account bug, so these MUST stay true.
     #[test]
     fn is_valid_address_accepts_all_real_classes() {
@@ -1474,8 +1474,8 @@ mod tests {
         );
     }
 
-    /// A one-char typo of a real address must be rejected (checksum mismatch) —
-    /// this is the P2-B bug: previously returned HTTP 200 balance:0.
+    /// A one-char typo of a real address must be rejected (checksum mismatch);
+    /// an unrejected typo returns HTTP 200 balance:0 (the fake-zero-account bug).
     #[test]
     fn is_valid_address_rejects_typos_and_garbage() {
         // Flip the last char of the D address: r5 -> r6 (breaks the checksum).
@@ -1515,7 +1515,7 @@ mod tests {
 
     /// Option-① regression: compute_address_info must (a) serve balance/totals
     /// from the persisted 'r'/'s' aggregates with balance == r - s, and (b) order
-    /// txids newest-first by block height via the single batched blocking pass —
+    /// txids newest-first by block height via the single batched blocking pass,
     /// without recomputing from full history. Builds a tiny addr_index +
     /// transactions DB and asserts both.
     #[tokio::test]

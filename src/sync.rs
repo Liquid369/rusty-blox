@@ -18,11 +18,11 @@ use crate::types::AppState;
 
 /// Effective parallel-file concurrency for blk parsing.
 ///
-/// If `sync.parallel_files` is set explicitly (> 0) it is honored EXACTLY — the
+/// If `sync.parallel_files` is set explicitly (> 0) it is honored EXACTLY; the
 /// operator knows their box, and a mis-reported cgroup core count must never
 /// throttle the parse below what they chose. If it is unset (or <= 0), default
 /// to the CPUs available to this process (`available_parallelism`, which is
-/// cgroup / affinity aware), floored at 1 — so a small VPS isn't oversubscribed
+/// cgroup / affinity aware), floored at 1, so a small VPS isn't oversubscribed
 /// by default (each blk file saturates a core hashing Quark/SHA256d), yet the
 /// operator can still set it ABOVE the detected core count when the parse is
 /// partly I/O-bound. Floored at 1 so a single-core host never builds a
@@ -408,7 +408,7 @@ async fn run_initial_sync_leveldb(
     // indexer validator (sync.validate_offset_indexing, default false; see the
     // gated call below at "Pattern A validation"). On the default path they are
     // written and never read, so skip the ~5.5M dead writes. NOTE: the validator
-    // runs only inside this initial leveldb import — set the flag BEFORE a from-
+    // runs only inside this initial leveldb import; set the flag BEFORE a from-
     // scratch sync; flipping it on a warm (already-synced) DB does nothing.
     let store_offsets = get_global_config()
         .get_bool("sync.validate_offset_indexing")
@@ -434,8 +434,8 @@ async fn run_initial_sync_leveldb(
         hash_key.extend_from_slice(hash); // Internal format (not reversed)
         batch.put_cf(&cf_metadata, &hash_key, height_key);
 
-        // If the leveldb index provided blk file number and data position, store it
-        // — but only when the offset-indexer validator will consume it (Lever H).
+        // If the leveldb index provided blk file number and data position, store it,
+        // but only when the offset-indexer validator will consume it (Lever H).
         if store_offsets {
             if let (Some(file_num), Some(data_pos)) = (opt_file, opt_pos) {
                 let mut off_key = vec![b'o'];
@@ -594,7 +594,7 @@ async fn run_initial_sync_leveldb(
 /// top of enrichment's own ~6.8GB footprint (full-sync peak ~9.6GB). A one-shot
 /// epoch advance + arena purge at the phase boundary returns them, dropping the
 /// peak toward enrichment's standalone footprint. Purging only releases memory
-/// that is already freed — it never touches live allocations, correctness, or
+/// that is already freed; it never touches live allocations, correctness, or
 /// any persisted DB byte.
 fn purge_jemalloc() {
     use std::ffi::CString;
@@ -716,7 +716,7 @@ async fn run_post_sync_enrichment(
 
     // Version-gated: an addr_index built by a pre-v2 binary (or by the chainstate /
     // !fast_sync path, which never stamp the version) is NOT current-format. Treat it as
-    // incomplete so it is rebuilt, and — if a legacy index actually exists — WIPE it
+    // incomplete so it is rebuilt, and, if a legacy index actually exists, WIPE it
     // first so the rebuild can't leave stale 40B/32B entries mixed with v2.
     let raw_address_index_complete = match db.get_cf(&cf_state, b"address_index_complete")? {
         Some(bytes) => bytes[0] == 1,
@@ -728,7 +728,7 @@ async fn run_post_sync_enrichment(
         tracing::warn!(
             found_version = addr_index_version,
             need_version = crate::parser::ADDR_INDEX_FORMAT_VERSION,
-            "addr_index is a legacy (pre-v2) format — wiping it for a clean v2 rebuild"
+            "addr_index is a legacy (pre-v2) format; wiping it for a clean v2 rebuild"
         );
         wipe_legacy_addr_index(db)?;
     }
@@ -811,7 +811,7 @@ async fn run_post_sync_enrichment(
 
     // Purge again after height-resolution: its maps (txid sets, chainwork,
     // height->blockhash) are now freed but still arena-retained, and would
-    // otherwise stack on enrichment's footprint — the full-sync peak.
+    // otherwise stack on enrichment's footprint, the full-sync peak.
     if bulk {
         purge_jemalloc();
     }
@@ -964,7 +964,7 @@ async fn run_post_sync_enrichment(
                     // daily-series has been SPAWNED (detached), not finished. A
                     // concurrent auto-reenrich during that tail is therefore possible
                     // only with sync.live_analytics_auto_reenrich=true AND a deep reorg
-                    // in the window — bounded, and the day-blob writes are
+                    // in the window; bounded, and the day-blob writes are
                     // overwrite-idempotent, so it is contention/RAM, never corruption.
                     // Count the attempt BEFORE running so an interruption is remembered;
                     // a successful enrich resets the counter.
@@ -1281,11 +1281,11 @@ async fn run_live_sync(
                 files = entries.len(),
                 "Processing blk*.dat files in parallel"
             );
-            // bulk=false: live/RPC catch-up on an already-synced DB — a crash here
+            // bulk=false: live/RPC catch-up on an already-synced DB; a crash here
             // must be WAL-recoverable, so the WAL stays enabled for these writes.
             // already_validated=false: catch-up runs no pre-validation (and a
             // resume-after-crash reclassifies here over possibly-incomplete
-            // metadata), so [F3] must run — it's the sole integrity gate (Lever G).
+            // metadata), so [F3] must run; it's the sole integrity gate (Lever G).
             process_files_parallel(
                 entries,
                 Arc::clone(&db),
@@ -1301,7 +1301,7 @@ async fn run_live_sync(
             // If Core's block-index leveldb lagged the blk-file tip when we refreshed
             // (a freshly-restarted node flushes its on-disk index behind its RPC tip),
             // the parse advanced sync_height past `canonical_tip` and the in-between
-            // blocks were stored heightless (tx height = -1) — which the re-enrich would
+            // blocks were stored heightless (tx height = -1), which the re-enrich would
             // orphan out of the address index (0-tx block-detail, missing UTXOs).
             // Backfill those blocks via authoritative RPC heights FIRST, so the re-enrich
             // below includes them.
@@ -1330,7 +1330,7 @@ async fn run_live_sync(
                     // index keeps serving its correct (slightly-behind) state, and the
                     // sync-thread retry loop (main.rs) re-runs the whole catch-up over the
                     // range (blocks_behind is large again) and retries the backfill once RPC
-                    // is back — converging without a silent hole and without stranding the
+                    // is back, converging without a silent hole and without stranding the
                     // canonical blocks below the gap.
                     crate::chain_state::set_sync_height(&db, pre_catchup_height)?;
                     return Err(e);
@@ -1391,7 +1391,7 @@ pub async fn run_sync_service(
         warn!("RESYNC MODE ENABLED - clearing all databases and rebuilding from scratch");
 
         // Clear all column families (derived from the single CF source of truth so
-        // resync can never drift — this list previously omitted utxo_undo).
+        // resync can never drift; this list previously omitted utxo_undo).
         for cf_name in crate::COLUMN_FAMILIES.iter().copied() {
             if let Some(cf) = db.cf_handle(cf_name) {
                 info!(cf = cf_name, "Clearing column family");
@@ -1450,13 +1450,13 @@ pub async fn run_sync_service(
                         // The blk-file-only fallback cannot assign transaction heights: without
                         // leveldb, chain_metadata is never populated and resolve_heights has no
                         // source, so it silently produced a height-less index (the 6.2M-tx
-                        // corruption). Fail loud instead of corrupting — leveldb is the required
+                        // corruption). Fail loud instead of corrupting; leveldb is the required
                         // height source and a failure here is almost always a fixable path/copy
                         // issue.
                         return Err(format!(
                             "LevelDB block-index import failed: {e}. The blk-file-only fallback \
                          cannot assign transaction heights and would produce a broken \
-                         (heightless) index, so it has been removed — refusing to proceed \
+                         (heightless) index, so it has been removed; refusing to proceed \
                          rather than corrupt silently. Ensure PIVX Core's block index is \
                          readable (paths.pivx_data_dir / paths.block_index_copy_dir) and retry."
                         )
@@ -1516,7 +1516,7 @@ pub async fn run_sync_service(
 
             // Only run enrichment if any phase is incomplete
             // The monitor handles incremental updates for new blocks
-            // bulk=false: existing index on disk — keep these writes WAL-recoverable.
+            // bulk=false: existing index on disk; keep these writes WAL-recoverable.
             run_post_sync_enrichment(&db, false).await?;
 
             metrics::set_pipeline_stage("current", 4); // Stage 4: RPC monitoring
@@ -1537,7 +1537,7 @@ mod migration_tests {
     use rocksdb::{Options, DB};
 
     /// The forced v1→v2 wipe must clear EVERY addr_index entry, the reorg undo records
-    /// (whose bincode layout changed), and the completion/version markers — so the
+    /// (whose bincode layout changed), and the completion/version markers, so the
     /// rebuild can't leave stale 40B/32B bytes and the index is non-served (503) until
     /// the re-enrich re-stamps v2.
     #[test]

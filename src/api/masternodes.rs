@@ -62,7 +62,7 @@ pub async fn mn_list_v2(
 
 /// Pure proxy: serve pivxd's rows UNTYPED. The old strict
 /// `Vec<pivx_rpc_rs::MasternodeList>` round-trip (rigid schema, `outidx: i8`,
-/// no optional fields) 500'd the ENTIRE list the day one row's shape moved —
+/// no optional fields) 500'd the ENTIRE list the day one row's shape moved,
 /// and the endpoint only re-serializes to JSON, so the typing bought nothing.
 /// The frontend renders row fields defensively.
 async fn compute_mn_list() -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {

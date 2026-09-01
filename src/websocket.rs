@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 
-/// P2-2 hardening — global cap on concurrent WebSocket connections across all
+/// Global cap on concurrent WebSocket connections across all
 /// channels (blocks/transactions/mempool). Sockets carry only public chain
 /// data, so this is resource-exhaustion hardening, not confidentiality. New
 /// handshakes past the cap are rejected with 503 instead of being accepted and
@@ -72,7 +72,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
     {
         Some(o) => o.trim().trim_end_matches('/').to_ascii_lowercase(),
-        None => return true, // no Origin (non-browser client) — allow
+        None => return true, // no Origin (non-browser client); allow
     };
 
     let allowed = ws_allowed_origins();
@@ -345,8 +345,8 @@ async fn serve_socket(
     ping.tick().await;
 
     // Idle deadline reset on every inbound frame (data, ping or pong). A peer
-    // that has gone silent — including one whose TCP is half-open and never
-    // answers our pings — trips this and the socket is closed.
+    // that has gone silent, including one whose TCP is half-open and never
+    // answers our pings, trips this and the socket is closed.
     let idle = tokio::time::sleep(WS_IDLE_TIMEOUT);
     tokio::pin!(idle);
 

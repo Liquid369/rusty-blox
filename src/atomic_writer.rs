@@ -65,7 +65,7 @@ impl AtomicBatchWriter {
     /// Only set `true` on the initial bulk-reindex path: a crash there is
     /// recoverable by re-scanning the `.blk` files, so the WAL is pure fsync
     /// overhead. The live/RPC catch-up path must leave this `false` so a crash
-    /// stays WAL-recoverable. This toggles durability only — the bytes written
+    /// stays WAL-recoverable. This toggles durability only; the bytes written
     /// are identical either way.
     pub fn set_disable_wal(&mut self, disable_wal: bool) {
         self.disable_wal = disable_wal;

@@ -1,5 +1,5 @@
 /* =====================================================================
-   MOCK FIXTURES — realistic offline data for every core-page endpoint.
+   MOCK FIXTURES: realistic offline data for every core-page endpoint.
    ---------------------------------------------------------------------
    Shapes + sample values mirror API-INVENTORY.md (probed against the
    live https://explorer.pivx.org). UNITS are preserved exactly so the
@@ -82,7 +82,7 @@ export function health() {
   }
 }
 
-// /block-stats/{count} — NEWEST-FIRST, returns count+1 rows (off-by-one).
+// /block-stats/{count}: NEWEST-FIRST, returns count+1 rows (off-by-one).
 export function blockStats(count = 30) {
   const rows = []
   let diff = 12984.71
@@ -101,7 +101,7 @@ export function blockStats(count = 30) {
   return rows // newest-first; consumer reverses for L->R time axes
 }
 
-// /block/{heightOrHash} — header + ordered txid list only.
+// /block/{heightOrHash}: header + ordered txid list only.
 export function block(heightOrHash) {
   const height = /^\d+$/.test(String(heightOrHash))
     ? Number(heightOrHash)
@@ -121,7 +121,7 @@ export function block(heightOrHash) {
   }
 }
 
-// /block-detail/{height} — full per-tx detail.
+// /block-detail/{height}: full per-tx detail.
 // per-io value = satoshi FLOAT; tx-level aggregates = PIV float.
 export function blockDetail(height) {
   const h = Number(height) || 5475000
@@ -196,7 +196,7 @@ export function blockDetail(height) {
   }
 }
 
-// /tx/{txid} — Blockbook camelCase. ALL money = satoshi STRINGS.
+// /tx/{txid}: Blockbook camelCase. ALL money = satoshi STRINGS.
 export function tx(txid) {
   const from = SAMPLE_ADDR
   const to = fakeAddr()
@@ -287,7 +287,7 @@ function buildAddrTx(id, addr, i) {
   }
 }
 
-// /utxo/{address} — BARE ARRAY. value = satoshi STRING.
+// /utxo/{address}: BARE ARRAY. value = satoshi STRING.
 export function utxo(addr) {
   if (ADDRESS_503) {
     const err = new Error('Address index is reindexing; please retry shortly')
@@ -342,7 +342,7 @@ export function balanceHistory() {
 // analytics-suite
 // =====================================================================
 
-// supply — PIV STRINGS; historical always empty.
+// supply: PIV STRINGS; historical always empty.
 export function analyticsSupply() {
   return {
     current: {
@@ -355,7 +355,7 @@ export function analyticsSupply() {
   }
 }
 
-// transactions — richest daily series. avg_value = SATOSHIS string;
+// transactions: richest daily series. avg_value = SATOSHIS string;
 // volume/avg_fee = PIV strings; rates = f64.
 export function analyticsTransactions() {
   const out = []
@@ -386,7 +386,7 @@ export function analyticsTransactions() {
   return out
 }
 
-// staking — daily economics. PIV strings + f64 rates.
+// staking: daily economics. PIV strings + f64 rates.
 export function analyticsStaking() {
   const out = []
   for (let i = SERIES_LEN - 1; i >= 0; i--) {
@@ -407,7 +407,7 @@ export function analyticsStaking() {
   return out
 }
 
-// network — daily health. difficulty = 2dp STRING; rest f64/u64.
+// network: daily health. difficulty = 2dp STRING; rest f64/u64.
 export function analyticsNetwork() {
   const out = []
   let diff = 16000
@@ -426,7 +426,7 @@ export function analyticsNetwork() {
   return out
 }
 
-// snapshots — hourly monitor samples. ts = unix secs; counts u64;
+// snapshots: hourly monitor samples. ts = unix secs; counts u64;
 // *_supply_piv = PIV f64 NUMBERS (no satoshi conversion).
 export function analyticsSnapshots() {
   const out = []
@@ -445,7 +445,7 @@ export function analyticsSnapshots() {
   return out
 }
 
-// coldstaking — created/spent/net_cumulative PIV strings; cumulative grows.
+// coldstaking: created/spent/net_cumulative PIV strings; cumulative grows.
 export function analyticsColdstaking() {
   const out = []
   let net = 5800000
@@ -468,7 +468,7 @@ export function analyticsColdstaking() {
   return out
 }
 
-// hodl — point-in-time age bands (PIV strings).
+// hodl: point-in-time age bands (PIV strings).
 export function analyticsHodl() {
   const total = 103231371.97
   const pct = { '<1m': 30.6, '1-3m': 33.1, '3-6m': 3.4, '6-12m': 6.2, '1-2y': 4.1, '>2y': 22.7 }
@@ -480,7 +480,7 @@ export function analyticsHodl() {
   return { bands, total: total.toFixed(8) }
 }
 
-// richlist — top 100. balance = SATOSHIS string.
+// richlist: top 100. balance = SATOSHIS string.
 export function analyticsRichlist(limit = 100) {
   const out = []
   // top holder ~33.74% then a decaying distribution
@@ -499,7 +499,7 @@ export function analyticsRichlist(limit = 100) {
   return out
 }
 
-// wealth-distribution — companion: Gini/Nakamoto + 7-bucket histogram.
+// wealth-distribution, companion: Gini/Nakamoto + 7-bucket histogram.
 export function analyticsWealthDistribution() {
   return {
     top_10: 61.2,
@@ -520,7 +520,7 @@ export function analyticsWealthDistribution() {
   }
 }
 
-// treasury — append-only payout history (PIV strings). Early outliers.
+// treasury: append-only payout history (PIV strings). Early outliers.
 export function analyticsTreasury() {
   const out = [
     { height: 86400, date: '2016-04-03', total_paid: '1000000.00000000', n_outputs: 2 },
@@ -543,17 +543,17 @@ export function analyticsTreasury() {
 }
 
 // =====================================================================
-// masternodes  (live RPC proxies; counts are plain — no money fields)
+// masternodes  (live RPC proxies; counts are plain, no money fields)
 // =====================================================================
 
-// /mncount — ipv4+ipv6+onion == total; inqueue <= enabled.
+// /mncount: ipv4+ipv6+onion == total; inqueue <= enabled.
 export function mnCount() {
   return { total: 2111, stable: 2107, enabled: 2111, inqueue: 2097, ipv4: 551, ipv6: 1160, onion: 400 }
 }
 
-// /mnlist — API returns the whole ~2k set as a bare array. We mock 22 mixed
+// /mnlist: API returns the whole ~2k set as a bare array. We mock 22 mixed
 // rows. CACHED so a row's collateral outpoint (txhash) is stable across
-// navigations — MasternodeDetail re-fetches the list and .find()s by id.
+// navigations; MasternodeDetail re-fetches the list and .find()s by id.
 const MN_STATUSES = [
   'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED',
   'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED', 'ENABLED',
@@ -588,7 +588,7 @@ export function mnList() {
 // mempool  (per-tx size/fee are ALWAYS null in the real API)
 // =====================================================================
 
-// /mempool — bytes/usage and per-tx size/fee are unavailable (null) by design.
+// /mempool: bytes/usage and per-tx size/fee are unavailable (null) by design.
 export function mempool() {
   const txs = Array.from({ length: 8 }, () => ({
     txid: fakeHash(), size: null, fee: null, time: TIP_TIME - randInt(5, 900),
@@ -623,7 +623,7 @@ function prop(Name, URL, Yeas, Nays, Abstains, Monthly, totalCount, remaining) {
 
 // Built once at import => Hash/PaymentAddress stable across calls.
 // Monthly demand (Σ 630k) intentionally exceeds the 432k cap so the Governance
-// Budget Simulator has something to cut — the passing subset (490k) alone is
+// Budget Simulator has something to cut; the passing subset (490k) alone is
 // already over-cap, so even "reset to actual" shows a cap-limited payout.
 const BUDGET_PROPOSALS = [
   prop('PIVX-Labs-Core-Dev', 'https://forum.pivx.org/proposal/labs-core-dev', 1510, 22, 0, 120000, 6, 4),
@@ -642,18 +642,18 @@ export const mnTotal = () => MN_TOTAL
 export const nextSuperblock = () => SUPERBLOCK_HEIGHT
 export const monthlyBudgetCap = () => MONTHLY_BUDGET_CAP
 
-// /budgetinfo — all proposals (Allotted = 0 here, per the real RPC).
+// /budgetinfo: all proposals (Allotted = 0 here, per the real RPC).
 export function budgetInfo() { return BUDGET_PROPOSALS.map((p) => ({ ...p })) }
 
 export function price() {
   return { usd: 0.2143, eur: 0.1985, btc: 0.00000214, last_updated: 1782700000 }
 }
 
-// ponytail: empty — the mock demo txs aren't budget collaterals, so this is
+// ponytail: empty; the mock demo txs aren't budget collaterals, so this is
 // never matched. Add a fixture if a mock budget-finalization tx is introduced.
 export function finalizedBudgets() { return {} }
 
-// /budgetprojection — only the funded subset, priority-ordered, with the real
+// /budgetprojection: only the funded subset, priority-ordered, with the real
 // Allotted populated and a cumulative TotalBudgetAllotted running total.
 export function budgetProjection() {
   const ranked = BUDGET_PROPOSALS
@@ -672,7 +672,7 @@ export function budgetProjection() {
   return out
 }
 
-// /budgetvotes/{name} — raw RPC array; length != Yeas (includes NO/ABSTAIN +
+// /budgetvotes/{name}: raw RPC array; length != Yeas (includes NO/ABSTAIN +
 // invalid/superseded). Unknown name -> [] (a 200, not an error).
 export function budgetVotes(name) {
   const p = BUDGET_PROPOSALS.find((x) => x.Name === name)
@@ -755,7 +755,7 @@ export function xpub(xpubStr, { details = 'tokens', page = 1, pageSize = 25 } = 
 }
 
 // =====================================================================
-// search — internally-tagged classification (drives a redirect / result card)
+// search: internally-tagged classification (drives a redirect / result card)
 // =====================================================================
 
 export function search(query) {

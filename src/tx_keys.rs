@@ -2,12 +2,12 @@
 ///
 /// Byte-level txid helpers for the transactions CF ('t' + 32-byte txid = 33-byte key).
 ///
-/// IMPORTANT — the CF holds records under TWO coexisting key orders: INTERNAL
+/// IMPORTANT: the CF holds records under TWO coexisting key orders: INTERNAL
 /// (reversed; written by initial sync) and DISPLAY (written by the live monitor).
 /// There is deliberately NO single-key lookup helper here: any serving-path read
 /// must go through `crate::api::transactions::read_valid_tx_record`, which probes
 /// both orders and refuses body-less stub records. (A display-only `get_transaction`
-/// used to live here with zero callers — it was exactly the raw one-key read that
+/// used to live here with zero callers; it was exactly the raw one-key read that
 /// caused the stub-shadowing /tx 404 bug, so it was removed.)
 ///
 /// prevout.hash from deserialized transactions is hex-encoded in display order;

@@ -305,7 +305,7 @@ pub async fn run_mempool_monitor(
     // PivxRpcClient uses reqwest::blocking which creates its own runtime.
     // RETRY with backoff: pivxd is routinely not up yet when the explorer boots
     // (a host reboot starts both services). The old code returned Ok(()) on the
-    // first failure — the task died permanently and the mempool served frozen-
+    // first failure; the task died permanently and the mempool served frozen-
     // empty for the process lifetime, indistinguishable from real data. Mirrors
     // the sync thread's boot retry loop.
     let rpc_client = loop {

@@ -74,7 +74,7 @@ pub(crate) fn classify_output(output: &CTxOut) -> ScriptClassification {
             ScriptClassification::P2PK(output.address[0].clone())
         }
         _ => {
-            // Unknown script with a single extracted address — attribute it rather
+            // Unknown script with a single extracted address; attribute it rather
             // than silently dropping value from the index.
             if output.address.len() == 1 {
                 ScriptClassification::P2PKH(output.address[0].clone())
@@ -94,11 +94,11 @@ pub(crate) fn classify_output(output: &CTxOut) -> ScriptClassification {
 /// from the source `CTxOut` so every packed value is byte-identical to the output.
 ///
 /// `kind`:
-///   0 = None      — no address attribution (OP_RETURN, zerocoin mint, the empty
+///   0 = None      - no address attribution (OP_RETURN, zerocoin mint, the empty
 ///                   coinstake vout[0] marker, nonstandard). Both ids are NO_ADDR.
-///   1 = Single    — P2PKH / P2SH / P2PK / unknown-single / EXM exchangeaddress.
+///   1 = Single    - P2PKH / P2SH / P2PK / unknown-single / EXM exchangeaddress.
 ///                   addr_a = the single id, addr_b = NO_ADDR.
-///   2 = ColdStake — P2CS. addr_a = staker id, addr_b = owner id.
+///   2 = ColdStake - P2CS. addr_a = staker id, addr_b = owner id.
 #[derive(Clone)]
 struct PackedOut {
     value: i64,
@@ -177,7 +177,7 @@ fn intern(addr_intern: &mut HashMap<String, u32>, addr_rev: &mut Vec<String>, s:
 
 /// Per-shard (or whole-DB serial) Pass-1 accumulator. Shards build these over
 /// disjoint txid ranges (`tx_shard_bounds`) and the merge concatenates them in
-/// shard order (`merge_pass1_shards`). Address interning is LOCAL to each shard —
+/// shard order (`merge_pass1_shards`). Address interning is LOCAL to each shard;
 /// dense ids are purely in-memory and resolved to base58 strings only at write
 /// time, so shards never share mutable state and the merge remaps each shard's
 /// ids into one global table without changing any on-disk byte.
@@ -203,7 +203,7 @@ struct Pass1Shard {
 /// by the serial scan and every parallel shard, so the two cannot diverge.
 ///
 /// `tx_index` is intentionally NOT built here: it is rebuilt once from `tx_rev`
-/// after Pass 1 (identical content — last-writer-wins per txid), which frees
+/// after Pass 1 (identical content; last-writer-wins per txid), which frees
 /// shards from sharing a global slot counter.
 fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i32) {
     // INVARIANT #2: detect the type while inputs[0]'s null/zerocoin prevout is
@@ -244,7 +244,7 @@ fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i3
         }
         sh.inputs_processed += 1;
         if let Some(prevout) = &input.prevout {
-            // prevout.hash from parser.rs is DISPLAY (reversed) format — the same
+            // prevout.hash from parser.rs is DISPLAY (reversed) format, the same
             // byte order as DB keys / tx_index / tx_rev (INVARIANT #7).
             if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
                 let t: [u8; 32] = prev_txid_display
@@ -259,13 +259,13 @@ fn pass1_index_tx(sh: &mut Pass1Shard, key: &[u8], tx: &CTransaction, height: i3
 
 /// Split the 't'-prefixed (0x74) transaction keyspace into `n` contiguous,
 /// disjoint `[lower, upper)` byte-bound pairs whose union is EXACTLY the set of
-/// keys the serial Pass-1 iterator visits — every `'t'`+txid key, ascending. The
+/// keys the serial Pass-1 iterator visits: every `'t'`+txid key, ascending. The
 /// `'B'`-prefixed block-tx-index keys sort below 0x74 and are excluded by the
 /// lower bound; the final shard's exclusive upper `0x75` stops past the entire
 /// `'t'` prefix.
 ///
 /// Sharding on the FIRST txid byte keeps shards ~even (txids are uniform hashes)
-/// and — because shard k's range sorts entirely before shard k+1's —
+/// and, because shard k's range sorts entirely before shard k+1's,
 /// concatenating shard results in index order reproduces serial SLOT ORDER
 /// byte-for-byte, which the unsorted `'a'` UTXO-list ordering depends on.
 ///
@@ -289,7 +289,7 @@ fn tx_shard_bounds(n: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Per-shard (or whole-DB serial) Pass-2b accumulator. The two byte-exact
-/// outputs are `totals_sent` (i64 — plain `+=` is associative, so the merge is
+/// outputs are `totals_sent` (i64; plain `+=` is associative, so the merge is
 /// order-independent across any shard count) and `txs_map_adds` (the spend-side
 /// txids, which are sorted+deduped at write time, so push order is irrelevant).
 /// `day_joins` / `coinstake_treasury` are analytics only (persisted to
@@ -316,9 +316,9 @@ struct Pass2bShard {
 
 /// Run the Pass-2b body for ONE already-deserialized, slot-resolved transaction:
 /// Already-resolved per-tx inputs to the shared join arithmetic. The PREVOUT
-/// RESOLUTION (value/kind/height per input) is done by the CALLER — the full
+/// RESOLUTION (value/kind/height per input) is done by the CALLER (the full
 /// enrich via the frozen `packed`/`tx_index`, the live updater via the
-/// `transactions` CF — so this struct is resolver-source-agnostic.
+/// `transactions` CF), so this struct is resolver-source-agnostic.
 #[derive(Debug, Clone)]
 pub(crate) struct TxJoinInputs {
     pub height: i32,
@@ -360,7 +360,7 @@ pub(crate) struct TxJoinContribution {
     pub treasury: Option<TreasuryPayout>,
 }
 
-/// THE shared per-tx join arithmetic — the single source of truth for the
+/// THE shared per-tx join arithmetic, the single source of truth for the
 /// daily-analytics join fields, called identically by the full enrich
 /// (`pass2b_process_tx`) and the live updater. Byte-for-byte mirrors the original
 /// inline pass2b logic: unconditional coin_days/p2cs/normal_tx_bytes, clamp-gated
@@ -414,7 +414,7 @@ pub(crate) fn compute_tx_join(inp: &TxJoinInputs, date: &str) -> TxJoinContribut
 
 /// THE shared per-tx INLINE accumulation (counts / volumes / type-specific),
 /// called identically by the full enrich (`persist_tx_daily_series`) and the live
-/// updater (Lane I) so neither can drift on the subtle bits — the `coldstake`
+/// updater (Lane I) so neither can drift on the subtle bits: the `coldstake`
 /// script test and the >10 PIV PoW-coinbase budget threshold. Updates `agg` in
 /// place and RETURNS a PoW-era coinbase budget `TreasuryPayout` if this coinbase
 /// minted more than 10 PIV over the era reward. Does NOT touch the set fields
@@ -516,7 +516,7 @@ fn pass2b_process_tx(
         sh.inputs_processed += 1;
         if let Some(prevout) = &input.prevout {
             inputs_with_prevout += 1;
-            // prevout.hash from parser.rs is in DISPLAY (reversed) format — the
+            // prevout.hash from parser.rs is in DISPLAY (reversed) format, the
             // same byte order as tx_index keys / tx_rev (INVARIANT #7).
             if let Ok(prev_txid_display) = txid_from_hex(&prevout.hash) {
                 // INVARIANT #3 (zPoS null-prevout): resolve ONLY through tx_index.
@@ -535,7 +535,7 @@ fn pass2b_process_tx(
 
                 if let Some((prev_tx, prev_height)) = prev {
                     if let Some(prev_out) = prev_tx.outs.get(prevout.n as usize) {
-                        // Tier 2: spend-side joins — input value sum (fees / rewards),
+                        // Tier 2: spend-side joins: input value sum (fees / rewards),
                         // coin age, and cold-staking principal spent.
                         inputs_resolved += 1;
                         sh.prevout_resolved += 1;
@@ -635,7 +635,7 @@ fn pass2b_process_tx(
 
 /// Number of enrichment range-shards from `sync.enrich_parallel_shards`.
 /// Default 1 => the serial path (today's behavior, untouched). Clamped to
-/// `[1, 4]` (the RAM cap — see `tx_shard_bounds`).
+/// `[1, 4]` (the RAM cap; see `tx_shard_bounds`).
 fn effective_enrich_shards() -> usize {
     match crate::config::get_global_config().get_int("sync.enrich_parallel_shards") {
         Ok(n) if n >= 1 => (n as usize).clamp(1, 4),
@@ -717,12 +717,12 @@ fn run_pass1_parallel(db: Arc<DB>, n: usize) -> Result<Pass1Shard, String> {
 /// with the serial scan:
 ///  - `packed`/`tx_rev` concatenated in SHARD ORDER (== ascending txid == serial
 ///    slot order); each shard's global base is the running length (realized,
-///    post-filter counts — empty shards contribute nothing).
+///    post-filter counts; empty shards contribute nothing).
 ///  - each shard's LOCAL interned ids remapped to GLOBAL ids (NO_ADDR preserved,
 ///    BOTH addr_a and addr_b remapped for P2CS). Global id assignment differs from
 ///    serial, but ids are in-memory only and resolve to the SAME base58 strings,
 ///    so every on-disk byte is identical.
-///  - `spent_outputs` unioned (a set — order-independent).
+///  - `spent_outputs` unioned (a set, order-independent).
 fn merge_pass1_shards(shards: Vec<Pass1Shard>) -> Pass1Shard {
     let total_packed: usize = shards.iter().map(|s| s.packed.len()).sum();
     let mut out = Pass1Shard {
@@ -738,7 +738,7 @@ fn merge_pass1_shards(shards: Vec<Pass1Shard>) -> Pass1Shard {
             remap[local_id] = intern(&mut out.addr_intern, &mut out.addr_rev, s);
         }
         // Remap every packed out's addr_a/addr_b (skip NO_ADDR; P2CS uses addr_b)
-        // and append in shard order — the global slot base is out.packed.len().
+        // and append in shard order; the global slot base is out.packed.len().
         for mut ptx in sh.packed.drain(..) {
             for o in ptx.outs.iter_mut() {
                 if o.addr_a != NO_ADDR {
@@ -864,7 +864,7 @@ fn run_pass2b_parallel(
 }
 
 /// Combine per-shard Pass-2b results. The two byte-exact outputs merge
-/// order-independently: `totals_sent` by plain `+=` (i64 — associative), and the
+/// order-independently: `totals_sent` by plain `+=` (i64, associative), and the
 /// `txs_map_adds` by append (sorted+deduped at write). `day_joins` /
 /// `coinstake_treasury` are analytics (chain_state, excluded from the
 /// address-index byte-diff gate), so their f64 / Vec accumulation tolerates the
@@ -1020,7 +1020,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     };
 
     // Destructure the shard back into the per-pass working set and rebuild
-    // tx_index (DISPLAY txid -> slot) from tx_rev — same content the old inline
+    // tx_index (DISPLAY txid -> slot) from tx_rev, same content the old inline
     // insert produced (last-writer-wins per txid).
     let Pass1Shard {
         spent_outputs,
@@ -1066,7 +1066,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // classifies + interns every output while building the packed store.)
 
     // PASS 2: Build address map with spent flags (outputs -> address_map).
-    // Value is now (slot, vout) — purely in-memory ids resolved back to the
+    // Value is now (slot, vout), purely in-memory ids resolved back to the
     // 32-byte DISPLAY txid (tx_rev[slot]) only at on-disk serialize time, so the
     // UTXO bytes stay byte-identical (INVARIANT #7).
     let mut address_map: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
@@ -1122,7 +1122,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 2 => {
                     // Cold staking (P2CS): the output is indexed under BOTH the staker
                     // (S-address) and the owner (D-address), each credited with the full
-                    // value — the same convention Blockbook uses for multi-address
+                    // value, the same convention Blockbook uses for multi-address
                     // outputs, and what wallets/explorers expect when querying either
                     // side of a delegation. The spend side (Pass 2b) debits BOTH
                     // addresses symmetrically, so balance == received - sent holds for
@@ -1253,7 +1253,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 .and_then(|a| tx_index.get(&a).copied())
             {
                 Some(s) => s,
-                None => continue, // not indexed in Pass 1 (failed deserialize) — skip
+                None => continue, // not indexed in Pass 1 (failed deserialize); skip
             };
 
             sh2.tx_total += 1;
@@ -1381,7 +1381,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Restricting the snapshot to address-attributed UTXOs is what keeps the
     // tracked total at the transparent supply: outputs with no address are
     // dominated by OP_ZEROCOINMINT scripts, whose zerocoin spends consume the
-    // accumulator by serial number — never the outpoint — so they would sit in
+    // accumulator by serial number (never the outpoint), so they would sit in
     // the spent-set-based walk as "unspent" forever (~744M phantom PIV).
     // hodl_seen dedupes outpoints across addresses because P2CS UTXOs are
     // indexed under BOTH the staker and the owner.
@@ -1391,7 +1391,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
 
     for (id, utxos) in address_map {
         // Resolve the interned id back to its exact base58 string ONLY here, where
-        // the on-disk key bytes are built — reproduces the original byte-for-byte.
+        // the on-disk key bytes are built; reproduces the original byte-for-byte.
         let address = &addr_rev[id as usize];
         let mut key = vec![b'a'];
         key.extend_from_slice(address.as_bytes());
@@ -1429,7 +1429,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     if h >= 0 && h <= tip {
                         // Parser sets output.index == position, so direct indexing
                         // by vout is exact. Value comes from packed[slot].outs[vout]
-                        // — identical to the original tx.outputs[vout].value.
+                        // (identical to the original tx.outputs[vout].value).
                         if let Some(out) = ptx.outs.get(*vout as usize) {
                             let band_idx = hodl_band_index(tip, h);
                             hodl_sums[band_idx] = hodl_sums[band_idx].saturating_add(out.value);
@@ -1549,7 +1549,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // Precompute the rich list and wealth distribution from the per-address
     // totals we already have. balance == received - sent (verified to match
     // Blockbook), so this needs no extra DB reads and produces the TRUE top
-    // holders — replacing the old O(addresses) full-scan endpoints that only
+    // holders, replacing the old O(addresses) full-scan endpoints that only
     // sampled the first 10k addresses.
     let wealth_ok = match persist_wealth_analytics(&db, &totals_received, &totals_sent, &addr_rev) {
         Ok(()) => true,
@@ -1562,13 +1562,13 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
     // HODL / dormancy snapshot: value of the final unspent UTXO set bucketed
     // by coin age, accumulated above from the same deduped unspent sets that
     // back the 'a' entries (the balance path verified against the reference
-    // explorer — see the comment at the accumulators).
+    // explorer; see the comment at the accumulators).
     if let Err(e) = persist_hodl_snapshot(&db, &hodl_sums, hodl_total, tip) {
         warn!(error = %e, "Failed to persist HODL snapshot");
     }
 
     // The full enrich rebuilt a/r/s/t, so durably (in the MAIN pass, not the
-    // crash-prone detached daily-series tail) clear any reorg-stale flag — the
+    // crash-prone detached daily-series tail) clear any reorg-stale flag; the
     // periodic recompute can resume. Advance its watermark to this tip ONLY if the
     // fresh richlist/wealth blob actually wrote; otherwise just clear the flag and
     // let the next recompute refresh the blob (never let the watermark outrun it).
@@ -1636,12 +1636,12 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                 return;
             }
             // A reorg during the pass invalidates the frozen view this series
-            // was computed from — the handoff would overwrite on_reorg's
+            // was computed from; the handoff would overwrite on_reorg's
             // cleanup/rewind with stale data. Refuse it; analytics_in_progress
             // stays set, so the interrupted-enrich recovery re-runs a full
             // enrich on the next restart (the designed heal path).
             if crate::analytics_live::reorg_epoch(&db_bg) != epoch_at_start {
-                warn!("Background: reorg landed during the daily-series pass — withholding the green handoff; restart (or a new full enrich) will rebuild on the post-reorg chain");
+                warn!("Background: reorg landed during the daily-series pass: withholding the green handoff; restart (or a new full enrich) will rebuild on the post-reorg chain");
                 return;
             }
             // Strictly-last handoff: flip the live gate green WITH the watermark
@@ -1657,7 +1657,7 @@ pub async fn enrich_all_addresses(db: Arc<DB>) -> Result<(), Box<dyn std::error:
                     tip.to_le_bytes(),
                 );
                 batch.put_cf(&cf_state, crate::analytics_live::K_READY, [1u8]);
-                // Join series is durably persisted — clear the in-flight marker so a
+                // Join series is durably persisted; clear the in-flight marker so a
                 // later restart does NOT trigger the interrupted-enrich recovery, and
                 // reset the recovery-attempt counter (the circuit-breaker budget).
                 batch.delete_cf(&cf_state, b"analytics_in_progress");
@@ -1738,7 +1738,7 @@ pub struct TxDayAgg {
     /// P2CS value spent (undelegated or restaked) this day (sats).
     #[serde(default)]
     pub p2cs_spent: i64,
-    /// Coinstakes that staked a P2CS (cold-staking) delegation this day —
+    /// Coinstakes that staked a P2CS (cold-staking) delegation this day, a
     /// subset of `coinstake`, identified by P2CS re-mint outputs.
     #[serde(default)]
     pub coldstake_txs: u64,
@@ -1763,7 +1763,7 @@ pub struct DayJoinAgg {
 /// HODL / dormancy snapshot: unspent value bucketed by coin age bands.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct HodlSnapshot {
-    /// (band label, unspent value in sats) — oldest band last.
+    /// (band label, unspent value in sats); oldest band last.
     pub bands: Vec<(String, i64)>,
     pub total: i64,
 }
@@ -1841,7 +1841,7 @@ fn build_block_times(
     Ok((times, bits))
 }
 
-/// Canonical iff the reverse 'h' hint (EITHER byte order — parse writes
+/// Canonical iff the reverse 'h' hint (EITHER byte order: parse writes
 /// 'h'+internal, legacy live-monitor wrote 'h'+display) resolves to a height whose
 /// FORWARD map entry round-trips back to this (internal) `hash`. Confirming against
 /// the forward map (correctly maintained on reorg) means a stale/leaked 'h' entry
@@ -1889,8 +1889,8 @@ fn header_ntime_at(
     }
 }
 
-/// Persistent orphan keyspace (in `chain_state`). `tail_blocks` is EPHEMERAL —
-/// blk-tail prunes settled records ~K_RETENTION blocks past the tip — so orphans
+/// Persistent orphan keyspace (in `chain_state`). `tail_blocks` is EPHEMERAL;
+/// blk-tail prunes settled records ~K_RETENTION blocks past the tip, so orphans
 /// must be PERSISTED as discovered, never re-derived from a scan (else a pruned
 /// tail orphan would silently drop out of the count). `orphanseen:<hash>` → date is
 /// the append-only dedup marker; `orphancount:<date>` → u64 LE is the count, bumped
@@ -1947,7 +1947,7 @@ fn mark_one(
 /// - `tail_only=false` (full enrich): scans the canonical `blocks` CF AND
 ///   `tail_blocks` to build the baseline.
 /// - `tail_only=true` (Lane R, ~hourly): scans ONLY `tail_blocks` (~hundreds of
-///   records) — no blocks-CF iterate, so it is cheap enough to run every tick.
+///   records); no blocks-CF iterate, so it is cheap enough to run every tick.
 /// A main-CF orphan is dated by its own header nTime; a tail orphan (no stored
 /// nTime) by the canonical block's time at its claimed height. Dedup by internal hash.
 pub fn mark_orphans(
@@ -1967,7 +1967,7 @@ pub fn mark_orphans(
     let mut new_by_date: HashMap<String, u64> = HashMap::new();
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
 
-    // 1. Canonical blocks CF — stale headers dated by their own nTime (full only).
+    // 1. Canonical blocks CF: stale headers dated by their own nTime (full only).
     if !tail_only {
         for item in db.iterator_cf(&cf_blocks, rocksdb::IteratorMode::Start) {
             let (key, header) = item?;
@@ -1998,7 +1998,7 @@ pub fn mark_orphans(
         }
     }
 
-    // 2. blk-tail private capture — dated by the canonical nTime at claimed_height
+    // 2. blk-tail private capture: dated by the canonical nTime at claimed_height
     // (records are `b'b' || hash(32)`; claimed_height is a LE i32 at value offset 33;
     // the `b'i'` index keys are 38 bytes and skipped).
     if let Some(cf_tail) = db.cf_handle("tail_blocks") {
@@ -2012,7 +2012,7 @@ pub fn mark_orphans(
             // wall-clock 2h exemption: depth is reached well before the K_RETENTION
             // prune AND is independent of block spacing, so a fast-block burst can't
             // prune the record before the exemption lifts. (The main-CF path keeps
-            // the time exemption — it has each header's own nTime.)
+            // the time exemption; it has each header's own nTime.)
             if claimed_height > tip - crate::blk_tail::K_CONFIRM {
                 continue;
             }
@@ -2161,7 +2161,7 @@ async fn persist_tx_daily_series(
         let agg_date = unix_to_date(t as u64);
         let tx_type = crate::tx_type::detect_transaction_type(&tx);
         // Inline counts/volumes/type + the PoW-coinbase budget, via the SHARED
-        // accumulator (Lane I calls the exact same fn — no drift on coldstake_txs
+        // accumulator (Lane I calls the exact same fn; no drift on coldstake_txs
         // or the >10 PIV budget threshold).
         let pow_treasury = {
             let agg = days.entry(agg_date.clone()).or_default();
@@ -2170,7 +2170,7 @@ async fn persist_tx_daily_series(
         if let Some(t) = pow_treasury {
             treasury.push(t);
         }
-        // The day's stakers (for unique_stakers / top10 concentration) — a Lane-R
+        // The day's stakers (for unique_stakers / top10 concentration), a Lane-R
         // set field; the staker is the first address of the first paying output.
         if tx_type == crate::tx_type::TransactionType::Coinstake {
             if let Some(addr) = tx
@@ -2318,7 +2318,7 @@ async fn persist_tx_daily_series(
         batch.put_cf(&cf_state, &k, bincode::serialize(agg)?);
     }
     batch.put_cf(&cf_state, b"analytics_tx_days", bincode::serialize(&dates)?);
-    // Tier 4: treasury payouts — PoW-era coinbase payouts (collected above)
+    // Tier 4: treasury payouts: PoW-era coinbase payouts (collected above)
     // merged with PoS-era coinstake payouts (collected in Pass 2b), sorted
     // by height.
     treasury.extend_from_slice(coinstake_treasury);
@@ -2370,12 +2370,12 @@ pub(crate) const RICHLIST_KEEP: usize = 1000;
 
 /// Pure, deterministic computation of the rich list + wealth snapshot from a set
 /// of per-address balances (satoshis). The caller supplies the FINAL balance per
-/// address (owner-attributed / deduped upstream — this function performs no
+/// address (owner-attributed / deduped upstream; this function performs no
 /// cross-address dedup); it then:
 ///   * keeps only strictly-positive balances (zero/negative is never a holder; a
 ///     negative would signal an upstream accounting bug, never a top-N entry);
-///   * sorts by (balance DESC, address ASC) so ties — and richlist membership at
-///     the `keep` cutoff — are reproducible regardless of input iteration order
+///   * sorts by (balance DESC, address ASC) so ties, and richlist membership at
+///     the `keep` cutoff, are reproducible regardless of input iteration order
 ///     (the previous HashMap-ordered, balance-only sort was nondeterministic);
 ///   * accumulates totals / top-N sums / the Gini weighted sum in i128, removing
 ///     the i64 intermediate-overflow footgun;
@@ -2500,7 +2500,7 @@ fn persist_wealth_analytics(
         .collect();
 
     // tx_count for the kept top-N from the deduped on-disk 't' list (already
-    // written by the address-index batch above) — the SAME source the periodic
+    // written by the address-index batch above), the SAME source the periodic
     // recompute reads, so the enrich and recompute snapshots agree at the same tip.
     let tx_count_of = |address: &str| -> u64 {
         let mut t_key = Vec::with_capacity(address.len() + 1);
@@ -2553,7 +2553,7 @@ fn hodl_band_index(tip: i32, create_height: i32) -> usize {
 /// Persist the HODL / dormancy snapshot.
 ///
 /// The band sums are accumulated in the 'a'-entry write loop from the deduped
-/// per-address unspent UTXO sets — the exact data the address API serves, and
+/// per-address unspent UTXO sets, the exact data the address API serves, and
 /// the path whose balances are verified against the reference explorer. Only
 /// address-attributed outputs are counted: outputs with no address (chiefly
 /// OP_ZEROCOINMINT) are excluded because zerocoin spends never consume the
@@ -2745,7 +2745,7 @@ mod tests {
 
     /// Every possible first txid byte must fall in EXACTLY one shard's [lo, hi),
     /// so the union of shards == the serial iterator's full visit set (each tx
-    /// processed once, in the same order — no tx dropped, none double-counted).
+    /// processed once, in the same order; no tx dropped, none double-counted).
     #[test]
     fn tx_shard_bounds_assign_every_txid_once() {
         for n in 1..=4 {
@@ -2774,7 +2774,7 @@ mod tests {
         }
     }
 
-    /// Canonical 25-byte P2PKH script (0x76a914 <20> 88ac) — get_script_type=="pubkeyhash".
+    /// Canonical 25-byte P2PKH script (0x76a914 <20> 88ac); get_script_type=="pubkeyhash".
     fn p2pkh_script() -> Vec<u8> {
         let mut s = vec![0x76, 0xa9, 0x14];
         s.extend_from_slice(&[0xAB; 20]);
@@ -2782,7 +2782,7 @@ mod tests {
         s
     }
 
-    /// Canonical 51-byte P2CS cold-stake script — get_script_type=="coldstake".
+    /// Canonical 51-byte P2CS cold-stake script; get_script_type=="coldstake".
     fn coldstake_script() -> Vec<u8> {
         let mut s = vec![0u8; 51];
         s[0] = 0x76;
@@ -2805,7 +2805,7 @@ mod tests {
     #[test]
     fn pack_output_kind_mapping_and_out_sum() {
         let outputs = vec![
-            // vout 0: empty coinstake marker — value 0, empty script => kind 0.
+            // vout 0: empty coinstake marker: value 0, empty script => kind 0.
             mk_out(0, 0, vec![], vec![]),
             // vout 1: P2PKH single address => kind 1.
             mk_out(

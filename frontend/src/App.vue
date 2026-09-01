@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   APP SHELL — "PIVX MISSION CONTROL" HUD CHROME
+   APP SHELL: "PIVX MISSION CONTROL" HUD CHROME
    Top telemetry bar (brand reticle + Cmd+K jump console trigger + live
    status cluster), a nav tab rail, the routed viewport, and a footer
    telemetry strip. Data wiring (store / search classifier) is preserved.
@@ -54,7 +54,7 @@ onMounted(() => {
   // Fallback poll for sync% / network height (and if the WS drops); status
   // caches 5s server-side.
   poll = setInterval(() => chain.refresh(), 15000)
-  // Market price (300s server cache + external API) — fetch once, refresh gently.
+  // Market price (300s server cache + external API); fetch once, refresh gently.
   chain.refreshPrice()
   pricePoll = setInterval(() => chain.refreshPrice(), 120000)
 })
@@ -68,7 +68,7 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pri
 
   <div class="app">
     <!-- Skip link: first focusable element. @click.prevent (not a bare #main
-         href) because the app uses hash-history routing — a hash jump would be
+         href) because the app uses hash-history routing; a hash jump would be
          read as a route change. -->
     <a href="#main" class="skip-link" @click.prevent="skipToMain">Skip to main content</a>
 
@@ -159,7 +159,7 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pri
 <style scoped>
 .app { position: relative; z-index: 2; min-height: 100%; display: flex; flex-direction: column; }
 
-/* skip link — hidden until keyboard-focused, then drops into view on-brand */
+/* skip link: hidden until keyboard-focused, then drops into view on-brand */
 .skip-link {
   position: absolute; left: 50%; top: 8px; z-index: 300;
   transform: translateX(-50%) translateY(-200%);
@@ -199,7 +199,7 @@ onBeforeUnmount(() => { clearInterval(t); clearInterval(poll); clearInterval(pri
 }
 .cmdbar:hover { border-color: var(--glass-edge); box-shadow: var(--glow-xs); }
 .cmdbar-ic { color: var(--neon); font-size: 15px; }
-/* min-width:0 + nowrap/ellipsis: never wrap the hint — a wrapped placeholder
+/* min-width:0 + nowrap/ellipsis: never wrap the hint; a wrapped placeholder
    grew the fixed-height topbar and spilled over the nav rail on the Fold. */
 .cmdbar-ph { flex: 1; min-width: 0; text-align: left; font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cmdbar kbd { font-family: var(--font-mono); font-size: 10px; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--hud-line); color: var(--text-muted); background: var(--glass-2); }

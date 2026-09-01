@@ -71,12 +71,12 @@ pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::E
 }
 
 /// A tip older than this (seconds) with a complete index means the monitor has
-/// stopped connecting blocks — a frozen tip (dead RPC / stalled sync). ~20 PIVX
+/// stopped connecting blocks: a frozen tip (dead RPC / stalled sync). ~20 PIVX
 /// blocks at the 60s target. ponytail: tune to the chain's real block cadence.
 pub const STALE_TIP_THRESHOLD_SECS: i64 = 1200;
 
 /// Age of the indexed tip in seconds, or `None` when no staleness judgement can
-/// be made — the index is still building (so a slow initial sync isn't reported
+/// be made: the index is still building (so a slow initial sync isn't reported
 /// "stale") or no block time has been recorded yet. Clamped at 0 for clock skew.
 pub fn tip_age_seconds(last_block_time: i64, now: i64, index_complete: bool) -> Option<i64> {
     if !index_complete || last_block_time <= 0 {
@@ -131,7 +131,7 @@ pub fn get_addr_index_version(db: &Arc<DB>) -> u32 {
         .unwrap_or(0)
 }
 
-/// Is the addr_index complete AND in the current on-disk format — i.e. safe to serve?
+/// Is the addr_index complete AND in the current on-disk format, i.e. safe to serve?
 /// The API data handlers gate on this (return 503 "reindexing" while false), because
 /// the web server is released independently of the sync/enrich thread, so an in-place
 /// v1→v2 upgrade would otherwise serve old-stride bytes at HTTP 200.
@@ -214,7 +214,7 @@ mod tests {
     }
 
     /// MS-1: the API 503-gate decision matrix. addr_index_ready is true ONLY when the
-    /// index is both complete AND stamped with the current format version — so a legacy
+    /// index is both complete AND stamped with the current format version, so a legacy
     /// (unstamped or older-version) index, or an in-progress rebuild, returns 503.
     #[test]
     fn addr_index_ready_requires_complete_and_current_version() {

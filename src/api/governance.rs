@@ -61,7 +61,7 @@ pub async fn budget_votes_v2(
 async fn compute_budget_votes(
     proposal_name: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    // params serialized via serde_json — no string interpolation (JSON-injection safe)
+    // params serialized via serde_json; no string interpolation (JSON-injection safe)
     match rpc_call_json("getbudgetvotes", serde_json::json!([proposal_name])).await {
         Ok(votes) => Ok(votes),
         Err(e) => {

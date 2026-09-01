@@ -18,7 +18,7 @@ pub const IN_PROGRESS: &str = "in-progress";
 /// caller flushes all memtables to disk so a later crash starts from a durable
 /// state even though no WAL was written.
 ///
-/// This only changes durability/commit granularity — it does NOT change any
+/// This only changes durability/commit granularity; it does NOT change any
 /// key/value bytes, so the resulting DB is byte-identical to a WAL-on sync.
 pub fn bulk_write_options() -> WriteOptions {
     let mut wo = WriteOptions::new();

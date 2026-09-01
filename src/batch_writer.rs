@@ -21,7 +21,7 @@ impl BatchWriter {
     /// Construct a batch writer for a given durability mode.
     ///
     /// Pass `bulk = true` only on the initial full-reindex path (disables the
-    /// WAL — the DB is reconstructible from the `.blk` files). Pass `false` on
+    /// WAL; the DB is reconstructible from the `.blk` files). Pass `false` on
     /// the live/RPC catch-up path so writes stay WAL-recoverable. Bytes written
     /// are identical regardless.
     pub fn new_with_bulk(db: Arc<DB>, batch_size_limit: usize, bulk: bool) -> Self {

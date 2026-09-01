@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   ADDRESS DETAIL — account telemetry + reconstructed balance curve +
+   ADDRESS DETAIL: account telemetry + reconstructed balance curve +
    UTXO value histogram + coin-age scatter + received/sent split.
    Handles the 503 reindex gate ("catching up, retry").
    UNITS: all /address + /utxo money fields are satoshi STRINGS.
@@ -66,12 +66,12 @@ watch(() => props.addr, load)
 
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
 // Sum UTXO value as BigInt satoshis (the /utxo values are integer satoshi
-// strings) so UNSPENT is exact for any address and matches BALANCE — a float
+// strings) so UNSPENT is exact for any address and matches BALANCE; a float
 // sum via sat2piv corrupts past 2^53 sats and reads lossily.
 const utxoTotal = computed(() => utxos.value.reduce((s, u) => s + BigInt(u.value), 0n).toString())
 
 // Ledger value must be THIS address's delta in each tx (Σ outputs paying it − Σ inputs
-// spending it), NOT the tx's grand total — a big exchange batch tx moves far more than this
+// spending it), NOT the tx's grand total; a big exchange batch tx moves far more than this
 // address's slice. Satoshi BigInt (values are integer sat strings); memoized (batch txs can
 // have hundreds of outputs). toSat guards a stray non-integer so one bad value can't crash.
 const toSat = (v) => { try { return BigInt(v || 0) } catch { return 0n } }

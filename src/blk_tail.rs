@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 type TailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// PIVX **mainnet** network message-start bytes (`pchMessageStart`).
-/// Testnet `F5 E6 D5 CA` / regtest `A1 CF 7E AC` differ — re-confirm against the
+/// Testnet `F5 E6 D5 CA` / regtest `A1 CF 7E AC` differ; re-confirm against the
 /// deployed node if ever run on another network.
 pub const PIVX_MAGIC: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 
@@ -45,7 +45,7 @@ pub const K_RETENTION: i32 = 300; // max(EXPECTED_REORG_DEPTH, MAX_MONITOR_LAG) 
 /// A pending record older than this (seconds, wall-clock since first_seen) is
 /// finalized to the terminal `unresolved` state.
 pub const MAX_PENDING_AGE_SECS: u64 = 600;
-/// Reconcile pass cadence (seconds) — monitor-independent timer.
+/// Reconcile pass cadence (seconds), monitor-independent timer.
 pub const RECONCILE_INTERVAL_SECS: u64 = 30;
 /// Hard ceiling on `tail_blocks` to bound memory under an indefinite monitor
 /// stall (frozen eviction). On reaching it the tail PAUSEs ingest and auto-resumes.
@@ -83,7 +83,7 @@ pub enum RecordRead {
     Incomplete,
 }
 
-/// Corruption detected while framing — a non-zero, non-magic marker, or a size
+/// Corruption detected while framing: a non-zero, non-magic marker, or a size
 /// outside the sanity bounds. This is an alarm condition, distinct from the
 /// benign `Padding`/`Torn`/`Incomplete` "no data yet" outcomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +106,7 @@ impl std::error::Error for RecordError {}
 
 /// Parse one block record from `window` (the bytes available starting at the
 /// cursor; `abs_pos` is the cursor's absolute file offset, used only to compute
-/// `next_offset`). Pure and allocation-light — the unit of the tail reader.
+/// `next_offset`). Pure and allocation-light, the unit of the tail reader.
 ///
 /// - all-zero magic            -> `Padding`  (write frontier; stop)
 /// - non-zero non-magic magic  -> `Err(BadMagic)` (corruption alarm)
@@ -146,7 +146,7 @@ pub fn parse_record(
 
 // ---- private storage layer (tail_blocks + tail_meta) ----------------------
 //
-// The tail writes ONLY these two private CFs — never any canonical CF. Within
+// The tail writes ONLY these two private CFs, never any canonical CF. Within
 // `tail_blocks` two disjoint single-byte-prefixed keyspaces live side by side:
 //   - record: `b'b' || block_hash(32)`                       -> serialized record
 //   - index : `b'i' || height_be(4) || state(1) || hash(32)` -> empty
@@ -459,7 +459,7 @@ impl TailStore {
         Ok(())
     }
 
-    /// Block hashes whose `claimed_height >= from_height`, ascending — the bounded
+    /// Block hashes whose `claimed_height >= from_height`, ascending: the bounded
     /// `<K` reconcile/demotion scan (drives state re-derivation). Reads the BE
     /// index only; does not load records.
     pub fn hashes_from_height(&self, from_height: i32) -> TailResult<Vec<[u8; 32]>> {
@@ -490,7 +490,7 @@ impl TailStore {
     }
 
     /// Block hashes in the `CLAIMED_UNKNOWN` bucket (parent never seen). These sort
-    /// below every real height, so the `tip - K` reconcile scan misses them — they
+    /// below every real height, so the `tip - K` reconcile scan misses them; they
     /// need their own retry/age pass to avoid an unbounded leak.
     pub fn hashes_at_unknown(&self) -> TailResult<Vec<[u8; 32]>> {
         let cf = self
@@ -573,7 +573,7 @@ pub fn parse_header(block: &[u8]) -> TailResult<HeaderInfo> {
 }
 
 /// Sentinel `claimed_height` for a record whose height can't yet be derived
-/// (parent not seen — rare, only across a crash gap given parents precede
+/// (parent not seen; rare, only across a crash gap given parents precede
 /// children on disk). Sorts below every real height in the index, so the
 /// `tip - K` reconcile scan misses it; the dedicated unknown-bucket pass in
 /// `reconcile_pass` (via [`TailStore::hashes_at_unknown`]) retries parent
@@ -617,7 +617,7 @@ impl TailStore {
 
     /// Canonical height of `hash` (internal order), or None if not on the canonical
     /// chain. Uses the reverse `'h'` map (BOTH writer byte orderings) only as a
-    /// HINT, then CONFIRMS against the forward map — so a leaked/stale `'h'` entry
+    /// HINT, then CONFIRMS against the forward map, so a leaked/stale `'h'` entry
     /// can never yield a false-canonical result.
     pub fn canonical_height_of(&self, hash_internal: &[u8; 32]) -> TailResult<Option<i32>> {
         let cf = self
@@ -646,7 +646,7 @@ impl TailStore {
     }
 
     /// Cumulative canonical chainwork at `height` (`'w'+height`), if present. May be
-    /// absent (only written on the live path; skipped by a bulk reindex) — callers
+    /// absent (only written on the live path; skipped by a bulk reindex); callers
     /// treat it as a best-effort optimization for informational cumulative work.
     fn canonical_chainwork_at(&self, height: i32) -> TailResult<Option<[u8; 32]>> {
         let cf = self
@@ -686,7 +686,7 @@ impl TailStore {
     /// Classify a freshly-read block: derive its height from the parent, then read
     /// the FORWARD map to decide canonical vs orphan vs pending. Pure reads of
     /// canonical state; returns the private record to persist (state is a cache
-    /// hint — read-time §5.1E re-derivation is authoritative). `txids` are deferred
+    /// hint; read-time §5.1E re-derivation is authoritative). `txids` are deferred
     /// (analytics-only; empty for now).
     pub fn classify(
         &self,
@@ -740,7 +740,7 @@ pub enum StopReason {
     Torn,
     /// Ran out of windowed bytes before a full frame header (EOF for now).
     Incomplete,
-    /// Non-zero, non-magic marker or out-of-range size — ALARM, do not advance.
+    /// Non-zero, non-magic marker or out-of-range size: ALARM, do not advance.
     Corruption(String),
 }
 
@@ -1136,7 +1136,7 @@ async fn tail_read_tick(
     let len = match tokio::fs::metadata(&path).await {
         Ok(m) => m.len(),
         Err(_) => {
-            warn!(file = %path.display(), "blk_tail: cursor file missing (pruned?) — halting tick");
+            warn!(file = %path.display(), "blk_tail: cursor file missing (pruned?); halting tick");
             return Ok(0);
         }
     };
@@ -1170,7 +1170,7 @@ async fn tail_read_tick(
     let mut ingested = 0u64;
     // A file is "exhausted" (safe to roll past) only when there was no new data,
     // OR we read to EOF and stopped on Padding/Incomplete (trailing zero padding /
-    // no full frame). A `Torn` stop means a real record is still being flushed —
+    // no full frame). A `Torn` stop means a real record is still being flushed;
     // we must NOT roll past it or that block is permanently SKIPPED. `Corruption`
     // halts in place.
     let mut file_exhausted = len <= cursor.offset;
@@ -1197,20 +1197,20 @@ async fn tail_read_tick(
                 // re-warned every 2s tick. Recover instead: skip to the next
                 // magic marker and persist the moved cursor. A false magic
                 // inside garbage just fails framing next tick and the scan
-                // continues — this namespace is private (zero canonical
+                // continues; this namespace is private (zero canonical
                 // writes), so a mis-step cannot corrupt served data.
                 let rel = (outcome.next_offset.saturating_sub(cursor.offset)) as usize;
                 let new_offset = match scan_next_magic(&window, rel + 1, magic) {
                     Some(p) => {
                         let off = cursor.offset + p as u64;
                         warn!(file = %path.display(), from = outcome.next_offset, to = off, msg = %msg,
-                            "blk_tail: torn/garbage region — skipping to next magic marker");
+                            "blk_tail: torn/garbage region; skipping to next magic marker");
                         off
                     }
                     None => {
                         // No magic in this window. If the garbage is followed by
                         // a trailing zero run (Core's padding / write frontier),
-                        // stop at the RUN START — the next tick reads zeros ->
+                        // stop at the RUN START; the next tick reads zeros ->
                         // quiet Padding wait, and a crash-recovery overwrite
                         // inside the padding is still picked up. Only when
                         // garbage runs to the window end do we skip the whole
@@ -1229,7 +1229,7 @@ async fn tail_read_tick(
                         }
                         .max(cursor.offset + 1);
                         debug!(file = %path.display(), offset = off, msg = %msg,
-                            "blk_tail: garbage window, no magic — advancing scan cursor");
+                            "blk_tail: garbage window, no magic; advancing scan cursor");
                         off
                     }
                 };
@@ -1251,7 +1251,7 @@ async fn tail_read_tick(
                 return Ok(ingested);
             }
             StopReason::Padding | StopReason::Incomplete => file_exhausted = drained_to_eof,
-            StopReason::Torn => file_exhausted = false, // a real record is still flushing — wait
+            StopReason::Torn => file_exhausted = false, // a real record is still flushing; wait
         }
     }
 
@@ -1290,7 +1290,7 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
         if keys > MAX_TAIL_BLOCKS * 2 {
             warn!(
                 keys,
-                "blk_tail: MAX_TAIL_BLOCKS reached — pausing ingest this tick"
+                "blk_tail: MAX_TAIL_BLOCKS reached; pausing ingest this tick"
             );
         } else if let Err(e) = tail_read_tick(&store, &blk_dir, magic, WINDOW_CAP).await {
             warn!(error = %e, "blk_tail: read tick error");
@@ -1311,7 +1311,7 @@ pub async fn run_tail(db: Arc<DB>, blk_dir: PathBuf, magic: [u8; 4]) {
                 Ok(_) => {}
                 Err(e) => warn!(error = %e, "blk_tail: reconcile error"),
             }
-            // Prune only when the tip advanced — freezes eviction while the monitor stalls.
+            // Prune only when the tip advanced; freezes eviction while the monitor stalls.
             if tip > last_prune_tip {
                 last_prune_tip = tip;
                 match store.prune_pass(tip, MAX_EVICT_PER_PASS) {
@@ -1562,7 +1562,7 @@ mod tests {
         let (store, _t) = tail_test_store();
         let r = rec(0x44, 0x43, 300, TailState::Canonical);
         commit_block(&store, &r, None);
-        // Replay (crash recovery) — re-stage the identical record with prior == itself.
+        // Replay (crash recovery): re-stage the identical record with prior == itself.
         commit_block(&store, &r, Some(&r));
         assert_eq!(store.get_record(&r.block_hash).unwrap().unwrap(), r);
         assert_eq!(store.hashes_from_height(0).unwrap(), vec![[0x44; 32]]);
@@ -1734,7 +1734,7 @@ mod tests {
         // The forward-map confirm rejects the stale hint -> not canonical.
         assert!(store.canonical_height_of(&stale).unwrap().is_none());
         // A block built on `stale` (not actually canonical, no private record) is
-        // Pending with an UNKNOWN height — never falsely Canonical/Orphan.
+        // Pending with an UNKNOWN height; never falsely Canonical/Orphan.
         let block = make_header(1, stale, NBITS);
         let r = store.classify(&block, 1, 100, 1000).unwrap();
         assert_eq!(r.state, TailState::Pending);
@@ -1799,7 +1799,7 @@ mod tests {
         assert_eq!(out.blocks_ingested, 2);
         assert_eq!(out.stop, StopReason::Padding);
         // h1 resolves off the canonical parent (10 -> 11); h2 resolves off h1's
-        // just-written private record (11 -> 12) — sequential chain resolution.
+        // just-written private record (11 -> 12), sequential chain resolution.
         assert_eq!(
             store.get_record(&hash1).unwrap().unwrap().claimed_height,
             11
@@ -2210,6 +2210,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1); // only h1 ingested
-        assert_eq!(store.load_cursor().unwrap().unwrap().file_no, 0); // stayed — waits for h2
+        assert_eq!(store.load_cursor().unwrap().unwrap().file_no, 0); // stayed; waits for h2
     }
 }

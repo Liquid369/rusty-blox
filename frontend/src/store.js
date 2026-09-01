@@ -1,5 +1,5 @@
 /* =====================================================================
-   PINIA — chain-status store. Mock by default (via api/client.js).
+   PINIA: chain-status store. Mock by default (via api/client.js).
    The top bar + Dashboard read tip height / sync state from here.
    ===================================================================== */
 import { defineStore } from 'pinia'
@@ -44,7 +44,7 @@ export const useChainStore = defineStore('chain', () => {
   }
 
   // PIVX market price, shared by the header ticker + Dashboard + Governance.
-  // /price degrades to a zero-fallback on upstream failure — keep the last good
+  // /price degrades to a zero-fallback on upstream failure; keep the last good
   // value rather than flash "$0". 300s server cache, so poll gently.
   const price = ref(null) // { usd, eur, btc, last_updated } or null
   async function refreshPrice() {

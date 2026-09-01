@@ -2,7 +2,7 @@
 /* =====================================================================
    Minimal echarts wrapper. Pass an `option` object; it inits, updates on
    change, and resizes with the container. NEUTRAL: no baked theme beyond
-   transparent background — prototypes pass brand colors via the option
+   transparent background; prototypes pass brand colors via the option
    (read the --chart-* tokens from tokens.css). Proves echarts renders.
    ===================================================================== */
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
@@ -31,7 +31,7 @@ function render() {
   chart.setOption(opt, true)
 }
 // rAF-throttled: observe the CONTAINER (not just window) so the canvas tracks any
-// width change — breakpoint reflow, a sidebar toggle, or a Fold device folding/
+// width change: breakpoint reflow, a sidebar toggle, or a Fold device folding/
 // unfolding. window.resize alone left the canvas stale and overflowing.
 function resize() {
   if (!chart) return

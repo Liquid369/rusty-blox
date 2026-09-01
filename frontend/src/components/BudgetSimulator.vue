@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   BUDGET SIMULATOR — a what-if treasury sandbox for the Governance HUD.
+   BUDGET SIMULATOR: a what-if treasury sandbox for the Governance HUD.
    Toggle proposals in/out and nudge their net votes; the monthly payout
    re-ranks and re-funds live within the budget cap so voters can SEE the
    vote -> funding causality.
@@ -24,7 +24,7 @@ import HudPanel from './HudPanel.vue'
 const props = defineProps({
   // All candidate proposals (the same /budgetinfo set the page loaded).
   candidates: { type: Array, default: () => [] },
-  // Proposals funded right now (/budgetprojection) — preload + reset target.
+  // Proposals funded right now (/budgetprojection); preload + reset target.
   actualFunded: { type: Array, default: () => [] },
   // Net-vote passing threshold (10% of the masternode count).
   threshold: { type: Number, default: 0 },

@@ -33,11 +33,11 @@ const MAX_TX_OUTPUTS: u64 = 100_000;
 /// conversions so the stored bytes stay big-endian.
 ///
 /// BYTE-IDENTICAL GUARANTEE: for every input whose true sum is < 2^256 (always
-/// true for PIVX cumulative chainwork — it is ~2^90 at the chain tip, vastly
+/// true for PIVX cumulative chainwork; it is ~2^90 at the chain tip, vastly
 /// below 2^256) this returns exactly the same 32 bytes the old
 /// `BigUint::from_bytes_be(a) + BigUint::from_bytes_be(b)` →
 /// `to_bytes_be()[..32]` path produced. The two paths can only differ when the
-/// mathematical sum overflows 256 bits — a case PIVX chainwork never reaches and
+/// mathematical sum overflows 256 bits, a case PIVX chainwork never reaches and
 /// in which the legacy BigUint path was itself buggy (it kept the HIGH 32 bytes
 /// of a 33-byte result). Verified exhaustively over tens of millions of random
 /// non-overflowing pairs (see `test_add_chainwork_be_matches_bigint`).
@@ -280,7 +280,7 @@ async fn scan_for_next_magic<R: AsyncReadExt + AsyncSeekExt + Unpin>(
 /// Process a single blk*.dat file.
 ///
 /// `bulk` selects the write durability mode: `true` on the initial full reindex
-/// (WAL disabled — the DB is fully reconstructible from the `.blk` files, so the
+/// (WAL disabled; the DB is fully reconstructible from the `.blk` files, so the
 /// WAL is pure fsync overhead), `false` on the live/RPC catch-up path (WAL kept
 /// so a crash stays recoverable). It only affects durability, never the bytes
 /// written.
@@ -534,7 +534,7 @@ pub async fn process_blk_file(
         //
         // LEVER 1(b): On the initial bulk reindex (`bulk == true`) the DB starts
         // empty, so this per-block point-get ALWAYS misses (~11M blocking gets
-        // that find nothing). Skip the dedupe entirely on the bulk path — there is
+        // that find nothing). Skip the dedupe entirely on the bulk path; there is
         // nothing to dedupe against on a fresh sync. On the live/RPC catch-up path
         // (`bulk == false`) the DB already holds prior blocks, so we keep the check
         // to avoid re-indexing blocks we already have. This changes NO stored bytes:
@@ -620,7 +620,7 @@ pub async fn process_blk_file(
         // ALL blocks are stored, even if height is unknown
         batch_items.push((block_hash_vec.clone(), header_buffer.clone()));
 
-        // If we have a height (genesis or previously resolved), record it — and,
+        // If we have a height (genesis or previously resolved), record it, and,
         // on the live path only, the chain_metadata height/chainwork mappings
         // (the bulk reindex skips those; see [Levers A+B] inside the block).
         if let Some(height) = block_height {

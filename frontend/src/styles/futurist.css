@@ -1,5 +1,5 @@
 /* =====================================================================
-   PROTO-FUTURIST — "PIVX MISSION CONTROL" HUD DESIGN SYSTEM
+   PROTO-FUTURIST: "PIVX MISSION CONTROL" HUD DESIGN SYSTEM
    ---------------------------------------------------------------------
    Maximally bold experimental futurism: neon/glow accents, holographic
    gradient surfaces, animated live-feeling telemetry, spaceship-HUD
@@ -53,7 +53,7 @@
 }
 
 /* =====================================================================
-   GLOBAL FIELD — cosmic background, grid, scanlines
+   GLOBAL FIELD: cosmic background, grid, scanlines
    ===================================================================== */
 body {
   background:
@@ -108,7 +108,7 @@ body {
 .muted { color: var(--text-muted); }
 
 /* =====================================================================
-   HUD PANEL — framed glass surface with corner reticles
+   HUD PANEL: framed glass surface with corner reticles
    ===================================================================== */
 .panel {
   position: relative;
@@ -147,7 +147,7 @@ body {
 .panel.hero::after  { border-color: var(--cyan); }
 
 /* =====================================================================
-   STAT TILES — glowing metric cells
+   STAT TILES: glowing metric cells
    ===================================================================== */
 .statgrid { display: grid; gap: var(--space-3); }
 .cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -267,7 +267,7 @@ body {
 .stack { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 .split { display: grid; gap: var(--space-4); }
 /* grid/flex items default to min-width:auto, so a wide child (an echarts canvas)
-   forces the track past the container — a horizontal-scroll bug that bites the
+   forces the track past the container, a horizontal-scroll bug that bites the
    near-square Galaxy Fold viewport. Let split items shrink to their track. */
 .split > * { min-width: 0; }
 /* Two-column splits from 760px so the Fold's ~840px near-square inner screen
@@ -297,7 +297,7 @@ body {
 .loading { color: var(--text-dim); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.1em; }
 
 /* =====================================================================
-   A11Y — KEYBOARD FOCUS
+   A11Y: KEYBOARD FOCUS
    Visible cyan focus ring on every interactive control (links, buttons,
    nav tabs, search, table-row links, palette). :focus-visible so it only
    shows for keyboard users; never strip an outline without this.
@@ -313,10 +313,10 @@ textarea:focus-visible,
 }
 
 /* =====================================================================
-   A11Y — REDUCED MOTION
+   A11Y: REDUCED MOTION
    Gate ALL non-essential motion (scanline sweep, pulse/glow heartbeat,
    telemetry ticker, fresh-row flash, skeleton shimmer, palette pop, chart
-   entrance — charts also get animation:false via EChart.vue). Universal
+   entrance; charts also get animation:false via EChart.vue). Universal
    reset so scoped component animations are covered too.
    ===================================================================== */
 @media (prefers-reduced-motion: reduce) {

@@ -104,7 +104,7 @@ async fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
     let pubkey = extract_pubkey_from_script(&script.script).await?;
 
     // PIVX Core (CPubKey::GetID): Hash160 over the pubkey bytes EXACTLY as they
-    // appear in the script — uncompressed keys are NOT compressed first.
+    // appear in the script; uncompressed keys are NOT compressed first.
     let pubkey_hash = compute_address_hash(pubkey).await;
     let pubkey_addr = hash_address(&pubkey_hash, 30).await;
 
@@ -176,7 +176,7 @@ pub async fn scriptpubkey_to_address(script: &CScript) -> Option<AddressType> {
         return Some(AddressType::Nonstandard);
     }
 
-    // Structural matching, mirroring PIVX Core's Solver() — each script template is
+    // Structural matching, mirroring PIVX Core's Solver(); each script template is
     // identified by exact layout (length + opcode positions), never by byte content
     // heuristics (hash/pubkey bytes can contain any value, including opcode bytes).
 

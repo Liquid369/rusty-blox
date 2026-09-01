@@ -4,12 +4,12 @@
 //! and clears it via an RAII guard on exit. A hard crash (kill -9 / OOM / power
 //! loss) skips Drop, so a leftover 'P' marker is the "died mid-block" signal.
 //!
-//! On re-applying that block, the address index is mostly idempotent — the 't'
-//! list and 'a' UTXO set both have existence checks — but the 'r'/'s' totals are
+//! On re-applying that block, the address index is mostly idempotent (the 't'
+//! list and 'a' UTXO set both have existence checks), but the 'r'/'s' totals are
 //! NOT (`r += received_delta`), so re-applying double-counts r/s for that block's
 //! addresses. We can't subtract the partial pre-crash amount (we don't know how
 //! many txs landed), but we CAN recompute each affected address's r/s from the
-//! now-idempotently-complete 't'/'a' indexes — bounded to the crashed tail.
+//! now-idempotently-complete 't'/'a' indexes, bounded to the crashed tail.
 
 use rocksdb::DB;
 use std::collections::HashSet;
@@ -21,7 +21,7 @@ use crate::parser::deserialize_transaction;
 /// Per-address cap on the recovery recompute's full-history scan. A crashed block
 /// that touched a very high-volume address (exchange/treasury) would otherwise make
 /// startup recovery deserialize that address's entire history. Above this many txs
-/// we skip the recompute and warn — the uncorrected double-count is bounded to the
+/// we skip the recompute and warn; the uncorrected double-count is bounded to the
 /// crashed block's contribution and self-heals on the next full enrichment, which is
 /// far preferable to a multi-minute startup stall. Reuses the API's env knob.
 fn recovery_scan_cap() -> usize {
@@ -88,7 +88,7 @@ pub async fn recompute_address_rs(
     for (txid, _height) in &t_entries {
         // Stub-safe, orphan-aware read (both key orders): this recompute PERSISTS
         // r/s, so a display-only read here re-created the exact bugs the serving
-        // paths were cured of — a stub/one-order record silently contributing 0
+        // paths were cured of: a stub/one-order record silently contributing 0
         // (understated r, negative s), or a reorg's display-keyed orphan mark
         // shadowed by a stale internal record (disconnected tx counted).
         let (body, orphan_marked) =
@@ -99,7 +99,7 @@ pub async fn recompute_address_rs(
         if let Some(txd) = body {
             let h = i32::from_le_bytes([txd[4], txd[5], txd[6], txd[7]]);
             // Skip non-canonical (orphaned/unresolved) txs, exactly as enrichment
-            // does via is_canonical_height — so the recomputed total matches the
+            // does via is_canonical_height, so the recomputed total matches the
             // authoritative aggregate.
             if !is_canonical_height(h) {
                 continue;

@@ -101,7 +101,7 @@ pub fn init_tracing(config: TelemetryConfig) -> Result<(), Box<dyn std::error::E
     } else {
         // Console-only logging. Wrap stdout in a non-blocking writer (same as the
         // file branch) so a burst of log lines can never stall the hot sync path on
-        // a slow/blocking terminal — the default deployment has no log file set.
+        // a slow/blocking terminal; the default deployment has no log file set.
         let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
 
         if config.log_format == "json" {

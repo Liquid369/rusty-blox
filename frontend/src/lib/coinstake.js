@@ -13,7 +13,7 @@
       so for a single-input coinstake: consumed value = value_out − reward.
 
    /tx has no tx_type, so coinstakes are detected STRUCTURALLY (the empty
-   marker output) — one code path keeps both detail pages consistent.
+   marker output); one code path keeps both detail pages consistent.
    ===================================================================== */
 
 // A PoS coinstake's first output is an empty 0-value marker, and its first
@@ -48,7 +48,7 @@ export function coinstakeInputAddresses(tx, vin) {
 
 // Consumed stake (original value) for a SINGLE-input coinstake, in satoshi:
 //   input = value_out − reward
-// `reward` is the FULL minted block reward — split between the staker and the
+// `reward` is the FULL minted block reward, split between the staker and the
 // masternode. value_out already includes the masternode output, so subtracting
 // the whole reward nets back to the staker's ORIGINAL stake (== stakerOutput −
 // stakerReward). Multi-input coinstakes can't be split per-vin -> null.

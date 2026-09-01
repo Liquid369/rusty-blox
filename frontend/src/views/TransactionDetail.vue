@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   TRANSACTION DETAIL — centerpiece value-flow Sankey (vin → vout) with
+   TRANSACTION DETAIL: centerpiece value-flow Sankey (vin → vout) with
    spent/unspent state pills. UNITS: EVERY money field is a satoshi
    STRING → formatSats (BigInt-safe). spent: true/false/null(unknown).
    ===================================================================== */
@@ -54,7 +54,7 @@ const isShielded = computed(() => {
   return !!s && ((s.shielded_spend_count || 0) > 0 || (s.shielded_output_count || 0) > 0)
 })
 // value_balance is a signed PIV FLOAT (not satoshis, so no formatSats).
-// Shape comes from lib/shield.js — structural s→s check first (a pure s→s's
+// Shape comes from lib/shield.js; structural s→s check first (a pure s→s's
 // vb = +fee, so the old sign-only check mislabeled it "Deshielding").
 const shieldShapeName = computed(() => shieldShape(tx.value))
 const shieldDirection = computed(() => {
@@ -101,7 +101,7 @@ function hexToAscii(hex) {
 }
 // vout decorated with its decoded script, so the template parses each hex once.
 // Detect a PIVX budget collateral OP_RETURN: a 32-byte hash (6a 20) whose output
-// burns the fee — >= 50 PIV = proposal (PROPOSAL_FEE_TX), 5..49 PIV = finalization
+// burns the fee: >= 50 PIV = proposal (PROPOSAL_FEE_TX), 5..49 PIV = finalization
 // (BUDGET_FEE_TX). Confirmed against Core's CheckCollateral. `value` is a satoshi
 // STRING, so compare with BigInt (never Number() a satoshi field).
 function budgetCollateral(v) {
@@ -175,7 +175,7 @@ const sankeyOption = computed(() => {
   const TXC = '◇ TX'
   nodes.push({ name: TXC, itemStyle: { color: p.amber }, label: { color: p.amber, fontWeight: 700 } })
 
-  // For a cold-stake (P2CS) input/output, addresses = [staker(S), owner(D)] — the
+  // For a cold-stake (P2CS) input/output, addresses = [staker(S), owner(D)]; the
   // OWNER is the economic party in the flow, so label the node with the last address.
   t.vin.forEach((vin, i) => {
     // Recover the cold-staker for unresolved P2CS coinstake inputs (backend blanks them).
@@ -220,7 +220,7 @@ const sankeyOption = computed(() => {
 
 // The Sankey needs ~20px of vertical room per node or the labels collapse into an
 // illegible block (a 44-output payout crammed into a fixed 300px). Scale to the busier
-// side. ponytail: capped at 1200px — a pathological fan-out (>~58 nodes) re-crowds past
+// side. ponytail: capped at 1200px; a pathological fan-out (>~58 nodes) re-crowds past
 // the cap, acceptable ceiling; raise it or aggregate small outputs if that ever matters.
 const flowHeight = computed(() => {
   const n = Math.max(tx.value?.vin?.length || 1, tx.value?.vout?.length || 1)

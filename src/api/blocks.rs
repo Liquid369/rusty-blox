@@ -62,7 +62,7 @@ pub(crate) fn resolve_block_height(db: &Arc<DB>, param: &str) -> Option<i32> {
             }
         }
 
-        // Some writers key 'h' entries by display byte order — try that too.
+        // Some writers key 'h' entries by display byte order; try that too.
         let mut key_display = vec![b'h'];
         key_display.extend_from_slice(&hash_bytes);
         if let Ok(Some(height_bytes)) = db.get_cf(&cf_metadata, &key_display) {

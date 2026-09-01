@@ -116,7 +116,7 @@ use rustyblox::COLUMN_FAMILIES;
 //     floods can't monopolise the node even within the global budget.
 // (tower's GlobalConcurrencyLimitLayer would require enabling tower's `limit`
 // feature as a new direct dependency; using axum middleware + a tokio
-// Semaphore — both already direct deps — achieves the same back-pressure with
+// Semaphore (both already direct deps) achieves the same back-pressure with
 // no Cargo manifest change. Over-limit requests get 503 + Retry-After.)
 const GLOBAL_MAX_INFLIGHT: usize = 256;
 const BROADCAST_MAX_INFLIGHT: usize = 8;
@@ -267,11 +267,11 @@ async fn start_web_server(
     let server_port: u16 = config.get_int("server.port").unwrap_or(3005) as u16;
 
     // Configure CORS (P2-1). This is a read-only PUBLIC block explorer, so we
-    // intentionally keep `allow_origin(Any)` — anyone may read the chain data
+    // intentionally keep `allow_origin(Any)`; anyone may read the chain data
     // from any site and there are no cookies/credentials to protect (CORS is
     // not a server-side authorization boundary here). We DO narrow methods to
-    // the two we actually serve — GET for reads and POST for the
-    // Blockbook-compatible /sendtx broadcast — instead of the previous `Any`,
+    // the two we actually serve (GET for reads and POST for the
+    // Blockbook-compatible /sendtx broadcast) instead of the previous `Any`,
     // and likewise scope allowed request headers to Content-Type.
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -323,7 +323,7 @@ async fn start_web_server(
         // /ws/, so /metrics is NOT reachable through the public vhost; restrict
         // /api/v2/cache/stats at the proxy too if it must stay private. A future
         // hardening step is to bind these behind a separate admin listener /
-        // config flag — left as a deliberate TODO to avoid breaking Prometheus
+        // config flag; left as a deliberate TODO to avoid breaking Prometheus
         // scraping which targets this port directly.
         .route("/api/v2/cache/stats", get(cache_stats_v2)) // Cache statistics endpoint
         .route("/api/v2/search/{query}", get(search_v2))
@@ -399,7 +399,7 @@ async fn start_web_server(
         info!(path = %frontend_dist, "Serving frontend");
         let index = std::path::Path::new(&frontend_dist).join("index.html");
         let assets_dir = std::path::Path::new(&frontend_dist).join("assets");
-        // Hashed bundles live under /assets — serve them directly and return a
+        // Hashed bundles live under /assets; serve them directly and return a
         // real 404 on a miss (NO index.html fallback here). Falling back to
         // index.html for a missing chunk returns 200 text/html, which browsers
         // reject with a strict-MIME error on every redeploy (stale clients still
@@ -558,7 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block_cache_size_mb = config.get_int("rocksdb.block_cache_size").unwrap_or(512);
     // Global memtable ceiling across all CFs (0 = unlimited). Bounds total write-
     // buffer RAM, which is otherwise capped only per-CF (write_buffer_size x
-    // max_write_buffer_number x CFs ~= several GB) — a real peak contributor on
+    // max_write_buffer_number x CFs ~= several GB), a real peak contributor on
     // an 8 GB VPS shared with pivxd.
     let db_write_buffer_size_mb = config
         .get_int("rocksdb.db_write_buffer_size")
@@ -790,9 +790,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Runtime::new().expect("Failed to build runtime");
 
             // Retry the sync service on a fatal error with capped backoff instead of
-            // letting the thread die. A prolonged RPC outage can abort a catch-up — the
+            // letting the thread die. A prolonged RPC outage can abort a catch-up; the
             // heightless-block backfill rewinds sync_height for re-detection and returns
-            // Err — and the web server keeps the process alive, so without this loop the
+            // Err, and the web server keeps the process alive, so without this loop the
             // explorer would serve a frozen tip even after RPC recovers (no supervisor
             // restart fires). The rewound sync_height makes each retry re-run the whole
             // catch-up + backfill, so it self-heals once RPC is back.

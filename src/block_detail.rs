@@ -26,7 +26,7 @@ pub struct BlockDetail {
     pub previousblockhash: Option<String>,
     pub nextblockhash: Option<String>,
     /// Block subsidy minted at this height (PIV), from the deterministic
-    /// emission schedule — always correct regardless of input resolution.
+    /// emission schedule, always correct regardless of input resolution.
     pub reward: f64,
     pub tx: Vec<TransactionSummary>,
 }
@@ -355,7 +355,7 @@ fn get_block_transactions(
                     if let Ok(txid_bytes) = hex::decode(txid_str) {
                         // Prefer a record WITH a body over an 8-byte stub (shadowing bug),
                         // else a stub-shadowed tx fails to parse and vanishes from the block.
-                        // Read errors degrade to "tx missing" (warned below) — block pages
+                        // Read errors degrade to "tx missing" (warned below); block pages
                         // render the rest of the block rather than failing wholesale.
                         let tx_data = crate::api::transactions::read_valid_tx_record(
                             db,
@@ -380,7 +380,7 @@ fn get_block_transactions(
             }
             Err(e) => {
                 // Silent break rendered a mid-iteration read error as a shorter
-                // block (200 with missing txs) — surface it before stopping.
+                // block (200 with missing txs); surface it before stopping.
                 warn!(height, error = %e, "'B' index iteration failed mid-block; tx list truncated");
                 break;
             }
@@ -645,7 +645,7 @@ fn parse_transaction_binary(data: &[u8]) -> Result<TransactionSummary, Box<dyn s
 
     // Pure-CPU parse via the sync twin. The old Handle::current().block_on here
     // worked only because callers happened to run inside spawn_blocking with a
-    // runtime in TLS — a panic ("no reactor") or deadlock trap for any new caller.
+    // runtime in TLS, a panic ("no reactor") or deadlock trap for any new caller.
     let tx = crate::parser::deserialize_transaction_blocking(&data_with_header)?;
 
     // Convert inputs

@@ -428,7 +428,7 @@ pub fn aggregate_by_address(raw_map: HashMap<String, Vec<u8>>) -> HashMap<String
 
                             // Non-standard scripts (zerocoin mints, cold-stake/exchange
                             // variants, OP_RETURN) are common and run once per chainstate
-                            // UTXO (~17M), so this is debug-only detail — the aggregate
+                            // UTXO (~17M), so this is debug-only detail; the aggregate
                             // `no_address` count is logged once in the summary below.
                             if output.amount > 0 {
                                 debug!(amount_sats = output.amount,
