@@ -41,7 +41,8 @@ impl DayRates {
         match currency {
             Some(c) => match self.get(c) {
                 Some(v) => serde_json::json!({ c: v }),
-                None => serde_json::json!({}),
+                // Blockbook marks an unavailable currency with -1, not {}.
+                None => serde_json::json!({ c: -1 }),
             },
             None => serde_json::json!({ "usd": self.usd, "eur": self.eur, "btc": self.btc }),
         }
@@ -215,12 +216,19 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
     loop {
         match crate::api::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([])).await {
             Ok(v) => {
-                let chain = v.get("chain").and_then(|c| c.as_str()).unwrap_or("");
-                if chain == "main" {
-                    break;
+                match v.get("chain").and_then(|c| c.as_str()).unwrap_or("") {
+                    "main" => break,
+                    // A shape anomaly is transient; only a named non-main
+                    // chain warrants a permanent stop.
+                    "" => {
+                        warn!("fiat sampler: getblockchaininfo missing chain; retrying in 60s");
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                    chain => {
+                        info!(chain = %chain, "fiat sampler disabled on non-mainnet chain");
+                        return;
+                    }
                 }
-                info!(chain = %chain, "fiat sampler disabled on non-mainnet chain");
-                return;
             }
             Err(e) => {
                 warn!(error = %e, "fiat sampler: chain unknown (RPC down); retrying in 60s");
@@ -312,6 +320,53 @@ pub async fn tickers_v2(
             Json(super::types::BlockbookError::new("No tickers available")),
         )),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct MultiTickersQuery {
+    pub timestamp: Option<String>,
+    pub currency: Option<String>,
+}
+
+/// GET /api/v2/multi-tickers/?timestamp=ts1,ts2&currency=
+/// One FiatTicker per requested timestamp, same lookup as /tickers.
+pub async fn multi_tickers_v2(
+    Query(q): Query<MultiTickersQuery>,
+    Extension(db): Extension<Arc<DB>>,
+    Extension(cache): Extension<Arc<CacheManager>>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    const MAX_TIMESTAMPS: usize = 100;
+    let timestamps: Vec<u64> = q
+        .timestamp
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|t| t.trim().parse::<u64>().ok())
+        .take(MAX_TIMESTAMPS)
+        .collect();
+    if timestamps.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(super::types::BlockbookError::new("Missing timestamp")),
+        ));
+    }
+    let series = cached_series(&db, &cache).await;
+    let currency = q.currency.as_deref().map(str::to_lowercase);
+    let out: Vec<serde_json::Value> = timestamps
+        .into_iter()
+        .filter_map(|t| {
+            rate_at(&series, Some(t)).map(|(ts, rates)| {
+                serde_json::json!({ "ts": ts, "rates": rates.to_json(currency.as_deref()) })
+            })
+        })
+        .collect();
+    if out.is_empty() {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            Json(super::types::BlockbookError::new("No tickers available")),
+        ));
+    }
+    Ok(Json(serde_json::Value::Array(out)))
 }
 
 /// GET /api/v2/tickers-list?timestamp=

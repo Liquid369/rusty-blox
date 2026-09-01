@@ -33,7 +33,7 @@ fn bits_to_difficulty(bits: u32) -> f64 {
 /// Resolve a block height from either a decimal height or a 64-char hex block
 /// hash (display byte order). Hash lookup uses the chain_metadata 'h' + hash
 /// (internal byte order) -> height mapping. Returns None if unresolvable.
-fn resolve_block_height(db: &Arc<DB>, param: &str) -> Option<i32> {
+pub(crate) fn resolve_block_height(db: &Arc<DB>, param: &str) -> Option<i32> {
     // All-digit param: parse as height directly.
     if let Ok(height) = param.parse::<i32>() {
         return Some(height);
@@ -257,7 +257,43 @@ pub async fn block_v2(
     }
 }
 
-async fn compute_blockbook_block(
+/// GET /api/v2/rawblock/{blockId}
+/// {"hex": "<raw serialized block>"}; the daemon holds the raw bytes, so this
+/// proxies getblock verbosity 0. Height or display-order hash accepted.
+pub async fn raw_block_v2(
+    Path(param): Path<String>,
+    Extension(db): Extension<Arc<DB>>,
+    Extension(cache): Extension<Arc<CacheManager>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
+    let height = match resolve_block_height(&db, &param) {
+        Some(h) => h,
+        None => return Err(not_found("Block not found")),
+    };
+    let hash = db
+        .cf_handle("chain_metadata")
+        .and_then(|cf| db.get_cf(&cf, height.to_le_bytes()).ok().flatten())
+        .map(hex::encode);
+    let Some(hash) = hash else {
+        return Err(not_found("Block not found"));
+    };
+    let hex = cache
+        .get_or_compute(
+            &format!("rawblock:{height}"),
+            Duration::from_secs(60),
+            || async move {
+                let v =
+                    super::helpers::rpc_call_json("getblock", serde_json::json!([hash, 0])).await?;
+                v.as_str().map(str::to_string).ok_or_else(|| {
+                    Box::<dyn std::error::Error + Send + Sync>::from("non-string getblock response")
+                })
+            },
+        )
+        .await
+        .map_err(|_| internal_error("Internal error loading block; please retry"))?;
+    Ok(Json(serde_json::json!({ "hex": hex })))
+}
+
+pub(crate) async fn compute_blockbook_block(
     db: &Arc<DB>,
     height: i32,
     page: u32,
@@ -422,7 +458,8 @@ async fn compute_blockbook_block(
     Ok(BlockbookBlock {
         page,
         total_pages,
-        items_on_page: txs.len() as u32,
+        // Page capacity, not returned count (Blockbook semantics)
+        items_on_page: BLOCK_TXS_PER_PAGE as u32,
         hash,
         previous_block_hash: prev_hash,
         next_block_hash: next_hash,

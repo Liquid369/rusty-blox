@@ -36,9 +36,12 @@ use rustyblox::api::{
     mn_list_v2,
     mn_raw_budget_vote_v2,
     money_supply_v2,
+    multi_tickers_v2,
     network_health_analytics,
     // Price module
     price_v2,
+    raw_block_v2,
+    raw_tx_v2,
     relay_mnb_v2,
     rich_list,
     root_handler,
@@ -302,10 +305,13 @@ async fn start_web_server(
         // probes. All four root spellings serve it (previously HTML/stubs).
         .route("/api", get(blockbook_root_v2))
         .route("/api/", get(blockbook_root_v2))
+        .route("/api/status", get(blockbook_root_v2)) // same SystemInfo as /api/
         .route("/api/v2", get(blockbook_root_v2))
         .route("/api/v2/", get(blockbook_root_v2))
         .route("/api/v2/estimatefee/{blocks}", get(estimate_fee_v2))
         .route("/api/v2/tx-specific/{txid}", get(tx_specific_v2))
+        .route("/api/v2/rawblock/{block_id}", get(raw_block_v2))
+        .route("/api/rawtx/{txid}", get(raw_tx_v2))
         // Any OTHER /api path is a JSON 404, never the SPA's HTML-with-200.
         .route("/api/{*rest}", any(api_not_found))
         .route("/api/v2/status", get(status_v2))
@@ -353,8 +359,14 @@ async fn start_web_server(
         .route("/api/v2/analytics/treasury", get(treasury_analytics))
         .route("/api/v2/analytics/coldstaking", get(coldstaking_analytics))
         .route("/api/v2/price", get(price_v2))
+        // Spec paths carry a trailing slash (Go mux redirects the bare form;
+        // axum treats them as distinct routes, so both are registered).
         .route("/api/v2/tickers", get(tickers_v2))
-        .route("/api/v2/tickers-list", get(tickers_list_v2)) // PIVX price data endpoint
+        .route("/api/v2/tickers/", get(tickers_v2))
+        .route("/api/v2/tickers-list", get(tickers_list_v2))
+        .route("/api/v2/tickers-list/", get(tickers_list_v2))
+        .route("/api/v2/multi-tickers", get(multi_tickers_v2))
+        .route("/api/v2/multi-tickers/", get(multi_tickers_v2))
         .route("/websocket", get(blockbook_websocket_handler))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))

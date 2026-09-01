@@ -461,11 +461,10 @@ pub(crate) async fn compute_address_info(
         .min(total_tx_count);
 
     // Handle page out of bounds - return empty result
-    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
-        (vec![], 0)
+    let paginated_txids = if start_idx >= total_tx_count {
+        vec![]
     } else {
-        let slice = &all_txids[start_idx..end_idx];
-        (slice.to_vec(), slice.len())
+        all_txids[start_idx..end_idx].to_vec()
     };
 
     // === DETAILS MODE HANDLING ===
@@ -499,6 +498,10 @@ pub(crate) async fn compute_address_info(
             }
             (None, Some(txs))
         }
+        "tokens" | "tokenBalances" => {
+            // Token modes return no tx data (Blockbook: option < txids)
+            (None, None)
+        }
         _ => {
             // Default: "txids" or any other value = just txid strings
             (Some(paginated_txids), None)
@@ -508,7 +511,9 @@ pub(crate) async fn compute_address_info(
     Ok(AddressInfo {
         page: Some(page),
         total_pages: Some(total_pages),
-        items_on_page: Some(actual_items as u32), // Actual count, not pageSize
+        // Blockbook emits the page CAPACITY here, not the returned count
+        // (its examples show 1000 with 2 rows).
+        items_on_page: Some(page_size),
         address: address.to_string(),
         balance: balance.to_string(),
         total_received: total_received.to_string(),
@@ -963,6 +968,9 @@ async fn aggregate_xpub_data(
 
     // Convert txid set to vec
     let unique_txids: Vec<String> = all_txids.into_iter().collect();
+    // Lifetime unique tx count, before the from/to filter (Blockbook's txs
+    // field for details >= txids).
+    let lifetime_unique_count = unique_txids.len();
 
     // Sort transactions by block height (descending = newest first)
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
@@ -1026,11 +1034,10 @@ async fn aggregate_xpub_data(
         .min(total_tx_count);
 
     // Handle page out of bounds - return empty result
-    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
-        (vec![], 0)
+    let paginated_txids = if start_idx >= total_tx_count {
+        vec![]
     } else {
-        let slice = &unique_txids[start_idx..end_idx];
-        (slice.to_vec(), slice.len())
+        unique_txids[start_idx..end_idx].to_vec()
     };
 
     // === DETAILS MODE HANDLING (same as address endpoint) ===
@@ -1074,8 +1081,10 @@ async fn aggregate_xpub_data(
         }
     };
 
-    // Build tokens array if requested, filtered by tokens parameter
-    let tokens = if params.details == "tokens" || params.details == "tokenBalances" {
+    // Token rows for any details above basic (Blockbook: option >
+    // AccountDetailsBasic covers the default txids too), filtered by the
+    // tokens parameter
+    let tokens = if params.details != "basic" {
         // Filter addresses based on tokens parameter
         let filtered_addresses: Vec<_> = all_addresses
             .iter()
@@ -1089,6 +1098,7 @@ async fn aggregate_xpub_data(
                         if let Some((_, _, tx_count, balance, total_recv, total_snt)) = addr_data {
                             Some(super::types::XPubToken {
                                 token_type: "XPUBAddress".to_string(),
+                                standard: "XPUBAddress".to_string(),
                                 name: addr.clone(),
                                 path: path.clone(),
                                 transfers: *tx_count as u32,
@@ -1101,6 +1111,7 @@ async fn aggregate_xpub_data(
                             // Address was derived but never used
                             Some(super::types::XPubToken {
                                 token_type: "XPUBAddress".to_string(),
+                                standard: "XPUBAddress".to_string(),
                                 name: addr.clone(),
                                 path: path.clone(),
                                 transfers: 0,
@@ -1118,6 +1129,7 @@ async fn aggregate_xpub_data(
                             .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
                                 super::types::XPubToken {
                                     token_type: "XPUBAddress".to_string(),
+                                    standard: "XPUBAddress".to_string(),
                                     name: addr.clone(),
                                     path: path.clone(),
                                     transfers: *tx_count as u32,
@@ -1135,6 +1147,7 @@ async fn aggregate_xpub_data(
                             .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
                                 super::types::XPubToken {
                                     token_type: "XPUBAddress".to_string(),
+                                    standard: "XPUBAddress".to_string(),
                                     name: addr.clone(),
                                     path: path.clone(),
                                     transfers: *tx_count as u32,
@@ -1199,25 +1212,30 @@ async fn aggregate_xpub_data(
         .map(|(_, _, _, balance, _, _)| balance)
         .sum();
 
-    // Blockbook's txs field for xpub = total transfers across ALL addresses
-    // (not unique transactions). If an address appears in 2 txs, it counts as 2.
-    // This matches: sum of all per-address tx counts = total "transfers"
+    // Blockbook's txs field: unique tx count when the history was built
+    // (details >= txids, xpub.go txCount = len(txcMap)); the per-address
+    // transfer sum is only the estimate used below that.
     let total_transfers: usize = used_addresses
         .iter()
         .map(|(_, _, tx_count, _, _, _)| tx_count)
         .sum();
+    let txs_count = match params.details.as_str() {
+        "basic" | "tokens" | "tokenBalances" => total_transfers,
+        _ => lifetime_unique_count,
+    };
 
     Ok(XPubInfo {
         page,
         total_pages,
-        items_on_page: actual_items as u32, // Actual count, not pageSize
+        // Page capacity, not returned count (Blockbook semantics)
+        items_on_page: page_size,
         address: xpub_str.to_string(),
         balance: xpub_balance.to_string(),
         total_received: xpub_total_received.to_string(),
         total_sent: xpub_total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_transfers as u32, // Total transfers (Blockbook compatibility)
+        txs: txs_count as u32,
         txids,
         tokens: tokens.0,
         transactions, // Now properly populated when details=txs

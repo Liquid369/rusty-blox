@@ -345,6 +345,12 @@ pub async fn run_mempool_monitor(
         tokio::time::sleep(Duration::from_secs(30)).await;
     };
 
+    // Txids whose "added" event has fired. An event announces a tx only once
+    // its parse landed (subscribers build the push from the parsed cache); a
+    // tx whose parse failed this poll is announced on a later poll instead of
+    // being dropped forever.
+    let mut announced: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     loop {
         tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
 
@@ -378,19 +384,12 @@ pub async fn run_mempool_monitor(
         };
 
         let current_txids: std::collections::HashSet<String> = txids.iter().cloned().collect();
-        let (added, removed) = {
+        let removed: Vec<String> = {
             let txs = mempool_state.transactions.read().await;
-            let added: Vec<String> = current_txids
-                .iter()
-                .filter(|t| !txs.contains_key(*t))
-                .cloned()
-                .collect();
-            let removed: Vec<String> = txs
-                .keys()
+            txs.keys()
                 .filter(|t| !current_txids.contains(*t))
                 .cloned()
-                .collect();
-            (added, removed)
+                .collect()
         };
         {
             let mut txs = mempool_state.transactions.write().await;
@@ -463,8 +462,14 @@ pub async fn run_mempool_monitor(
         // Events AFTER the parsed cache is ready, so websocket pushes can
         // build the pending tx from state.
         if let Some(bc) = &broadcaster {
-            for txid in &added {
-                bc.broadcast_mempool_update(txid.clone(), "added".to_string());
+            announced.retain(|t| current_txids.contains(t));
+            {
+                let parsed = mempool_state.parsed.read().await;
+                for txid in &current_txids {
+                    if parsed.contains_key(txid) && announced.insert(txid.clone()) {
+                        bc.broadcast_mempool_update(txid.clone(), "added".to_string());
+                    }
+                }
             }
             for txid in &removed {
                 bc.broadcast_mempool_update(txid.clone(), "removed".to_string());

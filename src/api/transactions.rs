@@ -98,6 +98,45 @@ pub async fn tx_v2(
     }
 }
 
+/// GET /api/rawtx/{txid}
+/// Blockbook's unversioned raw-tx endpoint: the response body is a bare JSON
+/// string of tx hex. Confirmed txs come from the local record, pending from
+/// the mempool cache.
+pub async fn raw_tx_v2(
+    axum::extract::Path(txid): axum::extract::Path<String>,
+    Extension(db): Extension<Arc<DB>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
+) -> Result<Json<String>, (StatusCode, Json<BlockbookError>)> {
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(BlockbookError::new("Transaction not found")),
+        )
+    };
+    let Ok(txid_bytes) = hex::decode(&txid) else {
+        return Err(not_found());
+    };
+    if txid_bytes.len() != 32 {
+        return Err(not_found());
+    }
+    let db_clone = Arc::clone(&db);
+    let confirmed = tokio::task::spawn_blocking(move || -> Option<String> {
+        let cf = db_clone.cf_handle("transactions")?;
+        read_valid_tx_record(&db_clone, &cf, &txid_bytes)
+            .unwrap_or(None)
+            .map(|rec| hex::encode(&rec[8..]))
+    })
+    .await
+    .unwrap_or(None);
+    if let Some(hex) = confirmed {
+        return Ok(Json(hex));
+    }
+    match mempool.raw_hex(&txid).await {
+        Some(raw) => Ok(Json(raw)),
+        None => Err(not_found()),
+    }
+}
+
 /// Overwrite a cached `/tx` JSON's `confirmations` from the CURRENT chain tip —
 /// the one field of a confirmed transaction that changes with every block, and
 /// therefore the one field that must never be served from a TTL cache.
@@ -262,9 +301,10 @@ async fn build_transaction_inner(
                     sequence: Some(input.sequence as u64),
                     n: idx as u32,
                     addresses: None,
-                    is_address: None,
+                    is_address: false,
                     value: None,
                     hex: Some(hex::encode(coinbase_data)),
+                    coinbase: Some(hex::encode(coinbase_data)),
                 });
             } else if let Some(prevout) = &input.prevout {
                 // Regular input - look up previous output for value and address
@@ -274,9 +314,10 @@ async fn build_transaction_inner(
                     sequence: Some(input.sequence as u64),
                     n: idx as u32,
                     addresses: None,
-                    is_address: None,
+                    is_address: false,
                     value: None,
                     hex: None,
+                    coinbase: None,
                 };
 
                 // Try to get value and address from previous transaction
@@ -305,7 +346,7 @@ async fn build_transaction_inner(
                                         value_in += output.value;
                                         if !output.address.is_empty() {
                                             tx_input.addresses = Some(output.address.clone());
-                                            tx_input.is_address = Some(true);
+                                            tx_input.is_address = true;
                                         }
                                     }
                                 }

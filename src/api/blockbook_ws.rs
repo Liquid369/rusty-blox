@@ -11,7 +11,7 @@ use axum::Extension;
 use rocksdb::DB;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::cache::CacheManager;
 use crate::mempool::MempoolState;
@@ -70,9 +70,19 @@ async fn handle_connection(mut socket: WebSocket, ctx: Ctx, broadcaster: Arc<Eve
     let mut mp_rx = broadcaster.mempool_tx.subscribe();
     let mut subs = Subs::default();
 
+    // Same liveness policy as the /ws/* channels: server pings every 30s and a
+    // 120s idle deadline reset on any inbound frame. Without it a half-open
+    // peer (NAT expiry, dropped packets) pends recv() forever and its permit
+    // from the shared connection pool never releases.
+    let mut ping = tokio::time::interval(crate::websocket::WS_PING_INTERVAL);
+    ping.tick().await;
+    let idle = tokio::time::sleep(crate::websocket::WS_IDLE_TIMEOUT);
+    tokio::pin!(idle);
+
     loop {
         tokio::select! {
             msg = socket.recv() => {
+                idle.as_mut().reset(tokio::time::Instant::now() + crate::websocket::WS_IDLE_TIMEOUT);
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let reply = handle_request(&ctx, &mut subs, &text).await;
@@ -90,9 +100,17 @@ async fn handle_connection(mut socket: WebSocket, ctx: Ctx, broadcaster: Arc<Eve
                     Some(Err(_)) => break,
                 }
             }
+            _ = ping.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+            _ = idle.as_mut() => break,
             ev = block_rx.recv() => {
                 if let (Ok(BlockchainEvent::NewBlock { height, hash, .. }), Some(id)) = (ev, subs.new_block.as_ref()) {
-                    let push = envelope(id, serde_json::json!({ "height": height, "hash": hash }));
+                    // evmData is a required key in the push shape, null on
+                    // non-EVM chains.
+                    let push = envelope(id, serde_json::json!({ "height": height, "hash": hash, "evmData": null }));
                     if socket.send(Message::Text(push.into())).await.is_err() {
                         break;
                     }
@@ -153,20 +171,24 @@ async fn push_tx_events(
         // Shared 300s cache, REST-identical key: one build per tx per block
         // no matter how many sockets subscribe (a 2k-tx block with N sockets
         // otherwise rebuilds 2k*N times on arrival).
-        let db = Arc::clone(&ctx.db);
-        let t = txid.to_string();
-        ctx.cache
-            .get_or_compute(&format!("tx:{txid}"), std::time::Duration::from_secs(300), || async move {
-                crate::api::transactions::compute_transaction_details(&db, &t).await
-            })
-            .await
-            .ok()
-            .map(|mut v| {
-                // Same freshen REST /tx applies on cache hits: a cached entry
-                // written mid-connect can hold confirmations 0 for a mined tx.
-                crate::api::transactions::freshen_confirmations(&ctx.db, &mut v);
-                v
-            })
+        let key = format!("tx:{txid}");
+        let mut built = build_cached_tx(ctx, &key, txid).await;
+        // freshen false = the cached value is an unconfirmed snapshot. This is
+        // the confirmed-tx path, so the index has the height now; evict and
+        // rebuild rather than push the stale mempool shape.
+        if let Some(v) = built.as_mut() {
+            if !crate::api::transactions::freshen_confirmations(&ctx.db, v) {
+                ctx.cache.invalidate(&key).await;
+                built = build_cached_tx(ctx, &key, txid).await;
+                if let Some(v2) = built.as_mut() {
+                    if !crate::api::transactions::freshen_confirmations(&ctx.db, v2) {
+                        // Still heightless: don't pin the snapshot for the TTL.
+                        ctx.cache.invalidate(&key).await;
+                    }
+                }
+            }
+        }
+        built
     };
     let Some(tx_value) = tx_value else {
         return Ok(());
@@ -189,6 +211,17 @@ async fn push_tx_events(
         }
     }
     Ok(())
+}
+
+async fn build_cached_tx(ctx: &Ctx, key: &str, txid: &str) -> Option<serde_json::Value> {
+    let db = Arc::clone(&ctx.db);
+    let t = txid.to_string();
+    ctx.cache
+        .get_or_compute(key, std::time::Duration::from_secs(300), || async move {
+            crate::api::transactions::compute_transaction_details(&db, &t).await
+        })
+        .await
+        .ok()
 }
 
 /// Every distinct address in a tx object's vin+vout.
@@ -274,22 +307,24 @@ async fn dispatch(
             };
             // Network identity from the node, not hardcoded: a testnet
             // instance must not present itself as mainnet. Cached 60s; the
-            // chain name cannot change under a running node.
+            // chain name cannot change under a running node. Unknown chain is
+            // an error, never a default: guessing "main" would misreport
+            // testnet as mainnet to network-selecting clients.
             let chain = ctx
                 .cache
                 .get_or_compute("bb:chain", std::time::Duration::from_secs(60), || async {
                     let v =
                         super::helpers::rpc_call_json("getblockchaininfo", serde_json::json!([]))
                             .await?;
-                    Ok::<String, Box<dyn std::error::Error + Send + Sync>>(
-                        v.get("chain")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("main")
-                            .to_string(),
-                    )
+                    match v.get("chain").and_then(|c| c.as_str()) {
+                        Some(c) if !c.is_empty() => {
+                            Ok::<String, Box<dyn std::error::Error + Send + Sync>>(c.to_string())
+                        }
+                        _ => Err("getblockchaininfo missing chain".into()),
+                    }
                 })
                 .await
-                .unwrap_or_else(|_| "main".to_string());
+                .map_err(|_| "backend network unavailable".to_string())?;
             let testnet = chain != "main";
             // Genesis hash straight from the index; correct on any network.
             let block0 = ctx
@@ -312,10 +347,14 @@ async fn dispatch(
             }))
         }
         "getBlockHash" => {
-            let height = params
+            // Reject before the i32 cast: 2^32+n would otherwise wrap and
+            // silently return block n's hash.
+            let height: i32 = params
                 .get("height")
-                .and_then(|v| v.as_i64())
-                .ok_or("missing height")? as i32;
+                .and_then(|v| v.as_u64())
+                .ok_or("missing height")?
+                .try_into()
+                .map_err(|_| "Block not found".to_string())?;
             let cf = ctx
                 .db
                 .cf_handle("chain_metadata")
@@ -325,6 +364,34 @@ async fn dispatch(
                 _ => Err("Block not found".to_string()),
             }
         }
+        "getBlock" => {
+            // Same object and cache key as REST /block; pageSize is fixed at
+            // 1000 there so the param is accepted but not honored.
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or("missing id")?;
+            let height =
+                super::blocks::resolve_block_height(&ctx.db, id).ok_or("Block not found")?;
+            let page = params
+                .get("page")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .clamp(1, u32::MAX as u64) as u32;
+            let db = Arc::clone(&ctx.db);
+            let block =
+                ctx.cache
+                    .get_or_compute(
+                        &format!("block:bb:{height}:{page}"),
+                        std::time::Duration::from_secs(60),
+                        || async move {
+                            super::blocks::compute_blockbook_block(&db, height, page).await
+                        },
+                    )
+                    .await
+                    .map_err(|_| "Block not found".to_string())?;
+            serde_json::to_value(block).map_err(|e| e.to_string())
+        }
         "getAccountInfo" => {
             require_addr_index(ctx)?;
             let descriptor = params
@@ -333,12 +400,17 @@ async fn dispatch(
                 .ok_or("missing descriptor")?
                 .to_string();
             let details_given = params.get("details").is_some();
+            let tokens_given = params.get("tokens").is_some();
             let mut q: super::types::AddressQuery =
                 serde_json::from_value(params).map_err(|e| format!("bad params: {e}"))?;
             if !details_given {
                 // Blockbook's ws default; AddressQuery's serde default is the
                 // REST "txids".
                 q.details = "basic".to_string();
+            }
+            if !tokens_given {
+                // ws default is derived (websocket.go); REST default nonzero.
+                q.tokens = "derived".to_string();
             }
             if descriptor.starts_with("xpub") {
                 if !super::addresses::is_valid_xpub(&descriptor) {
@@ -475,13 +547,41 @@ async fn dispatch(
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+            // Spec param is a currencies array; fiatcurrency kept as a
+            // fallback alias. One currency narrows the attach; several attach
+            // all stored rates then filter per bucket.
+            let currencies: Vec<String> = params
+                .get("currencies")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str())
+                        .map(|s| s.to_lowercase())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let single = match currencies.len() {
+                1 => Some(currencies[0].clone()),
+                0 => params
+                    .get("fiatcurrency")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_lowercase()),
+                _ => None,
+            };
             crate::api::balance_history::attach_rates(
                 &ctx.db,
                 &ctx.cache,
                 &mut series,
-                params.get("fiatcurrency").and_then(|v| v.as_str()),
+                single.as_deref(),
             )
             .await;
+            if currencies.len() > 1 {
+                for bucket in &mut series {
+                    if let Some(serde_json::Value::Object(m)) = bucket.rates.as_mut() {
+                        m.retain(|k, _| currencies.contains(k));
+                    }
+                }
+            }
             serde_json::to_value(series).map_err(|e| e.to_string())
         }
         "estimateFee" => {
@@ -560,8 +660,14 @@ async fn dispatch(
                 })
                 .unwrap_or_default();
             // Bound the per-connection set; Blockbook itself subscribes whole
-            // wallets, but an unbounded set is a memory hole.
-            if addrs.len() > 10_000 {
+            // wallets, but an unbounded set is a memory hole. The count cap
+            // alone still admits ~1MB of junk strings per connection (frame
+            // cap), so bound element size and total bytes too: no real PIVX
+            // address exceeds 64 bytes, and 384KB covers 10k full addresses.
+            if addrs.len() > 10_000
+                || addrs.iter().any(|a| a.len() > 64)
+                || addrs.iter().map(|a| a.len()).sum::<usize>() > 384 * 1024
+            {
                 return Err("too many addresses".to_string());
             }
             debug!(count = addrs.len(), "ws subscribeAddresses");
