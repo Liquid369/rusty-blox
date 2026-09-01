@@ -300,6 +300,8 @@ pub(crate) async fn apply_utxo_mempool_overlay(
                 coinstake: None,
                 spendable: Some(true),
                 blocks_until_spendable: None,
+                address: None,
+                path: None,
             },
         );
     }
@@ -657,65 +659,45 @@ pub(crate) async fn compute_xpub_info(
     // This is intentional and allows PIVX wallets to use standard BIP32 tools.
     // We cannot validate coin type from the xpub itself as it's not encoded in the serialization.
 
-    // Create secp256k1 context once for all derivations (performance optimization)
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-
-    // BIP44 gap limit: stop scanning after N consecutive unused addresses
     let gap_limit = params.gap_limit.unwrap_or(20); // Default 20 per BIP44
     let max_scan_limit = params.max_scan.unwrap_or(1000); // Configurable safety limit (default 1000)
-
-    // Derive addresses with gap limit logic for both chains
-    let mut all_addresses: Vec<(String, String)> = Vec::new(); // (address, path)
-
-    // External chain (receive addresses): m/44'/119'/account'/0/index
-    let mut external_consecutive_unused = 0;
-    for i in 0..max_scan_limit {
-        if external_consecutive_unused >= gap_limit {
-            break; // Gap limit reached
-        }
-
-        match derive_address(&xpub, &secp, 0, i, xpub.depth) {
-            Ok((address, path)) => {
-                // Check if address has activity
-                let has_activity = check_address_activity(db, &address).await?;
-
-                if has_activity {
-                    external_consecutive_unused = 0; // Reset gap counter
-                } else {
-                    external_consecutive_unused += 1;
-                }
-
-                all_addresses.push((address, path));
-            }
-            Err(_) => break,
-        }
-    }
-
-    // Internal chain (change addresses): m/44'/119'/account'/1/index
-    let mut internal_consecutive_unused = 0;
-    for i in 0..max_scan_limit {
-        if internal_consecutive_unused >= gap_limit {
-            break; // Gap limit reached
-        }
-
-        match derive_address(&xpub, &secp, 1, i, xpub.depth) {
-            Ok((address, path)) => {
-                let has_activity = check_address_activity(db, &address).await?;
-
-                if has_activity {
-                    internal_consecutive_unused = 0;
-                } else {
-                    internal_consecutive_unused += 1;
-                }
-
-                all_addresses.push((address, path));
-            }
-            Err(_) => break,
-        }
-    }
+    let all_addresses = derive_xpub_addresses(db, &xpub, gap_limit, max_scan_limit).await?;
 
     // Aggregate UTXOs and transactions from all derived addresses
     aggregate_xpub_data(db, xpub_str, &all_addresses, params).await
+}
+
+/// BIP44 window scan shared by the xpub account and utxo paths: derive both
+/// chains until `gap_limit` consecutive unused addresses, hard-capped at
+/// `max_scan` per chain. Returns (address, path) pairs.
+pub(crate) async fn derive_xpub_addresses(
+    db: &Arc<DB>,
+    xpub: &bitcoin::util::bip32::ExtendedPubKey,
+    gap_limit: u32,
+    max_scan: u32,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let mut all_addresses: Vec<(String, String)> = Vec::new();
+    for chain in [0u32, 1u32] {
+        let mut consecutive_unused = 0;
+        for i in 0..max_scan {
+            if consecutive_unused >= gap_limit {
+                break;
+            }
+            match derive_address(xpub, &secp, chain, i, xpub.depth) {
+                Ok((address, path)) => {
+                    if check_address_activity(db, &address).await? {
+                        consecutive_unused = 0;
+                    } else {
+                        consecutive_unused += 1;
+                    }
+                    all_addresses.push((address, path));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(all_addresses)
 }
 
 /// Derive a single address from xpub at specified chain/index
@@ -1250,6 +1232,42 @@ async fn aggregate_xpub_data(
 /// Returns unspent outputs for address.
 ///
 /// **CACHED**: 30 second TTL
+/// Confirmed UTXOs across an xpub's derive window, each row tagged with its
+/// owning address + path. Returns the derived pairs too so the caller can
+/// apply the mempool overlay per address post-cache.
+pub(crate) async fn compute_xpub_utxos(
+    db: &Arc<DB>,
+    xpub_str: &str,
+    gap: u32,
+) -> Result<(Vec<UTXO>, Vec<(String, String)>), Box<dyn std::error::Error + Send + Sync>> {
+    use std::str::FromStr;
+    let xpub = bitcoin::util::bip32::ExtendedPubKey::from_str(xpub_str)
+        .map_err(|e| format!("Invalid xpub format: {e}"))?;
+    if xpub.depth != 3 {
+        return Err(format!(
+            "Invalid xpub depth: expected 3 (account level m/44'/119'/account'), got {}",
+            xpub.depth
+        )
+        .into());
+    }
+    let derived = derive_xpub_addresses(db, &xpub, gap, 1000).await?;
+    let mut rows: Vec<UTXO> = Vec::new();
+    for (addr, path) in &derived {
+        let mut utxos = compute_utxos(db, addr).await?;
+        for u in &mut utxos {
+            u.address = Some(addr.clone());
+            u.path = Some(path.clone());
+        }
+        rows.extend(utxos);
+    }
+    Ok((rows, derived))
+}
+
+/// Blockbook order: unconfirmed first, then by height newest-first.
+pub(crate) fn sort_utxos_newest_first(rows: &mut [UTXO]) {
+    rows.sort_by_key(|u| std::cmp::Reverse(u.height.unwrap_or(u32::MAX)));
+}
+
 pub async fn utxo_v2(
     AxumPath(address): AxumPath<String>,
     Query(query): Query<UtxoQuery>,
@@ -1257,6 +1275,80 @@ pub async fn utxo_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
     Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<Vec<UTXO>>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
+    // xpub descriptor form: UTXOs across the account's derive window.
+    if address.len() > 60 && is_valid_xpub(&address) {
+        if !crate::chain_state::addr_index_ready(&db) {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(super::types::BlockbookError::new(
+                    "Address index is reindexing; please retry shortly",
+                )),
+            ));
+        }
+        // Validation up front so a bad descriptor is a 400; compute errors
+        // below are storage-side 500s (a 200 [] would read as "no coins").
+        {
+            use std::str::FromStr;
+            match bitcoin::util::bip32::ExtendedPubKey::from_str(&address) {
+                Ok(x) if x.depth == 3 => {}
+                Ok(x) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(super::types::BlockbookError::new(format!(
+                            "Invalid xpub depth: expected 3, got {}",
+                            x.depth
+                        ))),
+                    ))
+                }
+                Err(e) => {
+                    return Err((
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(super::types::BlockbookError::new(format!(
+                            "Invalid xpub format: {e}"
+                        ))),
+                    ))
+                }
+            }
+        }
+        let gap = query.gap.unwrap_or(20).clamp(1, 200);
+        let cache_key = format!("utxo:xpub:{address}:{gap}");
+        let db_clone = Arc::clone(&db);
+        let xpub_clone = address.clone();
+        let result = cache
+            .get_or_compute(&cache_key, Duration::from_secs(30), || async move {
+                compute_xpub_utxos(&db_clone, &xpub_clone, gap).await
+            })
+            .await;
+        return match result {
+            Ok((mut rows, derived)) => {
+                if !query.confirmed {
+                    for (addr, path) in &derived {
+                        apply_utxo_mempool_overlay(&mempool, addr, &mut rows).await;
+                        // Overlay-appended rows carry no tags yet; the retain
+                        // step can shift indices, so tag by absence.
+                        for u in rows.iter_mut() {
+                            if u.address.is_none() {
+                                u.address = Some(addr.clone());
+                                u.path = Some(path.clone());
+                            }
+                        }
+                    }
+                }
+                sort_utxos_newest_first(&mut rows);
+                Ok(Json(rows))
+            }
+            Err(e) => {
+                warn!(xpub = %address, error = %e, "xpub utxo compute failed");
+                Err((
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(super::types::BlockbookError::new(
+                        "Internal error computing UTXOs; please retry",
+                    )),
+                ))
+            }
+        };
+    }
+
     // P2-B: reject invalid/mistyped addresses with 400 instead of serving an
     // empty UTXO list (HTTP 200, []) for a non-existent/typo'd account.
     if !is_valid_address(&address) {
@@ -1412,6 +1504,8 @@ pub(crate) async fn compute_utxos(
                 coinstake: Some(tx_type == crate::tx_type::TransactionType::Coinstake),
                 spendable: Some(true),
                 blocks_until_spendable: None,
+                address: None,
+                path: None,
             });
         }
         Ok(out)

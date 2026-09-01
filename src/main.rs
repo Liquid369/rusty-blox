@@ -26,6 +26,7 @@ use rustyblox::api::{
     cache_stats_v2,
     coldstaking_analytics,
     estimate_fee_v2,
+    fee_stats_v2,
     finalized_budgets_v2,
     health_check_v2,
     hodl_analytics,
@@ -311,6 +312,7 @@ async fn start_web_server(
         .route("/api/v2/estimatefee/{blocks}", get(estimate_fee_v2))
         .route("/api/v2/tx-specific/{txid}", get(tx_specific_v2))
         .route("/api/v2/rawblock/{block_id}", get(raw_block_v2))
+        .route("/api/v2/feestats/{block_id}", get(fee_stats_v2))
         .route("/api/rawtx/{txid}", get(raw_tx_v2))
         // Any OTHER /api path is a JSON 404, never the SPA's HTML-with-200.
         .route("/api/{*rest}", any(api_not_found))
@@ -747,6 +749,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         rustyblox::api::tickers::run_fiat_rate_sampler(fiat_db).await;
     });
+
+    // new_addresses backfill runs inside the monitor task (run_block_monitor),
+    // not here: a detached task would RMW the same day blobs Lane I is
+    // updating and lose writes.
 
     // Spawn mempool monitor service (can start early). Carries the DB handle
     // so pending txs resolve their prevouts for the per-address mempool view.

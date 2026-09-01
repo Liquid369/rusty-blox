@@ -488,8 +488,34 @@ async fn dispatch(
                 .get("descriptor")
                 .and_then(|v| v.as_str())
                 .ok_or("missing descriptor")?;
-            if descriptor.starts_with("xpub") {
-                return Err("xpub utxo not supported yet; query per address".to_string());
+            if super::addresses::is_valid_xpub(descriptor) {
+                require_addr_index(ctx)?;
+                // REST-identical cache key + overlay flow (see utxo_v2's
+                // xpub branch); ws has no confirmed/gap params, defaults 20.
+                let gap = 20u32;
+                let db = Arc::clone(&ctx.db);
+                let d = descriptor.to_string();
+                let (mut rows, derived) = ctx
+                    .cache
+                    .get_or_compute(
+                        &format!("utxo:xpub:{descriptor}:{gap}"),
+                        std::time::Duration::from_secs(30),
+                        || async move { super::addresses::compute_xpub_utxos(&db, &d, gap).await },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                for (addr, path) in &derived {
+                    super::addresses::apply_utxo_mempool_overlay(&ctx.mempool, addr, &mut rows)
+                        .await;
+                    for u in rows.iter_mut() {
+                        if u.address.is_none() {
+                            u.address = Some(addr.clone());
+                            u.path = Some(path.clone());
+                        }
+                    }
+                }
+                super::addresses::sort_utxos_newest_first(&mut rows);
+                return serde_json::to_value(rows).map_err(|e| e.to_string());
             }
             if !super::addresses::is_valid_address(descriptor) {
                 return Err(format!("Invalid address '{descriptor}'"));
