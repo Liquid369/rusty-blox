@@ -837,6 +837,62 @@ pub(crate) async fn apply_block_core(
     Ok(())
 }
 
+/// First-seen height per address, from the canonical 't' history (min height
+/// > 0). An address's first-ever appearance is an output, so the min-height
+/// date equals the enrich's first-seen date. Cached per reorg epoch: a reorg
+/// can orphan a first appearance, so an epoch bump clears the map.
+static FIRST_SEEN: std::sync::OnceLock<tokio::sync::Mutex<(u64, HashMap<String, i32>)>> =
+    std::sync::OnceLock::new();
+
+async fn first_seen_height(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<i32> {
+    let m = FIRST_SEEN.get_or_init(|| tokio::sync::Mutex::new((0, HashMap::new())));
+    {
+        let mut g = m.lock().await;
+        if g.0 != epoch {
+            g.0 = epoch;
+            g.1.clear();
+        }
+        if let Some(h) = g.1.get(addr) {
+            return Some(*h);
+        }
+    }
+    // Handle scoped so the future stays Send (no CF handle across the await).
+    let data = {
+        let cf = db.cf_handle("addr_index")?;
+        let mut key = vec![b't'];
+        key.extend_from_slice(addr.as_bytes());
+        db.get_cf(&cf, &key).ok()??
+    };
+    let list = crate::parser::deserialize_addr_txs(&data).await.ok()?;
+    let min_h = list.iter().map(|(_, h)| *h).filter(|h| *h > 0).min()?;
+    m.lock().await.1.insert(addr.to_string(), min_h);
+    Some(min_h)
+}
+
+/// new_addresses for each date: members of the day's active set whose 't'
+/// history starts that day.
+async fn count_new_addresses(
+    db: &Arc<DB>,
+    day_active: &HashMap<String, HashSet<String>>,
+) -> HashMap<String, u64> {
+    let epoch = reorg_epoch(db);
+    let mut day_new: HashMap<String, u64> = HashMap::new();
+    for (date, addrs) in day_active {
+        let mut n = 0u64;
+        for a in addrs {
+            if let Some(h) = first_seen_height(db, a, epoch).await {
+                if let Some((t, _)) = header_time_bits(db, h) {
+                    if t != 0 && unix_to_date(t as u64) == *date {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        day_new.insert(date.clone(), n);
+    }
+    day_new
+}
+
 fn side_key(prefix: &[u8], date: &str) -> Vec<u8> {
     let mut k = prefix.to_vec();
     k.extend_from_slice(date.as_bytes());
@@ -844,10 +900,10 @@ fn side_key(prefix: &[u8], date: &str) -> Vec<u8> {
 }
 
 /// Lane R: recompute the day-local SET fields (`unique_stakers`, `top10_blocks`,
-/// `active_addresses`) for the last `R_DAYS` calendar days from the canonical DB,
-/// and set `orphan_blocks` from the PERSISTENT orphan index; RMW ONLY those four
-/// fields into each window day's blob (preserving every Lane-I field and
-/// `new_addresses` byte-exact). Re-deriving the sets from the canonical DB makes it
+/// `active_addresses`, `new_addresses`) for the last `R_DAYS` calendar days from
+/// the canonical DB, and set `orphan_blocks` from the PERSISTENT orphan index;
+/// RMW ONLY those five fields into each window day's blob (preserving every
+/// Lane-I field). Re-deriving the sets from the canonical DB makes it
 /// self-correcting on reorg. `do_mark` (live path only) first persists any NEW
 /// orphans from blk-tail's ephemeral `tail_blocks` (cheap, no blocks-CF iterate);
 /// `orphan_blocks` is always read from the persistent count, so a reorg-rebuilt or
@@ -956,6 +1012,8 @@ pub async fn recompute_window(
         crate::enrich_addresses::mark_orphans(db, tip, tip_time, true)?;
     }
 
+    let day_new = count_new_addresses(db, &day_active).await;
+
     // RMW the Lane-R fields into each window day's blob; orphan_blocks always comes
     // from the persistent count.
     let mut batch = WriteBatch::default();
@@ -979,11 +1037,113 @@ pub async fn recompute_window(
             agg.top10_blocks = 0;
         }
         agg.active_addresses = day_active.get(date).map(|s| s.len() as u64).unwrap_or(0);
+        agg.new_addresses = day_new.get(date).copied().unwrap_or(0);
         agg.orphan_blocks = crate::enrich_addresses::orphan_count(db, date);
         batch.put_cf(&cf_state, &day_key, bincode::serialize(&agg)?);
     }
     db.write(batch)?;
     Ok(())
+}
+
+/// One-shot repair for days written while `new_addresses` had no live owner
+/// (Lane I never wrote it; Lane R now does, but only over its 3-day window).
+/// Recomputes the field for every EXISTING day blob in the last `days_back`
+/// days using the same 't'-min-height derivation as Lane R. Idempotent; the
+/// caller gates it on a chain_state marker.
+pub async fn backfill_new_addresses(
+    db: &Arc<DB>,
+    days_back: i64,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let tip = watermark(db);
+    if tip <= 0 {
+        return Ok(0);
+    }
+    let Some((tip_time, _)) = header_time_bits(db, tip) else {
+        return Ok(0);
+    };
+    let window_start =
+        unix_to_date(tip_time.saturating_sub(days_back as u32 * SECS_PER_DAY) as u64);
+    let h_lo = (tip - (days_back as i32 + 1) * 1440).max(0);
+
+    let mut day_active: HashMap<String, HashSet<String>> = HashMap::new();
+    for h in h_lo..=tip {
+        let Some((t, _)) = header_time_bits(db, h) else {
+            continue;
+        };
+        if t == 0 {
+            continue;
+        }
+        let date = unix_to_date(t as u64);
+        if date < window_start {
+            continue;
+        }
+        // CF handle scoped per height so the future stays Send.
+        let values = {
+            let cf_tx = db
+                .cf_handle("transactions")
+                .ok_or("transactions CF not found")?;
+            block_tx_values(db, &cf_tx, h).map_err(|e| e.to_string())?
+        };
+        for data in values {
+            if data.len() < 8 {
+                continue;
+            }
+            let th = i32::from_le_bytes(data[4..8].try_into().unwrap_or([0; 4]));
+            if th != h || !crate::constants::should_index_transaction(th) {
+                continue;
+            }
+            let mut with_header = Vec::with_capacity(4 + data.len() - 8);
+            with_header.extend_from_slice(&[0u8; 4]);
+            with_header.extend_from_slice(&data[8..]);
+            let Ok(tx) = crate::parser::deserialize_transaction(&with_header).await else {
+                continue;
+            };
+            let tx_type = crate::tx_type::detect_transaction_type(&tx);
+            for (vout_index, output) in tx.outputs.iter().enumerate() {
+                if tx_type == crate::tx_type::TransactionType::Coinstake && vout_index == 0 {
+                    continue;
+                }
+                match classify_output(output) {
+                    ScriptClassification::P2PKH(a)
+                    | ScriptClassification::P2SH(a)
+                    | ScriptClassification::P2PK(a) => {
+                        day_active.entry(date.clone()).or_default().insert(a);
+                    }
+                    ScriptClassification::ColdStake { staker, owner } => {
+                        let e = day_active.entry(date.clone()).or_default();
+                        e.insert(staker);
+                        e.insert(owner);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let day_new = count_new_addresses(db, &day_active).await;
+    let prefix = key_prefix();
+    let cf_state = db
+        .cf_handle("chain_state")
+        .ok_or("chain_state CF not found")?;
+    let mut batch = WriteBatch::default();
+    let mut repaired = 0usize;
+    for (date, n) in &day_new {
+        let mut day_key = prefix.as_bytes().to_vec();
+        day_key.extend_from_slice(date.as_bytes());
+        let Some(blob) = db.get_cf(&cf_state, &day_key)? else {
+            continue; // day row never existed; only Lane I creates blobs
+        };
+        let Ok(mut agg) = bincode::deserialize::<TxDayAgg>(&blob) else {
+            continue;
+        };
+        if agg.new_addresses != *n {
+            agg.new_addresses = *n;
+            batch.put_cf(&cf_state, &day_key, bincode::serialize(&agg)?);
+            repaired += 1;
+        }
+    }
+    db.write(batch)?;
+    Ok(repaired)
 }
 
 /// On-demand Phase-0 validator. Re-runs Lane I (`apply_block_core`) + Lane R
@@ -992,9 +1152,11 @@ pub async fn recompute_window(
 /// COMPLETE day against the full-enrich `analytics_tx_day:` blob field-by-field.
 /// Integer fields must match exactly; the two f64 fields (`avg_difficulty`,
 /// `coin_days_destroyed`) use a relative epsilon (their accumulation order differs
-/// from the enrich). `new_addresses` is skipped (full-enrich-owned; Lane I never
-/// writes it). Returns a human-readable report. Does NOT touch the real
-/// `analytics_tx_day:` blobs or the live watermark.
+/// from the enrich). `new_addresses` is skipped (Lane R derives it from 't'
+/// min-heights while the enrich tracks it in-pass; same definition, different
+/// source, so it stays out of the strict diff). Returns a human-readable
+/// report. Does NOT touch the real `analytics_tx_day:` blobs or the live
+/// watermark.
 pub async fn shadow_validate(
     db: &Arc<DB>,
     days_back: i64,

@@ -293,6 +293,99 @@ pub async fn raw_block_v2(
     Ok(Json(serde_json::json!({ "hex": hex })))
 }
 
+/// GET /api/v2/feestats/{blockId}
+/// {txCount, totalFeesSat, averageFeePerKb, decilesFeePerKb[11]} over the
+/// block's fee-paying txs, Blockbook's exact decile formula. Blockbook skips
+/// only zero-input (coinbase) txs; a PIVX coinstake mints its reward so its
+/// apparent fee is negative, and it is skipped here too.
+pub async fn fee_stats_v2(
+    Path(param): Path<String>,
+    Extension(db): Extension<Arc<DB>>,
+    Extension(cache): Extension<Arc<CacheManager>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<BlockbookError>)> {
+    let height = match resolve_block_height(&db, &param) {
+        Some(h) => h,
+        None => return Err(not_found("Block not found")),
+    };
+    let db_clone = Arc::clone(&db);
+    let cache_clone = Arc::clone(&cache);
+    let stats = cache
+        .get_or_compute(
+            &format!("feestats:{height}"),
+            Duration::from_secs(60),
+            || async move { compute_fee_stats(&db_clone, &cache_clone, height).await },
+        )
+        .await
+        .map_err(|_| not_found("Block not found"))?;
+    Ok(Json(stats))
+}
+
+async fn compute_fee_stats(
+    db: &Arc<DB>,
+    cache: &Arc<CacheManager>,
+    height: i32,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut fees_per_kb: Vec<i64> = Vec::new();
+    let mut total_fees: i64 = 0;
+    let mut page = 1u32;
+    loop {
+        let db_clone = Arc::clone(db);
+        let block = cache
+            .get_or_compute(
+                &format!("block:bb:{height}:{page}"),
+                Duration::from_secs(60),
+                || async move { compute_blockbook_block(&db_clone, height, page).await },
+            )
+            .await?;
+        for tx in &block.txs {
+            // Coinbase: zero inputs (Blockbook's own skip).
+            if tx.value_in == "0" {
+                continue;
+            }
+            // Coinstake: empty first output is the PIVX marker.
+            if tx
+                .vout
+                .first()
+                .map(|o| o.value == "0" && o.addresses.is_none())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(fee) = tx.fees.parse::<i64>() else {
+                continue;
+            };
+            let Some(size) = tx.size.filter(|s| *s > 0) else {
+                continue;
+            };
+            total_fees += fee;
+            fees_per_kb.push((fee as f64 / size as f64 * 1000.0) as i64);
+        }
+        if page >= block.total_pages {
+            break;
+        }
+        page += 1;
+    }
+
+    let n = fees_per_kb.len();
+    let mut deciles = [0i64; 11];
+    let mut average = 0i64;
+    if n > 0 {
+        average = fees_per_kb.iter().sum::<i64>() / n as i64;
+        fees_per_kb.sort_unstable();
+        for (k, d) in deciles.iter_mut().enumerate() {
+            let idx = ((0.5 + k as f64 * (n + 1) as f64 / 10.0).floor() as i64 - 1)
+                .clamp(0, n as i64 - 1) as usize;
+            *d = fees_per_kb[idx];
+        }
+    }
+    Ok(serde_json::json!({
+        "txCount": n,
+        "totalFeesSat": total_fees.to_string(),
+        "averageFeePerKb": average,
+        "decilesFeePerKb": deciles,
+    }))
+}
+
 pub(crate) async fn compute_blockbook_block(
     db: &Arc<DB>,
     height: i32,

@@ -117,6 +117,11 @@ pub struct UTXO {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "blocksUntilSpendable")]
     pub blocks_until_spendable: Option<i32>,
+    // xpub/descriptor rows only: which derived address owns the coin
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 // ========== Money Supply Types ==========
@@ -396,6 +401,8 @@ fn default_tokens_filter() -> String {
 pub struct UtxoQuery {
     #[serde(default)]
     pub confirmed: bool,
+    // xpub form only: BIP44 gap limit for the derive window
+    pub gap: Option<u32>,
 }
 
 // ========== Error Types ==========
