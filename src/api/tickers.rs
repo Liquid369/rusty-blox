@@ -128,10 +128,12 @@ fn write_day(db: &Arc<DB>, day_ts: u64, rates: DayRates) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// One market_chart call: daily [ts, price] pairs for a currency.
+/// One market_chart call: daily [ts, price] pairs for a currency. Keyless
+/// CoinGecko caps the range at 365 days (401 error 10012 beyond) and gates
+/// the interval param; days > 90 is auto-daily, so neither is requested.
 async fn fetch_history(currency: &str) -> Result<Vec<(u64, f64)>, String> {
     let url = format!(
-        "https://api.coingecko.com/api/v3/coins/pivx/market_chart?vs_currency={currency}&days=max&interval=daily"
+        "https://api.coingecko.com/api/v3/coins/pivx/market_chart?vs_currency={currency}&days=365"
     );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
