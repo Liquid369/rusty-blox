@@ -261,6 +261,9 @@ fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) ->
             .map(|a| {
                 a.iter()
                     .filter_map(|c| c.as_str())
+                    // Keys echo into EVERY returned ticker; length-bound them
+                    // or 32 long strings x 100 tickers reflects ~100MB.
+                    .filter(|c| c.len() <= 8)
                     .take(WS_MAX_CURRENCIES)
                     .map(|c| c.to_lowercase())
                     .collect()
@@ -529,6 +532,11 @@ async fn dispatch(
             if txid.len() != 64 || !txid.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("Invalid txid".to_string());
             }
+            // Same node-RPC budget as /tx; a saturated limiter reads as
+            // not-found rather than piling onto pivxd.
+            let _permit = crate::api::transactions::MEMPOOL_RPC_LIMIT
+                .try_acquire()
+                .map_err(|_| format!("Transaction '{txid}' not found"))?;
             super::helpers::rpc_call_json("getrawtransaction", serde_json::json!([txid, 1]))
                 .await
                 .map_err(|_| format!("Transaction '{txid}' not found"))

@@ -202,6 +202,12 @@ pub async fn tx_specific_v2(
             &format!("bb:txspec:{txid}"),
             Duration::from_secs(60),
             || async move {
+                // Only cache misses reach here; same node-RPC budget as /tx,
+                // a distinct-txid spray is all misses and the cache alone
+                // bounds nothing.
+                let _permit = super::transactions::MEMPOOL_RPC_LIMIT
+                    .try_acquire()
+                    .map_err(|_| "busy")?;
                 rpc_call_json("getrawtransaction", serde_json::json!([txid_clone, 1])).await
             },
         )

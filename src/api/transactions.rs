@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 /// spraying random txids amplifies 1:1 onto the node's small rpcthreads pool and
 /// starves the explorer's own sync/mempool RPC. `try_acquire` → treat as not-found
 /// when saturated rather than piling on.
-static MEMPOOL_RPC_LIMIT: Semaphore = Semaphore::const_new(4);
+pub(crate) static MEMPOOL_RPC_LIMIT: Semaphore = Semaphore::const_new(4);
 
 pub use axum::extract::Path as AxumPath;
 
