@@ -667,6 +667,12 @@ pub(crate) async fn compute_xpub_info(
     aggregate_xpub_data(db, xpub_str, &all_addresses, params).await
 }
 
+/// Bound concurrent xpub derive-window scans. A cache miss costs up to 2000
+/// EC derivations + activity reads, and every distinct attacker-supplied xpub
+/// is its own miss; without a cap the global in-flight limits admit enough
+/// concurrent scans to saturate the CPU. Saturated = error, clients retry.
+static XPUB_SCAN_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// BIP44 window scan shared by the xpub account and utxo paths: derive both
 /// chains until `gap_limit` consecutive unused addresses, hard-capped at
 /// `max_scan` per chain. Returns (address, path) pairs.
@@ -676,6 +682,9 @@ pub(crate) async fn derive_xpub_addresses(
     gap_limit: u32,
     max_scan: u32,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error + Send + Sync>> {
+    let _permit = XPUB_SCAN_LIMIT
+        .try_acquire()
+        .map_err(|_| "xpub scan busy; please retry shortly")?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let mut all_addresses: Vec<(String, String)> = Vec::new();
     for chain in [0u32, 1u32] {

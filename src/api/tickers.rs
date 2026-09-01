@@ -238,8 +238,17 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
             }
         }
     }
-    if load_rate_series(&db).len() < 30 {
-        info!("fiat sampler: store empty, backfilling from CoinGecko market_chart");
+    // Backfill when the store is thin OR its history does not reach back
+    // near the fetchable 365-day window (a count-only gate left the
+    // historical gap permanent once 30 live samples accumulated).
+    let series = load_rate_series(&db);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let oldest = series.keys().next().copied().unwrap_or(u64::MAX);
+    if series.len() < 30 || oldest > now.saturating_sub(300 * 86_400) {
+        info!("fiat sampler: history thin, backfilling from CoinGecko market_chart");
         match backfill(&db).await {
             Ok(n) => info!(days = n, "fiat sampler: backfill complete"),
             Err(e) => warn!(error = %e, "fiat sampler: backfill failed; will accumulate live"),

@@ -886,9 +886,14 @@ async fn first_seen_date(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<String>
     let best = best?;
     {
         // Re-check the epoch: a reorg mid-computation must not repopulate the
-        // fresh map with pre-reorg data.
+        // fresh map with pre-reorg data. Size-bound the map (it otherwise
+        // accumulates every address seen for the whole epoch); a clear just
+        // refills from 't' reads.
         let mut g = m.lock().await;
         if g.0 == epoch {
+            if g.1.len() >= 200_000 {
+                g.1.clear();
+            }
             g.1.insert(addr.to_string(), best.clone());
         }
     }

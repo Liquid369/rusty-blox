@@ -342,13 +342,22 @@ async fn compute_fee_stats(
             if tx.value_in == "0" {
                 continue;
             }
-            // Coinstake: empty first output is the PIVX marker.
-            if tx
-                .vout
-                .first()
-                .map(|o| o.value == "0" && o.addresses.is_none())
-                .unwrap_or(false)
-            {
+            // Coinstake per Core's IsCoinStake: real vin, >= 2 outputs, and an
+            // EMPTY first output (zero value AND empty script). The script
+            // check matters: a zero-value OP_RETURN first output on a normal
+            // tx is not a coinstake and its fee belongs in the stats.
+            let is_coinstake = tx.vout.len() >= 2
+                && tx.vin.first().map(|v| v.txid.is_some()).unwrap_or(false)
+                && tx
+                    .vout
+                    .first()
+                    .map(|o| {
+                        o.value == "0"
+                            && o.addresses.is_none()
+                            && o.hex.as_deref().unwrap_or("").is_empty()
+                    })
+                    .unwrap_or(false);
+            if is_coinstake {
                 continue;
             }
             let Ok(fee) = tx.fees.parse::<i64>() else {

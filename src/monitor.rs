@@ -1975,8 +1975,14 @@ pub async fn run_block_monitor(
     // One-shot new_addresses repair, in THIS task so it cannot interleave with
     // Lane I/R RMWs on the same day blobs (a detached task loses whichever
     // write races second). Marker-gated: the 90-day walk runs once per
-    // deployment of the fix, delaying the first tick a few minutes.
-    if crate::analytics_live::is_enabled() && crate::analytics_live::is_ready(&db) {
+    // deployment of the fix, delaying the first tick a few minutes. Shadow
+    // mode skips WITHOUT setting the marker: the repair targets the real
+    // keyspace, and marking done against shadow blobs would permanently skip
+    // it after promotion.
+    if crate::analytics_live::is_enabled()
+        && crate::analytics_live::is_ready(&db)
+        && !crate::analytics_live::shadow_mode()
+    {
         const MARKER: &[u8] = b"new_addr_backfill_v1";
         let done = db
             .cf_handle("chain_state")
