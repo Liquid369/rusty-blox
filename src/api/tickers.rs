@@ -336,19 +336,27 @@ pub async fn multi_tickers_v2(
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     const MAX_TIMESTAMPS: usize = 100;
-    let timestamps: Vec<u64> = q
-        .timestamp
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .filter_map(|t| t.trim().parse::<u64>().ok())
-        .take(MAX_TIMESTAMPS)
-        .collect();
-    if timestamps.is_empty() {
-        return Err((
+    let bad_request = |msg: &str| {
+        (
             axum::http::StatusCode::BAD_REQUEST,
-            Json(super::types::BlockbookError::new("Missing timestamp")),
-        ));
+            Json(super::types::BlockbookError::new(msg)),
+        )
+    };
+    let raw = q.timestamp.as_deref().unwrap_or("");
+    if raw.is_empty() {
+        return Err(bad_request("Missing timestamp"));
+    }
+    // Strict parse: silently dropping a malformed element would misalign the
+    // response rows with the requested timestamps.
+    let mut timestamps = Vec::new();
+    for t in raw.split(',') {
+        match t.trim().parse::<u64>() {
+            Ok(v) => timestamps.push(v),
+            Err(_) => return Err(bad_request("Invalid timestamp")),
+        }
+    }
+    if timestamps.len() > MAX_TIMESTAMPS {
+        return Err(bad_request("Too many timestamps"));
     }
     let series = cached_series(&db, &cache).await;
     let currency = q.currency.as_deref().map(str::to_lowercase);

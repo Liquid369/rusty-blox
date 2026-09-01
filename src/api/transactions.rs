@@ -29,7 +29,7 @@ pub use axum::extract::Path as AxumPath;
 ///
 /// **CACHED**: 300 second TTL for the immutable BODY only. `confirmations`
 /// grows with every block, so it is recomputed from the current tip on every
-/// cache hit; an UNCONFIRMED (mempool) response is never left in the cache —
+/// cache hit; an UNCONFIRMED (mempool) response is never left in the cache;
 /// a cached "confirmations: 0" would keep answering for the full TTL after
 /// the tx is mined, stalling every wallet that polls this endpoint.
 pub async fn tx_v2(
@@ -49,7 +49,7 @@ pub async fn tx_v2(
 
     // Cache hit: serve the immutable body with `confirmations` freshened from
     // the current tip. A cached unconfirmed snapshot can't be freshened (no
-    // height to count from) — drop it and recompute below.
+    // height to count from); drop it and recompute below.
     if let Some(mut cached) = cache.get_json_value(&cache_key).await {
         if freshen_confirmations(&db, &mut cached) {
             return Ok(Json(cached));
@@ -70,7 +70,7 @@ pub async fn tx_v2(
         Ok(tx) => {
             // get_or_compute stores every Ok result; an unconfirmed snapshot must
             // not linger there for the TTL (it would pin "confirmations: 0" after
-            // the tx is mined). Evict it — the value returned to THIS caller was
+            // the tx is mined). Evict it; the value returned to THIS caller was
             // computed moments ago and is fresh either way.
             if tx.get("blockHeight").and_then(|h| h.as_i64()).unwrap_or(0) <= 0 {
                 cache.invalidate(&cache_key).await;
@@ -80,7 +80,7 @@ pub async fn tx_v2(
         Err(e) => {
             // 404 ONLY for a genuinely-absent tx. Errors like "transactions CF not
             // found" or a task-join failure are String errors, NOT rocksdb::Error,
-            // so the old downcast mapped them to 404 — telling clients a corrupt or
+            // so the old downcast mapped them to 404, telling clients a corrupt or
             // misconfigured DB simply has no such tx. Whitelist the real not-found
             // messages instead; everything else is a storage error (500).
             // 404 ONLY for a genuinely-absent tx; a storage/parser error is a 500 with
@@ -120,29 +120,51 @@ pub async fn raw_tx_v2(
         return Err(not_found());
     }
     let db_clone = Arc::clone(&db);
-    let confirmed = tokio::task::spawn_blocking(move || -> Option<String> {
-        let cf = db_clone.cf_handle("transactions")?;
+    // A storage error must surface as a 500, never read as "absent" (the
+    // false-404 class every other read path already guards against).
+    let confirmed = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+        let cf = db_clone
+            .cf_handle("transactions")
+            .ok_or_else(|| "transactions CF not found".to_string())?;
         read_valid_tx_record(&db_clone, &cf, &txid_bytes)
-            .unwrap_or(None)
-            .map(|rec| hex::encode(&rec[8..]))
+            .map_err(|e| e.to_string())
+            .map(|opt| opt.map(|rec| hex::encode(&rec[8..])))
     })
     .await
-    .unwrap_or(None);
-    if let Some(hex) = confirmed {
-        return Ok(Json(hex));
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    match confirmed {
+        Ok(Some(hex)) => return Ok(Json(hex)),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "rawtx read failed");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlockbookError::new("Internal error loading transaction")),
+            ));
+        }
     }
-    match mempool.raw_hex(&txid).await {
-        Some(raw) => Ok(Json(raw)),
-        None => Err(not_found()),
+    if let Some(raw) = mempool.raw_hex(&txid).await {
+        return Ok(Json(raw));
     }
+    // Just-broadcast txs sit at the node before the mempool monitor's next
+    // poll lands them in the parsed cache; ask the node directly.
+    if let Ok(v) =
+        super::helpers::rpc_call_json("getrawtransaction", serde_json::json!([txid, 0])).await
+    {
+        if let Some(s) = v.as_str() {
+            return Ok(Json(s.to_string()));
+        }
+    }
+    Err(not_found())
 }
 
-/// Overwrite a cached `/tx` JSON's `confirmations` from the CURRENT chain tip —
+/// Overwrite a cached `/tx` JSON's `confirmations` from the CURRENT chain tip,
 /// the one field of a confirmed transaction that changes with every block, and
 /// therefore the one field that must never be served from a TTL cache.
 /// Returns false for an unconfirmed snapshot (`blockHeight <= 0`): there is no
 /// height to count from, so the caller must recompute instead of serving it.
-/// If chain state is unreadable, the stored count is served as-is — stale-but-sane
+/// If chain state is unreadable, the stored count is served as-is; stale-but-sane
 /// beats a confident 0 (mirrors the compute path's `.ok()` on the same read).
 pub(crate) fn freshen_confirmations(db: &Arc<DB>, tx: &mut serde_json::Value) -> bool {
     let height = tx.get("blockHeight").and_then(|h| h.as_i64()).unwrap_or(0);
@@ -162,7 +184,7 @@ pub(crate) fn freshen_confirmations(db: &Arc<DB>, tx: &mut serde_json::Value) ->
 /// display) or DISPLAY; a body-LESS stub (≤8 bytes: version+height, no tx) at one key must
 /// NOT shadow the real record at the other (that shadowing is the `/tx` 404 bug). Returns
 /// the first record with a body (`len() > 8`), Ok(None) if none exists, or Err on a real
-/// RocksDB read failure — callers on money paths must propagate the Err (a swallowed IO
+/// RocksDB read failure; callers on money paths must propagate the Err (a swallowed IO
 /// error reads as "tx absent" and produces a confident wrong answer).
 pub(crate) fn read_valid_tx_record(
     db: &DB,
@@ -185,7 +207,7 @@ pub(crate) fn read_valid_tx_record(
 }
 
 /// Like [`read_valid_tx_record`], but ALSO reports whether any record at either key
-/// order — including body-less stubs — carries the `HEIGHT_ORPHAN` sentinel. A reorg
+/// order, including body-less stubs, carries the `HEIGHT_ORPHAN` sentinel. A reorg
 /// orphan-marks only the DISPLAY record, so a stale INTERNAL record with its old
 /// positive height would otherwise shadow the mark entirely (the reader probes
 /// internal first, and would count a disconnected tx). Callers whose SUMS must
@@ -194,7 +216,7 @@ pub(crate) fn read_valid_tx_record(
 ///
 /// ponytail: an any-order orphan mark wins even against a positive height at the
 /// other order. A tx orphaned during initial sync and later re-broadcast under the
-/// same txid would be wrongly skipped — if that ever matters, the upgrade path is a
+/// same txid would be wrongly skipped; if that ever matters, the upgrade path is a
 /// 'B'+height membership check (the authoritative canonical txid list).
 pub(crate) fn read_tx_record_orphan_aware(
     db: &DB,
@@ -241,7 +263,7 @@ pub(crate) async fn build_transaction_from_db(
 /// `version(4) ++ height(4) ++ raw_tx` blob directly (a mempool tx fetched via
 /// getrawtransaction); `None` reads it from the confirmed `transactions` index.
 /// Input values/addresses and output spent-flags are resolved from the index either
-/// way — for a mempool tx, confirmed prevouts resolve and its own not-yet-indexed
+/// way: for a mempool tx, confirmed prevouts resolve and its own not-yet-indexed
 /// outputs stay `spent: null`.
 async fn build_transaction_inner(
     db: &Arc<DB>,
@@ -362,7 +384,7 @@ async fn build_transaction_inner(
         // Build vout (outputs)
         //
         // P2-D: per-output spent/unspent status. The authoritative live-UTXO
-        // source in this codebase is the addr_index 'a'+address set — a serialized
+        // source in this codebase is the addr_index 'a'+address set, a serialized
         // list of (txid_bytes, vout) tuples where the txid is stored in canonical
         // DISPLAY order (the same bytes hex(tx.txid) decodes to; see
         // api/addresses.rs::compute_utxos, which trusts this exact set for /utxo).
@@ -372,7 +394,7 @@ async fn build_transaction_inner(
         // serde `spent`). spentTxId is intentionally omitted: there is no cheap
         // forward output->spending-txid index (the utxo_undo 'S' index is keyed for
         // reorg resurrection, not query), and that field is not on the shared
-        // TxOutput struct — a reverse scan would be too expensive per request.
+        // TxOutput struct; a reverse scan would be too expensive per request.
         //
         // The txid in DISPLAY order, decoded once, matched against the 'a' set.
         let txid_display_bytes = hex::decode(&tx.txid).unwrap_or_default();
@@ -382,7 +404,7 @@ async fn build_transaction_inner(
         // bytes a 49B stride can mis-parse (a UTXO-count multiple of 49 even passes the
         // modulo check), so do NOT read them. `spent` goes uniformly null; the rest of
         // the tx (hash/vin/vout/confirmations, from the transactions CF) stays available,
-        // so /tx is never 503'd wholesale — only this one annotation is withheld.
+        // so /tx is never 503'd wholesale; only this one annotation is withheld.
         let addr_index_serveable = crate::chain_state::addr_index_ready(&db_clone);
 
         // Synchronous probe of the 'a'+address unspent set (we are inside a
@@ -401,11 +423,11 @@ async fn build_transaction_inner(
             // An empty UTXO set comes in TWO shapes: the monitor DELETES the 'a' key
             // when an address empties (delete_cf at zero balance), while full
             // enrichment writes an EMPTY (0-byte) 'a' value for the same state. Treat
-            // both identically: if the address is genuinely KNOWN — its 'r'
-            // received-total exists AND is > 0 — an empty set means every output it
+            // both identically: if the address is genuinely KNOWN (its 'r'
+            // received-total exists AND is > 0), an empty set means every output it
             // held is spent (Some(false)). An 'r' of exactly 0 stays None: a reorg
             // rollback leaves 'r'=0 behind for an address whose only receipt was
-            // disconnected, and those outputs were never spent — asserting "spent"
+            // disconnected, and those outputs were never spent; asserting "spent"
             // there would be a false statement. Un-indexed addresses stay None.
             let known_and_emptied = || -> Option<bool> {
                 let mut r_key = vec![b'r'];
@@ -453,7 +475,7 @@ async fn build_transaction_inner(
 
             // Determine spent status only for outputs that carry an address (the
             // 'a' index is address-keyed). Unspendable outputs (OP_RETURN, empty
-            // scripts) can't be tracked — leave `spent` as None so the frontend
+            // scripts) can't be tracked; leave `spent` as None so the frontend
             // degrades cleanly rather than mislabeling them.
             // block_height <= 0 → unconfirmed (mempool) or non-canonical (orphan): the
             // output is not in the 'a' UTXO index, so a probe would falsely read "spent".
@@ -638,7 +660,7 @@ pub(crate) async fn compute_transaction_details(
         Ok(tx) => tx,
         Err(e) => {
             // Not in the confirmed index. A genuine "not found" may just be an
-            // UNCONFIRMED tx still in the mempool — the node can serve it via
+            // UNCONFIRMED tx still in the mempool; the node can serve it via
             // getrawtransaction. Fall back ONLY on a logical not-found, never on a
             // storage error (which must surface as 500, not be masked as a 404).
             if e.downcast_ref::<rocksdb::Error>().is_none()
@@ -706,7 +728,7 @@ async fn send_transaction_internal(
 ) -> Result<Json<SendTxResponse>, (StatusCode, Json<BlockbookError>)> {
     // Validate input BEFORE touching the node: must be hex and within PIVX's
     // 2 MB block size limit (4M hex chars). Previously arbitrary input was
-    // forwarded to the node on a freshly spawned OS thread per request —
+    // forwarded to the node on a freshly spawned OS thread per request:
     // unbounded thread growth under load, leaked threads on timeout.
     let tx_hex = tx_hex.trim().to_string();
     if tx_hex.is_empty() || tx_hex.len() > 4_000_000 || tx_hex.len() % 2 != 0 {
@@ -736,7 +758,7 @@ async fn send_transaction_internal(
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
             // Node rejection reasons (e.g. "bad-txns-inputs-spent") are part of the
-            // Blockbook contract — wallets rely on them.
+            // Blockbook contract; wallets rely on them.
             Json(BlockbookError::new(format!(
                 "Failed to send transaction: {e}"
             ))),
@@ -827,7 +849,7 @@ mod tests {
     }
 
     // THE reorg bug: an EXACTLY-8-byte body-less stub (version(4)+HEIGHT_ORPHAN(4), no tx
-    // bytes — written by reorg.rs disconnect_transaction) passes the len>=8 check. It must
+    // bytes, written by reorg.rs disconnect_transaction) passes the len>=8 check. It must
     // NOT shadow the real record (which has a body, len>8) at the other key order.
     #[test]
     fn prefers_body_over_eight_byte_stub() {
@@ -920,7 +942,7 @@ mod tests {
         assert_eq!(v["confirmations"], 11); // 110 - 100 + 1, same formula as compute
     }
 
-    // An unconfirmed snapshot (blockHeight <= 0) has no height to count from — the
+    // An unconfirmed snapshot (blockHeight <= 0) has no height to count from; the
     // caller must recompute instead of serving it (this is what un-pins a mempool
     // "confirmations: 0" after the tx is mined).
     #[test]

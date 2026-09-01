@@ -89,6 +89,10 @@ async fn handle_connection(mut socket: WebSocket, ctx: Ctx, broadcaster: Arc<Eve
                         if socket.send(Message::Text(reply.into())).await.is_err() {
                             break;
                         }
+                        // A dispatch longer than the idle window would leave
+                        // the expired idle arm ready and close a live socket
+                        // right after this reply; the reply IS liveness.
+                        idle.as_mut().reset(tokio::time::Instant::now() + crate::websocket::WS_IDLE_TIMEOUT);
                     }
                     Some(Ok(Message::Ping(p))) => {
                         if socket.send(Message::Pong(p)).await.is_err() {
@@ -256,14 +260,22 @@ fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) ->
                     .collect()
             });
     let mut out = serde_json::Map::new();
-    for cur in crate::api::tickers::CURRENCIES {
-        if filter
-            .as_ref()
-            .map(|f| f.iter().any(|c| c == cur))
-            .unwrap_or(true)
-        {
-            if let Some(v) = rates.get(cur) {
-                out.insert(cur.to_string(), serde_json::json!(v));
+    match filter.as_ref().filter(|f| !f.is_empty()) {
+        // Requested currencies echo back; unavailable ones mark -1, matching
+        // the REST tickers shape.
+        Some(f) => {
+            for cur in f {
+                match rates.get(cur) {
+                    Some(v) => out.insert(cur.clone(), serde_json::json!(v)),
+                    None => out.insert(cur.clone(), serde_json::json!(-1)),
+                };
+            }
+        }
+        None => {
+            for cur in crate::api::tickers::CURRENCIES {
+                if let Some(v) = rates.get(cur) {
+                    out.insert(cur.to_string(), serde_json::json!(v));
+                }
             }
         }
     }

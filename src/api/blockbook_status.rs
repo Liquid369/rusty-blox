@@ -80,8 +80,16 @@ pub async fn blockbook_root_v2(
         .get_or_compute("bb:backend", Duration::from_secs(15), || async {
             let chain_info = rpc_call_json("getblockchaininfo", serde_json::json!([])).await?;
             let net_info = rpc_call_json("getnetworkinfo", serde_json::json!([])).await?;
+            // A missing chain name degrades rather than defaults: claiming
+            // "main" would misreport a testnet backend to network-selecting
+            // clients.
+            let chain = chain_info
+                .get("chain")
+                .and_then(|c| c.as_str())
+                .filter(|c| !c.is_empty())
+                .ok_or("getblockchaininfo missing chain")?;
             Ok::<serde_json::Value, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({
-                "chain": chain_info.get("chain").cloned().unwrap_or("main".into()),
+                "chain": chain,
                 "blocks": chain_info.get("blocks").cloned().unwrap_or(0.into()),
                 "headers": chain_info.get("headers").cloned().unwrap_or(0.into()),
                 "bestBlockHash": chain_info.get("bestblockhash").cloned().unwrap_or("".into()),
@@ -95,7 +103,8 @@ pub async fn blockbook_root_v2(
         .await
         .unwrap_or_else(|e| {
             warn!(error = %e, "blockbook root: backend RPC unavailable, serving degraded");
-            serde_json::json!({ "chain": "main", "blocks": height, "error": "backend unavailable" })
+            // No chain claim while degraded; only what the index knows.
+            serde_json::json!({ "blocks": height, "error": "backend unavailable" })
         });
 
     Json(serde_json::json!({
