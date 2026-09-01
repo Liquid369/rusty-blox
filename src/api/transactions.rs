@@ -148,7 +148,12 @@ pub async fn raw_tx_v2(
         return Ok(Json(raw));
     }
     // Just-broadcast txs sit at the node before the mempool monitor's next
-    // poll lands them in the parsed cache; ask the node directly.
+    // poll lands them in the parsed cache; ask the node directly. Same cap as
+    // the /tx fallback: a random-txid spray must not amplify onto pivxd's
+    // rpcthreads pool, so a saturated limiter reports not-found.
+    let Ok(_permit) = MEMPOOL_RPC_LIMIT.try_acquire() else {
+        return Err(not_found());
+    };
     if let Ok(v) =
         super::helpers::rpc_call_json("getrawtransaction", serde_json::json!([txid, 0])).await
     {

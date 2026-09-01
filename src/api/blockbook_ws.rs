@@ -247,7 +247,12 @@ fn tx_addresses(tx: &serde_json::Value) -> HashSet<String> {
     out
 }
 
-/// Rates object honoring an optional ws `currencies` filter list.
+/// Rates object honoring an optional ws `currencies` filter list. The filter
+/// is attacker-sized, so it is capped: only 3 real currencies exist, and each
+/// requested element becomes a map entry (rate or -1) in EVERY returned
+/// ticker, multiplying against the timestamp count.
+const WS_MAX_CURRENCIES: usize = 32;
+
 fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) -> serde_json::Value {
     let filter: Option<Vec<String>> =
         params
@@ -256,6 +261,7 @@ fn ws_rates(params: &serde_json::Value, rates: crate::api::tickers::DayRates) ->
             .map(|a| {
                 a.iter()
                     .filter_map(|c| c.as_str())
+                    .take(WS_MAX_CURRENCIES)
                     .map(|c| c.to_lowercase())
                     .collect()
             });
@@ -709,6 +715,12 @@ async fn dispatch(
                 .unwrap_or_default();
             if stamps.is_empty() {
                 return Err("missing timestamps".to_string());
+            }
+            // Same bound as REST multi-tickers; each timestamp builds a full
+            // rates map, so the product with the currencies filter must stay
+            // small.
+            if stamps.len() > 100 {
+                return Err("too many timestamps".to_string());
             }
             let tickers: Vec<serde_json::Value> = stamps
                 .iter()
