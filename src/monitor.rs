@@ -1972,6 +1972,31 @@ pub async fn run_block_monitor(
         );
     }
 
+    // One-shot new_addresses repair, in THIS task so it cannot interleave with
+    // Lane I/R RMWs on the same day blobs (a detached task loses whichever
+    // write races second). Marker-gated: the 90-day walk runs once per
+    // deployment of the fix, delaying the first tick a few minutes.
+    if crate::analytics_live::is_enabled() && crate::analytics_live::is_ready(&db) {
+        const MARKER: &[u8] = b"new_addr_backfill_v1";
+        let done = db
+            .cf_handle("chain_state")
+            .and_then(|cf| db.get_cf(&cf, MARKER).ok().flatten())
+            .is_some();
+        if !done {
+            match crate::analytics_live::backfill_new_addresses(&db, 90).await {
+                Ok(n) => {
+                    info!(days_repaired = n, "new_addresses backfill complete");
+                    if let Some(cf) = db.cf_handle("chain_state") {
+                        let _ = db.put_cf(&cf, MARKER, [1u8]);
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "new_addresses backfill failed; will retry next boot")
+                }
+            }
+        }
+    }
+
     // One-shot Phase-0 shadow validator: if `sync.live_analytics_shadow_validate_days`
     // > 0, wait for the daily series to be built, then re-run Lane I/R over that many
     // recent days into the shadow keyspace and diff each complete day vs the full

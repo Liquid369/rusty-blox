@@ -750,35 +750,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rustyblox::api::tickers::run_fiat_rate_sampler(fiat_db).await;
     });
 
-    // One-shot new_addresses repair: days written before Lane R owned the
-    // field hold zeros. Marker-gated so it runs once per deployment of the fix.
-    if rustyblox::analytics_live::is_enabled() {
-        let na_db = Arc::clone(&db_arc);
-        tokio::spawn(async move {
-            const MARKER: &[u8] = b"new_addr_backfill_v1";
-            let done = na_db
-                .cf_handle("chain_state")
-                .and_then(|cf| na_db.get_cf(&cf, MARKER).ok().flatten())
-                .is_some();
-            if done {
-                return;
-            }
-            // Not ready = no watermark to walk from; leave the marker unset so
-            // the next boot retries.
-            if !rustyblox::analytics_live::is_ready(&na_db) {
-                return;
-            }
-            match rustyblox::analytics_live::backfill_new_addresses(&na_db, 90).await {
-                Ok(n) => {
-                    info!(days_repaired = n, "new_addresses backfill complete");
-                    if let Some(cf) = na_db.cf_handle("chain_state") {
-                        let _ = na_db.put_cf(&cf, MARKER, [1u8]);
-                    }
-                }
-                Err(e) => error!(error = %e, "new_addresses backfill failed; will retry next boot"),
-            }
-        });
-    }
+    // new_addresses backfill runs inside the monitor task (run_block_monitor),
+    // not here: a detached task would RMW the same day blobs Lane I is
+    // updating and lose writes.
 
     // Spawn mempool monitor service (can start early). Carries the DB handle
     // so pending txs resolve their prevouts for the per-address mempool view.

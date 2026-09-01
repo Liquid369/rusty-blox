@@ -837,14 +837,18 @@ pub(crate) async fn apply_block_core(
     Ok(())
 }
 
-/// First-seen height per address, from the canonical 't' history (min height
-/// > 0). An address's first-ever appearance is an output, so the min-height
-/// date equals the enrich's first-seen date. Cached per reorg epoch: a reorg
-/// can orphan a first appearance, so an epoch bump clears the map.
-static FIRST_SEEN: std::sync::OnceLock<tokio::sync::Mutex<(u64, HashMap<String, i32>)>> =
+/// First-seen DATE per address. The enrich tracks the minimum DATE over an
+/// address's output appearances; block timestamps are not strictly monotonic,
+/// so the min-HEIGHT block can carry a later date than a slightly-higher
+/// early block. Taking the min date over every history entry within 720
+/// blocks of the minimum height matches the enrich (an address's first
+/// appearance is an output, and no realistic timestamp inversion spans half
+/// a day of blocks). Cached per reorg epoch: a reorg can orphan a first
+/// appearance, so an epoch bump clears the map.
+static FIRST_SEEN: std::sync::OnceLock<tokio::sync::Mutex<(u64, HashMap<String, String>)>> =
     std::sync::OnceLock::new();
 
-async fn first_seen_height(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<i32> {
+async fn first_seen_date(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<String> {
     let m = FIRST_SEEN.get_or_init(|| tokio::sync::Mutex::new((0, HashMap::new())));
     {
         let mut g = m.lock().await;
@@ -852,8 +856,8 @@ async fn first_seen_height(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<i32> 
             g.0 = epoch;
             g.1.clear();
         }
-        if let Some(h) = g.1.get(addr) {
-            return Some(*h);
+        if let Some(d) = g.1.get(addr) {
+            return Some(d.clone());
         }
     }
     // Handle scoped so the future stays Send (no CF handle across the await).
@@ -864,9 +868,31 @@ async fn first_seen_height(db: &Arc<DB>, addr: &str, epoch: u64) -> Option<i32> 
         db.get_cf(&cf, &key).ok()??
     };
     let list = crate::parser::deserialize_addr_txs(&data).await.ok()?;
-    let min_h = list.iter().map(|(_, h)| *h).filter(|h| *h > 0).min()?;
-    m.lock().await.1.insert(addr.to_string(), min_h);
-    Some(min_h)
+    let mut heights: Vec<i32> = list.iter().map(|(_, h)| *h).filter(|h| *h > 0).collect();
+    heights.sort_unstable();
+    heights.dedup();
+    let h0 = *heights.first()?;
+    let mut best: Option<String> = None;
+    for h in heights.iter().take_while(|h| **h <= h0 + 720) {
+        if let Some((t, _)) = header_time_bits(db, *h) {
+            if t != 0 {
+                let d = unix_to_date(t as u64);
+                if best.as_deref().map(|b| d.as_str() < b).unwrap_or(true) {
+                    best = Some(d);
+                }
+            }
+        }
+    }
+    let best = best?;
+    {
+        // Re-check the epoch: a reorg mid-computation must not repopulate the
+        // fresh map with pre-reorg data.
+        let mut g = m.lock().await;
+        if g.0 == epoch {
+            g.1.insert(addr.to_string(), best.clone());
+        }
+    }
+    Some(best)
 }
 
 /// new_addresses for each date: members of the day's active set whose 't'
@@ -880,12 +906,8 @@ async fn count_new_addresses(
     for (date, addrs) in day_active {
         let mut n = 0u64;
         for a in addrs {
-            if let Some(h) = first_seen_height(db, a, epoch).await {
-                if let Some((t, _)) = header_time_bits(db, h) {
-                    if t != 0 && unix_to_date(t as u64) == *date {
-                        n += 1;
-                    }
-                }
+            if first_seen_date(db, a, epoch).await.as_deref() == Some(date.as_str()) {
+                n += 1;
             }
         }
         day_new.insert(date.clone(), n);
