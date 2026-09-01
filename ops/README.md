@@ -13,7 +13,7 @@ This starts:
 - **Prometheus** on port **9091** (http://localhost:9091)
 - **Grafana** on port **3002** (http://localhost:3002)
 
-Both run on different ports to avoid conflicts (port 3000: existing Grafana, port 3001: frontend).
+Both run on non-default ports to avoid conflicts (3000 and 9090 are the stock Grafana/Prometheus ports and are often taken).
 
 ### 2. Start rusty-blox
 
@@ -24,7 +24,7 @@ cd ..
 cargo run --release --bin rustyblox
 ```
 
-Metrics are exposed on `http://localhost:9090/metrics`
+Metrics are exposed on the API port: `http://localhost:3005/metrics`
 
 ### 3. Access Grafana
 
@@ -33,7 +33,7 @@ Metrics are exposed on `http://localhost:9090/metrics`
    - Username: `admin`
    - Password: `rustyblox_admin`
 3. Navigate to **Dashboards** → **rusty-blox** folder
-4. Open **"rusty-blox Production Monitoring"**
+4. Open **"rusty-blox Monitoring - Improved"**
 
 ### 4. Verify Metrics
 
@@ -98,7 +98,7 @@ Edit `ops/docker-compose.yml`:
 ```yaml
 grafana:
   ports:
-    - "3002:3000"  # Change 3001 to 3002 or any available port
+    - "3002:3000"  # host port on the left; pick any free port
 ```
 
 ### Change Admin Password
@@ -128,7 +128,7 @@ docker-compose up -d
 
 **Check rustyblox is running:**
 ```bash
-curl http://localhost:9090/metrics
+curl http://localhost:3005/metrics
 ```
 
 **Check Docker can reach host:**
@@ -137,7 +137,7 @@ curl http://localhost:9090/metrics
 
 Edit `ops/prometheus/prometheus.yml`:
 ```yaml
-- targets: ['192.168.1.100:9090']  # Use your host IP
+- targets: ['192.168.1.100:3005']  # Use your host IP
 ```
 
 ### Grafana shows "No Data"
@@ -149,11 +149,11 @@ Edit `ops/prometheus/prometheus.yml`:
 
 ### Port Conflicts
 
-If ports 3001 or 9091 are already in use:
+If ports 3002 or 9091 are already in use:
 
 ```bash
 # Find what's using the port
-lsof -i :3001
+lsof -i :3002
 lsof -i :9091
 
 # Change ports in docker-compose.yml
@@ -161,7 +161,7 @@ lsof -i :9091
 
 ## Metrics Catalog
 
-See `METRICS_CATALOG.md` for full list of 45 available metrics.
+`curl http://localhost:3005/metrics` lists every metric with its HELP text.
 
 Key metrics:
 - `rustyblox_blocks_processed_total` - Block processing counter
@@ -172,7 +172,7 @@ Key metrics:
 
 ## Alert Rules
 
-Prometheus includes pre-configured alerts in `ops/prometheus/alerts.yml`:
+Prometheus includes pre-configured alerts in `ops/prometheus/alerts.yml`, including:
 
 - **BlockProcessingStalled** - No blocks processed for 5 minutes
 - **InvariantViolation** - Data integrity violation detected

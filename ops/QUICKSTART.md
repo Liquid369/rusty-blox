@@ -22,7 +22,7 @@ Your monitoring stack is **UP and RUNNING**:
 
 4. **Import Dashboard**:
    - Dashboards → Import → Upload JSON file
-   - Select: `ops/grafana/dashboards/rustyblox-main.json`
+   - Select: `ops/grafana/dashboards/rustyblox-improved.json`
    - Select Prometheus data source
    - Click "Import"
 
@@ -56,9 +56,9 @@ cd ops
 
 ## 📁 Important Files
 
-- **Dashboard**: [ops/grafana/dashboards/rustyblox-main.json](grafana/dashboards/rustyblox-main.json)
-- **Metrics**: [METRICS_CATALOG.md](../METRICS_CATALOG.md) - All 45 metrics documented
-- **Alerts**: [ops/prometheus/alerts.yml](prometheus/alerts.yml) - 5 critical alerts
+- **Dashboard**: [ops/grafana/dashboards/rustyblox-improved.json](grafana/dashboards/rustyblox-improved.json)
+- **Metrics**: `curl http://localhost:3005/metrics` lists every metric with HELP text
+- **Alerts**: [ops/prometheus/alerts.yml](prometheus/alerts.yml)
 - **Config**: [ops/prometheus/prometheus.yml](prometheus/prometheus.yml)
 
 ## 📈 Dashboard Features
@@ -102,11 +102,10 @@ lsof -i :3005  # rustyblox
 
 ## 📦 Port Summary
 
-- **3000**: Your existing Grafana (unchanged)
-- **3001**: Frontend (unchanged)
-- **3002**: **rustyblox Grafana** (new)
-- **3005**: rustyblox API + metrics
-- **9091**: **Prometheus** (new)
+- **3002**: rustyblox Grafana
+- **3005**: rustyblox API + frontend + /metrics
+- **9091**: Prometheus
+(3000 and 9090 are the stock Grafana/Prometheus ports, left free on purpose)
 
 ---
 
