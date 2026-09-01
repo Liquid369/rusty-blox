@@ -9,20 +9,23 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use rustyblox::api::{
     // Addresses module
     addr_v2,
-    // Root handlers
-    api_handler,
+    // Blockbook drop-in surface
+    api_not_found,
     // Balance history
     balance_history_v2,
     // Blocks module
     block_index_v2,
     block_stats_v2,
     block_v2,
+    blockbook_root_v2,
+    blockbook_websocket_handler,
     // Governance module
     budget_info_v2,
     budget_projection_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
+    estimate_fee_v2,
     finalized_budgets_v2,
     health_check_v2,
     hodl_analytics,
@@ -31,10 +34,14 @@ use rustyblox::api::{
     // Masternodes module
     mn_count_v2,
     mn_list_v2,
+    mn_raw_budget_vote_v2,
     money_supply_v2,
+    multi_tickers_v2,
     network_health_analytics,
     // Price module
     price_v2,
+    raw_block_v2,
+    raw_tx_v2,
     relay_mnb_v2,
     rich_list,
     root_handler,
@@ -48,8 +55,11 @@ use rustyblox::api::{
     status_v2,
     // Analytics module
     supply_analytics,
+    tickers_list_v2,
+    tickers_v2,
     transaction_analytics,
     treasury_analytics,
+    tx_specific_v2,
     // Transactions module
     tx_v2,
     utxo_v2,
@@ -75,7 +85,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, Options, DB};
@@ -106,7 +116,7 @@ use rustyblox::COLUMN_FAMILIES;
 //     floods can't monopolise the node even within the global budget.
 // (tower's GlobalConcurrencyLimitLayer would require enabling tower's `limit`
 // feature as a new direct dependency; using axum middleware + a tokio
-// Semaphore — both already direct deps — achieves the same back-pressure with
+// Semaphore (both already direct deps) achieves the same back-pressure with
 // no Cargo manifest change. Over-limit requests get 503 + Retry-After.)
 const GLOBAL_MAX_INFLIGHT: usize = 256;
 const BROADCAST_MAX_INFLIGHT: usize = 8;
@@ -186,6 +196,50 @@ async fn redirect_xpub(axum::extract::Path(id): axum::extract::Path<String>) -> 
     hash_redirect("xpub", &id)
 }
 
+/// Every /api error must be {"error":"..."} JSON. axum's extractor
+/// rejections (bad Path/Query/Json) and 405s emit plain text; rewrap any
+/// non-JSON /api error here. Handler-produced JSON errors pass untouched.
+async fn blockbookify_api_errors(request: Request, next: Next) -> Response {
+    let is_api = request.uri().path().starts_with("/api");
+    let response = next.run(request).await;
+    if !is_api || !(response.status().is_client_error() || response.status().is_server_error()) {
+        return response;
+    }
+    let is_json = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false);
+    if is_json {
+        return response;
+    }
+    let status = response.status();
+    // Keep the original headers (Retry-After on limiter 503s is a real
+    // backoff signal); only the body and content type change.
+    let headers = response.headers().clone();
+    // Salvage the extractor's message when it fits one line; it names the
+    // offending field, which beats a bare canonical reason.
+    let msg = match axum::body::to_bytes(response.into_body(), 1024).await {
+        Ok(bytes) if !bytes.is_empty() => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => status.canonical_reason().unwrap_or("Error").to_string(),
+    };
+    let mut wrapped = (
+        status,
+        axum::Json(rustyblox::api::types::BlockbookError::new(msg)),
+    )
+        .into_response();
+    for (k, v) in headers.iter() {
+        if k != axum::http::header::CONTENT_TYPE
+            && k != axum::http::header::CONTENT_LENGTH
+            && k != axum::http::header::TRANSFER_ENCODING
+        {
+            wrapped.headers_mut().insert(k.clone(), v.clone());
+        }
+    }
+    wrapped
+}
+
 /// Prometheus metrics endpoint handler
 async fn metrics_handler() -> impl IntoResponse {
     let metrics_output = metrics::gather_metrics();
@@ -213,11 +267,11 @@ async fn start_web_server(
     let server_port: u16 = config.get_int("server.port").unwrap_or(3005) as u16;
 
     // Configure CORS (P2-1). This is a read-only PUBLIC block explorer, so we
-    // intentionally keep `allow_origin(Any)` — anyone may read the chain data
+    // intentionally keep `allow_origin(Any)`; anyone may read the chain data
     // from any site and there are no cookies/credentials to protect (CORS is
     // not a server-side authorization boundary here). We DO narrow methods to
-    // the two we actually serve — GET for reads and POST for the
-    // Blockbook-compatible /sendtx broadcast — instead of the previous `Any`,
+    // the two we actually serve (GET for reads and POST for the
+    // Blockbook-compatible /sendtx broadcast) instead of the previous `Any`,
     // and likewise scope allowed request headers to Content-Type.
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -237,16 +291,29 @@ async fn start_web_server(
     let broadcast_routes = Router::new()
         .route("/api/v2/sendtx/{hex_tx}", get(send_tx_v2))
         .route("/api/v2/sendtx", post(send_tx_post_v2)) // Blockbook-compatible POST endpoint
+        .route("/api/v2/sendtx/", post(send_tx_post_v2)) // spec URL carries a trailing slash
         .route("/api/v2/relaymnb/{hex_mnb}", get(relay_mnb_v2))
+        // PIVX extension: submit a pre-signed governance vote (node write).
+        .route("/api/v2/mnrawbudgetvote", post(mn_raw_budget_vote_v2))
         .layer(middleware::from_fn(move |req, next| {
             concurrency_limit(broadcast_limit.clone(), req, next)
         }));
 
     // We just want to mimic blockbook API endpoints and structure for compatibility
     let app = Router::new()
-        .route("/api", get(api_handler))
-        .route("/api/", get(status_v2)) // Same as /api/v2/status
-        .route("/api/endpoint", get(api_handler))
+        // Blockbook status envelope: the FIRST thing every Blockbook client
+        // probes. All four root spellings serve it (previously HTML/stubs).
+        .route("/api", get(blockbook_root_v2))
+        .route("/api/", get(blockbook_root_v2))
+        .route("/api/status", get(blockbook_root_v2)) // same SystemInfo as /api/
+        .route("/api/v2", get(blockbook_root_v2))
+        .route("/api/v2/", get(blockbook_root_v2))
+        .route("/api/v2/estimatefee/{blocks}", get(estimate_fee_v2))
+        .route("/api/v2/tx-specific/{txid}", get(tx_specific_v2))
+        .route("/api/v2/rawblock/{block_id}", get(raw_block_v2))
+        .route("/api/rawtx/{txid}", get(raw_tx_v2))
+        // Any OTHER /api path is a JSON 404, never the SPA's HTML-with-200.
+        .route("/api/{*rest}", any(api_not_found))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/health", get(health_check_v2))
         // NOTE (P3-3): /api/v2/cache/stats and /metrics (below) are operational
@@ -256,7 +323,7 @@ async fn start_web_server(
         // /ws/, so /metrics is NOT reachable through the public vhost; restrict
         // /api/v2/cache/stats at the proxy too if it must stay private. A future
         // hardening step is to bind these behind a separate admin listener /
-        // config flag — left as a deliberate TODO to avoid breaking Prometheus
+        // config flag; left as a deliberate TODO to avoid breaking Prometheus
         // scraping which targets this port directly.
         .route("/api/v2/cache/stats", get(cache_stats_v2)) // Cache statistics endpoint
         .route("/api/v2/search/{query}", get(search_v2))
@@ -278,10 +345,6 @@ async fn start_web_server(
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
-        .route(
-            "/api/v2/mnrawbudgetvote/{raw_vote_params}",
-            get(api_handler),
-        )
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))
         .route("/api/v2/analytics/staking", get(staking_analytics))
@@ -295,7 +358,16 @@ async fn start_web_server(
         .route("/api/v2/analytics/snapshots", get(snapshots_analytics))
         .route("/api/v2/analytics/treasury", get(treasury_analytics))
         .route("/api/v2/analytics/coldstaking", get(coldstaking_analytics))
-        .route("/api/v2/price", get(price_v2)) // PIVX price data endpoint
+        .route("/api/v2/price", get(price_v2))
+        // Spec paths carry a trailing slash (Go mux redirects the bare form;
+        // axum treats them as distinct routes, so both are registered).
+        .route("/api/v2/tickers", get(tickers_v2))
+        .route("/api/v2/tickers/", get(tickers_v2))
+        .route("/api/v2/tickers-list", get(tickers_list_v2))
+        .route("/api/v2/tickers-list/", get(tickers_list_v2))
+        .route("/api/v2/multi-tickers", get(multi_tickers_v2))
+        .route("/api/v2/multi-tickers/", get(multi_tickers_v2))
+        .route("/websocket", get(blockbook_websocket_handler))
         .route("/ws/blocks", get(ws_blocks_handler))
         .route("/ws/transactions", get(ws_transactions_handler))
         .route("/ws/mempool", get(ws_mempool_handler))
@@ -327,7 +399,7 @@ async fn start_web_server(
         info!(path = %frontend_dist, "Serving frontend");
         let index = std::path::Path::new(&frontend_dist).join("index.html");
         let assets_dir = std::path::Path::new(&frontend_dist).join("assets");
-        // Hashed bundles live under /assets — serve them directly and return a
+        // Hashed bundles live under /assets; serve them directly and return a
         // real 404 on a miss (NO index.html fallback here). Falling back to
         // index.html for a missing chunk returns 200 text/html, which browsers
         // reject with a strict-MIME error on every redeploy (stale clients still
@@ -361,6 +433,9 @@ async fn start_web_server(
         .layer(middleware::from_fn(move |req, next| {
             concurrency_limit(global_limit.clone(), req, next)
         }))
+        // OUTERMOST for /api: even limiter 503s and timeout 408s produced by
+        // inner layers leave as {"error":"..."} JSON.
+        .layer(middleware::from_fn(blockbookify_api_errors))
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
@@ -483,7 +558,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let block_cache_size_mb = config.get_int("rocksdb.block_cache_size").unwrap_or(512);
     // Global memtable ceiling across all CFs (0 = unlimited). Bounds total write-
     // buffer RAM, which is otherwise capped only per-CF (write_buffer_size x
-    // max_write_buffer_number x CFs ~= several GB) — a real peak contributor on
+    // max_write_buffer_number x CFs ~= several GB), a real peak contributor on
     // an 8 GB VPS shared with pivxd.
     let db_write_buffer_size_mb = config
         .get_int("rocksdb.db_write_buffer_size")
@@ -667,10 +742,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rustyblox::db_sampler::start_db_size_sampler(sampler_db, 60).await;
     });
 
-    // Spawn mempool monitor service (can start early)
-    let mempool_clone = Arc::clone(&mempool_state);
+    // Fiat rate sampler: self-backfills the daily series once, then samples.
+    let fiat_db = Arc::clone(&db_arc);
     tokio::spawn(async move {
-        if let Err(e) = run_mempool_monitor(mempool_clone, 10).await {
+        rustyblox::api::tickers::run_fiat_rate_sampler(fiat_db).await;
+    });
+
+    // Spawn mempool monitor service (can start early). Carries the DB handle
+    // so pending txs resolve their prevouts for the per-address mempool view.
+    let mempool_clone = Arc::clone(&mempool_state);
+    let mempool_db = Arc::clone(&db_arc);
+    let mempool_bc = Arc::clone(&broadcaster);
+    tokio::spawn(async move {
+        if let Err(e) = run_mempool_monitor(mempool_clone, mempool_db, Some(mempool_bc), 10).await {
             error!(error = ?e, "Mempool monitor error");
         }
     });
@@ -706,9 +790,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Runtime::new().expect("Failed to build runtime");
 
             // Retry the sync service on a fatal error with capped backoff instead of
-            // letting the thread die. A prolonged RPC outage can abort a catch-up — the
+            // letting the thread die. A prolonged RPC outage can abort a catch-up; the
             // heightless-block backfill rewinds sync_height for re-detection and returns
-            // Err — and the web server keeps the process alive, so without this loop the
+            // Err, and the web server keeps the process alive, so without this loop the
             // explorer would serve a frozen tip even after RPC recovers (no supervisor
             // restart fires). The rewound sync_height makes each retry re-run the whole
             // catch-up + backfill, so it self-heals once RPC is back.

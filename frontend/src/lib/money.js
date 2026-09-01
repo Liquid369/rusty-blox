@@ -1,5 +1,5 @@
 /* =====================================================================
-   MONEY FORMATTING — THE SINGLE MOST IMPORTANT FILE IN THE FOUNDATION
+   MONEY FORMATTING: THE SINGLE MOST IMPORTANT FILE IN THE FOUNDATION
    ---------------------------------------------------------------------
    Money units in the rusty-blox API are NOT global. The SAME concept
    ("a value") arrives as a satoshi STRING on one endpoint, a satoshi
@@ -11,7 +11,7 @@
    ----------------------------------------------------------------------
    WHICH HELPER FOR WHICH ENDPOINT (from API-INVENTORY.md):
 
-   formatSats()  — value is SATOSHIS (string or float). Divides by 1e8.
+   formatSats()  - value is SATOSHIS (string or float). Divides by 1e8.
      - /address, /xpub, /utxo : every value/balance/totalReceived/
        totalSent/fees  ............................. satoshi STRING
      - /tx : value, valueIn, fees, vin/vout value ... satoshi STRING
@@ -21,7 +21,7 @@
      - /analytics/transactions : avg_value .......... satoshi STRING
             (note: avg_fee on the SAME object is PIV -> formatPiv)
 
-   formatPiv()   — value is already PIV (decimal string or f64 number).
+   formatPiv()   - value is already PIV (decimal string or f64 number).
      - /block-detail : value_in, value_out, fees, reward,
                        sapling.value_balance ......... PIV float
      - /tx : sapling.value_balance .................. PIV float
@@ -36,7 +36,7 @@
      - /analytics/snapshots : *_supply_piv .......... PIV f64 number
      - /moneysupply, /budgetinfo, /budgetprojection . PIV f64 number
 
-   formatFiat()    — ordinary fiat number (USD/EUR from /price, f64).
+   formatFiat()    - ordinary fiat number (USD/EUR from /price, f64).
      Guards the documented 0.0 "price unavailable" upstream fallback.
 
    NOT money: difficulty, percentages/rates, counts. Use lib/format.js.
@@ -65,7 +65,7 @@ export function groupThousands(numStr) {
 /**
  * Format a SATOSHI amount as PIV. BigInt-safe for integer satoshi strings
  * (values regularly exceed Number.MAX_SAFE_INTEGER, e.g.
- * "3482633087462720" = 34,826,330.8746272 PIV — parseInt would corrupt it).
+ * "3482633087462720" = 34,826,330.8746272 PIV; parseInt would corrupt it).
  *
  * Accepts:
  *  - integer satoshi STRING ("54830645131")  -> exact BigInt division

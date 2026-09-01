@@ -43,8 +43,8 @@ impl TransactionType {
 pub const COINBASE_MATURITY: u32 = 100;
 
 /// Coinstake maturity: PIVX Core's GetBlocksToMaturity() applies COINBASE_MATURITY (100)
-/// to both coinbase and coinstake. (600 is nStakeMinDepth — the depth an input needs
-/// before it may STAKE — not a spend-maturity rule.)
+/// to both coinbase and coinstake. (600 is nStakeMinDepth, the depth an input needs
+/// before it may STAKE, not a spend-maturity rule.)
 pub const COINSTAKE_MATURITY: u32 = 100;
 
 /// Check if a prevout is null (coinbase/coinstake marker)
@@ -101,7 +101,7 @@ fn is_zerocoin_public_spend_input(input: &CTxIn) -> bool {
 /// - `IsCoinStake()`: `!vin.empty()` && (`vin[0].prevout` NOT null, unless `vin[0]` is a
 ///   zerocoin spend / zPoS) && `vout.size() >= 2 && vout[0].IsEmpty()`
 ///
-/// A coinstake spends a REAL stake outpoint — a null first prevout disqualifies it
+/// A coinstake spends a REAL stake outpoint; a null first prevout disqualifies it
 /// (except zerocoin stakes). This is the opposite of coinbase.
 pub fn detect_transaction_type(tx: &CTransaction) -> TransactionType {
     detect_type_from_components(&tx.inputs, &tx.outputs)
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_maturity_coinstake() {
-        // Coinstake at height 1000 — PIVX Core applies COINBASE_MATURITY (100) to coinstake too
+        // Coinstake at height 1000; PIVX Core applies COINBASE_MATURITY (100) to coinstake too
         assert!(!is_output_spendable(TransactionType::Coinstake, 1000, 1050)); // Only 50 blocks
         assert!(!is_output_spendable(TransactionType::Coinstake, 1000, 1099)); // 99 blocks
         assert!(is_output_spendable(TransactionType::Coinstake, 1000, 1100)); // Exactly 100 blocks

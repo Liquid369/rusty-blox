@@ -71,7 +71,7 @@ pub async fn deserialize_utxos(data: &[u8]) -> Vec<(Vec<u8>, u64)> {
 
 /// Error from the addr_index `'a'`/`'t'` codecs. A buffer whose length is not an
 /// exact multiple of the entry stride is a HARD error (a stale legacy-format blob
-/// or corruption) — NEVER silently truncated. Once the version-readiness gate lands
+/// or corruption), NEVER silently truncated. Once the version-readiness gate lands
 /// (migration Step 9), readers will turn this into a uniform "reindexing" (503)
 /// response; until then it surfaces as an endpoint error, never garbage.
 #[derive(Debug)]
@@ -304,7 +304,7 @@ pub async fn deserialize_transaction(data: &[u8]) -> Result<CTransaction, std::i
         if is_sapling {
             let has_sap_data = cursor.read_u8()? != 0;
             if !has_sap_data {
-                // Optional discriminant 0x00 — no sapling payload. extraPayload (if any)
+                // Optional discriminant 0x00: no sapling payload. extraPayload (if any)
                 // is handled below.
                 extra_payload = read_extra_payload(&mut cursor, tx_type, data.len()).await?;
                 None
@@ -628,7 +628,7 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
             return vec![address];
         }
     }
-    // P2SH: a914{20 byte script hash}87 — exactly ONE address (version 13).
+    // P2SH: a914{20 byte script hash}87: exactly ONE address (version 13).
     // PIVX Core never encodes a script hash with the EXM prefix; emitting an EXM
     // twin here previously made the enrichment classifier drop P2SH outputs entirely.
     if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
@@ -667,7 +667,7 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
 }
 
 pub fn get_script_type(script: &[u8]) -> &str {
-    // P2CS (Cold Stake) — both OP_CHECKCOLDSTAKEVERIFY (0xd2) and the LOF variant (0xd1)
+    // P2CS (Cold Stake): both OP_CHECKCOLDSTAKEVERIFY (0xd2) and the LOF variant (0xd1)
     if script.len() == 51
         && script[0] == 0x76
         && script[1] == 0xa9
@@ -834,7 +834,7 @@ mod golden_script_tests {
         hex::decode(s).unwrap()
     }
 
-    /// Real mainnet coinstake P2CS output (block 5,452,237) — OP_CHECKCOLDSTAKEVERIFY_LOF (0xd1)
+    /// Real mainnet coinstake P2CS output (block 5,452,237): OP_CHECKCOLDSTAKEVERIFY_LOF (0xd1)
     #[test]
     fn coldstake_d1_matches_core() {
         let script = hex_script("76a97b63d114b3be8567d0190c67ca4675a0019089c55fe695f96714ef6bede7abacb6bea406f5c67a6b9e5e066ca85a6888ac");
@@ -884,7 +884,7 @@ mod golden_script_tests {
         assert_eq!(tx.extra_payload.expect("commitment payload").len(), 329);
     }
 
-    /// Same P2CS with OP_CHECKCOLDSTAKEVERIFY (0xd2) — Core decodescript: same addresses
+    /// Same P2CS with OP_CHECKCOLDSTAKEVERIFY (0xd2); Core decodescript: same addresses
     #[test]
     fn coldstake_d2_matches_core() {
         let script = hex_script("76a97b63d214b3be8567d0190c67ca4675a0019089c55fe695f96714ef6bede7abacb6bea406f5c67a6b9e5e066ca85a6888ac");
@@ -909,7 +909,7 @@ mod golden_script_tests {
         );
     }
 
-    /// Real mainnet P2SH output (block 5,451,524) — exactly ONE address, version 13 ('6...')
+    /// Real mainnet P2SH output (block 5,451,524): exactly ONE address, version 13 ('6...')
     #[test]
     fn p2sh_matches_core_single_address() {
         let script = hex_script("a91403d3f3e2a851686bbd533a497b9dab0373303b6087");
@@ -920,7 +920,7 @@ mod golden_script_tests {
         );
     }
 
-    /// P2PK compressed — Core decodescript hashes the RAW 33 bytes
+    /// P2PK compressed: Core decodescript hashes the RAW 33 bytes
     #[test]
     fn p2pk_compressed_matches_core() {
         let script =
@@ -932,7 +932,7 @@ mod golden_script_tests {
         );
     }
 
-    /// P2PK uncompressed — Core hashes the RAW 65 bytes (no compression first!)
+    /// P2PK uncompressed: Core hashes the RAW 65 bytes (no compression first!)
     #[test]
     fn p2pk_uncompressed_matches_core() {
         let script = hex_script("4104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac");
@@ -954,7 +954,7 @@ mod golden_script_tests {
         );
     }
 
-    /// A wrapped P2SH with a non-0xe0 leading byte is NONSTANDARD per Core —
+    /// A wrapped P2SH with a non-0xe0 leading byte is NONSTANDARD per Core;
     /// it must produce no address (the old code emitted a bogus EXM address).
     #[test]
     fn bogus_wrapped_p2sh_is_nonstandard() {

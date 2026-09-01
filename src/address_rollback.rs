@@ -80,7 +80,7 @@ pub struct AddressBlockUndo {
     pub address_utxos_created: HashMap<String, Vec<(Vec<u8>, u64)>>,
 
     /// Map of address -> UTXOs spent in this block
-    /// Key: address string, Value: list of (txid, vout, value, kind) tuples — value
+    /// Key: address string, Value: list of (txid, vout, value, kind) tuples; value
     /// + kind are captured so a reorg disconnect restores the full 49B 'a' record.
     pub address_utxos_spent: HashMap<String, Vec<(Vec<u8>, u64, i64, u8)>>,
 
@@ -121,7 +121,7 @@ impl AddressBlockUndo {
 
     /// Add a spent UTXO, capturing its value + kind so a reorg disconnect can restore
     /// the record's fields. SET-exact (same UTXO + value + kind), not insertion-order:
-    /// a reorg may order 'a' differently from a fresh enrich — harmless, the served set
+    /// a reorg may order 'a' differently from a fresh enrich; harmless, the served set
     /// is order-independent.
     pub fn add_utxo_spent(
         &mut self,
@@ -150,7 +150,7 @@ impl AddressBlockUndo {
     /// Fold another block's undo into this one (used to reverse a multi-block reorg
     /// as a single read-modify-write per address). Sums r/s and concatenates the
     /// tx/UTXO lists so reverse_address_block reads each on-disk base value exactly
-    /// once and applies the combined delta — avoiding the stale-read last-write-wins
+    /// once and applies the combined delta, avoiding the stale-read last-write-wins
     /// bug that an un-flushed per-block loop would hit on a repeated address.
     pub fn merge_from(&mut self, other: AddressBlockUndo) {
         for (addr, txids) in other.address_txs {
@@ -426,7 +426,7 @@ pub async fn rollback_address_index(
     // blocks, an address touched by N reversed blocks would read the SAME stale disk
     // value N times and the batch's last-write-wins would drop N-1 subtractions,
     // leaving r/s over-stated. Merging first (sum r/s, concat t/a edits) makes it a
-    // single read-modify-write per address — correct AND still atomic (one flush by
+    // single read-modify-write per address; correct AND still atomic (one flush by
     // the caller).
     let mut merged = AddressBlockUndo::new(rollback_to_height);
     let mut reversed_any = false;
@@ -557,7 +557,7 @@ async fn reverse_address_block(
 
         // Set of UTXOs this reversal CREATED. A (txid,vout) that was both created
         // and spent within the reversed range nets to absent, so it must be removed
-        // and NOT restored — otherwise a cross-block create-then-spend (both blocks
+        // and NOT restored; otherwise a cross-block create-then-spend (both blocks
         // reversed and merged) would leave a phantom UTXO in 'a'. Computing this set
         // once and excluding it from the restore makes the merged reversal
         // order-independent. ('a'-set correctness only; the served r-s balance is
@@ -581,8 +581,8 @@ async fn reverse_address_block(
                 }
                 // Restore the spent record with its captured value+kind if not already
                 // present. SET-exact (same UTXO + value + kind), NOT byte-order-exact: a
-                // tail-append may order 'a' differently from a fresh enrich after a reorg
-                // — harmless (served UTXOs sort by confirmations; balances/totals and 't'
+                // tail-append may order 'a' differently from a fresh enrich after a reorg;
+                // harmless (served UTXOs sort by confirmations; balances/totals and 't'
                 // pagination are order-independent; the enrich-vs-enrich byte-exact gate
                 // is unaffected since a fresh sync has no reorg).
                 if !utxo_list.iter().any(|(t, v, _, _)| t == txid && v == vout) {
@@ -860,8 +860,8 @@ mod tests {
             "t must drop tx1, keep tx0 with its height"
         );
 
-        // 'a' drops (tx1,0) and restores (tx0,0) with its captured value=150 + kind=0
-        // — the whole reason the spent undo carries value/kind. (Single restored record
+        // 'a' drops (tx1,0) and restores (tx0,0) with its captured value=150 + kind=0,
+        // the whole reason the spent undo carries value/kind. (Single restored record
         // here, so this case is also byte-order-exact; multi-record order is set-exact.)
         let a_after = deserialize_addr_utxos(&db.get_cf(&cf_ai, &key(b'a')).unwrap().unwrap())
             .await
@@ -995,9 +995,9 @@ mod tests {
             .unwrap();
         writer.flush().await.unwrap();
 
-        // 'a' must remain empty — no phantom UTXO restored.
+        // 'a' must remain empty; no phantom UTXO restored.
         match db.get_cf(&cf_ai, &a_key).unwrap() {
-            None => {} // empty (deleted) — correct
+            None => {} // empty (deleted), correct
             Some(bytes) => {
                 let utxos = deserialize_addr_utxos(&bytes).await.unwrap();
                 assert!(

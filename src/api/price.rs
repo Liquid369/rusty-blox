@@ -55,7 +55,8 @@ pub async fn price_v2(
 }
 
 /// Fetch price data from CoinGecko API
-async fn fetch_coingecko_price() -> Result<PriceData, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn fetch_coingecko_price(
+) -> Result<PriceData, Box<dyn std::error::Error + Send + Sync>> {
     let url = "https://api.coingecko.com/api/v3/simple/price?ids=pivx&vs_currencies=usd,eur,btc";
 
     // Use reqwest for async HTTP with proper headers

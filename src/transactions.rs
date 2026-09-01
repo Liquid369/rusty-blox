@@ -89,7 +89,7 @@ pub async fn process_transaction_from_buffer(
         let tx_type = async_cursor.read_u16_le().await?;
 
         // PIVX Core serializes every transaction with the same layout regardless of
-        // block version — parse uniformly. (The old version gating could fall through
+        // block version; parse uniformly. (The old version gating could fall through
         // without consuming the tx body, misaligning every subsequent transaction.)
         process_transaction_v1(
             &mut async_cursor,
@@ -134,7 +134,7 @@ pub async fn process_transaction(
         let tx_type = reader.read_u16_le().await?;
 
         // PIVX Core serializes every transaction with the same layout regardless of
-        // block version — parse uniformly. (The old version gating could fall through
+        // block version; parse uniformly. (The old version gating could fall through
         // without consuming the tx body, misaligning every subsequent transaction.)
         if let Err(e) = process_transaction_v1(
             reader,
@@ -244,7 +244,7 @@ async fn process_transaction_v1(
     // For Sapling transactions (version >= 3), skip the Sapling-specific data.
     // PIVX Core serializes sapData as Optional<SaplingTxData>: 1-byte discriminant
     // (0x00 absent / 0x01 present) followed by the payload. All reads MUST propagate
-    // errors — a partial skip would misalign the stream and corrupt every subsequent
+    // errors; a partial skip would misalign the stream and corrupt every subsequent
     // transaction's framing and txid.
     if tx_ver_out >= 3 {
         let mut discriminant = [0u8; 1];

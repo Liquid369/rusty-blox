@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   COMMAND PALETTE (Cmd/Ctrl+K) — universal HUD jump console.
+   COMMAND PALETTE (Cmd/Ctrl+K): universal HUD jump console.
    Mirrors the backend /search classifier:
      digits -> block, 64-hex -> /search (block OR tx), D/S/6/7/E… -> address.
    Also exposes quick nav destinations + sample deep-links.
@@ -20,6 +20,7 @@ const NAV = [
   { kind: 'NAV', label: 'Blocks', hint: 'recent block ledger', to: '/blocks' },
   { kind: 'NAV', label: 'Mempool', hint: 'pending transactions', to: '/mempool' },
   { kind: 'NAV', label: 'Masternodes', hint: 'node network · /mnlist', to: '/masternodes' },
+  { kind: 'NAV', label: 'API Reference', hint: 'blockbook drop-in + extensions', to: '/api' },
   { kind: 'NAV', label: 'Governance', hint: 'budget proposals · superblock', to: '/governance' },
   { kind: 'NAV', label: 'Analytics Deck', hint: 'HODL · wealth · staking', to: '/analytics' },
   { kind: 'SAMPLE', label: 'Block #5475000', hint: 'block-detail', to: '/block/5475000' },
@@ -31,7 +32,7 @@ const NAV = [
 function classify(s) {
   if (!s) return null
   if (/^\d+$/.test(s)) return { type: 'BLOCK', to: `/block/${s}`, label: `Block #${s}`, hint: 'height → block-detail' }
-  // A 64-hex string is ambiguous (block hash OR txid) — let the backend /search
+  // A 64-hex string is ambiguous (block hash OR txid); let the backend /search
   // classifier decide instead of forcing /tx (a block hash → broken tx page).
   if (/^[0-9a-fA-F]{64}$/.test(s)) return { type: 'HASH', to: `/search/${s}`, label: 'Block or transaction', hint: '64-hex → classify' }
   if (/^(xpub)/i.test(s)) return { type: 'XPUB', to: `/xpub/${s}`, label: 'Extended pubkey', hint: 'xpub → account' }

@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::interval;
 use tracing::{info, warn};
 
-/// Column families to monitor — the canonical DB CF set (single source of truth).
+/// Column families to monitor: the canonical DB CF set (single source of truth).
 use crate::COLUMN_FAMILIES;
 
 /// Background task that samples database size every N seconds

@@ -4,8 +4,8 @@
 
 You have two options for running the monitoring stack:
 
-### Option A: Docker (Recommended - Easier)
-### Option B: Native Binaries (What we'll use now)
+### Option A: Docker (see README.md, recommended)
+### Option B: Native binaries (below)
 
 ---
 
@@ -25,7 +25,8 @@ Prometheus config is already at `ops/prometheus/prometheus.yml`
 ### 2. Start Prometheus
 
 ```bash
-# Start on port 9091 (avoiding default 9090 used by rustyblox)
+# Start on port 9091 (9090, the Prometheus default, is often taken;
+# rustyblox metrics are on the API port, 3005)
 prometheus \
   --config.file=/Users/liquid/Projects/rusty-blox/ops/prometheus/prometheus.yml \
   --storage.tsdb.path=/Users/liquid/Projects/rusty-blox/ops/prometheus/data \
@@ -40,7 +41,7 @@ prometheus \
 ### 3. Start Grafana
 
 ```bash
-# Start on port 3002 (3000: existing Grafana, 3001: frontend)
+# Start on port 3002 (3000, the Grafana default, is often taken)
 grafana-server \
   --config=/usr/local/etc/grafana/grafana.ini \
   --homepath=/usr/local/share/grafana \
@@ -62,10 +63,11 @@ grafana-server \
 3. Add Prometheus data source:
    - URL: http://localhost:9091
    - Access: Server (default)
-4. Import dashboard from `ops/grafana/dashboards/rustyblox-main.json`
+4. Import dashboard from `ops/grafana/dashboards/rustyblox-improved.json`
 
 ---
 
 ## Quick Start Scripts
 
-I'll create helper scripts for you...
+`ops/start-prometheus.sh`, `ops/start-grafana.sh`, `ops/start-monitoring.sh`
+(both), `ops/stop-monitoring.sh` wrap the commands above.

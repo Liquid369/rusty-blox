@@ -1,10 +1,10 @@
 <script setup>
 /* =====================================================================
-   SEARCH RESULTS — /search classifier. The endpoint is a router, not a
+   SEARCH RESULTS: /search classifier. The endpoint is a router, not a
    render target: it returns an internally-tagged enum (Block / Transaction
    / Address / XPub / NotFound). We echo the classified result as a card
    linking to the authoritative entity page (Address.balance is always null
-   here — the address page fetches the real balance).
+   here; the address page fetches the real balance).
    ===================================================================== */
 import { ref, onMounted, watch, computed } from 'vue'
 import { getSearch } from '../api/client.js'

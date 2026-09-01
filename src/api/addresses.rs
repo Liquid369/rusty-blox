@@ -35,7 +35,7 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
 
 /// P2-B: validate a PIVX transparent address before treating it as a real
 /// account. The prior handlers accepted any string, so a one-char typo of a
-/// real address returned HTTP 200 with balance:0 (a fake zero account) — the
+/// real address returned HTTP 200 with balance:0 (a fake zero account); the
 /// reference Blockbook returns 400 on a checksum mismatch, and `/search`
 /// already NotFounds the same string.
 ///
@@ -113,7 +113,7 @@ pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
 /// Read the exact persisted per-address totals written by the enrichment phase:
 /// 'r'+address -> totalReceived, 's'+address -> totalSent (both i64 LE).
 /// A MISSING key reads as 0 (a never-seen address genuinely has no totals); a
-/// read ERROR propagates — folding it into 0 served a confident zeroed account
+/// read ERROR propagates; folding it into 0 served a confident zeroed account
 /// for a rich address, minting the exact failure the handler's 500-on-error
 /// path exists to catch, one layer below it.
 async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), String> {
@@ -129,7 +129,7 @@ async fn read_address_totals(db: &Arc<DB>, address: &str) -> Result<(i64, i64), 
             match db_clone.get_cf(&cf, key).map_err(|e| e.to_string())? {
                 // A MISSING key is a genuine 0 (never-seen address).
                 None => Ok(0),
-                // A PRESENT but wrong-width value is corruption — erroring beats
+                // A PRESENT but wrong-width value is corruption; erroring beats
                 // folding it to 0 and serving a confident zeroed balance.
                 Some(bytes) => <[u8; 8]>::try_from(bytes.as_slice())
                     .map(i64::from_le_bytes)
@@ -152,6 +152,7 @@ pub async fn addr_v2(
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<AddressInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: reject invalid/mistyped addresses with 400 instead of serving a
     // fake zero account (HTTP 200, balance:0). Matches Blockbook and the
@@ -193,11 +194,17 @@ pub async fn addr_v2(
         .await;
 
     match result {
-        Ok(info) => Ok(Json(info)),
+        Ok(mut info) => {
+            // Live mempool overlay AFTER the 30s cache: unconfirmed balance,
+            // pending tx count, and (page 1, unfiltered) the pending txs
+            // themselves at blockHeight -1, exactly as Blockbook serves them.
+            apply_address_mempool_overlay(&db, &mempool, &mut info, &params).await;
+            Ok(Json(info))
+        }
         Err(e) => {
             // A transient DB/compute error for a checksum-valid address must FAIL
             // the request. Returning a zeroed account here (as this used to) is a
-            // confident false statement — "this address holds nothing" — that a
+            // confident false statement ("this address holds nothing") that a
             // wallet will act on; Blockbook 5xxs the same case.
             warn!(address = %address, error = %e, "address compute failed");
             Err((
@@ -210,7 +217,151 @@ pub async fn addr_v2(
     }
 }
 
-async fn compute_address_info(
+/// Overlay the live mempool view onto a (cached) /address response: real
+/// unconfirmedBalance/unconfirmedTxs, and pending txs prepended on page 1 when
+/// no height filter is active. Never touches confirmed figures.
+/// Mempool overlay for an xpub account: sum pending deltas across the account
+/// addresses. With a token list present, use it (covers deep-used accounts);
+/// without one (details=basic/txids/txs) derive a bounded window per chain so
+/// pending activity still shows. Shared by REST and websocket.
+pub(crate) async fn apply_xpub_mempool_overlay(
+    mempool: &Arc<crate::mempool::MempoolState>,
+    xpub_str: &str,
+    gap: u32,
+    info: &mut XPubInfo,
+) {
+    // Nothing pending anywhere = nothing to overlay; skip derivation entirely.
+    if mempool.address_index.read().await.by_address.is_empty() {
+        return;
+    }
+    let addresses: Vec<String> = if let Some(tokens) = info.tokens.as_ref() {
+        tokens.iter().map(|t| t.name.clone()).collect()
+    } else {
+        use std::str::FromStr;
+        let Ok(xpub) = bitcoin::util::bip32::ExtendedPubKey::from_str(xpub_str) else {
+            return;
+        };
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let window = gap.clamp(20, 200);
+        let mut out = Vec::with_capacity((window as usize) * 2);
+        for chain in [0u32, 1] {
+            for i in 0..window {
+                if let Ok((addr, _)) = derive_address(&xpub, &secp, chain, i, xpub.depth) {
+                    out.push(addr);
+                }
+            }
+        }
+        out
+    };
+    let mut delta = 0i64;
+    let mut pending: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for addr in &addresses {
+        if let Some((d, txids)) = mempool.pending_for_address(addr).await {
+            delta += d;
+            pending.extend(txids);
+        }
+    }
+    if !pending.is_empty() {
+        info.unconfirmed_balance = delta.to_string();
+        info.unconfirmed_txs = pending.len() as u32;
+    }
+}
+
+/// Mempool overlay for a UTXO list: outputs a mempool tx spends disappear (a
+/// wallet re-spending them double-spends its own pending change); outputs a
+/// mempool tx creates appear at 0 confirmations. Shared by REST and websocket.
+pub(crate) async fn apply_utxo_mempool_overlay(
+    mempool: &Arc<crate::mempool::MempoolState>,
+    address: &str,
+    utxos: &mut Vec<UTXO>,
+) {
+    let (created, spent) = mempool.utxo_overlay(address).await;
+    if !spent.is_empty() {
+        utxos.retain(|u| !spent.contains(&(u.txid.clone(), u.vout)));
+    }
+    // A tx that confirmed between the block connect and the next mempool poll
+    // is in BOTH views; the confirmed entry wins.
+    let existing: std::collections::HashSet<(String, u32)> =
+        utxos.iter().map(|u| (u.txid.clone(), u.vout)).collect();
+    for (txid, vout, value) in created.into_iter().rev() {
+        if existing.contains(&(txid.clone(), vout)) {
+            continue;
+        }
+        utxos.insert(
+            0,
+            UTXO {
+                txid,
+                vout,
+                value: value.to_string(),
+                confirmations: 0,
+                lock_time: None,
+                height: None,
+                coinbase: None,
+                coinstake: None,
+                spendable: Some(true),
+                blocks_until_spendable: None,
+            },
+        );
+    }
+}
+
+pub(crate) async fn apply_address_mempool_overlay(
+    db: &Arc<DB>,
+    mempool: &Arc<crate::mempool::MempoolState>,
+    info: &mut AddressInfo,
+    params: &AddressQuery,
+) {
+    let Some((delta, pending_txids)) = mempool.pending_for_address(&info.address).await else {
+        return;
+    };
+    info.unconfirmed_balance = delta.to_string();
+    info.unconfirmed_txs = pending_txids.len() as u32;
+
+    if params.page > 1 || params.from.is_some() || params.to.is_some() {
+        return;
+    }
+    match params.details.as_str() {
+        "txids" => {
+            let list = info.txids.get_or_insert_with(Vec::new);
+            for txid in pending_txids.iter().rev() {
+                list.insert(0, txid.clone());
+            }
+        }
+        "txs" | "txslight" => {
+            let mut pending = Vec::new();
+            for txid in &pending_txids {
+                let Some(raw_hex) = mempool.raw_hex(txid).await else {
+                    continue;
+                };
+                match crate::api::transactions::build_unconfirmed_transaction(db, txid, &raw_hex)
+                    .await
+                {
+                    Ok(mut t) => {
+                        if params.details == "txslight" {
+                            t.hex = String::new();
+                            if let Some(s) = t.sapling.as_mut() {
+                                s.spends = None;
+                                s.outputs = None;
+                            }
+                        }
+                        pending.push(t);
+                    }
+                    Err(e) => {
+                        warn!(txid = %txid, error = %e, "pending tx build failed; omitted")
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                let list = info.transactions.get_or_insert_with(Vec::new);
+                pending.append(list);
+                *list = pending;
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) async fn compute_address_info(
     db: &Arc<DB>,
     address: &str,
     params: &AddressQuery,
@@ -234,7 +385,7 @@ async fn compute_address_info(
 
     // v2 't' records are 36 bytes (txid(32) + height(i32 LE)). The inline height is
     // authoritative, so newest-first ordering needs NO per-txid tx-CF lookup. A
-    // stride mismatch (stale/legacy blob) is a hard error, surfaced — not silently
+    // stride mismatch (stale/legacy blob) is a hard error, surfaced, not silently
     // truncated.
     let mut tx_entries = crate::parser::deserialize_addr_txs(&tx_list_data).await?;
 
@@ -243,18 +394,18 @@ async fn compute_address_info(
     // (both i64 LE). By the UTXO-accounting identity, confirmed
     //     balance == totalReceived - totalSent
     // and this INCLUDES immature coinbase/coinstake outputs (both 'r' and the
-    // unspent set count them, so the identity still holds — the prior balance
+    // unspent set count them, so the identity still holds; the prior balance
     // loop deliberately included immature outputs for Blockbook parity).
     //
     // This replaces the former per-UTXO balance loop AND the per-tx
-    // total_received rescan — together ~2x len(txs) sequential
+    // total_received rescan (together ~2x len(txs) sequential
     // spawn_blocking().await round-trips whose scheduling overhead (~0.65ms
-    // each) pushed 5k-50k-tx addresses past the 30s HTTP timeout — with two
+    // each) pushed 5k-50k-tx addresses past the 30s HTTP timeout) with two
     // point lookups. The >50k-tx ("over_cap") path already served these exact
     // aggregates in production; this just makes them the path for every address
     // size, so the values are unchanged while the work drops from O(history) to
     // O(1). Missing keys read as 0 (an unenriched-but-indexed address shows
-    // 0/0/0 rather than erroring — same as the prior fallback).
+    // 0/0/0 rather than erroring, same as the prior fallback).
     let (total_received, total_sent) = read_address_totals(db, address).await?;
     let balance = total_received - total_sent;
 
@@ -272,6 +423,22 @@ async fn compute_address_info(
     // bought nothing but the bug. Stable sort keeps stored order within an equal
     // height (deterministic pagination).
     tx_entries.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Blockbook from/to: inclusive block-height filters on the returned tx set
+    // (they were accepted-but-ignored before, silently serving the full list).
+    // Filtering happens BEFORE paging so totalPages reflects the filtered set,
+    // while the all-time `txs` count stays unfiltered (matches Blockbook).
+    let lifetime_tx_count = tx_entries.len();
+    if params.from.is_some() || params.to.is_some() {
+        // Saturate into i32: a from/to above i32::MAX must not wrap
+        // negative and invert the filter.
+        let lo = params.from.unwrap_or(0).min(i32::MAX as u32) as i32;
+        let hi = params
+            .to
+            .map(|t| t.min(i32::MAX as u32) as i32)
+            .unwrap_or(i32::MAX);
+        tx_entries.retain(|(_, h)| *h >= lo && *h <= hi);
+    }
     let all_txids: Vec<String> = tx_entries.iter().map(|(t, _)| hex::encode(t)).collect();
 
     // === PAGINATION LOGIC ===
@@ -294,11 +461,10 @@ async fn compute_address_info(
         .min(total_tx_count);
 
     // Handle page out of bounds - return empty result
-    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
-        (vec![], 0)
+    let paginated_txids = if start_idx >= total_tx_count {
+        vec![]
     } else {
-        let slice = &all_txids[start_idx..end_idx];
-        (slice.to_vec(), slice.len())
+        all_txids[start_idx..end_idx].to_vec()
     };
 
     // === DETAILS MODE HANDLING ===
@@ -332,6 +498,10 @@ async fn compute_address_info(
             }
             (None, Some(txs))
         }
+        "tokens" | "tokenBalances" => {
+            // Token modes return no tx data (Blockbook: option < txids)
+            (None, None)
+        }
         _ => {
             // Default: "txids" or any other value = just txid strings
             (Some(paginated_txids), None)
@@ -341,14 +511,16 @@ async fn compute_address_info(
     Ok(AddressInfo {
         page: Some(page),
         total_pages: Some(total_pages),
-        items_on_page: Some(actual_items as u32), // Actual count, not pageSize
+        // Blockbook emits the page CAPACITY here, not the returned count
+        // (its examples show 1000 with 2 rows).
+        items_on_page: Some(page_size),
         address: address.to_string(),
         balance: balance.to_string(),
         total_received: total_received.to_string(),
         total_sent: total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_tx_count as u32, // Total tx count (not paginated count)
+        txs: lifetime_tx_count as u32, // all-time count, unaffected by from/to
         txids,
         transactions,
     })
@@ -363,6 +535,7 @@ pub async fn xpub_v2(
     Query(params): Query<AddressQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<XPubInfo>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: cheaply reject obviously-not-an-xpub input up front (before the
     // cache/derivation machinery) so a typo/garbage string gets a 400 rather
@@ -391,7 +564,7 @@ pub async fn xpub_v2(
         ));
     }
 
-    // See addr_v2: key on the full query — gap/tokens/maxScan/tokensPage/pageSize all
+    // See addr_v2: key on the full query: gap/tokens/maxScan/tokensPage/pageSize all
     // shape the xpub response, so keying on only page+details collided distinct requests.
     let cache_key = format!("xpub:{xpub_str}:{params:?}");
     let db_clone = Arc::clone(&db);
@@ -405,13 +578,22 @@ pub async fn xpub_v2(
         .await;
 
     match result {
-        Ok(info) => Ok(Json(info)),
+        Ok(mut info) => {
+            apply_xpub_mempool_overlay(
+                &mempool,
+                &xpub_str,
+                params.gap_limit.unwrap_or(20),
+                &mut info,
+            )
+            .await;
+            Ok(Json(info))
+        }
         Err(e) => {
             warn!(xpub = %redact_xpub(&xpub_str), error = %e, "xpub query error");
             // is_valid_xpub already 400s malformed input up front, so a residual
             // parse rejection stays client-shaped (400); anything else is a
             // storage/derivation failure that must be 500. A blanket 400 told
-            // wallets a valid xpub was permanently invalid — and leaked internals.
+            // wallets a valid xpub was permanently invalid, and leaked internals.
             let msg = e.to_string();
             if msg.starts_with("Invalid xpub") {
                 Err((
@@ -430,7 +612,7 @@ pub async fn xpub_v2(
     }
 }
 
-async fn compute_xpub_info(
+pub(crate) async fn compute_xpub_info(
     db: &Arc<DB>,
     xpub_str: &str,
     params: &AddressQuery,
@@ -659,7 +841,7 @@ async fn aggregate_xpub_data(
                 .map(|k| (&cf_addr_index, k.as_slice()))
                 .collect();
             // Absent key (None) = unused derived address, a legitimate zero.
-            // A per-key read ERROR must fail the request — folded into None it
+            // A per-key read ERROR must fail the request; folded into None it
             // reads as "unused" and silently undercuts the xpub money totals.
             let utxo_results: Vec<Option<Vec<u8>>> = db_clone
                 .multi_get_cf(utxo_batch)
@@ -696,7 +878,7 @@ async fn aggregate_xpub_data(
         let utxos = crate::parser::deserialize_addr_utxos(&utxo_data).await?;
 
         // Blockbook parity: include immature outputs in xpub balances. Balance is the
-        // sum of the inline 'a' values — the inline value IS the unspent output value,
+        // sum of the inline 'a' values; the inline value IS the unspent output value,
         // so the result is unchanged while the per-UTXO tx-CF parse is eliminated.
         let address_balance: i64 = utxos.iter().map(|(_, _, value, _)| *value).sum();
 
@@ -718,7 +900,7 @@ async fn aggregate_xpub_data(
         // + async parse hop made large xpubs pay thousands of dispatches per uncached
         // request once the stub-safe reader started actually finding historical txs).
         // Reads are orphan-AWARE: a reorg orphan-marks only the display record, and
-        // the internal-first body read would otherwise count a disconnected tx —
+        // the internal-first body read would otherwise count a disconnected tx,
         // permanently inflating totalReceived. A read ERROR propagates (fails the
         // request): swallowing it would silently undercount a money total under 200.
         let txids_clone: Vec<Vec<u8>> = txids.clone();
@@ -786,6 +968,9 @@ async fn aggregate_xpub_data(
 
     // Convert txid set to vec
     let unique_txids: Vec<String> = all_txids.into_iter().collect();
+    // Lifetime unique tx count, before the from/to filter (Blockbook's txs
+    // field for details >= txids).
+    let lifetime_unique_count = unique_txids.len();
 
     // Sort transactions by block height (descending = newest first)
     let mut txid_heights: Vec<(String, i32)> = Vec::new();
@@ -816,6 +1001,17 @@ async fn aggregate_xpub_data(
 
     // Sort by height descending (newest first = highest block)
     txid_heights.sort_by(|a, b| b.1.cmp(&a.1));
+    // Blockbook from/to: inclusive height filter before paging (mirrors /address).
+    if params.from.is_some() || params.to.is_some() {
+        // Saturate into i32: a from/to above i32::MAX must not wrap
+        // negative and invert the filter.
+        let lo = params.from.unwrap_or(0).min(i32::MAX as u32) as i32;
+        let hi = params
+            .to
+            .map(|t| t.min(i32::MAX as u32) as i32)
+            .unwrap_or(i32::MAX);
+        txid_heights.retain(|(_, h)| *h >= lo && *h <= hi);
+    }
     let unique_txids: Vec<String> = txid_heights.into_iter().map(|(txid, _)| txid).collect();
 
     // === PAGINATION LOGIC (same as address endpoint) ===
@@ -838,11 +1034,10 @@ async fn aggregate_xpub_data(
         .min(total_tx_count);
 
     // Handle page out of bounds - return empty result
-    let (paginated_txids, actual_items) = if start_idx >= total_tx_count {
-        (vec![], 0)
+    let paginated_txids = if start_idx >= total_tx_count {
+        vec![]
     } else {
-        let slice = &unique_txids[start_idx..end_idx];
-        (slice.to_vec(), slice.len())
+        unique_txids[start_idx..end_idx].to_vec()
     };
 
     // === DETAILS MODE HANDLING (same as address endpoint) ===
@@ -886,8 +1081,10 @@ async fn aggregate_xpub_data(
         }
     };
 
-    // Build tokens array if requested, filtered by tokens parameter
-    let tokens = if params.details == "tokens" || params.details == "tokenBalances" {
+    // Token rows for any details above basic (Blockbook: option >
+    // AccountDetailsBasic covers the default txids too), filtered by the
+    // tokens parameter
+    let tokens = if params.details != "basic" {
         // Filter addresses based on tokens parameter
         let filtered_addresses: Vec<_> = all_addresses
             .iter()
@@ -901,6 +1098,7 @@ async fn aggregate_xpub_data(
                         if let Some((_, _, tx_count, balance, total_recv, total_snt)) = addr_data {
                             Some(super::types::XPubToken {
                                 token_type: "XPUBAddress".to_string(),
+                                standard: "XPUBAddress".to_string(),
                                 name: addr.clone(),
                                 path: path.clone(),
                                 transfers: *tx_count as u32,
@@ -913,6 +1111,7 @@ async fn aggregate_xpub_data(
                             // Address was derived but never used
                             Some(super::types::XPubToken {
                                 token_type: "XPUBAddress".to_string(),
+                                standard: "XPUBAddress".to_string(),
                                 name: addr.clone(),
                                 path: path.clone(),
                                 transfers: 0,
@@ -930,6 +1129,7 @@ async fn aggregate_xpub_data(
                             .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
                                 super::types::XPubToken {
                                     token_type: "XPUBAddress".to_string(),
+                                    standard: "XPUBAddress".to_string(),
                                     name: addr.clone(),
                                     path: path.clone(),
                                     transfers: *tx_count as u32,
@@ -947,6 +1147,7 @@ async fn aggregate_xpub_data(
                             .map(|(_, _, tx_count, balance, total_recv, total_snt)| {
                                 super::types::XPubToken {
                                     token_type: "XPUBAddress".to_string(),
+                                    standard: "XPUBAddress".to_string(),
                                     name: addr.clone(),
                                     path: path.clone(),
                                     transfers: *tx_count as u32,
@@ -1011,25 +1212,30 @@ async fn aggregate_xpub_data(
         .map(|(_, _, _, balance, _, _)| balance)
         .sum();
 
-    // Blockbook's txs field for xpub = total transfers across ALL addresses
-    // (not unique transactions). If an address appears in 2 txs, it counts as 2.
-    // This matches: sum of all per-address tx counts = total "transfers"
+    // Blockbook's txs field: unique tx count when the history was built
+    // (details >= txids, xpub.go txCount = len(txcMap)); the per-address
+    // transfer sum is only the estimate used below that.
     let total_transfers: usize = used_addresses
         .iter()
         .map(|(_, _, tx_count, _, _, _)| tx_count)
         .sum();
+    let txs_count = match params.details.as_str() {
+        "basic" | "tokens" | "tokenBalances" => total_transfers,
+        _ => lifetime_unique_count,
+    };
 
     Ok(XPubInfo {
         page,
         total_pages,
-        items_on_page: actual_items as u32, // Actual count, not pageSize
+        // Page capacity, not returned count (Blockbook semantics)
+        items_on_page: page_size,
         address: xpub_str.to_string(),
         balance: xpub_balance.to_string(),
         total_received: xpub_total_received.to_string(),
         total_sent: xpub_total_sent.to_string(),
         unconfirmed_balance: "0".to_string(),
         unconfirmed_txs: 0,
-        txs: total_transfers as u32, // Total transfers (Blockbook compatibility)
+        txs: txs_count as u32,
         txids,
         tokens: tokens.0,
         transactions, // Now properly populated when details=txs
@@ -1049,6 +1255,7 @@ pub async fn utxo_v2(
     Query(query): Query<UtxoQuery>,
     Extension(db): Extension<Arc<DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
+    Extension(mempool): Extension<Arc<crate::mempool::MempoolState>>,
 ) -> Result<Json<Vec<UTXO>>, (axum::http::StatusCode, Json<super::types::BlockbookError>)> {
     // P2-B: reject invalid/mistyped addresses with 400 instead of serving an
     // empty UTXO list (HTTP 200, []) for a non-existent/typo'd account.
@@ -1082,10 +1289,15 @@ pub async fn utxo_v2(
         .await;
 
     match result {
-        Ok(utxos) => Ok(Json(utxos)),
+        Ok(mut utxos) => {
+            if !query.confirmed {
+                apply_utxo_mempool_overlay(&mempool, &address, &mut utxos).await;
+            }
+            Ok(Json(utxos))
+        }
         Err(e) => {
             // An internal error must FAIL the request: a 200 [] tells a wallet
-            // "no coins to spend" — a confident false statement it will act on.
+            // "no coins to spend", a confident false statement it will act on.
             warn!(address = %address, error = %e, "utxo compute failed");
             Err((
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1097,7 +1309,7 @@ pub async fn utxo_v2(
     }
 }
 
-async fn compute_utxos(
+pub(crate) async fn compute_utxos(
     db: &Arc<DB>,
     address: &str,
 ) -> Result<Vec<UTXO>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1126,7 +1338,7 @@ async fn compute_utxos(
     // a dust-spammed / exchange-payout address with tens of thousands of UTXOs blew
     // past the 30s request timeout (the exact anti-pattern already removed from
     // /address). Height/confirmations/orphan are still derived LIVE from the tx CF
-    // (not the inline 'a' fields) via the stub-safe reader — only the per-UTXO task
+    // (not the inline 'a' fields) via the stub-safe reader; only the per-UTXO task
     // hop is removed. The rare confirmations==0 lock_time parse now also runs inside
     // this blocking task instead of blocking the async worker inline.
     let db_blocking = Arc::clone(db);
@@ -1236,7 +1448,7 @@ mod tests {
     }
 
     /// P2-B: every real PIVX transparent address class must pass validation.
-    /// Asymmetric risk — a validator that rejects a VALID address is worse than
+    /// Asymmetric risk: a validator that rejects a VALID address is worse than
     /// the original fake-zero-account bug, so these MUST stay true.
     #[test]
     fn is_valid_address_accepts_all_real_classes() {
@@ -1262,8 +1474,8 @@ mod tests {
         );
     }
 
-    /// A one-char typo of a real address must be rejected (checksum mismatch) —
-    /// this is the P2-B bug: previously returned HTTP 200 balance:0.
+    /// A one-char typo of a real address must be rejected (checksum mismatch);
+    /// an unrejected typo returns HTTP 200 balance:0 (the fake-zero-account bug).
     #[test]
     fn is_valid_address_rejects_typos_and_garbage() {
         // Flip the last char of the D address: r5 -> r6 (breaks the checksum).
@@ -1303,7 +1515,7 @@ mod tests {
 
     /// Option-① regression: compute_address_info must (a) serve balance/totals
     /// from the persisted 'r'/'s' aggregates with balance == r - s, and (b) order
-    /// txids newest-first by block height via the single batched blocking pass —
+    /// txids newest-first by block height via the single batched blocking pass,
     /// without recomputing from full history. Builds a tiny addr_index +
     /// transactions DB and asserts both.
     #[tokio::test]

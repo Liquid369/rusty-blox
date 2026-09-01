@@ -72,7 +72,7 @@ pub const V5_5_HEIGHT: i32 = 3_715_200;
 /// Budget cycle length (consensus.nBudgetCycleBlocks, ~30 days).
 pub const BUDGET_CYCLE_BLOCKS: i32 = 43_200;
 
-/// Total scheduled block reward at `height` in satoshis — exact transcription
+/// Total scheduled block reward at `height` in satoshis, exact transcription
 /// of PIVX Core v5.6.1 `GetBlockValue(nHeight)` (mainnet branch). Excludes
 /// budget superblock payouts, which are minted on top of this value.
 pub fn era_block_reward(height: i32) -> i64 {
@@ -131,7 +131,7 @@ pub fn era_block_reward(height: i32) -> i64 {
 /// h=2_000_000 MN coinstake output = 3.0 (staker 2.0); h=4_000_000 MN output
 /// = 6.0 (staker 4.0).
 ///
-/// CAVEAT — seesaw era (259_201 ..= 1_153_160): historical PIVX (pre-v4
+/// CAVEAT, seesaw era (259_201 ..= 1_153_160): historical PIVX (pre-v4
 /// "seesaw", GetSeeSaw in legacy main.cpp) computed the masternode share per
 /// block from the live masternode count vs money supply (1%..90% of block
 /// value), so the exact split is NOT derivable from height alone. Empirically

@@ -79,11 +79,11 @@ pub struct TransactionDataPoint {
     pub stake_count: u64,
     /// Coinbase transactions this day. On PoS this equals the block count
     /// (one coinbase per block, paired with one coinstake). Surfaced as the
-    /// "Coinbase" slice — NOT a residual "other" bucket, which would double-
+    /// "Coinbase" slice, NOT a residual "other" bucket, which would double-
     /// count the coinstakes already in `stake_count`.
     pub coinbase_count: u64,
     /// Average transaction VALUE for the day, in satoshis (string).
-    /// Not byte size — this is volume / tx_count.
+    /// Not byte size; this is volume / tx_count.
     pub avg_value: String,
     pub avg_fee: String,
     /// Average fee per byte across the day's Normal txs (sats/byte).
@@ -94,7 +94,7 @@ pub struct TransactionDataPoint {
     pub new_addresses: u64,
     /// Transactions carrying Sapling (shield) data this day.
     pub sapling_txs: u64,
-    /// Coinstakes staking a P2CS (cold-staking) delegation this day —
+    /// Coinstakes staking a P2CS (cold-staking) delegation this day, a
     /// subset of `stake_count`.
     pub coldstake_txs: u64,
     /// Coin days destroyed this day (PIV * days).
@@ -229,7 +229,7 @@ pub async fn transaction_analytics(
 ) -> Result<Json<Vec<TransactionDataPoint>>, StatusCode> {
     // See rich_list/network_analytics: during the sync/enrich window the daily
     // series is absent and the fallback walks the whole transactions CF (its
-    // range cap only bounds IN-range txs) — and a timed-out request leaves the
+    // range cap only bounds IN-range txs), and a timed-out request leaves the
     // scan running detached in the blocking pool. 503 like the sibling
     // endpoints so anonymous requests can't amplify into full-CF scans.
     if !crate::chain_state::addr_index_ready(&db) {
@@ -261,8 +261,8 @@ pub async fn transaction_analytics(
 /// the requested range. Returns None if the series hasn't been built.
 /// PIVX produces ~1440 blocks/day; a TRAILING day well below this is a partial /
 /// stale-enrichment tail that renders as a cliff (counts dip) or a spike
-/// (block-time = 86400/blocks shoots up). Drop such trailing days — and the
-/// current day — so series end on a genuinely complete day. Interior low-block
+/// (block-time = 86400/blocks shoots up). Drop such trailing days, and the
+/// current day, so series end on a genuinely complete day. Interior low-block
 /// days (real chain stalls) are kept. `dates` must be sorted ascending.
 const MIN_COMPLETE_DAY_BLOCKS: u64 = 1000;
 
@@ -398,7 +398,7 @@ pub async fn staking_analytics(
 }
 
 /// Read the precomputed staking daily series. participation_rate relates the
-/// day's stake turnover (coinstake output volume) to current total supply —
+/// day's stake turnover (coinstake output volume) to current total supply,
 /// the same approximation the legacy sampled scan used. rewards_distributed
 /// comes from the Pass 2b prevout joins (coinstake outputs - inputs, budget
 /// mints excluded).
@@ -417,7 +417,7 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
     drop_incomplete_trailing_days(db, &mut dates);
 
     // Real circulating supply from the wealth snapshot (sum of all positive
-    // address balances, satoshis) — calculate_total_supply_at_height() is a
+    // address balances, satoshis); calculate_total_supply_at_height() is a
     // schedule-based estimate that overshoots by an order of magnitude.
     let total_supply = db
         .get_cf(&cf_state, b"analytics_wealth")
@@ -436,7 +436,7 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
             None => continue,
         };
         // A day's stake_volume of 0 with nonzero coinstakes means the series was
-        // built before the field existed — fall back to the legacy scan so the
+        // built before the field existed; fall back to the legacy scan so the
         // operator sees data until the next enrichment refresh.
         if agg.coinstake > 0 && agg.stake_volume == 0 {
             return None;
@@ -476,7 +476,7 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
             avg_block_time: 86_400.0 / blocks as f64,
             avg_stake_size: format_piv_amount(agg.stake_volume / agg.coinstake.max(1) as i64),
             // Honest staker APY: only the staker's share of the emission
-            // (excludes the masternode payment — and rewards_total already
+            // (excludes the masternode payment, and rewards_total already
             // excludes budget/superblock mints).
             apy_estimate: if staked_sats > 0.0 {
                 (agg.staker_rewards_total as f64 * 365.0 / staked_sats) * 100.0
@@ -522,7 +522,7 @@ fn read_network_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<NetworkHea
             None => continue,
         };
         if agg.blocks == 0 {
-            // Series predates the difficulty fields — rebuild pending; fall back.
+            // Series predates the difficulty fields (rebuild pending); fall back.
             return None;
         }
         // Real average block size: the day's transaction bytes plus per-block
@@ -550,7 +550,7 @@ pub async fn network_health_analytics(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<NetworkHealthDataPoint>>, StatusCode> {
     // See rich_list: until the index is ready the precomputed daily series is
-    // absent and the fallback loops millions of per-block lookups per request —
+    // absent and the fallback loops millions of per-block lookups per request;
     // 503 during the sync/enrich window instead.
     if !crate::chain_state::addr_index_ready(&db) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -582,7 +582,7 @@ pub async fn rich_list(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<Vec<RichListEntry>>, StatusCode> {
     // Reindexing: the precomputed snapshot isn't built and the live fallback is a
-    // full addr_index scan — 503 like the data endpoints, so anonymous requests
+    // full addr_index scan; 503 like the data endpoints, so anonymous requests
     // can't amplify into whole-CF scans during the sync/enrich window.
     if !crate::chain_state::addr_index_ready(&db) {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -839,9 +839,9 @@ pub struct TreasuryEntry {
 }
 
 /// GET /api/v2/analytics/treasury
-/// Historical budget/treasury payouts — value minted in excess of the era
+/// Historical budget/treasury payouts, value minted in excess of the era
 /// block reward (PoW era: extra coinbase outputs; PoS era: inside coinstakes
-/// at/after budget-cycle heights) — from the precomputed `analytics_treasury`
+/// at/after budget-cycle heights), from the precomputed `analytics_treasury`
 /// blob, sorted by height.
 pub async fn treasury_analytics(
     Extension(db): Extension<Arc<DB>>,
@@ -1279,7 +1279,7 @@ fn compute_network_health_analytics(
         }
 
         // Date from the REAL block header time at this height (chain_metadata
-        // height->hash, header nTime at offset 68) — the previous now-minus-
+        // height->hash, header nTime at offset 68); the previous now-minus-
         // estimate drifted by over a year on long ranges.
         let date = block_time_at_height(db, height)
             .map(|t| crate::enrich_addresses::unix_to_date(t as u64))
@@ -1341,7 +1341,7 @@ fn compute_rich_list(
     db: &Arc<DB>,
     limit: u32,
 ) -> Result<Vec<RichListEntry>, Box<dyn std::error::Error + Send + Sync>> {
-    // Live fallback — used only when the snapshot blob is absent (e.g. before the
+    // Live fallback: used only when the snapshot blob is absent (e.g. before the
     // first enrich completes). Compute from the SAME addr_index r/s totals the
     // snapshot + periodic recompute use, so the result is a correct full top-N (no
     // 10k-address / >200-UTXO cap) and is consistent with both the snapshot path
@@ -1354,7 +1354,7 @@ fn compute_rich_list(
 fn compute_wealth_distribution(
     db: &Arc<DB>,
 ) -> Result<WealthDistribution, Box<dyn std::error::Error + Send + Sync>> {
-    // Live fallback — used only when the snapshot blob is absent. Compute from the
+    // Live fallback: used only when the snapshot blob is absent. Compute from the
     // same addr_index r/s totals the snapshot + periodic recompute use, so it is a
     // correct full-set distribution (no 10k-address cap) consistent with the
     // snapshot path. Shares `shape_wealth` so the output is identical.

@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 pub struct XPubToken {
     #[serde(rename = "type")]
     pub token_type: String,
+    // Blockbook emits both type and standard as "XPUBAddress"
+    #[serde(default)]
+    pub standard: String,
     pub name: String,
     pub path: String,
     pub transfers: u32,
@@ -187,6 +190,8 @@ pub struct Transaction {
     pub lock_time: Option<u32>,
     pub vin: Vec<TxInput>,
     pub vout: Vec<TxOutput>,
+    // Absent (not "") for unconfirmed txs, matching Blockbook's omitempty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     #[serde(rename = "blockHash")]
     pub block_hash: String,
     #[serde(rename = "blockHeight")]
@@ -223,13 +228,17 @@ pub struct TxInput {
     pub n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Required key in Blockbook's Vin: false for coinbase and unresolved
+    // prevouts, never omitted (typed clients reject a missing key).
+    #[serde(default)]
     #[serde(rename = "isAddress")]
-    pub is_address: Option<bool>,
+    pub is_address: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coinbase: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -238,7 +247,8 @@ pub struct TxOutput {
     pub n: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hex: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Required key in Blockbook's Vout: null for scriptless outputs (every
+    // coinstake marker output), never omitted.
     pub addresses: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isAddress")]
@@ -247,15 +257,11 @@ pub struct TxOutput {
     pub spent: Option<bool>,
 }
 
+/// Blockbook success shape: {"result": "<txid>"} and nothing else; failures
+/// are BlockbookError string bodies, never an error field here.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SendTxResponse {
-    pub result: Option<String>,
-    pub error: Option<TxError>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct TxError {
-    pub message: String,
+    pub result: String,
 }
 
 // ========== Block Types ==========
@@ -394,23 +400,18 @@ pub struct UtxoQuery {
 
 // ========== Error Types ==========
 
-/// Blockbook-compatible error response wrapper
+/// Blockbook v2 error contract: {"error": "<message>"}, a plain STRING, not an
+/// object (verified against live Blockbook 0.6.0). Drop-in parity requires the
+/// exact shape; the old {"error":{"message":...}} wrapper broke that.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlockbookError {
-    pub error: ErrorDetail,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ErrorDetail {
-    pub message: String,
+    pub error: String,
 }
 
 impl BlockbookError {
     pub fn new(message: impl Into<String>) -> Self {
         BlockbookError {
-            error: ErrorDetail {
-                message: message.into(),
-            },
+            error: message.into(),
         }
     }
 }

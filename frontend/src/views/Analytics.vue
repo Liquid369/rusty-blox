@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   ANALYTICS DECK — the killer on-chain intelligence set.
+   ANALYTICS DECK: the killer on-chain intelligence set.
    HODL-waves · tx-type composition + coin-days-destroyed · cold-staking
    adoption curve + churn · wealth concentration Lorenz + histogram +
    Gini/Nakamoto · staking economics · rich list · treasury.
@@ -34,7 +34,7 @@ const ready = ref(false)
 const error = ref(null)
 
 onMounted(async () => {
-  // Ten /analytics series in parallel — render a loading state, not empty
+  // Ten /analytics series in parallel; render a loading state, not empty
   // panels, until the whole deck resolves.
   try {
     ;[supply.value, txs.value, staking.value, network.value, richlist.value,
@@ -288,7 +288,7 @@ const mnOption = computed(() => {
     ...base,
     grid: { left: 50, right: 16, top: 16, bottom: 26, containLabel: true },
     tooltip: { ...base.tooltip, formatter: (arr) => `${arr[0].axisValue}<br/>${formatCount(arr[0].value)} masternodes` },
-    // hourly points — thin the axis labels to ~7 across whatever span exists
+    // hourly points; thin the axis labels to ~7 across whatever span exists
     xAxis: catAxis(rows.map((r) => fmt(r.ts)), p, { axisLabel: { interval: Math.max(1, Math.floor(rows.length / 7)) } }),
     yAxis: valAxis(p, { scale: true, axisLabel: { formatter: (v) => formatCount(v) } }),
     series: [{

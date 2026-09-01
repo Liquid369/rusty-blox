@@ -272,4 +272,4 @@ sum by (error_type) (rate(rustyblox_rpc_errors_total[5m]))
 - **Summary Stats**: Use `_sum` and `_count` to calculate averages: `sum/count`
 - **Percentiles**: Use `histogram_quantile()` with histogram buckets
 
-See [METRICS_CATALOG.md](../METRICS_CATALOG.md) for complete metric definitions.
+`curl http://localhost:3005/metrics` lists every metric with its HELP text.

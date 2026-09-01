@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   MASTERNODE DETAIL — derived from one /mnlist row (no dedicated route).
+   MASTERNODE DETAIL: derived from one /mnlist row (no dedicated route).
    Keyed by collateral txhash (the stable unique id). Collateral outpoint
    links to /tx, payee links to /address.
    UNITS: no money fields; lastseen/lastpaid = unix sec, activetime =

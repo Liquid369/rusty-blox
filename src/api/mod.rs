@@ -6,6 +6,8 @@
 pub mod addresses;
 pub mod analytics;
 pub mod balance_history;
+pub mod blockbook_status;
+pub mod blockbook_ws;
 pub mod blocks;
 pub mod governance;
 pub mod helpers;
@@ -13,6 +15,7 @@ pub mod masternodes;
 pub mod network;
 pub mod price;
 pub mod search;
+pub mod tickers;
 pub mod transactions;
 pub mod types;
 
@@ -23,6 +26,8 @@ mod xpub_tests;
 pub use addresses::*;
 pub use analytics::*;
 pub use balance_history::*;
+pub use blockbook_status::*;
+pub use blockbook_ws::*;
 pub use blocks::*;
 pub use governance::*;
 pub use helpers::*;
@@ -30,6 +35,7 @@ pub use masternodes::*;
 pub use network::*;
 pub use price::*;
 pub use search::*;
+pub use tickers::*;
 pub use transactions::*;
 pub use types::*;
 

@@ -1,9 +1,9 @@
 /* =====================================================================
-   PIVX BRAND TOKENS — NEUTRAL PRIMITIVES ONLY
+   PIVX BRAND TOKENS: NEUTRAL PRIMITIVES ONLY
    ---------------------------------------------------------------------
    This file is the shared, design-neutral token layer for the redesign
    competition. It defines BRAND PRIMITIVES (color ramp, surfaces, text,
-   spacing, radius, type scale, chart series) — NOT component or layout
+   spacing, radius, type scale, chart series), NOT component or layout
    styling. Each prototype forks the foundation and builds its own
    aesthetic ON TOP of these tokens; do not bake component looks in here.
 
@@ -108,8 +108,8 @@
   --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
 }
 
-/* Minimal element reset so the data-wired stubs are legible. NOT styling
-   — just the neutral baseline every prototype starts from. */
+/* Minimal element reset so the data-wired stubs are legible. NOT styling,
+   just the neutral baseline every prototype starts from. */
 *,
 *::before,
 *::after { box-sizing: border-box; }

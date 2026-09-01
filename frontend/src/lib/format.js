@@ -2,7 +2,7 @@
    NON-MONEY FORMATTING HELPERS
    ---------------------------------------------------------------------
    Time, hashes, counts, percentages, difficulty. For anything that is a
-   coin AMOUNT, use lib/money.js instead — never format money here.
+   coin AMOUNT, use lib/money.js instead; never format money here.
    ===================================================================== */
 
 /**
@@ -89,7 +89,7 @@ export function formatCount(n) {
 
 /**
  * True when a tx/utxo is not in a block (unconfirmed). The API reports a
- * non-positive height — blockHeight -1 (tx) or height 0 (utxo) — with 0
+ * non-positive height, blockHeight -1 (tx) or height 0 (utxo), with 0
  * confirmations. This covers BOTH still-pending (in mempool) and dropped/
  * conflicted (evicted, will never confirm) txs; we can't tell them apart from
  * the address index alone, so render a neutral "UNCONFIRMED" marker (never a
@@ -126,7 +126,7 @@ export function formatDifficulty(diff) {
 
 /**
  * Humanize a DURATION in seconds (e.g. masternode activetime). Distinct
- * from timeAgo — this is a span, not a point in time.
+ * from timeAgo; this is a span, not a point in time.
  * @param {number|string} seconds
  * @returns {string}
  */
@@ -145,7 +145,7 @@ export function formatDuration(seconds) {
 
 /**
  * Return `url` only when it uses an http(s) scheme; otherwise ''. Guards an
- * attacker-controlled field (e.g. a PIVX proposal URL — Core validates it by
+ * attacker-controlled field (e.g. a PIVX proposal URL; Core validates it by
  * LENGTH only, not scheme) from reaching an <a :href> sink as javascript:/data:.
  * @param {string} url
  * @returns {string}

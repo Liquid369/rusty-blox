@@ -1,7 +1,7 @@
 /* =====================================================================
-   Sapling shield-flow shape detection — shared by Block/Transaction/
+   Sapling shield-flow shape detection, shared by Block/Transaction/
    AddressDetail. `sapling.value_balance` = net PIV flowing OUT of the
-   shield pool, and is a PIV FLOAT on BOTH /tx and /block-detail — the one
+   shield pool, and is a PIV FLOAT on BOTH /tx and /block-detail, the one
    non-satoshi money field in otherwise sat-valued io columns (formatPiv
    ONLY, never formatSats).
    The structural s→s check runs FIRST: a pure shielded tx's value_balance
@@ -10,12 +10,12 @@
    ===================================================================== */
 export const SHIELD = '◈'
 
-// compact ledger tags (address page) — PIVX SHIELD naming: s, not Zcash's z
+// compact ledger tags (address page); PIVX SHIELD naming: s, not Zcash's z
 export const SHIELD_TAG = { shielding: 't→s', 'de-shielding': 's→t', shielded: 's→s' }
 
 // 'shielding' (t→s) | 'de-shielding' (s→t) | 'shielded' (s→s) | null.
 // null covers: no sapling activity, and the degenerate vb==0-with-transparent-io
-// record — never invent a direction for odd data. Callers guard coinbase/coinstake
+// record; never invent a direction for odd data. Callers guard coinbase/coinstake
 // themselves (a stake is never reclassified).
 export function shieldShape(t) {
   const sap = t?.sapling

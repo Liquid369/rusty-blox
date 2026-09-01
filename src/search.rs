@@ -40,7 +40,7 @@ fn detect_query_type(query: &str) -> QueryType {
     // Empty/whitespace-only query is not a valid search of any kind.
     // (Guards against `"".chars().all(..)` classifying the empty string as a
     // BlockHeight via vacuous truth, which then fails `"".parse::<i32>()` and
-    // surfaced as an HTTP 500 — P3-4.)
+    // surfaced as an HTTP 500.)
     if q.is_empty() {
         return QueryType::Unknown;
     }
@@ -62,7 +62,7 @@ fn detect_query_type(query: &str) -> QueryType {
 
     // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
     // 6/7 (P2SH), E (exchange/EXM). Most are ~26-35 chars, but EXM exchange
-    // addresses are 36 — the old <=35 cap made them unsearchable. Upper bound
+    // addresses are 36; the old <=35 cap made them unsearchable. Upper bound
     // is generous (<=40) for headroom; a false positive just falls through to
     // NotFound in search_address, so over-inclusion is safe.
     if matches!(
@@ -184,10 +184,10 @@ fn search_block_by_hash(
         });
     }
 
-    // Method 2: some writers key 'h' entries by internal (reversed) byte order —
+    // Method 2: some writers key 'h' entries by internal (reversed) byte order;
     // try the reversed form before giving up. (The old fallback here iterated the
     // ENTIRE chain_metadata CF on every miss: any unknown 64-hex query forced a
-    // full-database scan — a trivial unauthenticated DoS. Point lookups only.)
+    // full-database scan, a trivial unauthenticated DoS. Point lookups only.)
     let hash_reversed: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
     let mut key_rev = vec![b'h'];
     key_rev.extend_from_slice(&hash_reversed);
@@ -219,7 +219,7 @@ fn search_transaction(
 
     // Prefer a record WITH a body over an 8-byte stub (shadowing bug) so search reports the
     // real block height, not the orphan/stub sentinel; the shared reader checks both orders.
-    // A RocksDB error propagates (500) — it must never read as "txid does not exist".
+    // A RocksDB error propagates (500); it must never read as "txid does not exist".
     let tx_data =
         crate::api::transactions::read_valid_tx_record(db, &cf_transactions, &txid_bytes)?;
 

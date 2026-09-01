@@ -1,5 +1,5 @@
 /* =====================================================================
-   CHART THEME HELPER — shared echarts styling for the HUD aesthetic.
+   CHART THEME HELPER: shared echarts styling for the HUD aesthetic.
    Reads brand + HUD tokens from CSS so every chart stays on-palette.
    Pure presentation; never touches money units.
 

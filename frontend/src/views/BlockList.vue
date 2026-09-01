@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   BLOCK LEDGER — paginated recent blocks from /block-stats + a tx-load
+   BLOCK LEDGER: paginated recent blocks from /block-stats + a tx-load
    throughput sparkline. block-stats returns count+1 rows, NEWEST-FIRST;
    `size` is header bytes only (not usable as block size).
    UNITS: block-stats carries NO money fields; difficulty is a derived

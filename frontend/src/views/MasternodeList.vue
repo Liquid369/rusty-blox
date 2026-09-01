@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   MASTERNODE NETWORK — /mncount counts + /mnlist full roster.
+   MASTERNODE NETWORK: /mncount counts + /mnlist full roster.
    Centerpiece: network-distribution donut (ipv4/ipv6/onion partition
    `total`) + status spread + activetime longevity histogram, with a
    client-paginated roster table.

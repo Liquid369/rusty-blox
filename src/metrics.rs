@@ -260,7 +260,7 @@ lazy_static! {
     ).unwrap();
 
     /// Transactions that failed to index in a live block. Non-zero means the block
-    /// was left unmarked and is being retried — sustained growth = flaky node RPC.
+    /// was left unmarked and is being retried; sustained growth = flaky node RPC.
     pub static ref TX_INDEX_ERRORS: IntCounter = IntCounter::new(
         "rustyblox_tx_index_errors_total",
         "Transactions that failed to index in a live block (block retried, not skipped)"

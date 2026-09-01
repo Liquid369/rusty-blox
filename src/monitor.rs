@@ -108,7 +108,7 @@ struct FetchedBlock {
 
 /// Get current chain tip from RPC node.
 ///
-/// Fully async via the shared `rpc_call_json` helper — no more detached
+/// Fully async via the shared `rpc_call_json` helper, not a detached
 /// `std::thread::spawn` + `recv_timeout` (which leaked an OS thread on every
 /// node timeout). The helper carries its own hard HTTP timeout.
 async fn get_rpc_chain_tip() -> Result<ChainTip, Box<dyn std::error::Error + Send + Sync>> {
@@ -186,7 +186,7 @@ fn get_db_chain_tip(db: &Arc<DB>) -> Result<ChainTip, Box<dyn std::error::Error>
     // (rollback deletes top-down; a partial batch may have committed the deletions
     // for the top heights before the final batch carrying sync_height landed).
     // Erroring here made the monitor loop retry the same dead read forever. Walk
-    // down to the highest surviving mapping instead — reorg re-detection then
+    // down to the highest surviving mapping instead; reorg re-detection then
     // heals the state from there. Bounded well past any real PIVX reorg depth.
     let floor = (height - 1_000).max(0);
     for h in (floor..height).rev() {
@@ -376,9 +376,9 @@ async fn index_block_from_rpc(
             // Already indexed this exact block - skip silently
             return Ok(());
         } else {
-            // Different block at same height — this height was reorged. Roll the
+            // Different block at same height; this height was reorged. Roll the
             // OLD block's effects back FIRST (tx orphan-marks, 'B' entries,
-            // metadata, addr-index reversal via its undo record) — re-indexing on
+            // metadata, addr-index reversal via its undo record); re-indexing on
             // top of them (as this used to) double-applied the old block's
             // address entries and left both blocks' 'B' entries at this height.
             // rollback_to_height is the same single-height machinery the reorg
@@ -479,7 +479,7 @@ async fn index_block_from_rpc(
     // INTERNAL (little-endian) hash to match the parse path (blocks.rs/offset_indexer)
     // and every 'h' reader (enrichment orphan classifier, reorg cleanup). Writing it
     // in display order (as this did previously) made live-monitored canonical blocks
-    // invisible to those readers — they were miscounted as orphans, which corrupted
+    // invisible to those readers; they were miscounted as orphans, which corrupted
     // the orphan-rate / daily-series analytics. The forward height->hash map above
     // stays display order (consistent with blocks.rs).
     let internal_hash: Vec<u8> = hash_bytes.iter().rev().cloned().collect();
@@ -562,7 +562,7 @@ async fn index_block_from_rpc(
     // write below. Recording exactly what we write (instead of recomputing from the
     // block afterwards) reverses r/s exactly and restores the spent UTXOs' fields
     // (set/value-exact; 'a'/'t' insertion order may differ from a fresh enrich after a
-    // reorg, harmless) — and adds zero extra DB reads/deserializes. Stored
+    // reorg, harmless), and adds zero extra DB reads/deserializes. Stored
     // after the loop, only for live blocks past the enrichment watermark. See
     // address_rollback::reverse_address_block for the consumer.
     let mut block_undo = crate::address_rollback::AddressBlockUndo::new(height);
@@ -697,7 +697,7 @@ async fn index_block_from_rpc(
             true
         };
 
-        // A raw tx shorter than its 4-byte version field is not a transaction —
+        // A raw tx shorter than its 4-byte version field is not a transaction;
         // writing it would create the banned body-less/garbage 't' record (an
         // empty RPC result padded with a default version = exactly the 8-byte
         // stub that shadows real records). Skip the tx entirely, like the RPC
@@ -790,7 +790,7 @@ async fn index_block_from_rpc(
 
         // Add outputs as UTXOs ONLY for new blocks
         if should_update_address_index {
-            // Source-tx type once per tx — the SAME byte enrich stores as packed.ty,
+            // Source-tx type once per tx, the SAME byte enrich stores as packed.ty,
             // so catch-up 'a' records are byte-identical to enrich.
             let tx_kind =
                 crate::tx_type::ty_to_u8(crate::tx_type::detect_transaction_type(&parsed_tx));
@@ -818,9 +818,9 @@ async fn index_block_from_rpc(
 
                     // No size cap: enrich writes 'a' UNCAPPED, so a >100k-UTXO address
                     // (exchange/treasury) is legitimate and must round-trip. On an
-                    // unreadable blob (legacy/corrupt — never a v2 blob), SKIP this
+                    // unreadable blob (legacy/corrupt, never a v2 blob), SKIP this
                     // address: never overwrite a non-empty-but-unreadable record with a
-                    // one-entry list, which would destroy the entire UTXO set (MBX-1).
+                    // one-entry list, which would destroy the entire UTXO set.
                     let mut existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
                         Some(data) => match crate::parser::deserialize_addr_utxos(&data).await {
                             Ok(u) => u,
@@ -956,7 +956,7 @@ async fn index_block_from_rpc(
                                                     // UNRESOLVED sentinel, never 0: height 0
                                                     // is genesis (canonical!), needs_update
                                                     // only overwrites heights < 0, and the
-                                                    // heal machinery targets the sentinels —
+                                                    // heal machinery targets the sentinels;
                                                     // a 0 here is a PERMANENT wrong record.
                                                     Ok(block_resp) => block_resp
                                                         .json::<Value>()
@@ -975,7 +975,7 @@ async fn index_block_from_rpc(
                                                 };
 
                                                 // Refuse to cache a body too short to be
-                                                // a real tx — a default-version pad around
+                                                // a real tx; a default-version pad around
                                                 // empty bytes writes the banned 8-byte
                                                 // body-less stub. Skip this input like the
                                                 // surrounding RPC-error branches do.
@@ -1091,8 +1091,8 @@ async fn index_block_from_rpc(
                         addr_key.extend_from_slice(address.as_bytes());
 
                         // Get existing UTXOs. No size cap (enrich is uncapped). On an
-                        // unreadable blob, SKIP this spend — never delete_cf / overwrite
-                        // a record that failed to read (MBX-1: that would wipe the set).
+                        // unreadable blob, SKIP this spend; never delete_cf / overwrite
+                        // a record that failed to read (that would wipe the set).
                         let existing_utxos = match db.get_cf(&cf_addr_index, &addr_key)? {
                             Some(data) => {
                                 match crate::parser::deserialize_addr_utxos(&data).await {
@@ -1169,8 +1169,8 @@ async fn index_block_from_rpc(
                     Some(data) => match crate::parser::deserialize_addr_txs(&data).await {
                         Ok(list) => list,
                         Err(e) => {
-                            // MBX-1 (same as the 'a' paths): an unreadable 't' blob must
-                            // NOT be overwritten with a one-entry list — 't' is the
+                            // Same rule as the 'a' paths: an unreadable 't' blob must
+                            // NOT be overwritten with a one-entry list; 't' is the
                             // non-reconstructable tx history. Skip this address.
                             warn!(address = %address, error = %e, "Invalid 't' record; skipping (not overwriting)");
                             continue;
@@ -1181,7 +1181,7 @@ async fn index_block_from_rpc(
 
                 // Add this transaction if not already present. Compare the 32-byte txid
                 // against each 36-byte record's txid field (a 36B record can never equal
-                // a 32B txid — the dedup trap that would otherwise append unboundedly).
+                // a 32B txid, the dedup trap that would otherwise append unboundedly).
                 if !tx_list.iter().any(|(t, _)| t == &txid_bytes) {
                     tx_list.push((txid_bytes.clone(), height));
                     // Reorg-undo capture: record exactly the txid we add to 't'.
@@ -1398,14 +1398,14 @@ async fn index_block_from_rpc(
 
     // A retry marker for this height: 'E' + height, written when an attempt ends
     // with tx_errors > 0 (below). Its presence on a SUCCESSFUL pass means a prior
-    // partial attempt already applied some txs — the 'r'/'s' adds are NOT
+    // partial attempt already applied some txs; the 'r'/'s' adds are NOT
     // idempotent, so this re-apply double-counted them. Repair from the
     // authoritative t/a indexes (the exact recompute crash recovery uses).
     let mut retry_marker_key = vec![b'E'];
     retry_marker_key.extend(&height.to_le_bytes());
 
     if tx_errors > 0 {
-        // Do NOT mark the block done: no 'H' marker, no sync_height advance —
+        // Do NOT mark the block done: no 'H' marker, no sync_height advance;
         // the next poll retries this height (the RAII guard clears 'P'). The old
         // behavior marked the block complete with a warn log, permanently
         // dropping the failed txs from the index with no signal.
@@ -1415,12 +1415,12 @@ async fn index_block_from_rpc(
         // Leaving it would poison the index if a reorg replaces this height
         // before the retry: the reorg handler only rolls back to OUR tip (H-1,
         // never touching H), and the 'H'-mismatch cleanup can't fire because no
-        // 'H' was written. A clean abort also makes the retry a first apply —
+        // 'H' was written. A clean abort also makes the retry a first apply;
         // no r/s double-count to repair.
         metrics::TX_INDEX_ERRORS.inc_by(tx_errors as u64);
         // The 'E' marker goes down UNCONDITIONALLY, before the rollback attempt:
         // if store_address_undo failed above (warn-only), the rollback silently
-        // cannot reverse r/s — a "clean" rollback without the marker would then
+        // cannot reverse r/s; a "clean" rollback without the marker would then
         // skip the repair and persist a double-count. The repair is an idempotent
         // recompute, so running it after a genuinely clean rollback is merely
         // redundant, never wrong.
@@ -1444,7 +1444,7 @@ async fn index_block_from_rpc(
             // at this height is guaranteed to consume the 'E' marker
             // (recover_crashed_blocks continues past this Err without retrying; backfill
             // may skip the height once chain_metadata is keyed). So reconcile r/s NOW from
-            // the authoritative t/a indexes — the exact repair the marker would trigger —
+            // the authoritative t/a indexes (the exact repair the marker would trigger)
             // and clear the marker on success. Still return Err so the caller logs the
             // partial attempt (t/a itself may be incomplete under the same IO fault, in
             // which case the marker is left for a later pass).
@@ -1501,7 +1501,7 @@ async fn index_block_from_rpc(
                 // Leave the block UNMARKED (no 'H'/sync_height) and the marker in
                 // place: advancing here would mark the block done with known
                 // over-counted r/s. The recompute is a local derivation, so failure
-                // means the DB itself is in trouble — retry the whole block.
+                // means the DB itself is in trouble; retry the whole block.
                 return Err(format!(
                     "r/s repair after retried block {height} failed: {e}; block left unmarked for retry"
                 )
@@ -1514,7 +1514,7 @@ async fn index_block_from_rpc(
     // re-apply callers (recover_crashed_blocks / backfill_heightless_catchup_range run
     // index_block_from_rpc for heights <= the committed tip) must not regress
     // sync_height: the regression triggers a full re-catchup that double-counts the
-    // non-idempotent r/s totals, and — with more than one leftover crash marker — could
+    // non-idempotent r/s totals, and, with more than one leftover crash marker, could
     // let the Wave-6-B abort guard misread the transiently-lowered tip and roll back a
     // still-canonical block. Preventing the regression here is the root fix;
     // restore_sync_height_if_regressed stays as a defensive net. The 'H'+height hash is
@@ -1539,19 +1539,32 @@ async fn index_block_from_rpc(
 
         // Update indexed height metric
         metrics::set_indexed_height("rpc_monitor", height as i64);
-        // Block header timestamp — lets an alert detect a frozen tip (now - ts > N).
+        // Block header timestamp: lets an alert detect a frozen tip (now - ts > N).
         metrics::set_last_block_timestamp(time as i64);
     }
 
     // Processing marker will be cleaned up automatically by the guard's Drop impl
 
-    // Broadcast new block event if broadcaster is available
-    if let Some(bc) = broadcaster {
+    // Broadcast only on a REAL tip advance: crash recovery and heightless
+    // backfill re-apply historical blocks through this path, and pushing those
+    // would feed websocket subscribers old transactions as new events.
+    if let (Some(bc), true) = (broadcaster, is_tip_advance) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or(std::time::Duration::from_secs(0))
             .as_secs();
         bc.broadcast_block(height, block_hash, timestamp, tx_count);
+        // Per-tx events feed the websocket address/tx subscriptions; without
+        // these the subscribe channels acknowledge but never fire.
+        for tx in tx_array {
+            let txid = tx
+                .get("txid")
+                .and_then(|t| t.as_str())
+                .or_else(|| tx.as_str());
+            if let Some(txid) = txid {
+                bc.broadcast_transaction(txid.to_string(), Some(height), None);
+            }
+        }
     }
 
     Ok(())
@@ -1568,7 +1581,7 @@ fn spawn_aggregate_metrics_update(db: &Arc<DB>) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static SCAN_RUNNING: AtomicBool = AtomicBool::new(false);
     if SCAN_RUNNING.swap(true, Ordering::SeqCst) {
-        return; // previous scan still in flight — skip, next cadence tick retries
+        return; // previous scan still in flight; skip, next cadence tick retries
     }
     let db = db.clone();
     tokio::task::spawn_blocking(move || {
@@ -1676,7 +1689,7 @@ fn detect_reorg(
         return Ok(Some(rpc_tip.height - 1));
     }
 
-    // RPC ahead of us — the COMMON reorg presentation (a reorg + extension lands
+    // RPC ahead of us, the COMMON reorg presentation (a reorg + extension lands
     // within one poll window). Being behind is only safe to treat as plain
     // catch-up if OUR tip is still on the canonical chain; otherwise catch-up
     // indexes the new chain on top of an orphaned block, whose txs stay served
@@ -1707,7 +1720,7 @@ fn detect_reorg(
 /// After crash recovery, never let `sync_height` regress below where it was before
 /// recovery ran. A stale (below-tip) `'P'` marker re-applied via `index_block_from_rpc`
 /// rewrites `sync_height` to that lower block height; left as-is, the monitor would
-/// then re-catch-up — and on any bulk-synced range re-apply, double-counting r/s —
+/// then re-catch-up (and on any bulk-synced range re-apply, double-counting r/s)
 /// thousands of already-indexed blocks. The recovered blocks are all <= the
 /// pre-recovery tip, so lifting the watermark back to `saved` is always safe.
 /// Returns true if it restored.
@@ -1754,7 +1767,7 @@ async fn recover_crashed_blocks(db: &Arc<DB>, broadcaster: &Option<Arc<EventBroa
 
         // Re-apply to complete t/a/undo (double-counts the non-idempotent r/s). If
         // the block already finished before the crash (H-marker present), this is a
-        // no-op skip — the recompute below is still idempotent and harmless.
+        // no-op skip; the recompute below is still idempotent and harmless.
         if let Err(e) = index_block_from_rpc(height, db, broadcaster, None).await {
             warn!(height, error = %e,
                 "Failed to re-apply crashed block during recovery; leaving for normal catchup/reorg");
@@ -1789,12 +1802,12 @@ async fn recover_crashed_blocks(db: &Arc<DB>, broadcaster: &Option<Arc<EventBroa
 /// Backfill catch-up blocks that were stored heightless (tx height = -1).
 ///
 /// When the blk-scan catch-up parses blocks newer than the canonical-metadata
-/// (Core leveldb) refresh — because the freshly-(re)started node's on-disk block
-/// index lagged its blk-file/RPC tip — those transactions are written heightless and
+/// (Core leveldb) refresh, because the freshly-(re)started node's on-disk block
+/// index lagged its blk-file/RPC tip, those transactions are written heightless and
 /// then orphaned out of the address index (0-tx block-detail, missing UTXOs, balances
 /// behind by the gap). This re-processes `[from..=to]` through `index_block_from_rpc`,
 /// which for each block, from the AUTHORITATIVE RPC block height:
-///   1. writes the canonical 4-byte `height→hash` key into chain_metadata (~line 444) —
+///   1. writes the canonical 4-byte `height→hash` key into chain_metadata (~line 444),
 ///      so the re-enrich's height resolver finds the height in `height_to_blockhash`
 ///      (`contains_key` true) and KEEPS it rather than orphaning it (height_resolver.rs
 ///      ~270); this is why the gap survives the re-enrich's height re-validation;
@@ -1806,12 +1819,12 @@ async fn recover_crashed_blocks(db: &Arc<DB>, broadcaster: &Option<Arc<EventBroa
 /// re-enrich then includes the now-resolved, chain_metadata-backed range.
 ///
 /// Durability: this retries IN PLACE until every height in the range has its 4-byte
-/// chain_metadata key (re-processing only the still-missing ones each pass — RPC heights
+/// chain_metadata key (re-processing only the still-missing ones each pass; RPC heights
 /// are authoritative and `index_block_from_rpc` is idempotent, so this converges
 /// regardless of how stale Core's leveldb is). It returns `Ok` ONLY when the whole range
 /// is verified keyed, and `Err` after `MAX_ATTEMPTS`. The caller just `?`s and, on `Err`,
-/// aborts the catch-up WITHOUT clearing completion markers — leaving the prior (correct,
-/// slightly-behind) index served and the gap to be re-detected on retry — rather than
+/// aborts the catch-up WITHOUT clearing completion markers, leaving the prior (correct,
+/// slightly-behind) index served and the gap to be re-detected on retry, rather than
 /// clearing markers, which would re-orphan the gap against the still-stale chain_metadata
 /// and re-mark it complete (the broken recovery the prior FE-1 attempt had).
 ///
@@ -1851,7 +1864,7 @@ pub(crate) async fn backfill_heightless_catchup_range(
         // Process only heights that still lack their canonical 4-byte chain_metadata key.
         for h in from..=to {
             if db.get_cf(&cf_meta, h.to_le_bytes())?.is_some() {
-                continue; // already keyed — idempotent re-run skips it
+                continue; // already keyed; idempotent re-run skips it
             }
             if let Err(e) = index_block_from_rpc(h, db, broadcaster, None).await {
                 warn!(height = h, attempt, error = %e, "Backfill: block re-resolve failed, will retry");
@@ -1897,7 +1910,7 @@ pub async fn run_block_monitor(
     // Construct the blocking RPC client + test connection on tokio's managed
     // blocking pool. PivxRpcClient uses reqwest::blocking (own runtime), so it
     // must not run on a tokio worker thread. spawn_blocking is bounded and
-    // awaited (joined) — unlike the previous detached std::thread::spawn +
+    // awaited (joined), unlike the previous detached std::thread::spawn +
     // recv_timeout, which leaked the OS thread whenever the node was slow.
     let rpc_host_clone = rpc_host.clone();
     let connect = tokio::task::spawn_blocking(move || {
@@ -1926,7 +1939,7 @@ pub async fn run_block_monitor(
             error!(error = %e, "RPC connection failed - ensure PIVX node is running with RPC enabled");
             metrics::set_rpc_connected(false);
             // Return (instead of parking in a no-op sleep loop) so the sync-thread retry
-            // loop (main.rs) re-drives the whole sync — re-detect, re-catch-up, reconnect —
+            // loop (main.rs) re-drives the whole sync (re-detect, re-catch-up, reconnect)
             // with backoff, and the tip self-heals once RPC recovers rather than freezing.
             return Err(format!("RPC connection failed at monitor startup: {e}").into());
         }
@@ -1963,14 +1976,14 @@ pub async fn run_block_monitor(
     // > 0, wait for the daily series to be built, then re-run Lane I/R over that many
     // recent days into the shadow keyspace and diff each complete day vs the full
     // enrich, logging the report. (Join-field mismatches vs a DEGRADED rebuild are
-    // expected — run a FULL re-enrich for a true join comparison.)
+    // expected; run a FULL re-enrich for a true join comparison.)
     let validate_days = config
         .get_int("sync.live_analytics_shadow_validate_days")
         .unwrap_or(0);
     if validate_days > 0 {
         // Single-flight: run_block_monitor is RE-ENTERED by the sync thread's
         // retry loop after any monitor error, and each entry spawned a fresh
-        // ≤2h validator thread — stacking concurrent full-index scans that
+        // ≤2h validator thread, stacking concurrent full-index scans that
         // garbled each other's shadow keyspace and reports.
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         static SHADOW_VALIDATOR_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -2027,11 +2040,11 @@ pub async fn run_block_monitor(
     loop {
         // PAUSE while a full analytics re-enrich rewrites the addr index: the
         // per-block 'a'/'r'/'s'/'t' read-modify-writes would land on rows
-        // Pass-2b then overwrites from its snapshot — deltas lost forever, and
+        // Pass-2b then overwrites from its snapshot; deltas lost forever, and
         // nothing re-applies them (sync_height has advanced). Blocks simply
         // accumulate; catch-up drains the backlog once the rebuild finishes.
         if crate::analytics_live::reenrich_in_progress() {
-            info!("full re-enrich in progress — live indexing paused this poll");
+            info!("full re-enrich in progress; live indexing paused this poll");
             tokio::time::sleep(Duration::from_secs(poll_interval_secs)).await;
             continue;
         }
@@ -2098,7 +2111,7 @@ pub async fn run_block_monitor(
 
         // When the RPC is AHEAD of us, verify our tip is still canonical before
         // treating the gap as plain catch-up (the common reorg presentation is
-        // "new chain already longer"). A failed probe degrades to None — no false
+        // "new chain already longer"). A failed probe degrades to None: no false
         // reorg, re-checked next poll.
         let canonical_at_db_tip = if rpc_tip.height > db_tip.height {
             match crate::api::helpers::rpc_call_json(
@@ -2277,14 +2290,14 @@ pub async fn run_block_monitor(
                     // A stored mapping that disagrees with the fetched block can only be
                     // a STALE pre-written entry: catch-up heights are strictly above
                     // sync_height, so the monitor has indexed nothing there ('H' markers
-                    // and tx/addr state are written only as blocks index) — the mapping
+                    // and tx/addr state are written only as blocks index); the mapping
                     // came from the leveldb metadata refresh or the parse path before a
                     // reorg. The old code `break`-ed here "to trigger the reorg handler",
                     // but detection could never fire while rpc > db with a canonical tip,
-                    // so the monitor re-broke at the same height every poll — a livelock.
+                    // so the monitor re-broke at the same height every poll, a livelock.
                     // The RPC chain is authoritative for un-indexed heights: drop the
                     // stale reverse 'h' entries (both byte orders, like reorg cleanup)
-                    // and fall through — index_block_from_rpc re-resolves the canonical
+                    // and fall through; index_block_from_rpc re-resolves the canonical
                     // hash by height and overwrites the forward mapping.
                     if let Some(stored_hash) = db.get_cf(&cf_metadata, height_key)? {
                         let stored_hash_hex = hex::encode(&stored_hash);
@@ -2351,7 +2364,7 @@ pub async fn run_block_monitor(
                 // Back off like the fetch-error path. Without this, a
                 // persistently-failing block (tx_errors now returns Err instead
                 // of silently advancing) hot-loops: re-fetch a full 500-block
-                // window, fail on block 0, repeat — no delay, hammering the node.
+                // window, fail on block 0, repeat; no delay, hammering the node.
                 warn!(
                     errors = index_errors,
                     retry_secs = poll_interval_secs,
@@ -2458,7 +2471,7 @@ mod tests {
     }
 
     /// THE blind spot: a reorg that presents with the new chain already LONGER
-    /// (rpc > db) — the common shape when a reorg + extension lands within one
+    /// (rpc > db), the common shape when a reorg + extension lands within one
     /// poll window. Detection must fire when our tip hash is no longer the
     /// canonical hash at our height, or catch-up indexes on top of an orphaned
     /// block forever (and the catch-up "abort to trigger reorg handler" livelocks).

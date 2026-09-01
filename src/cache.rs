@@ -102,9 +102,9 @@ pub struct CacheManager {
     /// instant the TTL expires, defeating the very rate-limit guard the cache
     /// exists for). Bounded LRU so it can't grow unbounded on high-cardinality
     /// keys; if an in-flight key's lock is evicted (1024 OTHER keys churn during
-    /// one slow compute) a later caller mints a fresh lock and double-computes —
+    /// one slow compute) a later caller mints a fresh lock and double-computes;
     /// rare and correctness-preserving (both writers store the same value), never
-    /// unbounded. Distinct keys get distinct locks — only the SAME key coalesces,
+    /// unbounded. Distinct keys get distinct locks; only the SAME key coalesces,
     /// so unrelated endpoints never serialize on each other.
     ///
     /// CAVEAT for future callers: the per-key mutex is held across `compute()`, so
@@ -330,7 +330,7 @@ impl CacheManager {
 
         // Single-flight: take this key's async lock so only ONE caller computes.
         // The registry lock is held only long enough to fetch/insert the per-key
-        // Mutex — never across compute() — so different keys never block each other.
+        // Mutex, never across compute(), so different keys never block each other.
         let key_lock = {
             let mut reg = self.compute_locks.write().await;
             reg.get_or_insert(key.to_string(), || Arc::new(tokio::sync::Mutex::new(())))

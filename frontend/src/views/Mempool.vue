@@ -1,8 +1,8 @@
 <script setup>
 /* =====================================================================
-   MEMPOOL — /mempool pending-tx snapshot. The node monitor uses a
+   MEMPOOL: /mempool pending-tx snapshot. The node monitor uses a
    non-verbose getrawmempool, so per-tx size/fee and bytes/usage are
-   ALWAYS null — we surface "—" with a note rather than fake numbers.
+   ALWAYS null; we surface "—" with a note rather than fake numbers.
    The size-over-time sparkline is client-accumulated live while the page is
    open (there is no backend mempool-history endpoint), so it starts empty and
    fills as you watch.
@@ -21,7 +21,7 @@ const err = ref(null)
 // Congestion series is accumulated client-side while the page is open: there is
 // no backend mempool-history endpoint (the monitor reads non-verbose
 // getrawmempool), so we poll the live snapshot every 10s and append {ts, txs}.
-// It starts empty and fills as you watch — real session telemetry, not a mock.
+// It starts empty and fills as you watch; real session telemetry, not a mock.
 const series = ref([])
 let timer = null
 

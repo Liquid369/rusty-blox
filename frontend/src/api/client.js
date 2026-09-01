@@ -1,12 +1,12 @@
 /* =====================================================================
-   API CLIENT — one function per core-page endpoint.
+   API CLIENT: one function per core-page endpoint.
    ---------------------------------------------------------------------
    LIVE by default: hits the real rusty-blox backend at the same origin (or
    VITE_API_BASE). Opt into offline MOCK fixtures with VITE_USE_MOCK=1 (dev).
 
    503 reindex gate: /address, /xpub, /utxo can throw a 503 (err.status).
    Pages must render a "catching up, retry" state, never an empty account.
-   All money formatting lives in lib/money.js — never format here.
+   All money formatting lives in lib/money.js; never format here.
    ===================================================================== */
 
 import * as mock from './mock.js'
@@ -114,7 +114,7 @@ export const getTreasury = () =>
 
 // hourly forward-only monitor snapshots (masternode count, mempool, shield
 // supply); empty until the monitor writes its first sample. hours clamped
-// server-side to 1..8760 — ask for the max and chart whatever exists.
+// server-side to 1..8760; ask for the max and chart whatever exists.
 export const getSnapshots = (hours = 8760) =>
   isMock ? Promise.resolve(mock.analyticsSnapshots()) : getJSON(`/analytics/snapshots?hours=${hours}`)
 
@@ -122,7 +122,7 @@ export const getSnapshots = (hours = 8760) =>
 export const getMnCount = () =>
   isMock ? Promise.resolve(mock.mnCount()) : getJSON('/mncount')
 
-// NOTE: bare array of ~2k rows, no server pagination — virtualize client-side.
+// NOTE: bare array of ~2k rows, no server pagination; virtualize client-side.
 export const getMnList = () =>
   isMock ? Promise.resolve(mock.mnList()) : getJSON('/mnlist')
 
@@ -143,7 +143,7 @@ export const getBudgetProjection = () =>
 export const getFinalizedBudgets = () =>
   isMock ? Promise.resolve(mock.finalizedBudgets()) : getJSON('/finalizedbudgets')
 
-// Proposal name may contain spaces/parens — URL-encode it.
+// Proposal name may contain spaces/parens; URL-encode it.
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
 
@@ -165,7 +165,7 @@ export const getSearch = (query) =>
   isMock ? Promise.resolve(mock.search(query)) : getJSON(`/search/${encodeURIComponent(query)}`)
 
 // --- price ------------------------------------------------------------
-// PIVX market price: { usd, eur, btc, last_updated } — all f64 NUMBERS (btc in
+// PIVX market price: { usd, eur, btc, last_updated }; all f64 NUMBERS (btc in
 // sci-notation). Degrades to a 200 zero-fallback on upstream failure, so treat
 // usd <= 0 as "unavailable" and keep the last good value.
 export const getPrice = () =>
@@ -181,7 +181,7 @@ export const nextSuperblock = (tip) =>
   isMock || !tip ? mock.nextSuperblock() : Math.ceil(tip / SUPERBLOCK_CYCLE) * SUPERBLOCK_CYCLE
 
 // Current-era monthly treasury cap (PIV). 10 PIV/block budget accrual × 43,200
-// blocks/cycle = 432,000 — the real network value (matches frontend-legacy
+// blocks/cycle = 432,000, the real network value (matches frontend-legacy
 // PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET; confirmed live: every passing /budgetinfo
 // proposal's Allotted, Σ ≈ 416,904, fits under it). Mock keeps its own constant
 // so the demo's deliberately-over-cap scenario is preserved.

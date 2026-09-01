@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   GOVERNANCE — /budgetinfo (all proposals) + /budgetprojection (the
+   GOVERNANCE: /budgetinfo (all proposals) + /budgetprojection (the
    funded subset that will actually pay). Superblock countdown, treasury
    allocation bar, and a proposal table with diverging Yeas/Nays bars.
    FUNDING GATE: (Yeas - Nays) must exceed 10% of /mncount.total.
@@ -47,7 +47,7 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
-  // Finalized budget (mnfinalbudget show) — best-effort, never blocks the page. The FeeTX is
+  // Finalized budget (mnfinalbudget show); best-effort, never blocks the page. The FeeTX is
   // the OP_RETURN finalization-collateral tx; resolve it to its block for the "finalized when".
   try {
     const fb = await getFinalizedBudgets()
@@ -60,7 +60,7 @@ onMounted(async () => {
         atHeight: null, atTime: null,
       }
     })
-    // resolve every FeeTX concurrently — no need to wait N serial round-trips
+    // resolve every FeeTX concurrently; no need to wait N serial round-trips
     await Promise.all(rows.map(async (r) => {
       if (!r.feeTx) return
       try { const tx = await getTx(r.feeTx); r.atHeight = tx.blockHeight; r.atTime = tx.blockTime } catch { /* still link the tx */ }
@@ -86,13 +86,13 @@ const allottedUsd = computed(() =>
 // USD value of a PIV amount at the live price, rounded + grouped ('' when unavailable).
 const usd = (piv) =>
   chain.price && chain.price.usd > 0 ? '$' + Math.round(piv * chain.price.usd).toLocaleString('en-US') : ''
-// Per-cycle treasury cap (PIV) — Core funds greedily UP TO this and defers the
+// Per-cycle treasury cap (PIV); Core funds greedily UP TO this and defers the
 // rest, so allotted should never exceed it. Surface it so the max is visible.
 const cap = computed(() => monthlyBudgetCap())
 const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
 const overCap = computed(() => allotted.value > cap.value + 1)
 /* Core's getbudgetinfo retains spent proposals (window closed, RemainingPaymentCount
-   0) until its lazy purge — only proposals with payments left are in the running.
+   0) until its lazy purge; only proposals with payments left are in the running.
    fundedThisCycle intentionally keeps the FULL list: the spent ones are exactly
    what the last superblock paid. */
 const active = computed(() => proposals.value.filter((p) => p.RemainingPaymentCount > 0))
@@ -222,7 +222,7 @@ const allocOption = computed(() => {
       </div>
     </HudPanel>
 
-    <!-- FUNDED THIS CYCLE — the most recent superblock's actual payout, derived from
+    <!-- FUNDED THIS CYCLE: the most recent superblock's actual payout, derived from
          budget status to match the on-chain payment set without a per-block scan. -->
     <h2 class="section-title">Funded this cycle — superblock #{{ formatCount(lastSbHeight) }}</h2>
     <HudPanel title="BUDGET PAID" id="funded set · matches the on-chain superblock payout" hero>

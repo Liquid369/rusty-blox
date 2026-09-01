@@ -1,5 +1,5 @@
 <script setup>
-/* On-brand HUD 404 — catch-all for unknown routes. */
+/* On-brand HUD 404: catch-all for unknown routes. */
 import { useRoute } from 'vue-router'
 const route = useRoute()
 </script>

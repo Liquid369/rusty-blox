@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   PROPOSAL DETAIL — one /budgetinfo proposal + its /budgetvotes campaign.
+   PROPOSAL DETAIL: one /budgetinfo proposal + its /budgetvotes campaign.
    Approval gauge (Ratio), YES/NO/ABSTAIN donut (valid votes only), the
    cumulative net-approval timeline crossing the funding threshold, and a
    pass/fail verdict vs 10% of /mncount.total.
@@ -46,7 +46,7 @@ const threshold = computed(() => mncount.value ? 0.1 * mncount.value.total : 211
 const netApproval = computed(() => proposal.value ? proposal.value.Yeas - proposal.value.Nays : 0)
 const passes = computed(() => netApproval.value > threshold.value)
 
-// valid-only tallies (array length != Yeas — strip invalid/superseded)
+// valid-only tallies (array length != Yeas; strip invalid/superseded)
 const valid = computed(() => votes.value.filter((v) => v.fValid))
 const tally = computed(() => {
   const t = { YES: 0, NO: 0, ABSTAIN: 0 }

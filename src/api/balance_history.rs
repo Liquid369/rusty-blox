@@ -41,6 +41,7 @@ pub struct BalanceHistoryQuery {
     pub group_by: Option<u64>,
     pub from: Option<u64>,
     pub to: Option<u64>,
+    pub fiatcurrency: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -53,6 +54,10 @@ pub struct BalanceHistoryBucket {
     pub sent: String,
     #[serde(rename = "sentToSelf")]
     pub sent_to_self: String,
+    /// Fiat rates at the bucket's day (attached post-compute from the tickers
+    /// store; absent when no rate data covers the bucket).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rates: Option<serde_json::Value>,
 }
 
 /// GET /api/v2/balancehistory/{address}
@@ -102,7 +107,10 @@ pub async fn balance_history_v2(
         .await;
 
     match result {
-        Ok(series) => Ok(Json(series)),
+        Ok(mut series) => {
+            attach_rates(&db, &cache, &mut series, params.fiatcurrency.as_deref()).await;
+            Ok(Json(series))
+        }
         Err(e) => {
             let msg = e.to_string();
             if msg == TOO_MANY_TXS {
@@ -120,6 +128,38 @@ pub async fn balance_history_v2(
                     "Internal error computing balance history; please retry",
                 )),
             ))
+        }
+    }
+}
+
+/// Attach per-bucket fiat rates from the tickers store (nearest at-or-before
+/// day; a historical bucket never gets a future price). Runs post-cache so the
+/// cached series stays currency-agnostic and rates stay fresh.
+pub(crate) async fn attach_rates(
+    db: &Arc<DB>,
+    cache: &Arc<CacheManager>,
+    series: &mut [BalanceHistoryBucket],
+    fiatcurrency: Option<&str>,
+) {
+    if series.is_empty() {
+        return;
+    }
+    let rates = super::tickers::cached_series_pub(db, cache).await;
+    if rates.is_empty() {
+        return;
+    }
+    let cur = fiatcurrency.map(str::to_lowercase);
+    for b in series.iter_mut() {
+        if let Some((_, day)) = super::tickers::rate_at_or_before(&rates, b.time) {
+            b.rates = Some(match cur.as_deref() {
+                Some(c) => match day.get(c) {
+                    Some(v) => serde_json::json!({ c: v }),
+                    None => serde_json::json!({}),
+                },
+                None => serde_json::json!({
+                    "usd": day.usd, "eur": day.eur, "btc": day.btc
+                }),
+            });
         }
     }
 }
@@ -208,11 +248,12 @@ fn bucket_series(
             received: a.received.to_string(),
             sent: a.sent.to_string(),
             sent_to_self: a.sent_to_self.to_string(),
+            rates: None,
         })
         .collect())
 }
 
-async fn compute_balance_history(
+pub(crate) async fn compute_balance_history(
     db: &Arc<DB>,
     address: &str,
     group_by: u64,

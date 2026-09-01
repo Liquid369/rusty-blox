@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   MISSION CONTROL — live network heartbeat dashboard.
+   MISSION CONTROL: live network heartbeat dashboard.
    Centerpiece: chain-tip telemetry + a hero "heartbeat" chart
    (recent-block difficulty area + tx-count columns + block-interval),
    a sync radial gauge, supply composition, and a live block feed.

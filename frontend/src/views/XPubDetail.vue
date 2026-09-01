@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   XPUB ACCOUNT — aggregate a whole HD account (/xpub?details=tokens).
+   XPUB ACCOUNT: aggregate a whole HD account (/xpub?details=tokens).
    Account totals + balance-by-derived-address bar + receive/change split
    + per-address (token) table + the merged tx ledger. Handles the 503
    reindex gate like the address page.
@@ -55,7 +55,7 @@ watch(() => props.xpub, load)
 const sat2piv = (v) => parseFloat(formatSats(v, { decimals: 8, group: false })) || 0
 const tokens = computed(() => info.value?.tokens || [])
 // path = m/44'/119'/account'/chain/index → split()[4] is the BIP44 chain field
-// (0=receive, 1=change). [5] is the address index — using it mis-buckets every
+// (0=receive, 1=change). [5] is the address index; using it mis-buckets every
 // address whose index is 1 as "change" and every change addr at index 0 as "receive".
 const chainOf = (path) => (path.split('/')[4] === '1' ? 'change' : 'receive')
 

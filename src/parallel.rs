@@ -57,7 +57,7 @@ async fn update_sync_height_from_metadata(db: &Arc<DB>) -> Result<(), Box<dyn st
 /// - Each file is processed on the tokio runtime
 /// - Database writes are batched within each file processor
 /// `bulk` selects the per-block write durability mode passed down to
-/// `process_blk_file`: `true` on the initial full reindex (WAL disabled — the
+/// `process_blk_file`: `true` on the initial full reindex (WAL disabled; the
 /// DB is reconstructible from the `.blk` files), `false` on the live/RPC
 /// catch-up path (WAL kept so a crash stays recoverable). It changes durability
 /// only, never the bytes written.
@@ -69,7 +69,7 @@ pub async fn process_files_parallel(
     bulk: bool,
     // [Lever G] true ONLY when the caller already ran validate_canonical_metadata_complete
     // immediately before, with no intervening writer (the leveldb fast path). The
-    // fallback + live-catchup callers pass false and run the [F3] re-check below —
+    // fallback + live-catchup callers pass false and run the [F3] re-check below;
     // the fallback also relies on its height_count==0 "assign dynamically" branch.
     already_validated: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -86,7 +86,7 @@ pub async fn process_files_parallel(
     // [Lever G] Skip this re-scan only when the caller already validated (the leveldb
     // fast path validated ~30 lines earlier with no intervening writer). Callers that
     // did NOT pre-validate (fallback, live catch-up, and any resume-after-crash that
-    // reclassifies to live) pass already_validated=false and run the full check —
+    // reclassifies to live) pass already_validated=false and run the full check;
     // [F3] is their sole integrity gate before the destructive parallel parse.
     if already_validated {
         info!("[F3] Canonical metadata already validated by caller - skipping redundant re-scan");
@@ -167,7 +167,7 @@ pub async fn process_files_parallel(
     let completed = Arc::new(tokio::sync::Mutex::new(0_usize));
 
     // Running max canonical block height seen across files, flushed to
-    // sync_height on a throttle below — replaces the per-file full-CF scan of
+    // sync_height on a throttle below; replaces the per-file full-CF scan of
     // chain_metadata (~O(files x blocks)). `last_written` is seeded from the
     // stored sync_height so the throttled writes stay monotonic (on the leveldb
     // path sync_height is set before parse and must not move backwards).
@@ -365,7 +365,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     info!("Building hash map (loading all blocks into memory)");
 
     // [A] Single scan of the blocks CF building only the fields the chain-walk
-    // and chainwork BFS actually read — NO full-header copies are retained.
+    // and chainwork BFS actually read; NO full-header copies are retained.
     //
     // Two maps replace the previous three full-chain hash maps
     // (children_map-with-headers, blocks_map, and calculate_all_chainwork's
@@ -379,7 +379,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     //     same count as before.
     //
     //   block_meta: block_hash -> (prev_hash[32], n_bits)
-    //     Built over blocks with header len >= 80 — exactly the set
+    //     Built over blocks with header len >= 80, exactly the set
     //     calculate_all_chainwork used to keep (its parent_map/bits_map applied a
     //     `< 80` skip). prev_hash (bytes 4..36) and n_bits (bytes 72..76) are the
     //     ONLY header fields either the chainwork BFS or the genesis chain-walk
@@ -389,7 +389,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     // blocks_map (which the walk indexed with a `len >= 36` guard) and this
     // >= 80 block_meta cover the same blocks. A block referenced as a parent but
     // shorter than 80 bytes is absent from block_meta and the walk breaks with a
-    // chain-gap error — exactly as the old code's "header too short" / "not found
+    // chain-gap error, exactly as the old code's "header too short" / "not found
     // in blocks_map" branches did, and in both cases NO height metadata is
     // written (the function returns Err before the assignment loop), so the
     // stored output is unchanged.
@@ -610,7 +610,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
         // identical to the previous `header[4..36]` read. block_meta covers every
         // block with a >= 80-byte header (all real PIVX blocks); a parent that is
         // absent here is the same condition the old code hit as "header too
-        // short" / "not found in blocks_map" — both break and yield a chain-gap
+        // short" / "not found in blocks_map"; both break and yield a chain-gap
         // error with NO metadata written.
         if let Some((prev_hash, _n_bits)) = block_meta.get(&current_hash) {
             let prev_hash = *prev_hash;
@@ -661,7 +661,7 @@ async fn resolve_block_heights(db: &Arc<DB>, bulk: bool) -> Result<(), Box<dyn s
     }
 
     // If we couldn't reach genesis and don't have an RPC-supplied tip height,
-    // we cannot reliably assign heights — abort with a clear error so the
+    // we cannot reliably assign heights; abort with a clear error so the
     // operator can supply RPC access or rebuild metadata with leveldb tools.
     if !reached_genesis && !have_highest_height {
         return Err(

@@ -2,8 +2,8 @@
 //! `addr_index`, decoupled from the heavy full enrich.
 //!
 //! It reads `balance = received - sent` per address straight from the `'r'`/`'s'`
-//! totals — the SAME values the `/address` API serves and the full enrich's
-//! rich list is built from — so the recomputed snapshot is byte-identical to the
+//! totals (the SAME values the `/address` API serves and the full enrich's
+//! rich list is built from), so the recomputed snapshot is byte-identical to the
 //! enrich computation at the same tip and always agrees with the address pages.
 //!
 //! Cold-stake (P2CS) coins are credited to BOTH the staker and owner address
@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 type DynErr = Box<dyn std::error::Error + Send + Sync>;
 
 /// Compute the rich list + wealth snapshot from the current `addr_index` `r`/`s`
-/// totals. Pure read — does NOT persist; the caller decides when to write (the
+/// totals. Pure read: does NOT persist; the caller decides when to write (the
 /// background task writes both blobs in a single batch).
 ///
 /// `balance = received - sent`, exactly as the `/address` API and the full enrich
@@ -94,7 +94,7 @@ pub const ENABLED_KEY: &str = "sync.analytics_recompute_enabled";
 pub const INTERVAL_KEY: &str = "sync.analytics_recompute_interval_blocks";
 const DEFAULT_INTERVAL_BLOCKS: i64 = 60;
 
-/// addr_index undo window — the SINGLE source of truth, also used by the monitor's
+/// addr_index undo window, the SINGLE source of truth, also used by the monitor's
 /// undo-prune (`src/monitor.rs`). A reorg deeper than this can leave `r`/`s`/`a`
 /// un-reversed (undo data is pruned below tip-window), so the recompute must not run
 /// on a possibly-stale index until a full re-enrich rebuilds it.
@@ -152,16 +152,16 @@ pub fn on_reorg(db: &Arc<DB>, orphaned_blocks: i32) {
     if let Some(cf) = db.cf_handle("chain_state") {
         // The dirty flag is the ONLY thing stopping the periodic recompute from
         // refreshing richlist/wealth off a known-un-reversed index. A failed put
-        // must not be logged as "paused" — surface it as the failure it is.
+        // must not be logged as "paused"; surface it as the failure it is.
         if let Err(e) = db.put_cf(&cf, K_ADDR_INDEX_DIRTY, [1u8]) {
             error!(orphaned_blocks, error = %e,
-                "analytics-recompute: FAILED to set dirty flag after deep reorg — recompute is NOT paused and may refresh from an un-reversed index");
+                "analytics-recompute: FAILED to set dirty flag after deep reorg; recompute is NOT paused and may refresh from an un-reversed index");
             return;
         }
         warn!(
             orphaned_blocks,
             undo_window = ADDR_INDEX_UNDO_WINDOW,
-            "analytics-recompute: reorg deeper than addr_index undo window — richlist/wealth recompute paused; run a full re-enrich to refresh + clear"
+            "analytics-recompute: reorg deeper than addr_index undo window; richlist/wealth recompute paused; run a full re-enrich to refresh + clear"
         );
     }
 }
@@ -192,7 +192,7 @@ pub fn mark_index_clean(db: &Arc<DB>, tip: i32) {
     }
 }
 
-/// Clear the reorg-stale flag WITHOUT advancing the recompute watermark — used when
+/// Clear the reorg-stale flag WITHOUT advancing the recompute watermark; used when
 /// the index was rebuilt but writing the fresh snapshot failed, so the watermark
 /// never asserts "recompute fresh at tip" without a blob and the next periodic
 /// recompute still runs to refresh it.
@@ -258,7 +258,7 @@ impl Drop for RecomputeGuard {
 /// immediately, so the monitor keeps polling/indexing while the snapshot recomputes; a
 /// single-flight guard prevents overlapping scans. The scan is eventually-consistent
 /// (a concurrent block write may be seen by only part of it); that self-heals on the
-/// next interval and never touches canonical state — the snapshot blobs are a derived
+/// next interval and never touches canonical state; the snapshot blobs are a derived
 /// cache. The watermark advances only on a successful persist, so a failure retries
 /// next interval. Must be called from within a Tokio runtime (the monitor task).
 pub fn maybe_recompute(db: &Arc<DB>) {
@@ -286,7 +286,7 @@ pub fn maybe_recompute(db: &Arc<DB>) {
             Ok((rl, w)) => {
                 // Re-check the dirty gate AFTER the scan: a deep reorg may have flagged
                 // the index mid-scan, in which case this result reflects the pre-reorg
-                // chain — discard it (also closes the TOCTOU vs the pre-dispatch check).
+                // chain; discard it (also closes the TOCTOU vs the pre-dispatch check).
                 if is_dirty(&db2) {
                     warn!("analytics-recompute: index flagged dirty mid-scan; discarding result");
                 } else if let Err(e) = persist(&db2, &rl, &w, tip) {
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn recompute_keeps_both_staker_and_owner_for_cold_stake() {
         // A P2CS coin is credited to BOTH staker and owner in r/s (credit-both),
-        // so the recompute lists both and the total double-counts — by design.
+        // so the recompute lists both and the total double-counts, by design.
         let (_t, db) = open_db();
         put_addr(&db, "owner_addr", 1000, 0, 1);
         put_addr(&db, "staker_addr", 1000, 0, 1);

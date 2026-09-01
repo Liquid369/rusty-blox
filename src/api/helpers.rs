@@ -65,10 +65,10 @@ lazy_static::lazy_static! {
 /// Flatten a reqwest transport error to a client-safe message. reqwest's Display
 /// embeds the target URL, which would leak the internal RPC host:port to anonymous
 /// callers (e.g. /sendtx echoes this error verbatim). Node *rejection* reasons do
-/// NOT pass through here — they're parsed from the JSON body and forwarded intact.
+/// NOT pass through here; they're parsed from the JSON body and forwarded intact.
 fn rpc_transport_error(e: reqwest::Error) -> Box<dyn std::error::Error + Send + Sync> {
     // Full detail (incl. URL) to the operator log only; a fixed, URL-free string
-    // to the caller. Never interpolate `e` into the returned message — its Display
+    // to the caller. Never interpolate `e` into the returned message; its Display
     // carries the URL.
     tracing::debug!(error = %e, "RPC transport error (sanitized for client)");
     if e.is_timeout() {
@@ -86,7 +86,7 @@ fn rpc_transport_error(e: reqwest::Error) -> Box<dyn std::error::Error + Send + 
 ///
 /// Replaces the previous per-endpoint synchronous `TcpStream` implementations,
 /// which performed blocking reads (15s timeouts) directly on tokio worker
-/// threads — a handful of concurrent requests could stall the entire server.
+/// threads; a handful of concurrent requests could stall the entire server.
 /// This version is fully async and JSON-injection-safe (params are serialized,
 /// never string-interpolated).
 pub async fn rpc_call_json(

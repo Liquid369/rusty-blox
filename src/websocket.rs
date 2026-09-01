@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 
-/// P2-2 hardening — global cap on concurrent WebSocket connections across all
+/// Global cap on concurrent WebSocket connections across all
 /// channels (blocks/transactions/mempool). Sockets carry only public chain
 /// data, so this is resource-exhaustion hardening, not confidentiality. New
 /// handshakes past the cap are rejected with 503 instead of being accepted and
@@ -27,11 +27,11 @@ const MAX_WS_CONNECTIONS: usize = 4096;
 /// Idle timeout: if no traffic (event to send or client frame, incl. pongs)
 /// flows for this long, the socket is closed. Combined with the periodic ping
 /// below this reaps half-open connections that never send a TCP FIN.
-const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const WS_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Interval at which the server sends a ping to keep the connection live and
 /// to detect dead peers (a missing pong eventually trips the idle timeout).
-const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const WS_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn ws_semaphore() -> &'static Arc<Semaphore> {
     static SEM: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -72,7 +72,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
     {
         Some(o) => o.trim().trim_end_matches('/').to_ascii_lowercase(),
-        None => return true, // no Origin (non-browser client) — allow
+        None => return true, // no Origin (non-browser client); allow
     };
 
     let allowed = ws_allowed_origins();
@@ -110,7 +110,7 @@ fn origin_allowed(headers: &HeaderMap) -> bool {
 /// Shared handshake gate: enforce the Origin allowlist and the global
 /// connection cap before upgrading. On success returns the acquired permit,
 /// which is moved into the socket handler so it is released on disconnect.
-fn ws_guard(headers: &HeaderMap) -> Result<OwnedSemaphorePermit, Response> {
+pub(crate) fn ws_guard(headers: &HeaderMap) -> Result<OwnedSemaphorePermit, Response> {
     if !origin_allowed(headers) {
         return Err((StatusCode::FORBIDDEN, "origin not allowed").into_response());
     }
@@ -164,10 +164,12 @@ impl Default for EventBroadcaster {
 
 impl EventBroadcaster {
     pub fn new() -> Self {
-        // Create broadcast channels with capacity of 1000 events
-        let (block_tx, _) = broadcast::channel(1000);
-        let (transaction_tx, _) = broadcast::channel(1000);
-        let (mempool_tx, _) = broadcast::channel(1000);
+        // Ring must hold a full block's per-tx events: a >cap block evicts
+        // the oldest before slow subscribers drain, and Lagged is dropped
+        // silently. 8192 clears any realistic PIVX block.
+        let (block_tx, _) = broadcast::channel(8192);
+        let (transaction_tx, _) = broadcast::channel(8192);
+        let (mempool_tx, _) = broadcast::channel(8192);
 
         Self {
             block_tx,
@@ -343,8 +345,8 @@ async fn serve_socket(
     ping.tick().await;
 
     // Idle deadline reset on every inbound frame (data, ping or pong). A peer
-    // that has gone silent — including one whose TCP is half-open and never
-    // answers our pings — trips this and the socket is closed.
+    // that has gone silent, including one whose TCP is half-open and never
+    // answers our pings, trips this and the socket is closed.
     let idle = tokio::time::sleep(WS_IDLE_TIMEOUT);
     tokio::pin!(idle);
 

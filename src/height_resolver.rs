@@ -163,7 +163,7 @@ pub async fn resolve_heights_from_block_index(
     }
 
     // 5a. [C] The previous code materialised a full 'B'-key index here
-    //     (`HashSet<(i32, txid_bytes)>`, one entry per ~12.3M block-tx record —
+    //     (`HashSet<(i32, txid_bytes)>`, one entry per ~12.3M block-tx record,
     //     several GB) purely to answer, for each positive-height tx in
     //     `txids_to_validate`, "does a 'B' key exist at this tx's stored height?".
     //
@@ -174,7 +174,7 @@ pub async fn resolve_heights_from_block_index(
     //     key (it doesn't know the tx_index). On a catch-up/resume (sync.rs
     //     deletes `height_resolution_complete` and re-runs this resolver over a
     //     monitor-populated DB) or a reorg, such a tx whose height is OUTSIDE the
-    //     canonical chain map MUST still be orphaned — hardcoding
+    //     canonical chain map MUST still be orphaned; hardcoding
     //     `has_block_index = true` would keep it and inflate balances.
     //
     //     `has_block_index` is therefore computed per-tx by an ON-DEMAND, bounded
@@ -182,7 +182,7 @@ pub async fn resolve_heights_from_block_index(
     //     parser writes 'B' as: 'B' + height.to_le_bytes() (i32, 4B) +
     //     tx_index.to_le_bytes() (u64, 8B) -> value = hex(display/big-endian txid)
     //     (transactions.rs ~527). A block holds only a few txs, so the scan over
-    //     the `b'B' + height` prefix touches O(few) keys per tx — not a full
+    //     the `b'B' + height` prefix touches O(few) keys per tx, not a full
     //     re-scan, and O(1) extra memory.
     //
     //     This is BYTE-EQUIVALENT to the old `block_tx_index.contains(&(height,
@@ -190,7 +190,7 @@ pub async fn resolve_heights_from_block_index(
     //       {(i32::from_le_bytes(key[1..5]), reverse(hex::decode(value)))
     //          : every 'B' key}
     //     and was queried at `(current_height, txid_internal)`. A 'B' key can only
-    //     satisfy that query if its `key[1..5]` equals `current_height` — i.e. it
+    //     satisfy that query if its `key[1..5]` equals `current_height`, i.e. it
     //     falls under the `b'B' + current_height` prefix. Restricting the scan to
     //     that prefix and decoding each value's txid to internal form
     //     (reverse(hex::decode(value))) and comparing to `txid_internal` evaluates
@@ -204,7 +204,7 @@ pub async fn resolve_heights_from_block_index(
     /// `txid_internal` is the internal (Core little-endian) txid, i.e. the bytes
     /// after the 't' prefix in a transaction key. The 'B' value stores the txid
     /// in display (big-endian) hex, so it is hex-decoded then reversed back to
-    /// internal form before comparison — matching how the old index was built.
+    /// internal form before comparison, matching how the old index was built.
     fn block_index_has_tx(
         db: &DB,
         cf: &impl rocksdb::AsColumnFamilyRef,
@@ -265,7 +265,7 @@ pub async fn resolve_heights_from_block_index(
             // index ONLY then: on a fresh sync every height is canonical and this
             // scan never runs; it fires solely for the rare off-chain tx (a reorg,
             // or a monitor-written prev-tx 't' record that has no 'B' key). When
-            // the height IS canonical the tx is valid and we touch nothing — same
+            // the height IS canonical the tx is valid and we touch nothing, same
             // as the old HashSet path, which also took no branch in that case.
             if !height_to_blockhash.contains_key(&(current_height as i64)) {
                 let has_block_index =

@@ -72,7 +72,7 @@ pub async fn health_check_v2(
     Extension(db): Extension<Arc<DB>>,
 ) -> Result<Json<HealthStatus>, StatusCode> {
     // O(1) health check. The previous implementation iterated the ENTIRE
-    // transactions and addr_index column families on every call — it was both the
+    // transactions and addr_index column families on every call; it was both the
     // Docker healthcheck target (every 30s) and an unauthenticated remote DoS
     // vector on a synced chain. Counts now come from RocksDB key estimates and
     // metrics persisted by the sync pipeline.
@@ -87,7 +87,7 @@ pub async fn health_check_v2(
         // Cheap liveness probe: a point read against chain_state
         let state_cf = db.cf_handle("chain_state").ok_or("chain_state CF not found")?;
         // Align /health with the data endpoints' 503 gate (LSM-2): "complete" means
-        // complete AND in the current (v2) on-disk format, not just the raw marker —
+        // complete AND in the current (v2) on-disk format, not just the raw marker;
         // otherwise /health reports healthy during the v1 pre-wipe window (when every
         // data endpoint 503s) and during a v2 re-enrich.
         let raw_complete = db
@@ -123,7 +123,7 @@ pub async fn health_check_v2(
 
         // Frozen-tip detection. When RPC dies mid-loop the monitor stops
         // connecting blocks AND stops advancing network_height, so `synced` still
-        // reads true — the only honest signal is that the last indexed block's
+        // reads true; the only honest signal is that the last indexed block's
         // header time stops moving. Only judged once the index is complete.
         let last_block_time = db
             .get_cf(state_cf, b"tip_block_time")?
@@ -141,7 +141,7 @@ pub async fn health_check_v2(
             tip_age_seconds.filter(|a| *a > crate::chain_state::STALE_TIP_THRESHOLD_SECS)
         {
             warnings.push(format!(
-                "No new block indexed in {age}s (~{} min); tip may be frozen — check pivxd RPC.",
+                "No new block indexed in {age}s (~{} min); tip may be frozen; check pivxd RPC.",
                 age / 60
             ));
         }
@@ -153,7 +153,7 @@ pub async fn health_check_v2(
             database_ok: true,
             address_index_complete,
             // Estimated via rocksdb.estimate-num-keys (exact counts would require a
-            // full CF scan — see DoS note above). Orphan breakdown is not tracked here.
+            // full CF scan; see DoS note above). Orphan breakdown is not tracked here.
             total_transactions: total_txs,
             valid_transactions: total_txs,
             orphaned_transactions: 0,

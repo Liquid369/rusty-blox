@@ -1,6 +1,6 @@
 <script setup>
 /* =====================================================================
-   BLOCK DETAIL — header telemetry + tx-type distribution donut +
+   BLOCK DETAIL: header telemetry + tx-type distribution donut +
    per-transaction value-flow (vin → vout) tables.
    UNITS: tx-level value_in/value_out/fees/reward = PIV (formatPiv);
           per-vin/vout value = satoshi FLOAT (formatSats).
@@ -41,7 +41,7 @@ const txType = (t) => {
 const SHIELD_TYPES = ['shielding', 'de-shielding', 'shielded']
 const TYPE_COLOR = { coinbase: '#ffcf5c', coinstake: '#c46bff', transparent: '#46e6d0', shielding: '#ff8fe0', 'de-shielding': '#e03fa8', shielded: '#ff5fd0' }
 // Directed vb for the pool rows / aggregates: 0 for s→s (its vb is the fee,
-// not a transfer — printing it as a pool amount would misstate private values).
+// not a transfer; printing it as a pool amount would misstate private values).
 const vbOf = (t) => { const s = shieldShape(t); return s && s !== 'shielded' ? (t.sapling.value_balance || 0) : 0 }
 
 // Block reward (total minted, PIV float) -> satoshi, for recovering the value the
@@ -62,7 +62,7 @@ const txIn = (t) => { const s = vinColdValueSat(t); const base = s != null ? s /
 const txOut = (t) => (t.value_out || 0) + Math.max(-vbOf(t), 0)
 
 // The block's minter: for a PoS block the staker is in the COINSTAKE (the tx that
-// consumes a real input) — never the empty coinbase. A cold-stake coinstake output is
+// consumes a real input); never the empty coinbase. A cold-stake coinstake output is
 // P2CS [staker(S), owner(D)]; the staker (S) is who minted the block.
 const minter = computed(() => {
   const cs = (block.value?.tx || []).find((t) => txType(t) === 'coinstake')

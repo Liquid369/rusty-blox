@@ -133,7 +133,7 @@ pub fn calculate_all_chainwork(
                 // Skip children absent from blocks_map (the caller's map may
                 // include headers < 80 bytes): the previous internal children map
                 // was built only from blocks_map keys, so this keeps the traversed
-                // set — and the resulting chainwork — byte-identical.
+                // set (and the resulting chainwork) byte-identical.
                 if !blocks_map.contains_key(child_hash) {
                     continue;
                 }
