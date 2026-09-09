@@ -617,7 +617,7 @@ pub async fn rich_list(
 /// Honest "% of supply" denominator: the HODL snapshot's deduped-outpoint
 /// circulating total. The wealth snapshot's total_balance is a SUM of per-address
 /// balances, which double-counts cold-staked coins (credited to both staker and
-/// owner for per-address parity), inflating it ~7% and biasing every share low.
+/// owner for per-address parity), inflating it ~19% and biasing every share low.
 /// Falls back to total_balance if the HODL blob is absent.
 fn supply_denominator_sats(db: &Arc<DB>, fallback: i64) -> i64 {
     let from_hodl = db
@@ -1177,7 +1177,9 @@ fn compute_staking_analytics(
         .cf_handle("transactions")
         .ok_or("transactions CF not found")?;
 
-    // Get current supply for participation rate calculation
+    // Get current supply for participation rate calculation. Pre-enrich
+    // fallback only: node moneysupply, NOT the stakeable-supply denominator
+    // the daily series uses; estimate-grade either way.
     let money_supply = super::network::compute_money_supply_blocking()?;
     let total_supply = (money_supply.moneysupply * 100_000_000.0) as i64;
 

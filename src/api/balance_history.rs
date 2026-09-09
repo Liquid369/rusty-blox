@@ -260,9 +260,18 @@ pub(crate) async fn compute_balance_history(
     from: Option<u64>,
     to: Option<u64>,
 ) -> Result<Vec<BalanceHistoryBucket>, Box<dyn std::error::Error + Send + Sync>> {
+    // Same whole-history budget as /address. The permit MOVES INTO the
+    // blocking closure: a request timeout drops this future but the detached
+    // blocking task keeps its slot until it actually finishes, so resident
+    // curves stay capped at the permit count.
+    let permit = super::addresses::addr_history_limit()
+        .clone()
+        .acquire_owned()
+        .await?;
     let db = Arc::clone(db);
     let address = address.to_string();
     tokio::task::spawn_blocking(move || -> Result<Vec<BalanceHistoryBucket>, String> {
+        let _permit = permit;
         let cf_addr = db
             .cf_handle("addr_index")
             .ok_or("addr_index CF not found")?;
@@ -290,66 +299,72 @@ pub(crate) async fn compute_balance_history(
             return Err(TOO_MANY_TXS.to_string());
         }
 
-        // Batch ALL tx-record reads into one multi_get (both key orders per txid;
-        // same semantics as read_tx_record_orphan_aware: body = first len>8 probing
-        // internal then display, orphan if EITHER order carries HEIGHT_ORPHAN).
-        // Serial point-gets cost a cold 17k-tx staker ~30s on the VPS; one batched
-        // multi_get is 1-2 orders of magnitude cheaper on the same data.
-        let tx_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> = canonical
-            .iter()
-            .flat_map(|(txid, _)| {
-                let internal: Vec<u8> = txid.iter().rev().cloned().collect();
-                let mut ik = vec![b't'];
-                ik.extend_from_slice(&internal);
-                let mut dk = vec![b't'];
-                dk.extend_from_slice(txid);
-                [(cf_tx, ik), (cf_tx, dk)]
-            })
-            .collect();
-        let tx_vals = db.multi_get_cf(tx_keys);
-
+        // Batch tx-record reads via multi_get in CHUNKS (both key orders per
+        // txid; same semantics as read_tx_record_orphan_aware: body = first
+        // len>8 probing internal then display, orphan if EITHER order carries
+        // HEIGHT_ORPHAN). Serial point-gets cost a cold 17k-tx staker ~30s on
+        // the VPS; batching is 1-2 orders of magnitude cheaper. Chunking
+        // matters for RAM: one flat multi_get held EVERY raw tx body of a
+        // 250k-tx address at once (hundreds of MB); per-chunk bodies free as
+        // soon as their flows are extracted.
+        const MULTI_GET_CHUNK: usize = 5_000;
         let mut own: HashMap<(String, u64), i64> = HashMap::new();
         let mut flows: Vec<TxFlow> = Vec::with_capacity(canonical.len());
-        for (i, (txid_bytes, height)) in canonical.iter().enumerate() {
-            let pair = [&tx_vals[2 * i], &tx_vals[2 * i + 1]];
-            let mut body: Option<&Vec<u8>> = None;
-            let mut orphan_marked = false;
-            for v in pair {
-                let d = match v {
-                    Ok(Some(d)) => d,
-                    Ok(None) => continue,
-                    // Orphan-aware on a SUMMING path, and IO errors must stay
-                    // errors: reading a failure as "absent" would drop money.
-                    Err(e) => return Err(e.to_string()),
-                };
-                if d.len() >= 8
-                    && i32::from_le_bytes([d[4], d[5], d[6], d[7]])
-                        == crate::constants::HEIGHT_ORPHAN
-                {
-                    orphan_marked = true;
+        for chunk in canonical.chunks(MULTI_GET_CHUNK) {
+            let tx_keys: Vec<(&rocksdb::ColumnFamily, Vec<u8>)> = chunk
+                .iter()
+                .flat_map(|(txid, _)| {
+                    let internal: Vec<u8> = txid.iter().rev().cloned().collect();
+                    let mut ik = vec![b't'];
+                    ik.extend_from_slice(&internal);
+                    let mut dk = vec![b't'];
+                    dk.extend_from_slice(txid);
+                    [(cf_tx, ik), (cf_tx, dk)]
+                })
+                .collect();
+            let tx_vals = db.multi_get_cf(tx_keys);
+
+            for (i, (txid_bytes, height)) in chunk.iter().enumerate() {
+                let pair = [&tx_vals[2 * i], &tx_vals[2 * i + 1]];
+                let mut body: Option<&Vec<u8>> = None;
+                let mut orphan_marked = false;
+                for v in pair {
+                    let d = match v {
+                        Ok(Some(d)) => d,
+                        Ok(None) => continue,
+                        // Orphan-aware on a SUMMING path, and IO errors must stay
+                        // errors: reading a failure as "absent" would drop money.
+                        Err(e) => return Err(e.to_string()),
+                    };
+                    if d.len() >= 8
+                        && i32::from_le_bytes([d[4], d[5], d[6], d[7]])
+                            == crate::constants::HEIGHT_ORPHAN
+                    {
+                        orphan_marked = true;
+                    }
+                    if d.len() > 8 && body.is_none() {
+                        body = Some(d);
+                    }
                 }
-                if d.len() > 8 && body.is_none() {
-                    body = Some(d);
+                if orphan_marked {
+                    continue;
                 }
+                let Some(rec) = body else { continue };
+                // Record = version(4) ++ height(4) ++ raw_tx; the parser wants a
+                // 4-byte block_version prefix (same framing as /tx).
+                let mut framed = Vec::with_capacity(4 + rec.len() - 8);
+                framed.extend_from_slice(&[0u8; 4]);
+                framed.extend_from_slice(&rec[8..]);
+                let tx = crate::parser::deserialize_transaction_blocking(&framed)
+                    .map_err(|e| format!("tx parse failed for {}: {e}", hex::encode(txid_bytes)))?;
+                let txid_hex = hex::encode(txid_bytes);
+                let (credit, refs) = tx_flow(&tx, &txid_hex, &address, &mut own);
+                flows.push(TxFlow {
+                    height: *height,
+                    credit,
+                    refs,
+                });
             }
-            if orphan_marked {
-                continue;
-            }
-            let Some(rec) = body else { continue };
-            // Record = version(4) ++ height(4) ++ raw_tx; the parser wants a
-            // 4-byte block_version prefix (same framing as /tx).
-            let mut framed = Vec::with_capacity(4 + rec.len() - 8);
-            framed.extend_from_slice(&[0u8; 4]);
-            framed.extend_from_slice(&rec[8..]);
-            let tx = crate::parser::deserialize_transaction_blocking(&framed)
-                .map_err(|e| format!("tx parse failed for {}: {e}", hex::encode(txid_bytes)))?;
-            let txid_hex = hex::encode(txid_bytes);
-            let (credit, refs) = tx_flow(&tx, &txid_hex, &address, &mut own);
-            flows.push(TxFlow {
-                height: *height,
-                credit,
-                refs,
-            });
         }
 
         // Batch the header-time resolution the same way: distinct heights ->

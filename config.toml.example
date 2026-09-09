@@ -155,8 +155,6 @@ port = 3005
 # Leave empty to apply the default same-origin policy.
 ws_allowed_origins = ""
 
-# Web server worker threads (string).
-worker_threads = "4"
 
 [repair]
 # One-shot heal for historic "stuck heightless" transactions — confirmed txs whose

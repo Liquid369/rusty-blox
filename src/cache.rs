@@ -114,17 +114,25 @@ pub struct CacheManager {
     compute_locks: Arc<RwLock<LruCache<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
+/// Per-entry byte cap for the JSON cache: the LRU bounds entries, not bytes,
+/// and whale pages exist (a details=txs page or a 250k-tx balance curve can
+/// exceed 20MB serialized; 5000 of those is an OOM, not a cache). Oversized
+/// responses recompute per request; the per-endpoint semaphores bound that.
+const MAX_JSON_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+
+fn within_entry_budget(v: &serde_json::Value) -> bool {
+    serde_json::to_string(v)
+        .map(|s| s.len() <= MAX_JSON_ENTRY_BYTES)
+        .unwrap_or(false)
+}
+
 impl CacheManager {
     /// Create a new cache manager with default sizes
     ///
-    /// Default sizes (approximate memory usage):
-    /// - 1000 blocks by height (~500KB)
-    /// - 1000 blocks by hash (~500KB)
-    /// - 10000 transactions (~5MB)
-    /// - 5000 addresses (~2MB)
-    /// - 5000 JSON responses (~10MB)
-    ///
-    /// Total: ~18MB
+    /// The LRUs bound ENTRY COUNTS, not bytes. Typical resident is tens of
+    /// MB; the worst case is bounded by the per-entry byte cap on the JSON
+    /// cache (see MAX_JSON_ENTRY_BYTES) at ~2MB * 5000 entries, reached only
+    /// if every entry is maximal.
     pub fn new() -> Self {
         Self::with_capacities(1000, 1000, 10000, 5000, 5000)
     }
@@ -262,6 +270,7 @@ impl CacheManager {
             if !entry.is_expired() {
                 // Try to deserialize from JSON
                 if let Ok(value) = serde_json::from_value::<T>(entry.value().clone()) {
+                    crate::metrics::increment_cache_hits();
                     return Some(value);
                 }
             } else {
@@ -269,6 +278,7 @@ impl CacheManager {
                 cache.pop(&key.to_string());
             }
         }
+        crate::metrics::increment_cache_misses();
         None
     }
 
@@ -278,6 +288,9 @@ impl CacheManager {
         T: Serialize,
     {
         if let Ok(json_value) = serde_json::to_value(value) {
+            if !within_entry_budget(&json_value) {
+                return;
+            }
             let entry = CachedEntry::new(json_value, ttl);
             let mut cache = self.json_cache.write().await;
             cache.put(key.to_string(), entry);
@@ -300,6 +313,9 @@ impl CacheManager {
 
     /// Set raw serde_json::Value in cache with TTL
     pub async fn set_json_value(&self, key: &str, value: serde_json::Value, ttl: Duration) {
+        if !within_entry_budget(&value) {
+            return;
+        }
         let entry = CachedEntry::new(value, ttl);
         let mut cache = self.json_cache.write().await;
         cache.put(key.to_string(), entry);

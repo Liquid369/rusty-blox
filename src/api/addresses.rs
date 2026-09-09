@@ -363,11 +363,26 @@ pub(crate) async fn apply_address_mempool_overlay(
     }
 }
 
+/// Bound concurrent whole-history loads. `/address` and `/balancehistory`
+/// (REST and ws) materialize an address's full 't' history per cache miss;
+/// a burst of distinct-key requests against a 230k-tx staker would otherwise
+/// hold hundreds of MB each up to the global in-flight limit and OOM the
+/// shared box. Waiters QUEUE (small addresses clear in microseconds). Owned
+/// permits so a compute detached by a request timeout keeps holding its slot:
+/// pile-up is capped at the permit count, never unbounded.
+pub(crate) fn addr_history_limit() -> &'static Arc<tokio::sync::Semaphore> {
+    static LIMIT: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    LIMIT.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+}
+
 pub(crate) async fn compute_address_info(
     db: &Arc<DB>,
     address: &str,
     params: &AddressQuery,
 ) -> Result<AddressInfo, Box<dyn std::error::Error + Send + Sync>> {
+    // Inline heavy work is cancel-safe (dropped with the future), so a plain
+    // acquire is enough here.
+    let _permit = addr_history_limit().acquire().await?;
     // Per-address tx list ('t' + address): the authoritative tx set written by
     // enrichment, stored in canonical display order (see the P1-1 note below).
     let tx_list_key = format!("t{address}");
@@ -441,15 +456,16 @@ pub(crate) async fn compute_address_info(
             .unwrap_or(i32::MAX);
         tx_entries.retain(|(_, h)| *h >= lo && *h <= hi);
     }
-    let all_txids: Vec<String> = tx_entries.iter().map(|(t, _)| hex::encode(t)).collect();
-
     // === PAGINATION LOGIC ===
-    // Validate and clamp parameters
+    // Validate and clamp parameters. Hex-encode ONLY the returned page:
+    // materializing the whole filtered history as hex strings cost ~90 bytes
+    // per tx (a 250k-tx address ~22MB per request) for rows the response
+    // never carries.
     const MAX_PAGE_SIZE: u32 = 1000;
     let page = params.page.max(1);
     let page_size = params.page_size.clamp(1, MAX_PAGE_SIZE);
 
-    let total_tx_count = all_txids.len();
+    let total_tx_count = tx_entries.len();
     let total_pages = if total_tx_count == 0 {
         1
     } else {
@@ -463,10 +479,13 @@ pub(crate) async fn compute_address_info(
         .min(total_tx_count);
 
     // Handle page out of bounds - return empty result
-    let paginated_txids = if start_idx >= total_tx_count {
+    let paginated_txids: Vec<String> = if start_idx >= total_tx_count {
         vec![]
     } else {
-        all_txids[start_idx..end_idx].to_vec()
+        tx_entries[start_idx..end_idx]
+            .iter()
+            .map(|(t, _)| hex::encode(t))
+            .collect()
     };
 
     // === DETAILS MODE HANDLING ===
