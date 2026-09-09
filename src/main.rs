@@ -528,13 +528,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = get_global_config();
     info!("Configuration loaded");
 
-    let worker_threads_str: String = config
-        .get("server.worker_threads")
-        .map_err(|e| format!("Error getting server.worker_threads: {e}"))?;
-    let _worker_threads: usize = worker_threads_str
-        .parse()
-        .map_err(|_| "Invalid number for worker_threads")?;
-
     let db_path_str = config
         .get_string("paths.db_path")
         .map_err(|_| MyError::new("Missing db_path in config"))?;
