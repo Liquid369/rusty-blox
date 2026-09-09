@@ -2447,6 +2447,10 @@ pub fn compute_wealth_richlist(
     };
 
     // Nakamoto: minimum holders summing to >50% of total, exact integer test.
+    // `total` here is the address-balance sum, which double-counts cold-staked
+    // coins; the serving path re-derives the coefficient against the true
+    // supply (same denominator as the percentages) and uses this stored value
+    // only as a fallback.
     let mut nakamoto_coefficient: u32 = 0;
     let mut acc: i128 = 0;
     for (_, b) in &balances {

@@ -615,7 +615,7 @@ pub async fn rich_list(
 /// balances, which double-counts cold-staked coins (credited to both staker and
 /// owner for per-address parity), inflating it ~7% and biasing every share low.
 /// Falls back to total_balance if the HODL blob is absent.
-fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
+fn supply_denominator_sats(db: &Arc<DB>, fallback: i64) -> i64 {
     let from_hodl = db
         .cf_handle("chain_state")
         .and_then(|cf| db.get_cf(&cf, b"analytics_hodl").ok().flatten())
@@ -624,10 +624,41 @@ fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
         .filter(|t| *t > 0);
     let v = from_hodl.unwrap_or(fallback);
     if v > 0 {
-        v as f64
+        v
     } else {
-        1.0
+        1
     }
+}
+
+fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
+    supply_denominator_sats(db, fallback) as f64
+}
+
+/// Nakamoto against the SAME denominator the percentages use. The snapshot's
+/// stored coefficient crosses half of the address-balance SUM, which
+/// double-counts cold-staked coins (~19% high on mainnet) and overstates the
+/// answer (77 where the true crossing is 31); a top_50 above 50% next to a
+/// nakamoto above 50 is self-contradictory. The persisted richlist holds the
+/// same descending balances the snapshot was built from, so the exact integer
+/// walk is redone here; the stored value serves only when the blob is absent
+/// or the crossing lies beyond the kept rows.
+fn nakamoto_vs_supply(db: &Arc<DB>, denom_sats: i64, fallback: u32) -> u32 {
+    let rows: Option<Vec<crate::enrich_addresses::RichListSnapshotEntry>> = db
+        .cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"analytics_richlist").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok());
+    let Some(rows) = rows else {
+        return fallback;
+    };
+    let denom = denom_sats as i128;
+    let mut acc: i128 = 0;
+    for (i, r) in rows.iter().enumerate() {
+        acc += r.balance as i128;
+        if 2 * acc > denom {
+            return (i + 1) as u32;
+        }
+    }
+    fallback
 }
 
 /// Read the precomputed rich-list snapshot and shape it into the API response.
@@ -707,8 +738,10 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
 /// Shape a wealth snapshot into the API response. Shared by the snapshot path AND
 /// the live recompute fallback so the two never diverge.
 fn shape_wealth(db: &Arc<DB>, w: crate::enrich_addresses::WealthSnapshot) -> WealthDistribution {
-    let denom = supply_denominator(db, w.total_balance);
+    let denom_sats = supply_denominator_sats(db, w.total_balance);
+    let denom = denom_sats as f64;
     let pct = |v: i64| (v as f64 / denom) * 100.0;
+    let nakamoto = nakamoto_vs_supply(db, denom_sats, w.nakamoto_coefficient);
     let total_holders = if w.address_count > 0 {
         w.address_count as f64
     } else {
@@ -721,7 +754,7 @@ fn shape_wealth(db: &Arc<DB>, w: crate::enrich_addresses::WealthSnapshot) -> Wea
         top_100: pct(w.top_100),
         top_1000: pct(w.top_1000),
         gini: w.gini,
-        nakamoto_coefficient: w.nakamoto_coefficient,
+        nakamoto_coefficient: nakamoto,
         histogram: w
             .histogram
             .into_iter()
@@ -1423,4 +1456,60 @@ fn format_timestamp(timestamp: u64) -> String {
     }
 
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[cfg(test)]
+mod nakamoto_tests {
+    use super::nakamoto_vs_supply;
+    use crate::enrich_addresses::RichListSnapshotEntry;
+    use rocksdb::{Options, DB};
+    use std::sync::Arc;
+
+    fn db_with_richlist(balances: &[i64]) -> (tempfile::TempDir, Arc<DB>) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = DB::open_cf(&opts, temp.path(), ["chain_state"]).unwrap();
+        let rows: Vec<RichListSnapshotEntry> = balances
+            .iter()
+            .map(|b| RichListSnapshotEntry {
+                address: format!("D{b}"),
+                balance: *b,
+                tx_count: 0,
+            })
+            .collect();
+        let cf = db.cf_handle("chain_state").unwrap();
+        db.put_cf(
+            &cf,
+            b"analytics_richlist",
+            bincode::serialize(&rows).unwrap(),
+        )
+        .unwrap();
+        (temp, Arc::new(db))
+    }
+
+    // The stored coefficient crosses half of the inflated address-sum; the
+    // served one must cross half of the true supply, like the percentages.
+    #[test]
+    fn crossing_uses_the_served_denominator() {
+        let (_t, db) = db_with_richlist(&[60, 30, 20, 10]);
+        // true supply 100: 60 alone crosses (2*60 > 100) -> 1
+        assert_eq!(nakamoto_vs_supply(&db, 100, 99), 1);
+        // inflated 200: 60+30+20 = 110 > 100 -> 3
+        assert_eq!(nakamoto_vs_supply(&db, 200, 99), 3);
+    }
+
+    #[test]
+    fn falls_back_when_blob_missing_or_crossing_beyond_rows() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let db = Arc::new(DB::open_cf(&opts, temp.path(), ["chain_state"]).unwrap());
+        assert_eq!(nakamoto_vs_supply(&db, 100, 42), 42);
+        let (_t, db) = db_with_richlist(&[10, 10]);
+        // kept rows sum to 20, denominator 1000: never crosses -> fallback
+        assert_eq!(nakamoto_vs_supply(&db, 1000, 42), 42);
+    }
 }
