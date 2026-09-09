@@ -281,6 +281,12 @@ pub async fn raw_block_v2(
             &format!("rawblock:{height}"),
             Duration::from_secs(60),
             || async move {
+                // Same node-RPC budget as the tx proxies: distinct-height
+                // requests must not fan out to pivxd unbounded (a large
+                // block's hex exceeds the cache entry cap, so misses recur).
+                let _permit = crate::api::transactions::MEMPOOL_RPC_LIMIT
+                    .try_acquire()
+                    .map_err(|_| "busy")?;
                 let v =
                     super::helpers::rpc_call_json("getblock", serde_json::json!([hash, 0])).await?;
                 v.as_str().map(str::to_string).ok_or_else(|| {

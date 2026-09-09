@@ -643,6 +643,10 @@ async fn dispatch(
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|b| b.as_u64())
+                        // Length-capped like the other ws array params; a 1MB
+                        // frame of targets is latency amplification, and no
+                        // client asks for more than a handful.
+                        .take(32)
                         .map(|b| b.min(1008) as u32)
                         .collect()
                 })

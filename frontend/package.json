@@ -1,9 +1,9 @@
 {
-  "name": "rusty-blox-foundation",
-  "version": "0.0.0",
+  "name": "rusty-blox",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Neutral, data-wired base for the rusty-blox explorer redesign competition. Fork + reskin; keep the data wiring + money formatting.",
+  "description": "rusty-blox PIVX explorer frontend. Blockbook v2 drop-in API + PIVX extensions; see /#/api for the reference.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

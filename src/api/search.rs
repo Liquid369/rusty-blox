@@ -30,11 +30,30 @@ pub async fn search_v2(
 /// GET /api/v2/mempool
 /// Returns current mempool information.
 ///
-/// **NO CACHE**: Mempool is real-time data
+/// **CACHED 2s**: the snapshot clones every pending tx; a 2s TTL keeps it
+/// effectively real-time (10s poll cadence) while bounding clone work under
+/// a request burst.
 pub async fn mempool_v2(
     Extension(mempool_state): Extension<Arc<MempoolState>>,
+    Extension(cache): Extension<Arc<crate::cache::CacheManager>>,
 ) -> Result<Json<MempoolInfo>, (StatusCode, Json<BlockbookError>)> {
-    let info = mempool_state.get_info().await;
+    let info = cache
+        .get_or_compute(
+            "mempool:snapshot",
+            std::time::Duration::from_secs(2),
+            || async move {
+                Ok::<MempoolInfo, Box<dyn std::error::Error + Send + Sync>>(
+                    mempool_state.get_info().await,
+                )
+            },
+        )
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(BlockbookError::new("Internal error reading mempool")),
+            )
+        })?;
     Ok(Json(info))
 }
 
