@@ -350,12 +350,12 @@ function richWidth(bal) {
     </div>
 
     <!-- HODL WAVES -->
-    <h2 class="section-title">HODL waves — unspent value by coin age</h2>
-    <HudPanel title="HODL WAVES" id="/analytics/hodl · cold → hot" hero>
+    <h2 class="section-title">HODL waves — value by time since last move</h2>
+    <HudPanel title="HODL WAVES" id="/analytics/hodl · staking respends reset age" hero>
       <template #head>
-        <span class="pill neon mono" v-if="hodl">{{ percent(hodl.bands.at(-1).percentage, 1) }} held &gt;2y</span>
+        <span class="pill neon mono" v-if="hodl">{{ percent(hodl.bands.at(-1).percentage, 1) }} unmoved &gt;2y</span>
       </template>
-      <EChart v-if="hodl" :option="hodlOption" height="92px" aria-label="HODL waves: unspent supply by coin age" />
+      <EChart v-if="hodl" :option="hodlOption" height="92px" aria-label="HODL waves: unspent supply by time since last on-chain move; staking respends reset a coin's age" />
       <div class="hodl-legend" v-if="hodl">
         <div v-for="b in hodl.bands" :key="b.band" class="hl">
           <span class="hl-dot" :style="{ background: HODL_COLORS[b.band] }"></span>

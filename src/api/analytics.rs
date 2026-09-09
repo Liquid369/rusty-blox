@@ -104,6 +104,7 @@ pub struct TransactionDataPoint {
 #[derive(Serialize, Debug)]
 pub struct StakingDataPoint {
     pub date: String,
+    /// Network weight as a share of the stakeable (transparent) supply, %.
     pub participation_rate: f64,
     pub total_staked: String,
     pub active_stakers: u64,
@@ -416,16 +417,19 @@ fn read_staking_daily_series(db: &Arc<DB>, range: &str) -> Option<Vec<StakingDat
     // of today that read as a cliff. Also drop any incomplete trailing days.
     drop_incomplete_trailing_days(db, &mut dates);
 
-    // Real circulating supply from the wealth snapshot (sum of all positive
-    // address balances, satoshis); calculate_total_supply_at_height() is a
-    // schedule-based estimate that overshoots by an order of magnitude.
-    let total_supply = db
+    // Stakeable-supply denominator: the HODL true-supply total (transparent,
+    // address-attributed, shield cannot stake). The wealth snapshot's
+    // total_balance double-counts cold-staked coins (~19% high) and pushed
+    // participation down to 28.7% when the real share was ~34%; it survives
+    // only as the fallback inside supply_denominator_sats.
+    let wealth_total = db
         .get_cf(&cf_state, b"analytics_wealth")
         .ok()
         .flatten()
         .and_then(|b| bincode::deserialize::<crate::enrich_addresses::WealthSnapshot>(&b).ok())
         .map(|w| w.total_balance)
         .unwrap_or(0);
+    let total_supply = supply_denominator_sats(db, wealth_total);
 
     let mut out = Vec::with_capacity(dates.len());
     for date in dates {
