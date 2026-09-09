@@ -646,14 +646,11 @@ fn supply_denominator(db: &Arc<DB>, fallback: i64) -> f64 {
 /// same descending balances the snapshot was built from, so the exact integer
 /// walk is redone here; the stored value serves only when the blob is absent
 /// or the crossing lies beyond the kept rows.
-fn nakamoto_vs_supply(db: &Arc<DB>, denom_sats: i64, fallback: u32) -> u32 {
-    let rows: Option<Vec<crate::enrich_addresses::RichListSnapshotEntry>> = db
-        .cf_handle("chain_state")
-        .and_then(|cf| db.get_cf(&cf, b"analytics_richlist").ok().flatten())
-        .and_then(|b| bincode::deserialize(&b).ok());
-    let Some(rows) = rows else {
-        return fallback;
-    };
+fn nakamoto_walk(
+    rows: &[crate::enrich_addresses::RichListSnapshotEntry],
+    denom_sats: i64,
+    fallback: u32,
+) -> u32 {
     let denom = denom_sats as i128;
     let mut acc: i128 = 0;
     for (i, r) in rows.iter().enumerate() {
@@ -663,6 +660,17 @@ fn nakamoto_vs_supply(db: &Arc<DB>, denom_sats: i64, fallback: u32) -> u32 {
         }
     }
     fallback
+}
+
+fn nakamoto_vs_supply(db: &Arc<DB>, denom_sats: i64, fallback: u32) -> u32 {
+    let rows: Option<Vec<crate::enrich_addresses::RichListSnapshotEntry>> = db
+        .cf_handle("chain_state")
+        .and_then(|cf| db.get_cf(&cf, b"analytics_richlist").ok().flatten())
+        .and_then(|b| bincode::deserialize(&b).ok());
+    match rows {
+        Some(rows) => nakamoto_walk(&rows, denom_sats, fallback),
+        None => fallback,
+    }
 }
 
 /// Read the precomputed rich-list snapshot and shape it into the API response.
@@ -736,16 +744,27 @@ fn read_wealth_snapshot(db: &Arc<DB>) -> Option<WealthDistribution> {
     let cf_state = db.cf_handle("chain_state")?;
     let bytes = db.get_cf(&cf_state, b"analytics_wealth").ok()??;
     let w: crate::enrich_addresses::WealthSnapshot = bincode::deserialize(&bytes).ok()?;
-    Some(shape_wealth(db, w))
+    Some(shape_wealth(db, w, None))
 }
 
 /// Shape a wealth snapshot into the API response. Shared by the snapshot path AND
 /// the live recompute fallback so the two never diverge.
-fn shape_wealth(db: &Arc<DB>, w: crate::enrich_addresses::WealthSnapshot) -> WealthDistribution {
+fn shape_wealth(
+    db: &Arc<DB>,
+    w: crate::enrich_addresses::WealthSnapshot,
+    // Same-era richlist rows when the caller just computed them (live
+    // fallback); None reads the persisted blob, which the writers pair with
+    // the wealth blob in one batch. Mixing eras would re-open the
+    // inconsistency this derivation exists to close.
+    rows: Option<&[crate::enrich_addresses::RichListSnapshotEntry]>,
+) -> WealthDistribution {
     let denom_sats = supply_denominator_sats(db, w.total_balance);
     let denom = denom_sats as f64;
     let pct = |v: i64| (v as f64 / denom) * 100.0;
-    let nakamoto = nakamoto_vs_supply(db, denom_sats, w.nakamoto_coefficient);
+    let nakamoto = match rows {
+        Some(rows) => nakamoto_walk(rows, denom_sats, w.nakamoto_coefficient),
+        None => nakamoto_vs_supply(db, denom_sats, w.nakamoto_coefficient),
+    };
     let total_holders = if w.address_count > 0 {
         w.address_count as f64
     } else {
@@ -1395,8 +1414,8 @@ fn compute_wealth_distribution(
     // same addr_index r/s totals the snapshot + periodic recompute use, so it is a
     // correct full-set distribution (no 10k-address cap) consistent with the
     // snapshot path. Shares `shape_wealth` so the output is identical.
-    let (_, wealth) = crate::analytics_recompute::recompute_wealth_richlist_from_index(db)?;
-    Ok(shape_wealth(db, wealth))
+    let (richlist, wealth) = crate::analytics_recompute::recompute_wealth_richlist_from_index(db)?;
+    Ok(shape_wealth(db, wealth, Some(&richlist)))
 }
 
 // ========================================
@@ -1502,6 +1521,13 @@ mod nakamoto_tests {
         assert_eq!(nakamoto_vs_supply(&db, 100, 99), 1);
         // inflated 200: 60+30+20 = 110 > 100 -> 3
         assert_eq!(nakamoto_vs_supply(&db, 200, 99), 3);
+    }
+
+    // Exactly half is NOT a crossing: the test is strictly greater-than.
+    #[test]
+    fn exact_half_does_not_cross() {
+        let (_t, db) = db_with_richlist(&[50, 1]);
+        assert_eq!(nakamoto_vs_supply(&db, 100, 99), 2);
     }
 
     #[test]

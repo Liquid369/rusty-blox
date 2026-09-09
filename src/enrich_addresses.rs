@@ -2519,12 +2519,17 @@ fn persist_wealth_analytics(
 
     let (richlist, wealth) = compute_wealth_richlist(balances, RICHLIST_KEEP, tx_count_of);
 
-    db.put_cf(
+    // One batch: serving re-derives the nakamoto coefficient from the richlist
+    // blob against the wealth blob's era, so the pair must never be readable
+    // half-written.
+    let mut batch = rocksdb::WriteBatch::default();
+    batch.put_cf(
         &cf_state,
         b"analytics_richlist",
         bincode::serialize(&richlist)?,
-    )?;
-    db.put_cf(&cf_state, b"analytics_wealth", bincode::serialize(&wealth)?)?;
+    );
+    batch.put_cf(&cf_state, b"analytics_wealth", bincode::serialize(&wealth)?);
+    db.write(batch)?;
     info!(
         richlist_entries = richlist.len(),
         holders = wealth.address_count,
