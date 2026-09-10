@@ -430,7 +430,7 @@ pub fn on_reorg(db: &Arc<DB>, fork_height: i32, orphaned_blocks: i32) {
 /// Read a canonical block header's (nTime, nBits), mirroring `build_block_times`
 /// EXACTLY (chain_metadata height→display_hash → blocks[internal] → header bytes;
 /// nTime@68..72, nBits@72..76). Returns None if the header is missing/short.
-fn header_time_bits(db: &Arc<DB>, height: i32) -> Option<(u32, u32)> {
+pub(crate) fn header_time_bits(db: &Arc<DB>, height: i32) -> Option<(u32, u32)> {
     let cf_metadata = db.cf_handle("chain_metadata")?;
     let cf_blocks = db.cf_handle("blocks")?;
     let display_hash = db.get_cf(&cf_metadata, height.to_le_bytes()).ok()??;

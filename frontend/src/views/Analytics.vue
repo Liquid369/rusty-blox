@@ -353,7 +353,7 @@ function richWidth(bal) {
     <h2 class="section-title">HODL waves — value by time since last move</h2>
     <HudPanel title="HODL WAVES" id="/analytics/hodl · staking respends reset age" hero>
       <template #head>
-        <span class="pill neon mono" v-if="hodl">{{ percent(hodl.bands.at(-1).percentage, 1) }} unmoved &gt;2y</span>
+        <span class="pill neon mono" v-if="hodl && hodl.bands.length">{{ percent(hodl.bands.at(-1).percentage, 1) }} unmoved &gt;2y</span>
       </template>
       <EChart v-if="hodl" :option="hodlOption" height="92px" aria-label="HODL waves: unspent supply by time since last on-chain move; staking respends reset a coin's age" />
       <div class="hodl-legend" v-if="hodl">
@@ -383,7 +383,7 @@ function richWidth(bal) {
     <!-- ADDRESS ACTIVITY + FEES -->
     <h2 class="section-title">Address activity &amp; fee economics</h2>
     <div class="split s-2">
-      <HudPanel title="ADDRESS ACTIVITY" id="/analytics/transactions · active + new">
+      <HudPanel title="ADDRESS ACTIVITY" id="/analytics/transactions · receiving addresses · new = first seen">
         <EChart v-if="txs.length" :option="addrOption" height="260px" aria-label="Active and new addresses per day" />
         <div v-else class="sk" style="height:260px"></div>
       </HudPanel>

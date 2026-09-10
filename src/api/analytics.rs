@@ -52,6 +52,11 @@ fn default_limit() -> u32 {
 pub struct SupplyAnalytics {
     pub current: SupplySnapshot,
     pub historical: Vec<SupplyDataPoint>,
+    // True only when the node was unreachable and this is the last good value
+    // (kept up to a day); absent otherwise. A silently stale supply next to
+    // the node's live number is publicly checkable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -209,8 +214,9 @@ pub async fn supply_analytics(
         Err(e) => {
             // RPC stall / error: serve the last good value if we still have one.
             match cache.get_json::<SupplyAnalytics>(&stale_key).await {
-                Some(stale) => {
+                Some(mut stale) => {
                     tracing::warn!(error = %e, "supply analytics compute failed; serving stale cache");
+                    stale.stale = true;
                     Ok(Json(stale))
                 }
                 None => {
@@ -289,7 +295,21 @@ fn drop_incomplete_trailing_days(db: &Arc<DB>, dates: &mut Vec<String>) {
             )
         });
     dates.retain(|d| *d != today);
+    // A day the indexer has already moved PAST is complete whatever its block
+    // count: a real network stall must show as a bad day, not vanish. The
+    // count check below only guards days the indexer may still be filling.
+    let tip = crate::analytics_live::watermark(db);
+    let tip_day = (tip > 0)
+        .then(|| crate::analytics_live::header_time_bits(db, tip))
+        .flatten()
+        .filter(|(t, _)| *t != 0)
+        .map(|(t, _)| crate::enrich_addresses::unix_to_date(t as u64));
     while let Some(last) = dates.last() {
+        if let Some(td) = &tip_day {
+            if last.as_str() < td.as_str() {
+                break;
+            }
+        }
         let mut k = b"analytics_tx_day:".to_vec();
         k.extend_from_slice(last.as_bytes());
         let blocks = db
@@ -1029,6 +1049,7 @@ async fn compute_supply_analytics(
     Ok(SupplyAnalytics {
         current,
         historical,
+        stale: false,
     })
 }
 
@@ -1442,7 +1463,9 @@ fn parse_time_range(range: &str) -> i64 {
         "30d" => 30,
         "90d" => 90,
         "1y" => 365,
-        "all" => 3650,
+        // "all" means all indexed history; the date list itself bounds the
+        // walk, this just must never truncate it (PIVX is past ten years).
+        "all" => 36_500,
         _ => 30,
     }
 }
