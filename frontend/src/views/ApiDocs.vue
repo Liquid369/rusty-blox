@@ -71,7 +71,7 @@ const GROUPS = [
     title: 'ANALYTICS',
     id: 'PIVX extension · precomputed on-chain series',
     endpoints: [
-      { m: 'GET', p: '/analytics/supply', q: 'range', d: 'Supply split incl. shield pool.', ttl: '300s' },
+      { m: 'GET', p: '/analytics/supply', q: 'range', d: 'Supply split incl. shield pool. Current values only (historical []); carries stale:true when serving a cached value with the node down. active_addresses on /analytics/transactions counts RECEIVING addresses per day.', ttl: '300s' },
       { m: 'GET', p: '/analytics/transactions', q: 'range', d: 'Daily tx-type composition, fees, activity, coin-days destroyed.', ttl: '300s' },
       { m: 'GET', p: '/analytics/staking', q: 'range', d: 'APY estimate, participation, dominance.', ttl: '300s' },
       { m: 'GET', p: '/analytics/network', q: 'range', d: 'Difficulty, orphan rate, block cadence.', ttl: '300s' },
