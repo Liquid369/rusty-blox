@@ -140,7 +140,11 @@ async fn fetch_history(currency: &str) -> Result<Vec<(u64, f64)>, String> {
         .user_agent("PIVX-Explorer/1.0")
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let mut req = client.get(&url);
+    if let Some(key) = super::price::coingecko_api_key() {
+        req = req.header("x-cg-demo-api-key", key);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("market_chart {currency}: HTTP {}", resp.status()));
     }
@@ -257,7 +261,7 @@ pub async fn run_fiat_rate_sampler(db: Arc<DB>) {
     let mut tick = tokio::time::interval(Duration::from_secs(900));
     loop {
         tick.tick().await;
-        match super::price::fetch_coingecko_price().await {
+        match super::price::fetch_price().await {
             Ok(p) => {
                 let day = day_start(p.last_updated);
                 let rates = DayRates {
