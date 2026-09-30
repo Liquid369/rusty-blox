@@ -14,8 +14,34 @@ updates:
       # Batch patch/minor bumps into one PR to cut review noise.
       cargo-minor:
         update-types: [minor, patch]
+    ignore:
+      # bincode defines the persisted analytics blob format (a change forces a
+      # re-enrich); 3.0.0 is a tombstone release that only contains compile_error!.
+      - dependency-name: bincode
+        update-types: ["version-update:semver-major"]
+      # 0.26 -> 0.32 breaks bip32/Script/network APIs; only used for xpub derivation.
+      - dependency-name: bitcoin
+        update-types: ["version-update:semver-major"]
+      # sha2 0.10 and ripemd (successor to ripemd160) share digest 0.10: migrate
+      # both by hand in one change, not as two broken PRs.
+      - dependency-name: sha2
+        update-types: ["version-update:semver-major"]
+      - dependency-name: ripemd160
+        update-types: ["version-update:semver-major"]
 
-  # Shipping frontend (frontend-legacy)
+  # Served frontend (built into frontend/dist)
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  # Legacy frontend (kept for reference, not served)
   - package-ecosystem: npm
     directory: "/frontend-legacy"
     schedule:
