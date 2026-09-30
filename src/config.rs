@@ -14,6 +14,11 @@ pub fn init_global_config() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Non-fatal accessor for optional keys: None before init instead of exit.
+pub fn try_global_config() -> Option<&'static Config> {
+    GLOBAL_CONFIG.get()
+}
+
 pub fn get_global_config() -> &'static Config {
     GLOBAL_CONFIG.get().unwrap_or_else(|| {
         eprintln!("FATAL: Config not initialized - call init_global_config() first");

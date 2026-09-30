@@ -172,3 +172,11 @@ reresolve_heightless = false
 # /tx 404 a transaction that exists. Safe + idempotent. Set true for one run, then false.
 # Default: false.
 delete_stub_txs = false
+
+[price]
+# Optional free CoinGecko demo key (coingecko.com/en/api). Keyless
+# /simple/price is blocked; without a key the live price falls back to
+# CoinPaprika and the fiat backfill (market_chart) may fail.
+# coingecko_api_key = ""
+# Daily fiat-rate sampler for /tickers + balancehistory rates (default true).
+# fiat_sampler = true
