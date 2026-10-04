@@ -85,7 +85,7 @@ const txOption = computed(() => {
   const rows = txs.value
   const base = baseOption(p)
   const mk = (name, key, color) => ({
-    name, type: 'line', stack: 'mix', smooth: true, showSymbol: false,
+    name, type: 'line', stack: 'mix', smooth: true, showSymbol: false, color,
     areaStyle: { color: areaFill(echarts, color, 0.5, 0.05) },
     lineStyle: { width: 0 }, emphasis: { focus: 'series' },
     data: rows.map((r) => r[key]),

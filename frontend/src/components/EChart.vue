@@ -25,9 +25,24 @@ const reduceMotion = () =>
 let ro = null
 let raf = 0
 
+// Legend icons and tooltip dots take the SERIES color, which falls back to the
+// echarts palette when a series only sets lineStyle.color; the line and its
+// legend entry then disagree. Promote a plain lineStyle color to the series
+// color unless the series already sets one.
+function alignSeriesColors(opt) {
+  if (!Array.isArray(opt.series)) return opt
+  const series = opt.series.map((s) => {
+    const c = s && s.lineStyle && s.lineStyle.color
+    if (typeof c !== 'string' || s.color || (s.itemStyle && s.itemStyle.color)) return s
+    return { ...s, color: c }
+  })
+  return { ...opt, series }
+}
+
 function render() {
   if (!chart || !props.option) return
-  const opt = reduceMotion() ? { ...props.option, animation: false } : props.option
+  const base = alignSeriesColors(props.option)
+  const opt = reduceMotion() ? { ...base, animation: false } : base
   chart.setOption(opt, true)
 }
 // rAF-throttled: observe the CONTAINER (not just window) so the canvas tracks any
