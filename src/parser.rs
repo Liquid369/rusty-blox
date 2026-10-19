@@ -588,11 +588,15 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
 
         let mut addresses = Vec::new();
         // Staker address (version 0x3f = 63)
-        if let Some(staker_addr) = encode_pivx_address(staker_hash, 63) {
+        if let Some(staker_addr) =
+            encode_pivx_address(staker_hash, crate::network::params().staking_prefix)
+        {
             addresses.push(staker_addr);
         }
         // Owner address (version 0x1e = 30)
-        if let Some(owner_addr) = encode_pivx_address(owner_hash, 30) {
+        if let Some(owner_addr) =
+            encode_pivx_address(owner_hash, crate::network::params().pubkey_prefix)
+        {
             addresses.push(owner_addr);
         }
         if !addresses.is_empty() {
@@ -609,7 +613,9 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
         && script[24] == 0xac
     {
         let pubkey_hash = &script[3..23];
-        if let Some(address) = encode_pivx_address(pubkey_hash, 30) {
+        if let Some(address) =
+            encode_pivx_address(pubkey_hash, crate::network::params().pubkey_prefix)
+        {
             return vec![address];
         }
     }
@@ -633,7 +639,9 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
     // twin here previously made the enrichment classifier drop P2SH outputs entirely.
     if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
         let script_hash = &script[2..22];
-        if let Some(address) = encode_pivx_address(script_hash, 13) {
+        if let Some(address) =
+            encode_pivx_address(script_hash, crate::network::params().script_prefix)
+        {
             return vec![address];
         }
     }
@@ -648,7 +656,9 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
         let sha_hash = Sha256::digest(pubkey);
         let ripemd_hash = Ripemd160::digest(&sha_hash);
 
-        if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
+        if let Some(address) =
+            encode_pivx_address(&ripemd_hash, crate::network::params().pubkey_prefix)
+        {
             return vec![address];
         }
     }
@@ -659,7 +669,9 @@ fn extract_address_from_script(script: &[u8]) -> Vec<String> {
         let sha_hash = Sha256::digest(pubkey);
         let ripemd_hash = Ripemd160::digest(&sha_hash);
 
-        if let Some(address) = encode_pivx_address(&ripemd_hash, 30) {
+        if let Some(address) =
+            encode_pivx_address(&ripemd_hash, crate::network::params().pubkey_prefix)
+        {
             return vec![address];
         }
     }
@@ -755,11 +767,11 @@ pub fn encode_pivx_address(hash: &[u8], version: u8) -> Option<String> {
 }
 
 /// Encode PIVX exchange address (EXM prefix)
-/// Exchange addresses use a 3-byte prefix: [0x01, 0xb9, 0xa2]
+/// Exchange addresses use a 3-byte prefix, `network::params().exchange_prefix`.
 pub fn encode_pivx_exchange_address(hash: &[u8]) -> Option<String> {
     // PIVX exchange address: 3-byte prefix + 20-byte hash + 4-byte checksum
     let mut data = Vec::with_capacity(27);
-    data.extend_from_slice(&[0x01, 0xb9, 0xa2]); // EXCHANGE_ADDRESS prefix
+    data.extend_from_slice(&crate::network::params().exchange_prefix);
     data.extend_from_slice(hash);
 
     // Calculate checksum: first 4 bytes of SHA256(SHA256(prefix + hash))

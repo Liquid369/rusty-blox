@@ -11,7 +11,6 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use tracing::{error, info, warn};
 
-const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network prefix
 const BATCH_SIZE: usize = 1000; // Increased from 100 for better throughput
 const TX_BATCH_SIZE: usize = 10000; // Increased from 1000 for better throughput
 
@@ -365,16 +364,16 @@ pub async fn process_blk_file(
             }
         }
 
-        if magic_bytes != PREFIX {
+        if magic_bytes != crate::blk_tail::network_magic() {
             warn!(
                 block_num = block_count,
                 magic = ?magic_bytes,
-                expected = ?PREFIX,
+                expected = ?crate::blk_tail::network_magic(),
                 "Invalid magic - scanning for next valid block"
             );
 
             // Try to find next magic bytes by scanning ahead
-            match scan_for_next_magic(&mut reader, &PREFIX).await {
+            match scan_for_next_magic(&mut reader, &crate::blk_tail::network_magic()).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     // Reader is already positioned at magic bytes, continue to read them
@@ -417,7 +416,7 @@ pub async fn process_blk_file(
             );
 
             // Try to recover by scanning for next magic
-            match scan_for_next_magic(&mut reader, &PREFIX).await {
+            match scan_for_next_magic(&mut reader, &crate::blk_tail::network_magic()).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
@@ -480,7 +479,7 @@ pub async fn process_blk_file(
                 "Header exceeds block size - scanning for next valid block"
             );
 
-            match scan_for_next_magic(&mut reader, &PREFIX).await {
+            match scan_for_next_magic(&mut reader, &crate::blk_tail::network_magic()).await {
                 Ok(Some(recovery_pos)) => {
                     info!(position = recovery_pos, "Recovered - found next magic");
                     continue;
@@ -561,21 +560,20 @@ pub async fn process_blk_file(
         let block_height = if block_header.hash_prev_block == [0u8; 32] {
             // Genesis block - verify hash matches known genesis
             // Fix for Phase 2, Issue #1: Improved genesis detection
-            const PIVX_GENESIS_HASH: &str =
-                "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818";
+            let genesis_hash: &str = crate::network::params().genesis;
 
             // Compare in display format (reversed)
             let mut block_hash_display = block_hash_vec.clone();
             block_hash_display.reverse();
             let block_hash_hex = hex::encode(&block_hash_display);
 
-            if block_hash_hex == PIVX_GENESIS_HASH {
+            if block_hash_hex == genesis_hash {
                 Some(0) // Confirmed genesis
             } else {
                 // Block with null prev_hash but non-genesis hash - very suspicious!
                 warn!(
                     block_hash = %block_hash_hex,
-                    expected_genesis = PIVX_GENESIS_HASH,
+                    expected_genesis = genesis_hash,
                     "Block with null prev_hash but non-genesis hash - marking as orphan"
                 );
                 None // Orphan or corrupted

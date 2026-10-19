@@ -20,8 +20,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, BufReader, SeekFrom};
 use tracing::{debug, warn};
 
-#[allow(dead_code)] // PIVX magic bytes - may be needed for raw block validation
-const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
 #[allow(dead_code)] // Size limit for transaction payloads - may be needed for validation
 const MAX_PAYLOAD_SIZE: usize = 10000;
 
@@ -965,14 +963,14 @@ async fn parse_payload_data(reader: &mut BufReader<File>) -> Result<Option<Vec<u
     // Read byte by byte until the PREFIX is found or the end of the stream is reached
     while !prefix_found && reader.read_exact(&mut buffer).await.is_ok() {
         byte_count += 1;
-        if buffer == PREFIX {
+        if buffer == crate::blk_tail::network_magic() {
             prefix_found = true;
         }
     }
 
     // Adjust the byte count to exclude the PREFIX sequence
-    if prefix_found && byte_count >= PREFIX.len() {
-        byte_count -= PREFIX.len();
+    if prefix_found && byte_count >= crate::blk_tail::network_magic().len() {
+        byte_count -= crate::blk_tail::network_magic().len();
     }
 
     // Check if the byte count exceeds the maximum payload size

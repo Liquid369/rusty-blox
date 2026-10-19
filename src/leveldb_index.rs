@@ -359,8 +359,7 @@ pub fn build_canonical_chain_from_leveldb(
 
     // PIVX genesis hash (internal/little-endian byte order)
     let genesis_hash: [u8; 32] = {
-        let mut g = hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")
-            .expect("Invalid genesis");
+        let mut g = hex::decode(crate::network::params().genesis).expect("Invalid genesis");
         g.reverse();
         g.try_into().expect("genesis hash must be 32 bytes")
     };

@@ -49,7 +49,7 @@ pub(crate) fn redact_xpub(xpub: &str) -> String {
 ///   - 21 bytes = 1-byte version + 20-byte hash160. Covers every standard
 ///     class: D (P2PKH v30), S (cold-staking staker v63), 6/7 (P2SH v13),
 ///     E (single-byte exchange variants).
-///   - 23 bytes = 3-byte EXM prefix [0x01,0xb9,0xa2] + 20-byte hash160. Covers
+///   - 23 bytes = 3-byte EXM prefix (mainnet [0x01,0xb9,0xa2]) + 20-byte hash160. Covers
 ///     EXM exchange addresses (OP_EXCHANGEADDR 0xe0), which are 36 chars and
 ///     use a 3-byte prefix (see encode_pivx_exchange_address in parser.rs).
 ///
@@ -744,9 +744,11 @@ pub(crate) fn derive_address(
 
     let pubkey_hash = child_key.public_key.pubkey_hash();
 
-    // Encode as PIVX address (version 30 for mainnet P2PKH)
-    let address = crate::parser::encode_pivx_address(pubkey_hash.as_ref(), 30)
-        .ok_or("Failed to encode PIVX address")?;
+    let address = crate::parser::encode_pivx_address(
+        pubkey_hash.as_ref(),
+        crate::network::params().pubkey_prefix,
+    )
+    .ok_or("Failed to encode PIVX address")?;
 
     // Construct full derivation path
     let account = xpub_depth.saturating_sub(3);
