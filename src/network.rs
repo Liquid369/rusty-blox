@@ -18,6 +18,11 @@ pub struct Params {
     pub budget_cycle_blocks: i32,
     /// GetBlockValue's testnet branch: blocks 2..=200 pay 250,000 PIV.
     pub testnet_inflation: bool,
+    /// BIP44 coin type (EXT_COIN_TYPE), for derivation path labels.
+    pub coin_type: u32,
+    /// PIVX Core base58Prefixes[EXT_PUBLIC_KEY]. Bitcoin's 0488b21e "xpub",
+    /// which PIVX wallets also export, is accepted on every network.
+    pub ext_pubkey_version: [u8; 4],
 }
 
 pub(crate) const MAINNET: Params = Params {
@@ -32,6 +37,8 @@ pub(crate) const MAINNET: Params = Params {
     v5_5_height: crate::emission::V5_5_HEIGHT,
     budget_cycle_blocks: crate::emission::BUDGET_CYCLE_BLOCKS,
     testnet_inflation: false,
+    coin_type: 119,
+    ext_pubkey_version: [0x02, 0x2d, 0x25, 0x33],
 };
 
 // PIVX CTestNetParams (chainparams.cpp, 2026_testnet6 merge d93a3981b6).
@@ -48,6 +55,8 @@ pub(crate) const TESTNET6: Params = Params {
     v5_5_height: 650,
     budget_cycle_blocks: 144,
     testnet_inflation: true,
+    coin_type: 1,
+    ext_pubkey_version: [0x3a, 0x80, 0x61, 0xa0],
 };
 
 pub fn params() -> &'static Params {

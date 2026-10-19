@@ -90,24 +90,41 @@ fn decode_base58check(s: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Bitcoin's "xpub" version bytes. PIVX wallets export these on every network.
+const BTC_XPUB_VERSION: [u8; 4] = [0x04, 0x88, 0xb2, 0x1e];
+
+/// base58check payload of an extended public key this network accepts:
+/// Bitcoin's "xpub" or PIVX Core's own EXT_PUBLIC_KEY ("ToEA" mainnet,
+/// "DRKV" testnet6). 78 = 4 version + 1 depth + 4 parent fingerprint
+/// + 4 child number + 32 chain code + 33 compressed pubkey.
+fn xpub_payload(xpub: &str) -> Option<Vec<u8>> {
+    let p = decode_base58check(xpub)?;
+    let version = p.get(..4)?;
+    let known =
+        version == BTC_XPUB_VERSION || version == crate::network::params().ext_pubkey_version;
+    (p.len() == 78 && known).then_some(p)
+}
+
 /// P2-B: cheap plausibility check for a BIP32 extended public key, used to
 /// reject typo/garbage input at the top of `xpub_v2` before the derivation
-/// scan. PIVX reuses Bitcoin's xpub version bytes (0x0488B21E -> "xpub"), so a
-/// real account-level key must start with "xpub" and decode as base58check to
-/// the standard 78-byte serialization (4 version + 1 depth + 4 fingerprint +
-/// 4 child + 32 chain code + 33 pubkey). `with_check(None)` validates the same
-/// 4-byte double-SHA256 checksum used by addresses, so a one-char typo fails.
-/// `compute_xpub_info` remains the authoritative parser (depth, key validity).
+/// scan. The checksum is the same double-SHA256 used by addresses, so a
+/// one-char typo fails. `parse_xpub` remains the authoritative parser.
 pub(crate) fn is_valid_xpub(xpub: &str) -> bool {
-    if !xpub.starts_with("xpub") {
-        return false;
-    }
-    match decode_base58check(xpub) {
-        // 78 = 4 version + 1 depth + 4 parent fingerprint + 4 child number
-        //      + 32 chain code + 33 compressed pubkey.
-        Some(payload) => payload.len() == 78,
-        None => false,
-    }
+    xpub_payload(xpub).is_some()
+}
+
+/// Parse an accepted extended public key. The bitcoin crate only knows
+/// Bitcoin's version bytes, so PIVX Core's EXT_PUBLIC_KEY is rewritten to
+/// 0488b21e first; depth, chain code and key are untouched.
+pub(crate) fn parse_xpub(
+    xpub: &str,
+) -> Result<bitcoin::util::bip32::ExtendedPubKey, Box<dyn std::error::Error + Send + Sync>> {
+    use std::str::FromStr;
+    let mut p = xpub_payload(xpub).ok_or("not an extended public key for this network")?;
+    p[..4].copy_from_slice(&BTC_XPUB_VERSION);
+    Ok(bitcoin::util::bip32::ExtendedPubKey::from_str(
+        &bitcoin::util::base58::check_encode_slice(&p),
+    )?)
 }
 
 /// Read the exact persisted per-address totals written by the enrichment phase:
@@ -237,8 +254,7 @@ pub(crate) async fn apply_xpub_mempool_overlay(
     let addresses: Vec<String> = if let Some(tokens) = info.tokens.as_ref() {
         tokens.iter().map(|t| t.name.clone()).collect()
     } else {
-        use std::str::FromStr;
-        let Ok(xpub) = bitcoin::util::bip32::ExtendedPubKey::from_str(xpub_str) else {
+        let Ok(xpub) = parse_xpub(xpub_str) else {
             return;
         };
         let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -638,18 +654,16 @@ pub(crate) async fn compute_xpub_info(
     xpub_str: &str,
     params: &AddressQuery,
 ) -> Result<XPubInfo, Box<dyn std::error::Error + Send + Sync>> {
-    use bitcoin::util::bip32::ExtendedPubKey;
-    use std::str::FromStr;
-
     // Parse and validate the xpub
-    let xpub = ExtendedPubKey::from_str(xpub_str).map_err(|e| {
+    let xpub = parse_xpub(xpub_str).map_err(|e| {
         format!("Invalid xpub format: {e}. Please provide a valid BIP32 extended public key.")
     })?;
 
     // Validate xpub is at correct depth (account level = 3 for m/44'/119'/account')
     if xpub.depth != 3 {
         return Err(format!(
-            "Invalid xpub depth: expected 3 (account level m/44'/119'/account'), got {}. This endpoint only supports account-level xpubs. Please export xpub at depth 3.",
+            "Invalid xpub depth: expected 3 (account level m/44'/{}'/account'), got {}. This endpoint only supports account-level xpubs. Please export xpub at depth 3.",
+            crate::network::params().coin_type,
             xpub.depth
         ).into());
     }
@@ -752,7 +766,8 @@ pub(crate) fn derive_address(
 
     // Construct full derivation path
     let account = xpub_depth.saturating_sub(3);
-    let path = format!("m/44'/119'/{account}'/{chain}/{index}");
+    let coin = crate::network::params().coin_type;
+    let path = format!("m/44'/{coin}'/{account}'/{chain}/{index}");
 
     Ok((address, path))
 }
@@ -1270,12 +1285,11 @@ pub(crate) async fn compute_xpub_utxos(
     xpub_str: &str,
     gap: u32,
 ) -> Result<(Vec<UTXO>, Vec<(String, String)>), Box<dyn std::error::Error + Send + Sync>> {
-    use std::str::FromStr;
-    let xpub = bitcoin::util::bip32::ExtendedPubKey::from_str(xpub_str)
-        .map_err(|e| format!("Invalid xpub format: {e}"))?;
+    let xpub = parse_xpub(xpub_str).map_err(|e| format!("Invalid xpub format: {e}"))?;
     if xpub.depth != 3 {
         return Err(format!(
-            "Invalid xpub depth: expected 3 (account level m/44'/119'/account'), got {}",
+            "Invalid xpub depth: expected 3 (account level m/44'/{}'/account'), got {}",
+            crate::network::params().coin_type,
             xpub.depth
         )
         .into());
@@ -1318,8 +1332,7 @@ pub async fn utxo_v2(
         // Validation up front so a bad descriptor is a 400; compute errors
         // below are storage-side 500s (a 200 [] would read as "no coins").
         {
-            use std::str::FromStr;
-            match bitcoin::util::bip32::ExtendedPubKey::from_str(&address) {
+            match parse_xpub(&address) {
                 Ok(x) if x.depth == 3 => {}
                 Ok(x) => {
                     return Err((
@@ -1550,7 +1563,7 @@ pub(crate) async fn compute_utxos(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_address, is_valid_xpub, redact_xpub};
+    use super::{decode_base58check, is_valid_address, is_valid_xpub, parse_xpub, redact_xpub};
 
     /// P2: `redact_xpub` is called on the invalid-xpub branch with fully
     /// attacker-controlled input, so it must never panic. The old code
@@ -1635,6 +1648,25 @@ mod tests {
             !is_valid_xpub("DU8gPC5mh4KxWJARQRxoESFark2jAguBr5"),
             "address is not an xpub"
         );
+    }
+
+    /// The same key under PIVX Core's EXT_PUBLIC_KEY version parses to the
+    /// identical key as its "xpub" form. testnet6 "DRKV" takes this path.
+    #[test]
+    fn parse_xpub_accepts_network_ext_version() {
+        // Real BIP32 key from xpub_tests.rs; is_valid_xpub_basic's fixture fails secp256k1.
+        let good = "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz";
+        let mut p = decode_base58check(good).unwrap();
+        p[..4].copy_from_slice(&crate::network::params().ext_pubkey_version);
+        let native = bitcoin::util::base58::check_encode_slice(&p);
+        assert!(native.starts_with("ToEA"), "{native}");
+        assert!(is_valid_xpub(&native));
+        assert_eq!(parse_xpub(&native).unwrap(), parse_xpub(good).unwrap());
+        // tpub and other foreign versions stay rejected.
+        p[..4].copy_from_slice(&[0x04, 0x35, 0x87, 0xcf]);
+        assert!(!is_valid_xpub(&bitcoin::util::base58::check_encode_slice(
+            &p
+        )));
     }
 
     /// Option-① regression: compute_address_info must (a) serve balance/totals
