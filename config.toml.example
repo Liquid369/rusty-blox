@@ -7,6 +7,11 @@
 # Database path for RocksDB storage
 db_path = "./data/blocks.db"
 
+# Governance vote history (separate RocksDB). Not rebuildable from the chain:
+# never delete it during a resync, and back it up. Defaults to gov.db in the
+# same directory as db_path.
+# gov_db_path = "./data/gov.db"
+
 # Directory containing PIVX blockchain files (blk*.dat)
 # Linux:   ~/.pivx/blocks
 # macOS:   ~/Library/Application Support/PIVX/blocks
@@ -180,3 +185,8 @@ delete_stub_txs = false
 # coingecko_api_key = ""
 # Daily fiat-rate sampler for /tickers + balancehistory rates (default true).
 # fiat_sampler = true
+
+[governance]
+# Seconds between governance polls (60 to 3599; anything else falls back to 600). Core allows a masternode one
+# vote change per hour of signed time; 600 catches normal changes.
+# poll_secs = 600
