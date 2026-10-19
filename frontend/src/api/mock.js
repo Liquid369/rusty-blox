@@ -602,7 +602,7 @@ export function mempool() {
 // =====================================================================
 
 const MN_TOTAL = 2111
-const NET_THRESHOLD = 0.1 * MN_TOTAL // funding gate: (Yeas - Nays) must exceed this
+const NET_THRESHOLD = Math.floor(MN_TOTAL / 10) // Core funding line: (Yeas - Nays) must be strictly greater
 const SUPERBLOCK_HEIGHT = 5486400    // next superblock (≈ ceil(tip/43200)*43200)
 const MONTHLY_BUDGET_CAP = 432000    // current-era treasury cap (PIV/cycle); demand intentionally exceeds it
 
@@ -674,6 +674,38 @@ export function budgetProjection() {
 
 // /budgetvotes/{name}: raw RPC array; length != Yeas (includes NO/ABSTAIN +
 // invalid/superseded). Unknown name -> [] (a 200, not an error).
+// /budgetvotecounts: tallied from budgetVotes() so the overview and the
+// detail page agree on held vs counting.
+export function budgetVoteCounts() {
+  const tally = (votes, onlyValid) => {
+    const c = { yes: 0, no: 0, abstain: 0 }
+    for (const v of votes) if (!onlyValid || v.fValid) c[v.Vote === 'YES' ? 'yes' : v.Vote === 'NO' ? 'no' : 'abstain']++
+    return c
+  }
+  return {
+    as_of: TIP_TIME,
+    rows: BUDGET_PROPOSALS.map((p) => {
+      const votes = budgetVotes(p.Name)
+      return { hash: p.Hash, name: p.Name, readable: true, reason: null, held: tally(votes, false), counting: tally(votes, true) }
+    }),
+  }
+}
+
+// /budgetpayouts: the funded projection set, one payment per block from the
+// superblock, satoshis as strings like the live API.
+export function budgetPayouts(sb) {
+  const at = sb || Math.floor(TIP_HEIGHT / 43200) * 43200
+  const rows = budgetProjection().map((p, i) => {
+    const sats = String(Math.round(p.MonthlyPayment * 1e8))
+    return {
+      height: at + i, txid: fakeHash(), vout: 2, address: p.PaymentAddress,
+      amount_sats: sats, excess_sats: sats, kind: 'paid', name: p.Name, hash: p.Hash, candidates: [],
+    }
+  })
+  const total = rows.reduce((s, r) => s + BigInt(r.amount_sats), 0n)
+  return { sb: at, scanned_to: at + 99, complete: true, unclassified: 0, total_paid_sats: total.toString(), payouts: rows }
+}
+
 export function budgetVotes(name) {
   const p = BUDGET_PROPOSALS.find((x) => x.Name === name)
   if (!p) return []

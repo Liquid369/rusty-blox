@@ -230,6 +230,9 @@ body {
   border-bottom: 1px solid var(--hud-line); white-space: nowrap;
   position: sticky; top: 0; background: rgba(14,9,24,0.7); backdrop-filter: blur(4px);
 }
+/* Numeric headers sit over their right-aligned values; .dtable th's left
+   alignment otherwise wins over .num on specificity. */
+.dtable th.num { text-align: right; }
 .dtable td { padding: 9px 12px; border-bottom: 1px solid var(--hud-line-2); color: var(--text-muted); }
 .dtable tbody tr { transition: background .12s; }
 .dtable tbody tr:hover td { background: rgba(196,107,255,0.06); color: var(--text); }

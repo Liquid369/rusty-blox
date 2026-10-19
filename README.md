@@ -107,6 +107,12 @@ Prometheus metrics: `/metrics` (block this path at the edge in production;
   instance (spent-record lookups, outpoint spender search).
 - Re-syncing from scratch is cheap (~20 minutes): stop the explorer, remove
   the database directory from `[paths] db_path`, start again.
+- `[paths] gov_db_path` (default `gov.db` beside `db_path`) holds governance vote
+  history polled from the node. It cannot be rebuilt: the node overwrites
+  votes and deletes expired proposals. Keep it out of any resync and back it
+  up. If this store cannot be opened or written, the explorer keeps serving
+  but governance history stops; check the log for "governance". A poll is
+  skipped when the system clock is more than 2 h from the tip block time.
 
 ## Repository layout
 

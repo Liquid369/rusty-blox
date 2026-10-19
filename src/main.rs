@@ -21,7 +21,9 @@ use rustyblox::api::{
     blockbook_websocket_handler,
     // Governance module
     budget_info_v2,
+    budget_payouts_v2,
     budget_projection_v2,
+    budget_vote_counts_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
@@ -346,6 +348,8 @@ async fn start_web_server(
         .route("/api/v2/budgetinfo", get(budget_info_v2))
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
+        .route("/api/v2/budgetvotecounts", get(budget_vote_counts_v2))
+        .route("/api/v2/budgetpayouts", get(budget_payouts_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))
@@ -714,7 +718,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "RocksDB configuration"
     );
 
-    let db = DB::open_cf_descriptors(&db_options, db_path_str, cf_descriptors)?;
+    let db = DB::open_cf_descriptors(&db_options, &db_path_str, cf_descriptors)?;
     let db_arc = Arc::new(db);
 
     // Initialize cached column family handles
@@ -750,6 +754,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         rustyblox::api::tickers::run_fiat_rate_sampler(fiat_db).await;
     });
+
+    // Governance vote history lives in its own RocksDB: it comes from RPC polling,
+    // cannot be rebuilt from the chain, and must survive a main-DB resync.
+    // Default sits beside the main DB, never cwd-relative: under systemd the
+    // working directory is whatever the unit says, and a wrong path means no
+    // history until someone reads the log.
+    let gov_path = config.get_string("paths.gov_db_path").unwrap_or_else(|_| {
+        std::path::Path::new(&db_path_str)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("gov.db")
+            .to_string_lossy()
+            .into_owned()
+    });
+    info!(path = %gov_path, "governance history store");
+    // An open failure disables history, not the explorer (ponytail: until the
+    // poller has run in production for a while). The error line is the only
+    // signal, so it names the path.
+    match rustyblox::gov::store::open(&gov_path) {
+        Ok(gov) => {
+            let gov = Arc::new(gov);
+            let gov_main = Arc::clone(&db_arc);
+            let secs = rustyblox::gov::poller::poll_secs();
+            tokio::spawn(async move {
+                rustyblox::gov::poller::run(gov_main, gov, secs).await;
+            });
+        }
+        Err(e) => {
+            error!(error = %e, path = %gov_path, "governance history DISABLED: gov.db failed to open")
+        }
+    }
 
     // new_addresses backfill runs inside the monitor task (run_block_monitor),
     // not here: a detached task would RMW the same day blobs Lane I is

@@ -3,11 +3,11 @@
    PROPOSAL DETAIL: one /budgetinfo proposal + its /budgetvotes campaign.
    Approval gauge (Ratio), YES/NO/ABSTAIN donut (valid votes only), the
    cumulative net-approval timeline crossing the funding threshold, and a
-   pass/fail verdict vs 10% of /mncount.total.
+   pass/fail verdict vs floor(/mncount.enabled / 10), strictly greater.
    UNITS: TotalPayment/MonthlyPayment are PIV f64 NUMBERS (formatPiv).
    ===================================================================== */
 import { ref, onMounted, computed, watch } from 'vue'
-import { getBudgetInfo, getBudgetVotes, getMnCount } from '../api/client.js'
+import { getBudgetInfo, getBudgetVotes, getBudgetVoteCounts, getMnCount } from '../api/client.js'
 import { formatPiv } from '../lib/money.js'
 import { formatCount, percent, formatDateTime, safeUrl } from '../lib/format.js'
 import { echarts, baseOption, valAxis, palette, areaFill, hexA } from '../lib/chart.js'
@@ -18,33 +18,54 @@ import Stat from '../components/Stat.vue'
 const props = defineProps({ name: { type: String, required: true } })
 const proposal = ref(null)
 const votes = ref([])
+const counts = ref(null)
 const mncount = ref(null)
 const notFound = ref(false)
 const err = ref(null)
 const loading = ref(true)
 
+// Only the newest load may write: a route change mid-request must not leave
+// the previous proposal's votes under the new proposal.
+let loadId = 0
 async function load() {
-  proposal.value = null; votes.value = []; notFound.value = false; err.value = null
+  const id = ++loadId
+  proposal.value = null; votes.value = []; counts.value = null; notFound.value = false; err.value = null
   loading.value = true
   try {
     const [all, mc] = await Promise.all([getBudgetInfo(), getMnCount()])
+    if (id !== loadId) return
     mncount.value = mc
     const p = all.find((x) => x.Name === props.name)
     if (!p) { notFound.value = true; return }
     proposal.value = p
-    votes.value = await getBudgetVotes(p.Name)
+    const v = await getBudgetVotes(p.Name)
+    if (id !== loadId) return
+    votes.value = v
+    // Held vs counting, checked against this proposal's hash on the backend;
+    // best-effort, the rest of the page does not depend on it.
+    // Assign only if this proposal is still the one on screen: a route change
+    // mid-request must not put the previous proposal's counts on the new page.
+    getBudgetVoteCounts().then((c) => {
+      if (proposal.value?.Hash === p.Hash) counts.value = (c.rows || []).find((r) => r.hash === p.Hash) || null
+    }, () => {})
   } catch (e) {
-    err.value = e.message || 'failed to load proposal'
+    if (id === loadId) err.value = e.message || 'failed to load proposal'
   } finally {
-    loading.value = false
+    if (id === loadId) loading.value = false
   }
 }
 onMounted(load)
 watch(() => props.name, load)
 
-const threshold = computed(() => mncount.value ? 0.1 * mncount.value.total : 211)
+// Core funding line: floor(enabled / 10), net must be STRICTLY greater
+// (budgetproposal.cpp:211).
+const threshold = computed(() => mncount.value ? Math.floor(mncount.value.enabled / 10) : 211)
 const netApproval = computed(() => proposal.value ? proposal.value.Yeas - proposal.value.Nays : 0)
 const passes = computed(() => netApproval.value > threshold.value)
+
+const sumC = (c) => (c ? c.yes + c.no + c.abstain : 0)
+const notCounting = computed(() =>
+  counts.value?.readable ? sumC(counts.value.held) - sumC(counts.value.counting) : 0)
 
 // valid-only tallies (array length != Yeas; strip invalid/superseded)
 const valid = computed(() => votes.value.filter((v) => v.fValid))
@@ -121,7 +142,7 @@ const timelineOption = computed(() => {
       areaStyle: { color: areaFill(echarts, p.neon, 0.36, 0.01) },
       markLine: {
         silent: true, symbol: 'none',
-        data: [{ yAxis: Math.ceil(threshold.value), lineStyle: { color: hexA(p.amber, 0.8), type: 'dashed' }, label: { formatter: 'funding threshold', color: p.amber, fontSize: 9, fontFamily: 'monospace', position: 'insideEndTop' } }],
+        data: [{ yAxis: threshold.value, lineStyle: { color: hexA(p.amber, 0.8), type: 'dashed' }, label: { formatter: 'funding threshold', color: p.amber, fontSize: 9, fontFamily: 'monospace', position: 'insideEndTop' } }],
       },
     }],
   }
@@ -136,7 +157,7 @@ const timelineOption = computed(() => {
         <h1 class="page-title">{{ proposal ? proposal.Name : 'Proposal' }}</h1>
       </div>
       <div class="head-live" v-if="proposal">
-        <span class="pill" :class="passes ? 'ok' : 'bad'"><span class="dot" :class="passes ? 'live' : ''"></span>{{ passes ? 'PASSING' : 'FAILING' }}</span>
+        <span class="pill" :class="passes ? 'ok' : 'bad'"><span class="dot" :class="passes ? 'live' : ''"></span>{{ passes ? 'OVER LINE' : 'BELOW LINE' }}</span>
       </div>
     </div>
 
@@ -166,10 +187,19 @@ const timelineOption = computed(() => {
         </Stat>
         <Stat k="NET APPROVAL">
           <template #v>{{ formatCount(netApproval) }}</template>
-          <template #s>need &gt; {{ formatCount(Math.ceil(threshold)) }} to fund</template>
+          <template #s>need &gt; {{ formatCount(threshold) }} net to fund</template>
         </Stat>
       </div>
 
+      <div v-if="counts && !counts.readable" class="banner warn">
+        This proposal's votes cannot be read by name ({{ counts.reason }}): another proposal answers to the same name, so its vote charts are not shown.
+      </div>
+      <p v-else-if="notCounting > 0" class="nc-line mono">
+        Counting {{ formatCount(sumC(counts.counting)) }} of {{ formatCount(sumC(counts.held)) }} votes held:
+        {{ formatCount(notCounting) }} come from masternodes that are not enabled and count again if they return.
+      </p>
+
+      <template v-if="!counts || counts.readable">
       <!-- VOTE TALLY -->
       <h2 class="section-title">Vote tally</h2>
       <div class="split s-21">
@@ -197,6 +227,8 @@ const timelineOption = computed(() => {
       </div>
 
       <!-- META -->
+      </template>
+
       <h2 class="section-title">Proposal record</h2>
       <HudPanel title="DETAIL" :id="proposal.IsEstablished ? 'established' : 'new'">
         <dl class="kv">
@@ -226,4 +258,5 @@ const timelineOption = computed(() => {
 .verdict.bad { color: var(--hot); background: rgba(255,84,112,0.1); border: 1px solid rgba(255,84,112,0.3); }
 .tally-cap { display: flex; justify-content: center; gap: 14px; margin-top: 8px; font-size: 11px; color: var(--text-muted); }
 .tally-cap .td { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; box-shadow: 0 0 5px currentColor; }
+.nc-line { margin: var(--space-3) 0 0; font-size: 12px; color: var(--amber); }
 </style>

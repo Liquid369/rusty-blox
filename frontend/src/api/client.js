@@ -144,6 +144,39 @@ export const getFinalizedBudgets = () =>
   isMock ? Promise.resolve(mock.finalizedBudgets()) : getJSON('/finalizedbudgets')
 
 // Proposal name may contain spaces/parens; URL-encode it.
+// --- governance history ------------------------------------------------
+// Prototype: served from gov-mock.json (live node responses captured
+// 2026-10-08, shaped like /api/v2/gov/*) until the gov routes ship.
+// Mock-only until the gov routes ship, so a production build cannot publish
+// prototype data.
+const GOV_PROTOTYPE = isMock
+// Tested on import.meta.env directly: Vite inlines it, so a production build
+// drops the 113 KB mock chunk (the guarded isMock is not constant-folded).
+const govMock = () =>
+  import.meta.env.VITE_USE_MOCK === '1'
+    ? import('./gov-mock.json').then((m) => m.default)
+    : Promise.reject(new Error('governance history prototype is mock-only'))
+
+export const getGovProposals = () =>
+  GOV_PROTOTYPE
+    ? govMock().then((m) => ({ meta: m.meta, enabled: m.enabled, downvoteInvalidLine: m.downvote_invalid_line, rows: m.proposals }))
+    : getJSON('/gov/proposals?status=live')
+export const getGovHistory = (hash) =>
+  GOV_PROTOTYPE ? govMock().then((m) => ({ meta: m.meta, points: m.history[hash] || [] })) : getJSON(`/gov/proposal/${hash}/history?range=all`)
+export const getGovBatches = (hash) =>
+  GOV_PROTOTYPE ? govMock().then((m) => ({ meta: m.meta, batches: m.batches[hash] || [] })) : getJSON(`/gov/proposal/${hash}/batches`)
+export const getGovChanges = (hash) =>
+  GOV_PROTOTYPE ? govMock().then((m) => ({ meta: m.meta, rows: m.changes[hash] || [] })) : getJSON(`/gov/proposal/${hash}/changes?limit=1000`)
+export const getGovSwings = () =>
+  GOV_PROTOTYPE ? govMock().then((m) => ({ meta: m.meta, rows: m.swings })) : getJSON('/gov/swings?window=72h&min=200')
+
+// Held vs counting votes per proposal hash (identity-checked on the backend).
+export const getBudgetVoteCounts = () =>
+  isMock ? Promise.resolve(mock.budgetVoteCounts()) : getJSON('/budgetvotecounts')
+// Budget payments read from a superblock's blocks; no sb = the latest superblock.
+export const getBudgetPayouts = (sb) =>
+  isMock ? Promise.resolve(mock.budgetPayouts(sb)) : getJSON(sb ? `/budgetpayouts?sb=${sb}` : '/budgetpayouts')
+
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
 
@@ -196,7 +229,7 @@ export default {
   getAddress, getUtxo, getBalanceHistory, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
-  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
+  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getXpub, getSearch, getPrice,
   nextSuperblock, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }
