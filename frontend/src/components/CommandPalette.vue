@@ -37,7 +37,9 @@ function classify(s) {
   if (/^[0-9a-fA-F]{64}$/.test(s)) return { type: 'HASH', to: `/search/${s}`, label: 'Block or transaction', hint: '64-hex → classify' }
   // xpub, or PIVX Core's ToEA (mainnet) / DRKV (testnet6): 111 base58 chars.
   if (/^[1-9A-HJ-NP-Za-km-z]{100,120}$/.test(s)) return { type: 'XPUB', to: `/xpub/${s}`, label: 'Extended pubkey', hint: 'xpub → account' }
-  if (/^[DS67E]/.test(s)) return { type: 'ADDRESS', to: `/address/${s}`, label: 'Address', hint: 'base58 → account' }
+  // Any transparent address, any network (testnet6 x/y/W/8/9 included): 26-40
+  // base58 chars. The address page validates the checksum.
+  if (/^[1-9A-HJ-NP-Za-km-z]{26,40}$/.test(s)) return { type: 'ADDRESS', to: `/address/${s}`, label: 'Address', hint: 'base58 → account' }
   return { type: 'SEARCH', to: `/search/${s}`, label: 'Lookup', hint: 'universal search' }
 }
 
