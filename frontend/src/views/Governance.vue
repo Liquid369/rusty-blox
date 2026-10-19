@@ -6,10 +6,10 @@
    FUNDING GATE: (Yeas - Nays) must exceed floor(/mncount.enabled / 10).
    UNITS: budget amounts are PIV f64 NUMBERS (formatPiv, never /1e8).
    ===================================================================== */
-import { ref, onMounted, computed, nextTick } from 'vue'
+import { ref, onMounted, computed, nextTick, watch } from 'vue'
 import { useChainStore } from '../store.js'
-import { isMock, getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getTx, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
-import { formatPiv } from '../lib/money.js'
+import { isMock, getBudgetInfo, getBudgetProjection, getMnCount, getFinalizedBudgets, getBudgetVoteCounts, getBudgetPayouts, getTx, nextSuperblock, monthlyBudgetCap } from '../api/client.js'
+import { formatPiv, formatSats } from '../lib/money.js'
 import { formatCount, percent, formatDateTime, truncateHash, esc } from '../lib/format.js'
 import { baseOption, palette, hexA } from '../lib/chart.js'
 import EChart from '../components/EChart.vue'
@@ -25,11 +25,15 @@ const mncount = ref(null)
 const loading = ref(true)
 const error = ref(null)
 const finalized = ref([])
+const voteCounts = ref(null)
+const voteCountsError = ref(null)
+const payouts = ref(null)
+const payoutsError = ref(null)
 
 /* Overview (read-only) vs Simulator (what-if sandbox). Tablist with roving
    focus + arrow keys, mirroring the nav-rail tab semantics. */
 const mode = ref('overview')
-const MODES = isMock ? ['overview', 'history', 'sim'] : ['overview', 'sim']
+const MODES = isMock ? ['overview', 'payouts', 'history', 'sim'] : ['overview', 'payouts', 'sim']
 const onTabKey = (e) => {
   if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
     e.preventDefault()
@@ -50,6 +54,9 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  // Both read the node / block index on the backend; a failure shows its own
+  // message in its panel and never blanks the rest of the page.
+  getBudgetVoteCounts().then((v) => { voteCounts.value = v }, (e) => { voteCountsError.value = e.message || 'failed' })
   // Finalized budget (mnfinalbudget show); best-effort, never blocks the page. The FeeTX is
   // the OP_RETURN finalization-collateral tx; resolve it to its block for the "finalized when".
   try {
@@ -97,38 +104,39 @@ const cap = computed(() => monthlyBudgetCap())
 const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
 const overCap = computed(() => allotted.value > cap.value + 1)
 /* Core's getbudgetinfo retains spent proposals (window closed, RemainingPaymentCount
-   0) until its lazy purge; only proposals with payments left are in the running.
-   fundedThisCycle intentionally keeps the FULL list: the spent ones are exactly
-   what the last superblock paid. */
+   0) until its lazy purge; only proposals with payments left are in the running. */
 const active = computed(() => proposals.value.filter((p) => p.RemainingPaymentCount > 0))
 const demand = computed(() => active.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
-/* ---------- funded THIS cycle (most recent superblock) ----------
-   /budgetprojection is forward-looking (the NEXT payout), so it can't answer
-   "what did the last superblock fund". We reproduce Core's allotment for the most
-   recent superblock instead: passing proposals whose payment window covers it,
-   ranked by net approval, funded greedily up to the monthly cap (skip-and-keep-
-   filling, exactly like CBudgetManager::GetBudget). Verified to match the on-chain
-   superblock payout (blocks pay one proposal each, contiguously from the superblock
-   height) exactly, without a per-block scan. */
-const SUPERBLOCK_CYCLE = 43200 // PIVX consensus: nBudgetCycleBlocks
-const lastSbHeight = computed(() =>
-  Math.floor((chain.height || 0) / SUPERBLOCK_CYCLE) * SUPERBLOCK_CYCLE)
-const fundedThisCycle = computed(() => {
-  const sb = lastSbHeight.value
-  if (!sb || !proposals.value.length) return { rows: [], total: 0 }
-  const cand = proposals.value
-    .filter((p) => passes(p) && p.BlockStart <= sb && sb <= p.BlockEnd && p.MonthlyPayment > 0)
-    .sort((a, b) => b.Yeas - b.Nays - (a.Yeas - a.Nays))
-  const rows = []
-  let total = 0
-  for (const p of cand) {
-    if (total + p.MonthlyPayment > cap.value + 0.5) continue // over cap → deferred, not paid
-    rows.push(p)
-    total += p.MonthlyPayment
-  }
-  return { rows, total }
-})
+/* Votes the node holds vs votes Core counts, per proposal hash. Core counts only
+   votes whose masternode it sees as enabled; the rest still exist and count again
+   if the masternode returns. Held and counting come from the same read, never mixed
+   with /budgetinfo, which is cached separately. */
+/* Payouts tab: fetched when first opened, then per superblock on demand. Only
+   the newest request may land, so fast clicking never shows a stale cycle. */
+const SB_CYCLE = 43200
+const FIRST_PAYOUT_SB = 1728000 // backend refuses earlier eras (see /budgetpayouts)
+const latestPayoutSb = ref(null)
+let payoutReq = 0
+function loadPayouts(sb) {
+  const id = ++payoutReq
+  payouts.value = null
+  payoutsError.value = null
+  getBudgetPayouts(sb).then((v) => {
+    if (id !== payoutReq) return
+    payouts.value = v
+    if (!sb) latestPayoutSb.value = v.sb
+  }, (e) => { if (id === payoutReq) payoutsError.value = e.message || 'failed' })
+}
+watch(mode, (m) => { if (m === 'payouts' && !payouts.value && !payoutsError.value) loadPayouts() })
+
+const voteRows = computed(() => (voteCounts.value?.rows || []))
+const sum = (c) => (c ? c.yes + c.no + c.abstain : 0)
+const notCounting = (r) => (r.readable ? sum(r.held) - sum(r.counting) : 0)
+const notCountingByHash = computed(() => Object.fromEntries(voteRows.value.map((r) => [r.hash, r])))
+const notCountingRows = computed(() =>
+  voteRows.value.filter((r) => !r.readable || notCounting(r) > 0)
+    .sort((a, b) => notCounting(b) - notCounting(a)))
 
 const PAL = ['#c46bff', '#46e6d0', '#ffcf5c', '#9d4ef0', '#ff6f9c', '#7ad97a']
 
@@ -179,6 +187,12 @@ const allocOption = computed(() => {
         :tabindex="mode === 'overview' ? 0 : -1"
         @click="mode = 'overview'" @keydown="onTabKey"
       >OVERVIEW</button>
+      <button
+        id="tab-payouts" role="tab" type="button" class="modetab"
+        :class="{ on: mode === 'payouts' }" :aria-selected="mode === 'payouts'"
+        :tabindex="mode === 'payouts' ? 0 : -1"
+        @click="mode = 'payouts'" @keydown="onTabKey"
+      >PAYOUTS</button>
       <!-- History is mock-mode only until /api/v2/gov/ ships. -->
       <button
         v-if="isMock"
@@ -198,6 +212,49 @@ const allocOption = computed(() => {
     <!-- ================= HISTORY ================= -->
     <div v-if="mode === 'history'" role="tabpanel" aria-labelledby="tab-history">
       <GovHistory />
+    </div>
+
+    <!-- ================= PAYOUTS ================= -->
+    <div v-else-if="mode === 'payouts'" role="tabpanel" aria-labelledby="tab-payouts">
+    <!-- PAID THIS CYCLE: read from the superblock's blocks, never recomputed from
+         today's votes (they move after the superblock, and paid proposals expire). -->
+    <div class="sb-nav">
+      <button type="button" class="modetab" :disabled="!payouts || payouts.sb - SB_CYCLE < FIRST_PAYOUT_SB" @click="loadPayouts(payouts.sb - SB_CYCLE)">◀ OLDER</button>
+      <h2 class="section-title">Superblock #{{ payouts ? formatCount(payouts.sb) : '…' }} payouts</h2>
+      <button type="button" class="modetab" :disabled="!payouts || !latestPayoutSb || payouts.sb >= latestPayoutSb" @click="loadPayouts(payouts.sb + SB_CYCLE)">NEWER ▶</button>
+    </div>
+    <HudPanel title="BUDGET PAID" id="/budgetpayouts · read from the superblock's blocks" hero>
+      <template #head><span v-if="payouts" class="pill ok mono">Σ {{ formatSats(payouts.total_paid_sats, { decimals: 0 }) }} PIV</span></template>
+      <p v-if="payoutsError" class="note mono err">Could not read the superblock payouts: {{ payoutsError }}</p>
+      <p v-else-if="!payouts" class="note mono dim">reading superblock blocks…</p>
+      <template v-else>
+        <div class="scroll" v-if="payouts.payouts.length">
+          <table class="dtable">
+            <thead><tr><th>Block</th><th>Proposal / payee</th><th class="num">Paid (PIV)</th></tr></thead>
+            <tbody>
+              <tr v-for="p in payouts.payouts" :key="p.height">
+                <td class="mono"><RouterLink :to="`/block/${p.height}`">#{{ formatCount(p.height) }}</RouterLink></td>
+                <td>
+                  <RouterLink v-if="p.name" :to="`/proposal/${encodeURIComponent(p.name)}`">{{ p.name }}</RouterLink>
+                  <RouterLink v-else-if="p.address" :to="`/address/${p.address}`" class="mono" :title="p.candidates.length ? 'one of: ' + p.candidates.join(', ') : 'proposal no longer held by the node'">{{ p.address }}</RouterLink>
+                  <span v-if="p.candidates.length" class="dim mono"> · one of {{ p.candidates.join(', ') }}</span>
+                  <span v-if="p.kind !== 'paid'" class="pill warn mono" title="Minted above the block reward, but not as Core's block template pays a budget">UNCLASSIFIED · excess {{ formatSats(p.excess_sats, { decimals: 0 }) }}</span>
+                </td>
+                <td class="num mono" :class="p.kind === 'paid' ? 'strong' : 'dim'">{{ formatSats(p.amount_sats, { decimals: 0 }) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="note mono dim">No budget payments in blocks #{{ formatCount(payouts.sb) }} to #{{ formatCount(payouts.scanned_to) }}.</p>
+        <p class="note mono dim">
+          {{ payouts.payouts.filter((p) => p.kind === 'paid').length }} budget payments found in blocks
+          <RouterLink :to="`/block/${payouts.sb}`" class="mono">#{{ formatCount(payouts.sb) }}</RouterLink> to #{{ formatCount(payouts.scanned_to) }}<template v-if="!payouts.complete"> (superblock window still open)</template>:
+          each block's coinstake minted exactly its last output above the block reward, the way Core pays a budget.
+          A payee shown as an address belongs to a proposal the node no longer holds (expired, or its amount has since changed).<template v-if="payouts.unclassified"> Σ counts confirmed payments only; {{ payouts.unclassified }} unclassified row(s) are listed for inspection.</template>
+        </p>
+      </template>
+    </HudPanel>
+      <p class="note mono dim">Superblocks before #{{ formatCount(FIRST_PAYOUT_SB) }} paid with zerocoin stakes or fee-deducted coinstakes this view cannot classify, so they are not listed.</p>
     </div>
 
     <!-- ================= SIMULATOR ================= -->
@@ -241,26 +298,6 @@ const allocOption = computed(() => {
       </div>
     </HudPanel>
 
-    <!-- FUNDED THIS CYCLE: the most recent superblock's actual payout, derived from
-         budget status to match the on-chain payment set without a per-block scan. -->
-    <h2 class="section-title">Funded this cycle — superblock #{{ formatCount(lastSbHeight) }}</h2>
-    <HudPanel title="BUDGET PAID" id="funded set · matches the on-chain superblock payout" hero>
-      <template #head><span class="pill ok mono">Σ {{ formatPiv(fundedThisCycle.total, { decimals: 0 }) }} PIV</span></template>
-      <div class="alloc-legend" v-if="fundedThisCycle.rows.length">
-        <div v-for="(p, i) in fundedThisCycle.rows" :key="p.Hash" class="al">
-          <span class="al-dot" :style="{ background: PAL[i % PAL.length] }"></span>
-          <RouterLink :to="`/proposal/${encodeURIComponent(p.Name)}`" class="al-name" :title="p.Name">{{ p.Name }}</RouterLink>
-          <span class="al-val mono">{{ formatPiv(p.MonthlyPayment, { decimals: 0 }) }} PIV</span>
-        </div>
-      </div>
-      <p v-else class="note mono dim">No proposals were funded at the most recent superblock.</p>
-      <p class="note mono dim">
-        {{ fundedThisCycle.rows.length }} passing proposals whose payment window covers superblock
-        <RouterLink :to="`/block/${lastSbHeight}`" class="mono">#{{ formatCount(lastSbHeight) }}</RouterLink>,
-        ranked by net approval and funded to the {{ formatPiv(cap, { decimals: 0 }) }} PIV cap{{ usd(fundedThisCycle.total) ? ' · ≈ ' + usd(fundedThisCycle.total) : '' }} — the same set paid on-chain across the superblock blocks, one proposal per block.
-      </p>
-    </HudPanel>
-
     <!-- FINALIZED BUDGET (mnfinalbudget show) -->
     <template v-if="finalized.length">
       <h2 class="section-title">Finalized budget</h2>
@@ -297,6 +334,7 @@ const allocOption = computed(() => {
                     <i class="nay" :style="{ width: (p.Nays / (p.Yeas + p.Nays || 1) * 100) + '%' }"></i>
                   </div>
                   <span class="mono dim vnums">{{ formatCount(p.Yeas) }} / {{ formatCount(p.Nays) }} · {{ percent(p.Ratio * 100, 1) }}</span>
+                  <span v-if="notCountingByHash[p.Hash] && notCounting(notCountingByHash[p.Hash]) > 0" class="mono dim vnums nc">{{ formatCount(notCounting(notCountingByHash[p.Hash])) }} more held, not counting</span>
                 </div>
               </td>
               <td class="num strong">
@@ -315,6 +353,41 @@ const allocOption = computed(() => {
         the authoritative payout list is /budgetprojection.
       </p>
     </HudPanel>
+
+    <!-- VOTES NOT COUNTING -->
+    <template v-if="notCountingRows.length || voteCountsError">
+      <h2 class="section-title">Votes not counting</h2>
+      <HudPanel title="NOT COUNTING" id="/budgetvotecounts · held vs counted">
+        <p v-if="voteCountsError" class="note mono err">Could not read vote counts: {{ voteCountsError }}</p>
+        <div v-else class="scroll">
+          <table class="dtable">
+            <thead>
+              <tr><th>Proposal</th><th class="num nc-col">Yes counting</th><th class="num nc-col">No counting</th><th class="num nc-col">Yes held</th><th class="num nc-col">No held</th><th class="num nc-col">Not counting</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in notCountingRows" :key="r.hash">
+                <td><RouterLink :to="`/proposal/${encodeURIComponent(r.name)}`">{{ r.name }}</RouterLink></td>
+                <template v-if="r.readable">
+                  <td class="num mono">{{ formatCount(r.counting.yes) }}</td>
+                  <td class="num mono">{{ formatCount(r.counting.no) }}</td>
+                  <td class="num mono dim">{{ formatCount(r.held.yes) }}</td>
+                  <td class="num mono dim">{{ formatCount(r.held.no) }}</td>
+                  <td class="num mono strong">{{ formatCount(notCounting(r)) }}</td>
+                </template>
+                <td v-else colspan="5" class="dim mono">unreadable: {{ r.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note mono dim">
+          Core counts a vote only while its masternode is enabled. Votes from masternodes that are offline
+          stay on the network and count again when the masternode returns. A node that restarted recently
+          also reports fewer enabled masternodes until its list refills.
+        </p>
+      </HudPanel>
+    </template>
+
+
     </div>
     </template>
   </div>
@@ -352,5 +425,11 @@ const allocOption = computed(() => {
 .vbar .yea { background: var(--success); box-shadow: 0 0 6px rgba(92,203,111,0.5); }
 .vbar .nay { background: var(--hot); }
 .vnums { font-size: 10.5px; }
+.vnums.nc { display: block; color: var(--amber); }
+.nc-col { width: 13%; }
+.sb-nav { display: flex; align-items: center; gap: var(--space-3); }
+.sb-nav .section-title { flex: 1; margin: 0; }
+.sb-nav .modetab:disabled { opacity: .35; cursor: default; }
+.note.err { color: var(--hot); }
 .note { margin: var(--space-4) 0 0; font-size: 11px; padding-top: var(--space-3); border-top: 1px solid var(--hud-line); }
 </style>

@@ -170,6 +170,13 @@ export const getGovChanges = (hash) =>
 export const getGovSwings = () =>
   GOV_PROTOTYPE ? govMock().then((m) => ({ meta: m.meta, rows: m.swings })) : getJSON('/gov/swings?window=72h&min=200')
 
+// Held vs counting votes per proposal hash (identity-checked on the backend).
+export const getBudgetVoteCounts = () =>
+  isMock ? Promise.resolve(mock.budgetVoteCounts()) : getJSON('/budgetvotecounts')
+// Budget payments read from a superblock's blocks; no sb = the latest superblock.
+export const getBudgetPayouts = (sb) =>
+  isMock ? Promise.resolve(mock.budgetPayouts(sb)) : getJSON(sb ? `/budgetpayouts?sb=${sb}` : '/budgetpayouts')
+
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
 
@@ -221,7 +228,7 @@ export default {
   getAddress, getUtxo, getBalanceHistory, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
-  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getXpub, getSearch, getPrice,
+  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getXpub, getSearch, getPrice,
   nextSuperblock, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }

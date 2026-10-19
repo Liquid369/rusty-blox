@@ -25,22 +25,22 @@ const BASELINED: &[u8] = b"meta/baselined";
 /// One proposal row from getbudgetinfo, tolerant of missing fields so a new
 /// Core field (or a dropped one) cannot stop history collection.
 #[derive(Debug, Clone)]
-struct Row {
-    hash: Hash,
-    name: String,
-    url: String,
-    fee_hash: Hash,
-    payment_address: String,
-    monthly_payment_sats: i64,
-    block_start: u32,
-    block_end: u32,
-    total_payment_count: u32,
-    remaining_payment_count: i32,
-    yeas: u32,
-    nays: u32,
-    abstains: u32,
-    is_valid: bool,
-    is_established: bool,
+pub(crate) struct Row {
+    pub(crate) hash: Hash,
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) fee_hash: Hash,
+    pub(crate) payment_address: String,
+    pub(crate) monthly_payment_sats: i64,
+    pub(crate) block_start: u32,
+    pub(crate) block_end: u32,
+    pub(crate) total_payment_count: u32,
+    pub(crate) remaining_payment_count: i32,
+    pub(crate) yeas: u32,
+    pub(crate) nays: u32,
+    pub(crate) abstains: u32,
+    pub(crate) is_valid: bool,
+    pub(crate) is_established: bool,
 }
 
 /// Core emits every field read here unconditionally (rpc/budget.cpp
@@ -76,7 +76,7 @@ fn row(v: &Value) -> Option<Row> {
     })
 }
 
-fn rows(v: &Value, what: &str, gaps: &mut Vec<String>) -> Vec<Row> {
+pub(crate) fn rows(v: &Value, what: &str, gaps: &mut Vec<String>) -> Vec<Row> {
     let Some(arr) = v.as_array() else {
         gaps.push(format!("{what}: not an array"));
         return Vec::new();
@@ -92,12 +92,12 @@ fn rows(v: &Value, what: &str, gaps: &mut Vec<String>) -> Vec<Row> {
         .collect()
 }
 
-fn is_unknown_proposal(e: &str) -> bool {
+pub(crate) fn is_unknown_proposal(e: &str) -> bool {
     let e = e.to_lowercase();
     e.contains("unknown proposal") || e.contains("invalid proposal")
 }
 
-fn tallies_match(cur: &BTreeMap<Outpoint, VoteState>, r: &Row) -> bool {
+pub(crate) fn tallies_match(cur: &BTreeMap<Outpoint, VoteState>, r: &Row) -> bool {
     let n = |vote| cur.values().filter(|s| s.f_valid && s.vote == vote).count() as u32;
     (n(1), n(2), n(0)) == (r.yeas, r.nays, r.abstains)
 }

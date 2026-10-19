@@ -3,5 +3,6 @@
 //! history exists only if it is polled and stored here.
 
 pub mod diff;
+pub mod live;
 pub mod poller;
 pub mod store;

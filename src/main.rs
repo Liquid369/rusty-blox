@@ -21,7 +21,9 @@ use rustyblox::api::{
     blockbook_websocket_handler,
     // Governance module
     budget_info_v2,
+    budget_payouts_v2,
     budget_projection_v2,
+    budget_vote_counts_v2,
     budget_votes_v2,
     cache_stats_v2,
     coldstaking_analytics,
@@ -346,6 +348,8 @@ async fn start_web_server(
         .route("/api/v2/budgetinfo", get(budget_info_v2))
         .route("/api/v2/budgetvotes/{proposal_name}", get(budget_votes_v2))
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
+        .route("/api/v2/budgetvotecounts", get(budget_vote_counts_v2))
+        .route("/api/v2/budgetpayouts", get(budget_payouts_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))
