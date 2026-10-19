@@ -13,6 +13,7 @@
 //   g/T        PollGap           meta/last_poll  PollStatus
 //   s/H/T      Visibility        written on change: blind intervals
 //   f/F        FinalizedBudget   latest per finalized-budget hash F
+//   m/H        u32               stored votes the node no longer reports
 //   fv/F/T     FinalizedVotes    only when changed: Core picks the winner per
 //                                height by CURRENT VoteCount, so past leads
 //                                exist only in this log
@@ -180,6 +181,13 @@ pub const LAST_MNCOUNT: &[u8] = b"nl";
 /// ts (u64 BE) of the poll in progress; cleared by the status write. Present
 /// at startup = the previous poll was interrupted.
 pub const POLL_STARTED: &[u8] = b"meta/poll_started";
+/// MnCountPoint of the last poll that passed the masternode-count gate.
+pub const MN_ACCEPTED: &[u8] = b"meta/mn_accepted";
+/// (MnCountPoint, ts) of the first reading before any accepted poll; the
+/// count must stay within 1% of it for MN_SETTLE_SECS.
+pub const MN_CANDIDATE: &[u8] = b"meta/mn_candidate";
+/// ts (u64 BE) the enabled count first fell >10% below MN_ACCEPTED.
+pub const MN_LOW_SINCE: &[u8] = b"meta/mn_low_since";
 
 fn key(prefix: &[u8], parts: &[&[u8]]) -> Vec<u8> {
     let mut k = prefix.to_vec();
@@ -215,6 +223,9 @@ pub fn gap_key(ts: u64) -> Vec<u8> {
 }
 pub fn visibility_key(h: &Hash, ts: u64) -> Vec<u8> {
     key(b"s/", &[h, &ts.to_be_bytes()])
+}
+pub fn missing_key(h: &Hash) -> Vec<u8> {
+    key(b"m/", &[h])
 }
 pub fn finalized_key(f: &Hash) -> Vec<u8> {
     key(b"f/", &[f])

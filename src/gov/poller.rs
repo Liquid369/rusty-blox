@@ -111,6 +111,64 @@ fn mn_count(v: &Value) -> Option<MnCountPoint> {
     })
 }
 
+/// A low count this long is a real network change, not a refilling list.
+/// ponytail: fixed 6 h; a genuine >10% drop delays history by that much.
+const MN_LOW_ACCEPT_SECS: u64 = 6 * 3600;
+/// How long the first reading must hold before the first baseline.
+const MN_SETTLE_SECS: u64 = 3600;
+
+/// Why to skip this poll, from the node's enabled masternode count. Core marks
+/// a vote invalid when its masternode is missing from the node's own list
+/// (budgetmanager.cpp RemoveStaleVotesOnProposal). After an unclean restart
+/// that list refills over hours while `mnsync` already reads finished (its
+/// budget stage ends after 50 s without a new item), and polling then records
+/// the refill as vote movement.
+fn mn_gate(db: &DB, mnc: &MnCountPoint, now: u64) -> Result<Option<String>, String> {
+    let Some(acc) = get::<MnCountPoint>(db, MN_ACCEPTED)? else {
+        // No reference before the first accepted poll: the count must hold
+        // within 1% for an hour, so a list still refilling (or pausing between
+        // bursts) is not taken as the baseline. Cost: the first baseline lands
+        // at least 1 h after the poller first runs.
+        let cand = get::<(MnCountPoint, u64)>(db, MN_CANDIDATE)?;
+        let close = cand.is_some_and(|(c, _)| c.enabled.abs_diff(mnc.enabled) * 100 <= c.enabled);
+        if close && cand.is_some_and(|(_, ts)| now.saturating_sub(ts) >= MN_SETTLE_SECS) {
+            return Ok(None);
+        }
+        if !close {
+            db.put(MN_CANDIDATE, enc(&(*mnc, now))?)
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(Some(format!(
+            "masternode count settling before first poll: enabled {} (reading held since {})",
+            mnc.enabled,
+            cand.filter(|_| close).map_or(now, |(_, ts)| ts)
+        )));
+    };
+    if u64::from(mnc.enabled) * 10 >= u64::from(acc.enabled) * 9 {
+        // Recovered: clear now, not in the poll tail, which a later RPC
+        // failure would skip and leave a stale timer for the next drop.
+        db.delete(MN_LOW_SINCE).map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+    let since = match db.get(MN_LOW_SINCE).map_err(|e| e.to_string())? {
+        Some(v) => <[u8; 8]>::try_from(v.as_slice())
+            .map(u64::from_be_bytes)
+            .map_err(|_| "meta/mn_low_since is not 8 bytes".to_string())?,
+        None => {
+            db.put(MN_LOW_SINCE, now.to_be_bytes())
+                .map_err(|e| e.to_string())?;
+            now
+        }
+    };
+    if now.saturating_sub(since) >= MN_LOW_ACCEPT_SECS {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "masternode list partial: enabled {} vs {} at last accepted poll; node recovering",
+        mnc.enabled, acc.enabled
+    )))
+}
+
 fn write_failed(
     db: &DB,
     now: u64,
@@ -179,6 +237,9 @@ async fn poll_inner(db: &DB, rpc: &Rpc, now: u64, height: u32) -> Result<PollSta
         Ok(m) => m,
         Err(e) => return write_failed(db, now, height, e, ms()),
     };
+    if let Some(reason) = mn_gate(db, &mnc, now)? {
+        return write_failed(db, now, height, reason, ms());
+    }
     let list = match rpc("getbudgetinfo", Value::Array(vec![])).await {
         Ok(v) => v,
         Err(e) => return write_failed(db, now, height, format!("getbudgetinfo: {e}"), ms()),
@@ -358,11 +419,6 @@ async fn poll_inner(db: &DB, rpc: &Rpc, now: u64, height: u32) -> Result<PollSta
                         ));
                         continue;
                     }
-                    votes_seen += cur.len() as u32;
-                    // First read of this proposal's votes (new, or readable
-                    // for the first time): its transitions this poll are
-                    // first sightings, not movement.
-                    meta.votes_since.get_or_insert(now);
                     let prefix = vote_prefix(&r.hash);
                     let mut prev = HashMap::new();
                     for (k, v) in scan(db, &prefix)? {
@@ -371,7 +427,34 @@ async fn poll_inner(db: &DB, rpc: &Rpc, now: u64, height: u32) -> Result<PollSta
                             .map_err(|_| "gov.db: malformed v/ key".to_string())?;
                         prev.insert(mn, bincode::deserialize(&v).map_err(|e| e.to_string())?);
                     }
-                    for t in diff_votes(&prev, &cur) {
+                    // Core never deletes one vote from a live proposal (mapVotes
+                    // is only assigned; stale votes are only marked invalid), but
+                    // after a lost budget.dat a node can lack votes for good: peers
+                    // relay valid votes only (budgetproposal.cpp SyncVotes). A
+                    // stored vote absent now keeps its last known state, never
+                    // becomes Removed; a gap marks each change in how many.
+                    let (transitions, missing): (Vec<_>, Vec<_>) = diff_votes(&prev, &cur)
+                        .into_iter()
+                        .partition(|t| t.change.kind != VoteChangeKind::Removed);
+                    let missing = missing.len() as u32;
+                    let was_missing = get::<u32>(db, &missing_key(&r.hash))?.unwrap_or(0);
+                    if missing != was_missing {
+                        gaps.push(format!(
+                            "getbudgetvotes({}): {missing} stored votes not reported by the node (was {was_missing}); kept as last known",
+                            r.name
+                        ));
+                        if missing == 0 {
+                            batch.delete(missing_key(&r.hash));
+                        } else {
+                            batch.put(missing_key(&r.hash), enc(&missing)?);
+                        }
+                    }
+                    votes_seen += cur.len() as u32;
+                    // First read of this proposal's votes (new, or readable
+                    // for the first time): its transitions this poll are
+                    // first sightings, not movement.
+                    meta.votes_since.get_or_insert(now);
+                    for t in transitions {
                         match t.state {
                             Some(s) => batch.put(vote_key(&r.hash, &t.mn), enc(&s)?),
                             None => batch.delete(vote_key(&r.hash, &t.mn)),
@@ -428,6 +511,12 @@ async fn poll_inner(db: &DB, rpc: &Rpc, now: u64, height: u32) -> Result<PollSta
         tail.put(LAST_MNCOUNT, enc(&mnc)?);
     }
     let ok = gaps.is_empty();
+    // Only a clean poll moves the reference: a poll with gaps may be reading a
+    // node that is still incomplete.
+    if ok {
+        tail.put(MN_ACCEPTED, enc(&mnc)?);
+        tail.delete(MN_CANDIDATE);
+    }
     if !ok {
         tail.put(
             gap_key(now),
@@ -665,6 +754,7 @@ mod tests {
         by_name: HashMap<String, Result<Value, String>>,
         sync: Value,
         finalized: Value,
+        mncount: Value,
     }
 
     fn rpc_for(node: Arc<Mutex<Node>>) -> Box<Rpc> {
@@ -678,7 +768,7 @@ mod tests {
                 let arg = p.get(0).and_then(|x| x.as_str()).map(str::to_string);
                 match (m, arg) {
                     ("mnsync", _) => Ok(n.sync.clone()),
-                    ("getmasternodecount", _) => Ok(fx("mncount.json")),
+                    ("getmasternodecount", _) => Ok(n.mncount.clone()),
                     ("getbudgetprojection", _) => Ok(fx("budgetprojection.json")),
                     ("mnfinalbudget", _) => Ok(n.finalized.clone()),
                     ("getbudgetinfo", None) => Ok(n.info.clone()),
@@ -731,7 +821,142 @@ mod tests {
             by_name: HashMap::new(),
             sync: serde_json::json!({"IsBlockchainSynced": true, "RequestedMasternodeAssets": 999}),
             finalized: serde_json::json!({}),
+            mncount: fx("mncount.json"),
         }))
+    }
+
+    /// Marks the fixture masternode count as accepted, as after earlier
+    /// polls; tests of the count gate itself skip this.
+    fn settled(db: &DB) {
+        let m = mn_count(&fx("mncount.json")).unwrap();
+        db.put(MN_ACCEPTED, enc(&m).unwrap()).unwrap();
+    }
+
+    fn set_enabled(n: &Arc<Mutex<Node>>, enabled: u32) {
+        n.lock().unwrap().mncount["enabled"] = enabled.into();
+    }
+
+    #[tokio::test]
+    async fn first_poll_waits_for_the_masternode_count_to_settle() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = open(tmp.path().to_str().unwrap()).unwrap();
+        let n = node();
+        set_enabled(&n, 2115);
+        let s = poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
+            .await
+            .unwrap();
+        assert!(!s.ok && !s.baseline);
+        assert!(scan(&db, b"c/").unwrap().is_empty());
+        // Still refilling: 2115 -> 2600 is not within 1%.
+        set_enabled(&n, 2600);
+        assert!(
+            !poll_once(&db, &*rpc_for(n.clone()), 1_600, 11)
+                .await
+                .unwrap()
+                .ok
+        );
+        set_enabled(&n, 2610);
+        let s = poll_once(&db, &*rpc_for(n.clone()), 2_200, 12)
+            .await
+            .unwrap();
+        assert!(!s.ok, "within 1% but not yet held for an hour");
+        let s = poll_once(&db, &*rpc_for(n), 1_600 + MN_SETTLE_SECS, 13)
+            .await
+            .unwrap();
+        assert!(s.ok && s.baseline, "held within 1% for an hour");
+    }
+
+    #[tokio::test]
+    async fn partial_masternode_list_skips_polls_until_it_persists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
+        let n = node();
+        assert!(
+            poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
+                .await
+                .unwrap()
+                .ok
+        );
+        let rows = scan(&db, b"c/").unwrap().len();
+        set_enabled(&n, 2115); // node restarted, list refilling
+        let s = poll_once(&db, &*rpc_for(n.clone()), 1_600, 11)
+            .await
+            .unwrap();
+        assert!(!s.ok);
+        assert_eq!(
+            scan(&db, b"c/").unwrap().len(),
+            rows,
+            "nothing recorded while partial"
+        );
+        let g: PollGap = get(&db, &gap_key(1_600)).unwrap().unwrap();
+        assert!(g.reason.contains("partial"), "{}", g.reason);
+        // Still low 6 h later: a real network change, accepted.
+        let s = poll_once(&db, &*rpc_for(n.clone()), 1_600 + MN_LOW_ACCEPT_SECS, 12)
+            .await
+            .unwrap();
+        assert!(s.ok);
+        // Recovery above 90% of the accepted count needs no wait.
+        set_enabled(&n, 2000);
+        assert!(
+            poll_once(&db, &*rpc_for(n), 1_700 + MN_LOW_ACCEPT_SECS, 13)
+                .await
+                .unwrap()
+                .ok
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_vote_is_kept_as_last_known_not_removed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
+        let n = node();
+        poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
+            .await
+            .unwrap();
+        let h = mrali_hash();
+        let rows = scan(&db, b"c/").unwrap().len();
+        let totals = scan(&db, &[b"t/".as_slice(), &h].concat()).unwrap().len();
+        {
+            // Node lost 10 NO votes; its tallies agree with what it has.
+            let mut g = n.lock().unwrap();
+            let v = g
+                .votes
+                .get_mut("MrAliMMFund01")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            let mut dropped = 0;
+            v.retain(|x| {
+                let drop = dropped < 10 && x["Vote"] == "NO";
+                dropped += drop as u32;
+                !drop
+            });
+            for r in g.info.as_array_mut().unwrap() {
+                if r["Name"] == "MrAliMMFund01" {
+                    r["Nays"] = (r["Nays"].as_i64().unwrap() - 10).into();
+                }
+            }
+        }
+        let s = poll_once(&db, &*rpc_for(n.clone()), 1_600, 11)
+            .await
+            .unwrap();
+        assert!(!s.ok, "first time the node lacks them: a gap");
+        assert_eq!(scan(&db, b"c/").unwrap().len(), rows, "no Removed rows");
+        assert_eq!(
+            scan(&db, &vote_prefix(&h)).unwrap().len(),
+            999,
+            "kept as last known"
+        );
+        assert_eq!(get::<u32>(&db, &missing_key(&h)).unwrap(), Some(10));
+        assert_eq!(
+            scan(&db, &[b"t/".as_slice(), &h].concat()).unwrap().len(),
+            totals + 1,
+            "the proposal keeps recording"
+        );
+        // Same node state next poll: no repeated gap, collection stays ok.
+        assert!(poll_once(&db, &*rpc_for(n), 2_200, 12).await.unwrap().ok);
     }
 
     fn changes(db: &DB) -> Vec<VoteChange> {
@@ -757,6 +982,7 @@ mod tests {
     async fn baseline_then_quiet_then_change() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         let rpc = rpc_for(n.clone());
 
@@ -816,6 +1042,7 @@ mod tests {
         let rpc = rpc_for(node());
         {
             let db = open(&path).unwrap();
+            settled(&db);
             poll_once(&db, &*rpc, 1_000, 10).await.unwrap();
         }
         let db = open(&path).unwrap();
@@ -828,6 +1055,7 @@ mod tests {
     async fn global_rpc_failure_writes_gap_and_nothing_else() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         n.lock().unwrap().fail = Some("getbudgetinfo");
         let s = poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
@@ -847,6 +1075,7 @@ mod tests {
     async fn votes_failure_keeps_stored_votes() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
             .await
@@ -882,6 +1111,7 @@ mod tests {
     async fn invalid_then_gone_lifecycle() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
             .await
@@ -928,6 +1158,7 @@ mod tests {
     async fn shared_name_votes_go_only_to_the_resolved_proposal() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         {
             let mut g = n.lock().unwrap();
@@ -956,6 +1187,7 @@ mod tests {
     async fn unsynced_node_writes_gap_only() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         n.lock().unwrap().sync =
             serde_json::json!({"IsBlockchainSynced": true, "RequestedMasternodeAssets": 3});
@@ -969,6 +1201,7 @@ mod tests {
     async fn votes_not_matching_tallies_are_not_written() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         {
             // Listed tallies disagree with the returned votes (another proposal's
@@ -992,6 +1225,7 @@ mod tests {
     async fn owner_flip_during_read_writes_nothing() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         let calls = Arc::new(Mutex::new(0u32));
         let inner = rpc_for(n);
@@ -1026,6 +1260,7 @@ mod tests {
     async fn malformed_projection_fails_the_poll() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let inner = rpc_for(node());
         let rpc: Box<Rpc> = Box::new(move |m: &'static str, p: Value| -> RpcFut {
             if m == "getbudgetprojection" {
@@ -1042,6 +1277,7 @@ mod tests {
     async fn malformed_list_row_fails_the_poll() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
             .await
@@ -1071,6 +1307,7 @@ mod tests {
     async fn unresolvable_name_records_list_data_without_gap() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         // By-name lookup for MrAli fails as Core does for a sanitized-away name.
         n.lock()
@@ -1095,6 +1332,7 @@ mod tests {
     async fn duplicate_hash_in_list_fails_the_poll() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         {
             let mut g = n.lock().unwrap();
@@ -1123,6 +1361,7 @@ mod tests {
     fn interrupted_poll_is_marked_and_bad_marker_fails_closed() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         db.put(POLL_STARTED, 900u64.to_be_bytes()).unwrap();
         assert_eq!(recover_cursor(&db), Ok(Some(900)));
         assert!(db.get(POLL_STARTED).unwrap().is_none());
@@ -1135,6 +1374,7 @@ mod tests {
     async fn failed_poll_also_clears_the_start_marker() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         n.lock().unwrap().fail = Some("getbudgetinfo");
         poll_once(&db, &*rpc_for(n), 1_000, 10).await.unwrap();
@@ -1157,6 +1397,7 @@ mod tests {
     async fn proposal_first_seen_after_baseline_gets_its_own_baseline() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         let full = n.lock().unwrap().info.clone();
         n.lock()
@@ -1185,6 +1426,7 @@ mod tests {
     async fn unlisted_proposal_owned_by_another_is_unresolvable_not_live() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         poll_once(&db, &*rpc_for(n.clone()), 1_000, 10)
             .await
@@ -1224,6 +1466,7 @@ mod tests {
     async fn finalized_budgets_are_kept_and_malformed_entries_are_gaps() {
         let tmp = tempfile::TempDir::new().unwrap();
         let db = open(tmp.path().to_str().unwrap()).unwrap();
+        settled(&db);
         let n = node();
         // Shape of rpc/budget.cpp mnfinalbudget "show".
         let key = format!("main (dirty) ({})", "ab".repeat(32));
@@ -1287,6 +1530,13 @@ mod tests {
             .as_secs();
         let tip = tip_time(&rpc).await.unwrap();
         assert_eq!(poll_ts(now, None, tip), Ok(now), "live clock check");
+        let settle = poll_once(&db, &rpc, now - MN_SETTLE_SECS, height)
+            .await
+            .unwrap();
+        assert!(
+            !settle.ok,
+            "first reading only records the masternode count"
+        );
         let a = poll_once(&db, &rpc, now, height).await.unwrap();
         let changes_a = scan(&db, b"c/").unwrap().len();
         let gaps_a = scan(&db, b"g/").unwrap();
