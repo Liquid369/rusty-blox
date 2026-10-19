@@ -1,3 +1,4 @@
+pub mod network;
 extern crate sha2;
 
 use sha2::{Digest, Sha512};

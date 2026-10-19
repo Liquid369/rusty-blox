@@ -433,7 +433,8 @@ async fn dispatch(
                 // ws default is derived (websocket.go); REST default nonzero.
                 q.tokens = "derived".to_string();
             }
-            if descriptor.starts_with("xpub") {
+            // Addresses are <=36 chars; anything this long is an xpub attempt.
+            if descriptor.len() > 60 {
                 if !super::addresses::is_valid_xpub(&descriptor) {
                     return Err("Invalid xpub".to_string());
                 }

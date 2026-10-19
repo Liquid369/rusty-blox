@@ -62,7 +62,7 @@ async fn scriptpubkey_to_p2pkh_address(script: &CScript) -> Option<String> {
         && script.script[24] == 0xac
     {
         let address_hash = &script.script[3..23];
-        Some(hash_address(address_hash, 30).await)
+        Some(hash_address(address_hash, crate::network::params().pubkey_prefix).await)
     } else {
         None
     }
@@ -75,7 +75,7 @@ async fn scriptpubkey_to_p2sh_address(script: &CScript) -> Option<String> {
         && script.script[22] == 0x87
     {
         let address_hash = &script.script[2..22];
-        Some(hash_address(address_hash, 13).await)
+        Some(hash_address(address_hash, crate::network::params().script_prefix).await)
     } else {
         None
     }
@@ -106,7 +106,7 @@ async fn scriptpubkey_to_p2pk(script: &CScript) -> Option<String> {
     // PIVX Core (CPubKey::GetID): Hash160 over the pubkey bytes EXACTLY as they
     // appear in the script; uncompressed keys are NOT compressed first.
     let pubkey_hash = compute_address_hash(pubkey).await;
-    let pubkey_addr = hash_address(&pubkey_hash, 30).await;
+    let pubkey_addr = hash_address(&pubkey_hash, crate::network::params().pubkey_prefix).await;
 
     Some(pubkey_addr)
 }
@@ -139,8 +139,10 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
         let staker_key_hash = &s[6..26];
         let owner_key_hash = &s[28..48];
 
-        let staker_address = hash_address(staker_key_hash, 63).await;
-        let owner_address = hash_address(owner_key_hash, 30).await;
+        let staker_address =
+            hash_address(staker_key_hash, crate::network::params().staking_prefix).await;
+        let owner_address =
+            hash_address(owner_key_hash, crate::network::params().pubkey_prefix).await;
 
         return Some((staker_address, owner_address));
     }
@@ -149,7 +151,7 @@ async fn scriptpubkey_to_staking_address(script: &CScript) -> Option<(String, St
 
 /// Match a PIVX exchange-address script (TX_EXCHANGEADDR), 26 bytes:
 /// OP_EXCHANGEADDR(0xe0) OP_DUP OP_HASH160 0x14 <keyhash20> OP_EQUALVERIFY OP_CHECKSIG
-/// Encoded with the 3-byte EXM base58 prefix [0x01, 0xb9, 0xa2].
+/// Encoded with the network's 3-byte EXM base58 prefix (mainnet [0x01, 0xb9, 0xa2]).
 async fn scriptpubkey_to_exchange_address(script: &CScript) -> Option<String> {
     let s = &script.script;
     if s.len() == 26
@@ -162,7 +164,7 @@ async fn scriptpubkey_to_exchange_address(script: &CScript) -> Option<String> {
     {
         let key_hash = &s[4..24];
         let mut data = Vec::with_capacity(27);
-        data.extend_from_slice(&[0x01, 0xb9, 0xa2]);
+        data.extend_from_slice(&crate::network::params().exchange_prefix);
         data.extend_from_slice(key_hash);
         let checksum = sha256d(&data);
         data.extend_from_slice(&checksum[0..4]);

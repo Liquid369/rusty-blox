@@ -55,8 +55,8 @@ fn detect_query_type(query: &str) -> QueryType {
         return QueryType::HashOrTxid;
     }
 
-    // XPub (BIP32 extended public key): starts with "xpub" and is 111 chars
-    if q.starts_with("xpub") && q.len() >= 100 && q.len() <= 120 {
+    // Extended public key ("xpub", or the network's own "ToEA"/"DRKV"): 111 chars
+    if (100..=120).contains(&q.len()) && crate::api::addresses::is_valid_xpub(q) {
         return QueryType::XPub;
     }
 
@@ -282,9 +282,7 @@ fn search_address(db: &Arc<DB>, address: &str) -> Result<SearchResult, Box<dyn s
 /// Search for XPub (extended public key)
 /// Just validates format and returns the xpub - actual data fetching happens in xpub endpoint
 fn search_xpub(xpub: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    // Basic validation: starts with "xpub" and has reasonable length
-    if xpub.starts_with("xpub") && xpub.len() >= 100 && xpub.len() <= 120 {
-        // Could add more validation (base58 checksum) but API endpoint will handle that
+    if (100..=120).contains(&xpub.len()) && crate::api::addresses::is_valid_xpub(xpub) {
         Ok(SearchResult::XPub {
             xpub: xpub.to_string(),
         })

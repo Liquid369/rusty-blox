@@ -74,7 +74,7 @@ const passes = (p) => (p.Yeas - p.Nays) > threshold.value
 
 /* superblock countdown from the chain tip (~60s PoS spacing). Live derives the
    next superblock from the real tip so it advances past each cycle. */
-const sbHeight = computed(() => nextSuperblock(chain.height))
+const sbHeight = computed(() => nextSuperblock(chain.height, chain.budgetCycleBlocks))
 const blocksLeft = computed(() => Math.max(0, sbHeight.value - (chain.height || 0)))
 const daysLeft = computed(() => (blocksLeft.value * 60) / 86400)
 
@@ -88,7 +88,7 @@ const usd = (piv) =>
   chain.price && chain.price.usd > 0 ? '$' + Math.round(piv * chain.price.usd).toLocaleString('en-US') : ''
 // Per-cycle treasury cap (PIV); Core funds greedily UP TO this and defers the
 // rest, so allotted should never exceed it. Surface it so the max is visible.
-const cap = computed(() => monthlyBudgetCap())
+const cap = computed(() => monthlyBudgetCap(chain.budgetCap))
 const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
 const overCap = computed(() => allotted.value > cap.value + 1)
 /* Core's getbudgetinfo retains spent proposals (window closed, RemainingPaymentCount
@@ -106,9 +106,8 @@ const demand = computed(() => active.value.reduce((s, p) => s + p.MonthlyPayment
    filling, exactly like CBudgetManager::GetBudget). Verified to match the on-chain
    superblock payout (blocks pay one proposal each, contiguously from the superblock
    height) exactly, without a per-block scan. */
-const SUPERBLOCK_CYCLE = 43200 // PIVX consensus: nBudgetCycleBlocks
 const lastSbHeight = computed(() =>
-  Math.floor((chain.height || 0) / SUPERBLOCK_CYCLE) * SUPERBLOCK_CYCLE)
+  Math.floor((chain.height || 0) / chain.budgetCycleBlocks) * chain.budgetCycleBlocks)
 const fundedThisCycle = computed(() => {
   const sb = lastSbHeight.value
   if (!sb || !proposals.value.length) return { rows: [], total: 0 }
