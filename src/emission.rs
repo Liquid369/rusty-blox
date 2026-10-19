@@ -73,13 +73,23 @@ pub const V5_5_HEIGHT: i32 = 3_715_200;
 pub const BUDGET_CYCLE_BLOCKS: i32 = 43_200;
 
 /// Total scheduled block reward at `height` in satoshis, exact transcription
-/// of PIVX Core v5.6.1 `GetBlockValue(nHeight)` (mainnet branch). Excludes
-/// budget superblock payouts, which are minted on top of this value.
+/// of PIVX Core v5.6.1 `GetBlockValue(nHeight)` for the selected network.
+/// Excludes budget superblock payouts, which are minted on top of this value.
 pub fn era_block_reward(height: i32) -> i64 {
-    if height > V5_5_HEIGHT {
+    era_block_reward_for(crate::network::params(), height)
+}
+
+/// `era_block_reward` for explicit params, so tests can cover each network.
+/// The 86_400..648_000 steps are literals in GetBlockValue on both networks;
+/// testnet6 passes ZC_V2 at 275, long before any of them.
+pub fn era_block_reward_for(p: &crate::network::Params, height: i32) -> i64 {
+    if p.testnet_inflation && height > 1 && height < 201 {
+        return 250_000 * COIN;
+    }
+    if height > p.v5_5_height {
         return 10 * COIN;
     }
-    if height > ZC_V2_HEIGHT {
+    if height > p.zc_v2_height {
         return 5 * COIN;
     }
     if height > 648_000 {
@@ -140,17 +150,38 @@ pub fn era_block_reward(height: i32) -> i64 {
 /// era and document the error bound here; the modern (>= ZC_V2) eras that
 /// drive current APY are exact.
 pub fn era_staker_reward(height: i32) -> i64 {
-    if height < POS_START_HEIGHT {
+    era_staker_reward_for(crate::network::params(), height)
+}
+
+/// `era_staker_reward` for explicit params.
+pub fn era_staker_reward_for(p: &crate::network::Params, height: i32) -> i64 {
+    if height < p.pos_height {
         return 0; // PoW era: no coinstakes, no staker share.
     }
-    if height > V5_5_HEIGHT {
+    if height > p.v5_5_height {
         return 4 * COIN; // 10 PIV block - 6 PIV nNewMNBlockReward
     }
-    if height > ZC_V2_HEIGHT {
+    if height > p.zc_v2_height {
         return 2 * COIN; // 5 PIV block - 3 PIV nMNBlockReward
     }
     // Seesaw era: per-block MN-count-dependent split, ~50% on average.
-    era_block_reward(height) / 2
+    era_block_reward_for(p, height) / 2
+}
+
+/// Treasury budget per cycle at `height` in satoshis, PIVX Core
+/// `CBudgetManager::GetTotalBudget`: 20% of the block value per block up to
+/// V5_5, 100% after, times nBudgetCycleBlocks. Mainnet today: 432,000 PIV.
+pub fn total_budget(height: i32) -> i64 {
+    total_budget_for(crate::network::params(), height)
+}
+
+/// `total_budget` for explicit params.
+pub fn total_budget_for(p: &crate::network::Params, height: i32) -> i64 {
+    let mut subsidy = era_block_reward_for(p, height);
+    if height <= p.v5_5_height {
+        subsidy /= 5;
+    }
+    subsidy * p.budget_cycle_blocks as i64
 }
 
 #[cfg(test)]
@@ -234,5 +265,31 @@ mod tests {
         assert_eq!(era_staker_reward(V5_5_HEIGHT + 1), 4 * COIN);
         assert_eq!(era_staker_reward(4_000_000), 4 * COIN);
         assert_eq!(era_staker_reward(5_443_200), 4 * COIN);
+    }
+
+    #[test]
+    fn testnet6_schedule_boundaries() {
+        use crate::network::TESTNET6 as T;
+        // GetBlockValue testnet branch, heights from CTestNetParams.
+        assert_eq!(era_block_reward_for(&T, 1), 60_001 * COIN);
+        assert_eq!(era_block_reward_for(&T, 2), 250_000 * COIN);
+        assert_eq!(era_block_reward_for(&T, 200), 250_000 * COIN);
+        assert_eq!(era_block_reward_for(&T, 201), 250 * COIN);
+        assert_eq!(era_block_reward_for(&T, 275), 250 * COIN);
+        assert_eq!(era_block_reward_for(&T, 276), 5 * COIN);
+        assert_eq!(era_block_reward_for(&T, 650), 5 * COIN);
+        assert_eq!(era_block_reward_for(&T, 651), 10 * COIN);
+        assert_eq!(era_staker_reward_for(&T, 200), 0);
+        assert_eq!(era_staker_reward_for(&T, 276), 2 * COIN);
+        assert_eq!(era_staker_reward_for(&T, 651), 4 * COIN);
+        assert_eq!(total_budget_for(&T, 82_000), 1_440 * COIN);
+    }
+
+    #[test]
+    fn mainnet_total_budget_matches_cap() {
+        let m = &crate::network::MAINNET;
+        assert_eq!(total_budget_for(m, 5_632_900), 432_000 * COIN);
+        // Pre-V5_5: 20% of 5 PIV x 43_200.
+        assert_eq!(total_budget_for(m, 2_000_000), 43_200 * COIN);
     }
 }

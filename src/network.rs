@@ -10,6 +10,14 @@ pub struct Params {
     pub staking_prefix: u8,
     pub exchange_prefix: [u8; 3],
     pub genesis: &'static str,
+    /// UPGRADE_POS / UPGRADE_ZC_V2 / UPGRADE_V5_5 activation heights.
+    pub pos_height: i32,
+    pub zc_v2_height: i32,
+    pub v5_5_height: i32,
+    /// consensus.nBudgetCycleBlocks.
+    pub budget_cycle_blocks: i32,
+    /// GetBlockValue's testnet branch: blocks 2..=200 pay 250,000 PIV.
+    pub testnet_inflation: bool,
 }
 
 pub(crate) const MAINNET: Params = Params {
@@ -19,6 +27,11 @@ pub(crate) const MAINNET: Params = Params {
     staking_prefix: 63,
     exchange_prefix: [0x01, 0xb9, 0xa2],
     genesis: "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818",
+    pos_height: crate::emission::POS_START_HEIGHT,
+    zc_v2_height: crate::emission::ZC_V2_HEIGHT,
+    v5_5_height: crate::emission::V5_5_HEIGHT,
+    budget_cycle_blocks: crate::emission::BUDGET_CYCLE_BLOCKS,
+    testnet_inflation: false,
 };
 
 // PIVX CTestNetParams (chainparams.cpp, 2026_testnet6 merge d93a3981b6).
@@ -30,6 +43,11 @@ pub(crate) const TESTNET6: Params = Params {
     staking_prefix: 73,
     exchange_prefix: [0x01, 0xb9, 0xb1],
     genesis: "00000f254358fe046377c224341c794b7faf942a6311a7ece773d3c378239c54",
+    pos_height: 201,
+    zc_v2_height: 275,
+    v5_5_height: 650,
+    budget_cycle_blocks: 144,
+    testnet_inflation: true,
 };
 
 pub fn params() -> &'static Params {
