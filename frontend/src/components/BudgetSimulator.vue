@@ -26,7 +26,7 @@ const props = defineProps({
   candidates: { type: Array, default: () => [] },
   // Proposals funded right now (/budgetprojection); preload + reset target.
   actualFunded: { type: Array, default: () => [] },
-  // Net-vote passing threshold (10% of the masternode count).
+  // Core funding line floor(enabled / 10); passing needs net strictly above it.
   threshold: { type: Number, default: 0 },
 })
 
@@ -270,11 +270,11 @@ watch(() => props.actualFunded, trySeed)
                 <td>
                   <div class="vote" @click.stop>
                     <button class="vstep" type="button" :aria-label="`Decrease ${row.proposal.Name} net votes by ${VOTE_STEP}`" @click="bump(row.proposal, -1)">−</button>
-                    <span class="vval mono" :class="{ low: row.net < threshold }">{{ signed(row.net) }}</span>
+                    <span class="vval mono" :class="{ low: row.net <= threshold }">{{ signed(row.net) }}</span>
                     <button class="vstep" type="button" :aria-label="`Increase ${row.proposal.Name} net votes by ${VOTE_STEP}`" @click="bump(row.proposal, 1)">+</button>
                     <button v-if="row.adjusted" class="vreset" type="button" :aria-label="`Reset ${row.proposal.Name} votes to actual`" title="Reset to actual votes" @click="resetRow(row.proposal)">↺</button>
                   </div>
-                  <span v-if="row.net < threshold" class="below mono">below 10% gate</span>
+                  <span v-if="row.net <= threshold" class="below mono">below 10% gate</span>
                 </td>
                 <td class="num strong">{{ piv(row.proposal.MonthlyPayment) }}</td>
                 <td class="num dim">{{ capShare(row.proposal) }}%</td>

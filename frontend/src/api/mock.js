@@ -602,7 +602,7 @@ export function mempool() {
 // =====================================================================
 
 const MN_TOTAL = 2111
-const NET_THRESHOLD = 0.1 * MN_TOTAL // funding gate: (Yeas - Nays) must exceed this
+const NET_THRESHOLD = Math.floor(MN_TOTAL / 10) // Core funding line: (Yeas - Nays) must be strictly greater
 const SUPERBLOCK_HEIGHT = 5486400    // next superblock (≈ ceil(tip/43200)*43200)
 const MONTHLY_BUDGET_CAP = 432000    // current-era treasury cap (PIV/cycle); demand intentionally exceeds it
 

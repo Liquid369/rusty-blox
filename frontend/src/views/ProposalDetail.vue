@@ -3,7 +3,7 @@
    PROPOSAL DETAIL: one /budgetinfo proposal + its /budgetvotes campaign.
    Approval gauge (Ratio), YES/NO/ABSTAIN donut (valid votes only), the
    cumulative net-approval timeline crossing the funding threshold, and a
-   pass/fail verdict vs 10% of /mncount.total.
+   pass/fail verdict vs floor(/mncount.enabled / 10), strictly greater.
    UNITS: TotalPayment/MonthlyPayment are PIV f64 NUMBERS (formatPiv).
    ===================================================================== */
 import { ref, onMounted, computed, watch } from 'vue'
@@ -42,7 +42,9 @@ async function load() {
 onMounted(load)
 watch(() => props.name, load)
 
-const threshold = computed(() => mncount.value ? 0.1 * mncount.value.total : 211)
+// Core funding line: floor(enabled / 10), net must be STRICTLY greater
+// (budgetproposal.cpp:211).
+const threshold = computed(() => mncount.value ? Math.floor(mncount.value.enabled / 10) : 211)
 const netApproval = computed(() => proposal.value ? proposal.value.Yeas - proposal.value.Nays : 0)
 const passes = computed(() => netApproval.value > threshold.value)
 
@@ -121,7 +123,7 @@ const timelineOption = computed(() => {
       areaStyle: { color: areaFill(echarts, p.neon, 0.36, 0.01) },
       markLine: {
         silent: true, symbol: 'none',
-        data: [{ yAxis: Math.ceil(threshold.value), lineStyle: { color: hexA(p.amber, 0.8), type: 'dashed' }, label: { formatter: 'funding threshold', color: p.amber, fontSize: 9, fontFamily: 'monospace', position: 'insideEndTop' } }],
+        data: [{ yAxis: threshold.value, lineStyle: { color: hexA(p.amber, 0.8), type: 'dashed' }, label: { formatter: 'funding threshold', color: p.amber, fontSize: 9, fontFamily: 'monospace', position: 'insideEndTop' } }],
       },
     }],
   }
@@ -136,7 +138,7 @@ const timelineOption = computed(() => {
         <h1 class="page-title">{{ proposal ? proposal.Name : 'Proposal' }}</h1>
       </div>
       <div class="head-live" v-if="proposal">
-        <span class="pill" :class="passes ? 'ok' : 'bad'"><span class="dot" :class="passes ? 'live' : ''"></span>{{ passes ? 'PASSING' : 'FAILING' }}</span>
+        <span class="pill" :class="passes ? 'ok' : 'bad'"><span class="dot" :class="passes ? 'live' : ''"></span>{{ passes ? 'OVER LINE' : 'BELOW LINE' }}</span>
       </div>
     </div>
 
@@ -166,7 +168,7 @@ const timelineOption = computed(() => {
         </Stat>
         <Stat k="NET APPROVAL">
           <template #v>{{ formatCount(netApproval) }}</template>
-          <template #s>need &gt; {{ formatCount(Math.ceil(threshold)) }} to fund</template>
+          <template #s>need &gt; {{ formatCount(threshold) }} net to fund</template>
         </Stat>
       </div>
 
