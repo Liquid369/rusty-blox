@@ -17,6 +17,7 @@
    ===================================================================== */
 import { reactive, computed, onMounted, watch } from 'vue'
 import { monthlyBudgetCap } from '../api/client.js'
+import { useChainStore } from '../store.js'
 import { formatPiv } from '../lib/money.js'
 import { formatCount } from '../lib/format.js'
 import HudPanel from './HudPanel.vue'
@@ -30,7 +31,8 @@ const props = defineProps({
   threshold: { type: Number, default: 0 },
 })
 
-const CAP = monthlyBudgetCap()
+const chain = useChainStore()
+const CAP = computed(() => monthlyBudgetCap(chain.budgetCap))
 const VOTE_STEP = 50
 
 const actualNet = (p) => (p.Yeas || 0) - (p.Nays || 0)
@@ -90,7 +92,7 @@ function simulate(proposals, netOf, cap, threshold) {
 }
 
 const selectedProposals = computed(() => props.candidates.filter((p) => selected.has(p.Hash)))
-const sim = computed(() => simulate(selectedProposals.value, effectiveNet, CAP, props.threshold))
+const sim = computed(() => simulate(selectedProposals.value, effectiveNet, CAP.value, props.threshold))
 const simByHash = computed(() => {
   const m = new Map()
   for (const r of sim.value.ranked) m.set(r.proposal.Hash, r)
@@ -99,7 +101,7 @@ const simByHash = computed(() => {
 
 /* --- Live panel derivations ------------------------------------------- */
 const selectedCount = computed(() => selected.size)
-const utilizationPct = computed(() => (CAP ? Math.round((sim.value.allocated / CAP) * 1000) / 10 : 0))
+const utilizationPct = computed(() => (CAP.value ? Math.round((sim.value.allocated / CAP.value) * 1000) / 10 : 0))
 const overCap = computed(() => sim.value.cutCount > 0)
 const delta = computed(() => {
   const actual = new Set(props.actualFunded.map((p) => p.Hash))
@@ -152,7 +154,7 @@ const toggleAll = () => (allSelected.value ? clear() : selectAll())
 
 /* --- Display helpers --------------------------------------------------- */
 const piv = (n) => formatPiv(n, { decimals: 0 })
-const capShare = (p) => (CAP ? (((p.MonthlyPayment || 0) / CAP) * 100).toFixed(1) : '0.0')
+const capShare = (p) => (CAP.value ? (((p.MonthlyPayment || 0) / CAP.value) * 100).toFixed(1) : '0.0')
 const signed = (n) => (n > 0 ? `+${formatCount(n)}` : formatCount(n))
 const proposalLink = (p) => `/proposal/${encodeURIComponent(p.Name)}`
 const rowClass = (row) => ({

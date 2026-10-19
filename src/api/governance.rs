@@ -176,16 +176,26 @@ pub async fn budget_payouts_v2(
     Extension(db): Extension<Arc<rocksdb::DB>>,
     Extension(cache): Extension<Arc<CacheManager>>,
 ) -> Result<Json<serde_json::Value>, JsonErr> {
-    use crate::gov::live::{CYCLE, FIRST_SUPPORTED_SUPERBLOCK, MAX_PAYMENTS};
+    use crate::gov::live::{FIRST_SUPPORTED_SUPERBLOCK, MAX_PAYMENTS};
+    let net = crate::network::params();
+    // The mint rule and its era floor were verified against mainnet blocks
+    // only; other networks get a refusal rather than an unverified answer.
+    if net.genesis != crate::network::MAINNET.genesis {
+        return Err(json_err(
+            StatusCode::BAD_REQUEST,
+            "superblock payout scan is verified on mainnet only",
+        ));
+    }
+    let cycle = net.budget_cycle_blocks as u32;
     let tip = crate::chain_state::get_chain_state(&db)
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .height
         .max(0) as u32;
-    let sb = q.sb.unwrap_or(tip - tip % CYCLE);
-    if sb % CYCLE != 0 || sb > tip {
+    let sb = q.sb.unwrap_or(tip - tip % cycle);
+    if sb % cycle != 0 || sb > tip {
         return Err(json_err(
             StatusCode::BAD_REQUEST,
-            format!("sb must be a multiple of {CYCLE} at or below the tip {tip}"),
+            format!("sb must be a multiple of {cycle} at or below the tip {tip}"),
         ));
     }
     if sb < FIRST_SUPPORTED_SUPERBLOCK {

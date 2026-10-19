@@ -17,6 +17,9 @@ export const useChainStore = defineStore('chain', () => {
   const error = ref(null)
   const lastUpdate = ref(null)
   const lastBlockAt = ref(0) // unix secs of the most recent block, driven by the WS feed
+  // Network budget params from /status; mainnet values until the first refresh.
+  const budgetCycleBlocks = ref(43200)
+  const budgetCap = ref(432000)
 
   const blocksBehind = computed(() => Math.max(0, networkHeight.value - height.value))
   const isSyncing = computed(() => syncPercentage.value < 100)
@@ -31,6 +34,8 @@ export const useChainStore = defineStore('chain', () => {
       hash.value = s.hash || ''
       synced.value = !!s.synced
       syncPercentage.value = Number(s.sync_percentage) || 0
+      if (s.budget_cycle_blocks > 0) budgetCycleBlocks.value = s.budget_cycle_blocks
+      if (s.budget_cap > 0) budgetCap.value = s.budget_cap
       lastUpdate.value = new Date()
     } catch (e) {
       error.value = e.message || 'status fetch failed'
@@ -101,6 +106,7 @@ export const useChainStore = defineStore('chain', () => {
   return {
     height, networkHeight, hash, synced, syncPercentage, health, price,
     loading, error, lastUpdate, lastBlockAt, blocksBehind, isSyncing,
+    budgetCycleBlocks, budgetCap,
     refresh, refreshHealth, refreshPrice, connectLive, disconnectLive
   }
 })

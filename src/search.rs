@@ -55,22 +55,15 @@ fn detect_query_type(query: &str) -> QueryType {
         return QueryType::HashOrTxid;
     }
 
-    // XPub (BIP32 extended public key): starts with "xpub" and is 111 chars
-    if q.starts_with("xpub") && q.len() >= 100 && q.len() <= 120 {
+    // Extended public key ("xpub", or the network's own "ToEA"/"DRKV"): 111 chars
+    if (100..=120).contains(&q.len()) && crate::api::addresses::is_valid_xpub(q) {
         return QueryType::XPub;
     }
 
-    // PIVX transparent address prefixes: D (P2PKH), S (cold-staking staker),
-    // 6/7 (P2SH), E (exchange/EXM). Most are ~26-35 chars, but EXM exchange
-    // addresses are 36; the old <=35 cap made them unsearchable. Upper bound
-    // is generous (<=40) for headroom; a false positive just falls through to
-    // NotFound in search_address, so over-inclusion is safe.
-    if matches!(
-        q.chars().next(),
-        Some('D') | Some('S') | Some('6') | Some('7') | Some('E')
-    ) && q.len() >= 26
-        && q.len() <= 40
-    {
+    // Transparent address of any class or network: base58check with a 21 or
+    // 23 byte payload. A first-character whitelist (D/S/6/7/E) sent every
+    // testnet6 x/y/W/8/9 address to NotFound. EXM addresses are 36 chars.
+    if (26..=40).contains(&q.len()) && crate::api::addresses::is_valid_address(q) {
         return QueryType::Address;
     }
 
@@ -282,9 +275,7 @@ fn search_address(db: &Arc<DB>, address: &str) -> Result<SearchResult, Box<dyn s
 /// Search for XPub (extended public key)
 /// Just validates format and returns the xpub - actual data fetching happens in xpub endpoint
 fn search_xpub(xpub: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
-    // Basic validation: starts with "xpub" and has reasonable length
-    if xpub.starts_with("xpub") && xpub.len() >= 100 && xpub.len() <= 120 {
-        // Could add more validation (base58 checksum) but API endpoint will handle that
+    if (100..=120).contains(&xpub.len()) && crate::api::addresses::is_valid_xpub(xpub) {
         Ok(SearchResult::XPub {
             xpub: xpub.to_string(),
         })
@@ -292,5 +283,26 @@ fn search_xpub(xpub: &str) -> Result<SearchResult, Box<dyn std::error::Error>> {
         Ok(SearchResult::NotFound {
             query: xpub.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect_query_type, QueryType};
+
+    #[test]
+    fn addresses_route_by_checksum_not_first_char() {
+        // mainnet P2PKH and a live testnet6 address both classify as addresses.
+        for a in [
+            "DU8gPC5mh4KxWJARQRxoESFark2jAguBr5",
+            "y7QPbhEav6X8J4DbLFLtVyKg7rttbzCzaH",
+        ] {
+            assert!(matches!(detect_query_type(a), QueryType::Address), "{a}");
+        }
+        // One char off fails the checksum.
+        assert!(matches!(
+            detect_query_type("y7QPbhEav6X8J4DbLFLtVyKg7rttbzCzaJ"),
+            QueryType::Unknown
+        ));
     }
 }

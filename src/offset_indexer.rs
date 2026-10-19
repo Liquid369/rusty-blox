@@ -18,7 +18,6 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 use tracing::{debug, info, warn};
 
-const PREFIX: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9]; // PIVX network magic
 const TX_BATCH_SIZE: usize = 10000;
 
 /// Read and index a single canonical block using file number + offset from LevelDB
@@ -46,7 +45,7 @@ async fn index_block_by_offset(
     // Read and validate magic bytes
     let mut magic_bytes = [0u8; 4];
     reader.read_exact(&mut magic_bytes).await?;
-    if magic_bytes != PREFIX {
+    if magic_bytes != crate::blk_tail::network_magic() {
         return Err(format!(
             "Invalid magic at {}:{} - got {:02x?}",
             path.display(),

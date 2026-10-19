@@ -181,7 +181,7 @@ pub fn calculate_chainwork_for_all(
     info!("Phase 2: Calculating chainwork (cumulative PoW)");
 
     // PIVX genesis hash in display format (big-endian/reversed)
-    let genesis_hash_display = "0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818";
+    let genesis_hash_display = crate::network::params().genesis;
     // Convert to internal format (little-endian)
     let mut genesis_hash_bytes = hex::decode(genesis_hash_display)?;
     genesis_hash_bytes.reverse(); // Reverse to get internal format
@@ -341,8 +341,7 @@ pub fn build_canonical_chain(
     let mut current_hash = tip_hash.to_vec();
 
     // Genesis hash in internal format (little-endian)
-    let mut genesis_hash_bytes =
-        hex::decode("0000041e482b9b9691d98eefb48473405c0b8ec31b76df3797c74a78680ef818")?;
+    let mut genesis_hash_bytes = hex::decode(crate::network::params().genesis)?;
     genesis_hash_bytes.reverse();
 
     loop {

@@ -26,10 +26,14 @@ use tracing::{debug, info, warn};
 
 type TailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// PIVX **mainnet** network message-start bytes (`pchMessageStart`).
-/// Testnet `F5 E6 D5 CA` / regtest `A1 CF 7E AC` differ; re-confirm against the
-/// deployed node if ever run on another network.
+/// PIVX mainnet message-start bytes, kept for the tests below. Production reads
+/// `network_magic()`, which follows RUSTYBLOX_NETWORK.
 pub const PIVX_MAGIC: [u8; 4] = [0x90, 0xc4, 0xfd, 0xe9];
+
+/// blk*.dat magic for the network selected by RUSTYBLOX_NETWORK.
+pub fn network_magic() -> [u8; 4] {
+    crate::network::params().magic
+}
 
 // ---- §9 pinned constants (provisional; tune in Phase 0) -------------------
 

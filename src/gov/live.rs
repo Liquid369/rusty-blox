@@ -10,8 +10,7 @@ use super::poller::{is_unknown_proposal, rows, tallies_match, Row, Rpc};
 use crate::tx_type::{detect_transaction_type, TransactionType};
 use crate::types::CTransaction;
 
-pub const CYCLE: u32 = 43_200;
-/// Earliest superblock the mint rule classifies exactly: all 87 from here to
+/// Mainnet only. Earliest superblock the mint rule classifies exactly: all 87 from here to
 /// 5,443,200 verified (2026-10-19). Earlier eras break it: zPoS coinstakes
 /// (1,153,160..1,686,240) have null prevouts; pre-2019 wallets paid a fee out
 /// of the stake (excess = payment - fee); 302,400 and 345,600 were funded from
@@ -415,7 +414,7 @@ mod tests {
     fn payout_outside_a_proposals_window_is_not_named_after_it() {
         let r = row("DA", 100, "A");
         let mut p = [payout("DA", 100, "paid")];
-        name_payouts(&mut p, std::slice::from_ref(&r), r.block_start - CYCLE);
+        name_payouts(&mut p, std::slice::from_ref(&r), r.block_start - 43_200);
         assert_eq!(p[0].name, None, "same payee and amount, earlier cycle");
     }
 
@@ -437,7 +436,7 @@ mod tests {
         let sb: u32 = std::env::var("GOV_SB")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(tip - tip % CYCLE);
+            .unwrap_or(tip - tip % 43_200);
         eprintln!("tip {tip} sb {sb}");
         let db =
             DB::open_cf_for_read_only(&rocksdb::Options::default(), &path, &cfs, false).unwrap();

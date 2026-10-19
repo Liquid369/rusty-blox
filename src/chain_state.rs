@@ -17,6 +17,12 @@ pub struct ChainState {
     pub synced: bool,
     pub sync_percentage: f64,
     pub network_height: Option<i32>,
+    /// nBudgetCycleBlocks and GetTotalBudget at the tip (PIV), so the
+    /// governance view stops assuming mainnet's 43_200 / 432_000.
+    #[serde(default)]
+    pub budget_cycle_blocks: i32,
+    #[serde(default)]
+    pub budget_cap: f64,
 }
 
 /// Get current chain state
@@ -67,6 +73,9 @@ pub fn get_chain_state(db: &Arc<DB>) -> Result<ChainState, Box<dyn std::error::E
         synced,
         sync_percentage,
         network_height,
+        budget_cycle_blocks: crate::network::params().budget_cycle_blocks,
+        budget_cap: crate::emission::total_budget(network_height.unwrap_or(height)) as f64
+            / crate::emission::COIN as f64,
     })
 }
 

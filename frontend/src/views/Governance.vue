@@ -86,7 +86,7 @@ const passes = (p) => (p.Yeas - p.Nays) > threshold.value
 
 /* superblock countdown from the chain tip (~60s PoS spacing). Live derives the
    next superblock from the real tip so it advances past each cycle. */
-const sbHeight = computed(() => nextSuperblock(chain.height))
+const sbHeight = computed(() => nextSuperblock(chain.height, chain.budgetCycleBlocks))
 const blocksLeft = computed(() => Math.max(0, sbHeight.value - (chain.height || 0)))
 const daysLeft = computed(() => (blocksLeft.value * 60) / 86400)
 
@@ -100,7 +100,7 @@ const usd = (piv) =>
   chain.price && chain.price.usd > 0 ? '$' + Math.round(piv * chain.price.usd).toLocaleString('en-US') : ''
 // Per-cycle treasury cap (PIV); Core funds greedily UP TO this and defers the
 // rest, so allotted should never exceed it. Surface it so the max is visible.
-const cap = computed(() => monthlyBudgetCap())
+const cap = computed(() => monthlyBudgetCap(chain.budgetCap))
 const capPct = computed(() => (cap.value > 0 ? (allotted.value / cap.value) * 100 : 0))
 const overCap = computed(() => allotted.value > cap.value + 1)
 /* Core's getbudgetinfo retains spent proposals (window closed, RemainingPaymentCount
@@ -108,13 +108,8 @@ const overCap = computed(() => allotted.value > cap.value + 1)
 const active = computed(() => proposals.value.filter((p) => p.RemainingPaymentCount > 0))
 const demand = computed(() => active.value.reduce((s, p) => s + p.MonthlyPayment, 0))
 
-/* Votes the node holds vs votes Core counts, per proposal hash. Core counts only
-   votes whose masternode it sees as enabled; the rest still exist and count again
-   if the masternode returns. Held and counting come from the same read, never mixed
-   with /budgetinfo, which is cached separately. */
 /* Payouts tab: fetched when first opened, then per superblock on demand. Only
    the newest request may land, so fast clicking never shows a stale cycle. */
-const SB_CYCLE = 43200
 const FIRST_PAYOUT_SB = 1728000 // backend refuses earlier eras (see /budgetpayouts)
 const latestPayoutSb = ref(null)
 let payoutReq = 0
@@ -130,6 +125,10 @@ function loadPayouts(sb) {
 }
 watch(mode, (m) => { if (m === 'payouts' && !payouts.value && !payoutsError.value) loadPayouts() })
 
+/* Votes the node holds vs votes Core counts, per proposal hash. Core counts only
+   votes whose masternode it sees as enabled; the rest still exist and count again
+   if the masternode returns. Held and counting come from the same read, never mixed
+   with /budgetinfo, which is cached separately. */
 const voteRows = computed(() => (voteCounts.value?.rows || []))
 const sum = (c) => (c ? c.yes + c.no + c.abstain : 0)
 const notCounting = (r) => (r.readable ? sum(r.held) - sum(r.counting) : 0)
@@ -219,9 +218,9 @@ const allocOption = computed(() => {
     <!-- PAID THIS CYCLE: read from the superblock's blocks, never recomputed from
          today's votes (they move after the superblock, and paid proposals expire). -->
     <div class="sb-nav">
-      <button type="button" class="modetab" :disabled="!payouts || payouts.sb - SB_CYCLE < FIRST_PAYOUT_SB" @click="loadPayouts(payouts.sb - SB_CYCLE)">◀ OLDER</button>
+      <button type="button" class="modetab" :disabled="!payouts || payouts.sb - chain.budgetCycleBlocks < FIRST_PAYOUT_SB" @click="loadPayouts(payouts.sb - chain.budgetCycleBlocks)">◀ OLDER</button>
       <h2 class="section-title">Superblock #{{ payouts ? formatCount(payouts.sb) : '…' }} payouts</h2>
-      <button type="button" class="modetab" :disabled="!payouts || !latestPayoutSb || payouts.sb >= latestPayoutSb" @click="loadPayouts(payouts.sb + SB_CYCLE)">NEWER ▶</button>
+      <button type="button" class="modetab" :disabled="!payouts || !latestPayoutSb || payouts.sb >= latestPayoutSb" @click="loadPayouts(payouts.sb + chain.budgetCycleBlocks)">NEWER ▶</button>
     </div>
     <HudPanel title="BUDGET PAID" id="/budgetpayouts · read from the superblock's blocks" hero>
       <template #head><span v-if="payouts" class="pill ok mono">Σ {{ formatSats(payouts.total_paid_sats, { decimals: 0 }) }} PIV</span></template>

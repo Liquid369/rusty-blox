@@ -204,21 +204,22 @@ export const getSearch = (query) =>
 export const getPrice = () =>
   isMock ? Promise.resolve(mock.price()) : getJSON('/price')
 
-// PIVX budget cycle = consensus.nBudgetCycleBlocks (43,200 blocks, ~30 days).
+// Mainnet consensus.nBudgetCycleBlocks (43,200 blocks, ~30 days). Live callers
+// pass the network's value from /status (chain.budgetCycleBlocks).
 export const SUPERBLOCK_CYCLE = 43200
 
 // Next superblock height. Mock keeps its frozen constant; live derives it from
 // the chain tip so the countdown advances past each superblock instead of
 // sticking on a baked-in height (e.g. tip 5,477,016 → 5,486,400 = 127×43,200).
-export const nextSuperblock = (tip) =>
-  isMock || !tip ? mock.nextSuperblock() : Math.ceil(tip / SUPERBLOCK_CYCLE) * SUPERBLOCK_CYCLE
+export const nextSuperblock = (tip, cycle = SUPERBLOCK_CYCLE) =>
+  isMock || !tip ? mock.nextSuperblock() : Math.ceil(tip / cycle) * cycle
 
 // Current-era monthly treasury cap (PIV). 10 PIV/block budget accrual × 43,200
 // blocks/cycle = 432,000, the real network value (matches frontend-legacy
 // PIVX_GOVERNANCE.MAX_MONTHLY_BUDGET; confirmed live: every passing /budgetinfo
 // proposal's Allotted, Σ ≈ 416,904, fits under it). Mock keeps its own constant
 // so the demo's deliberately-over-cap scenario is preserved.
-export const monthlyBudgetCap = () => (isMock ? mock.monthlyBudgetCap() : 432000)
+export const monthlyBudgetCap = (live = 432000) => (isMock ? mock.monthlyBudgetCap() : live)
 
 // Expose the 503 toggle so a prototype can demo the reindex state.
 export const setAddress503 = mock.setAddress503

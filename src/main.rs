@@ -519,6 +519,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _span = info_span!("service_start").entered();
     info!("Service starting");
 
+    // Resolve RUSTYBLOX_NETWORK on the main thread. First use otherwise lands in
+    // a spawned sync task, where a bad value panics that task and the server
+    // waits forever on "Indexing in progress" with a live PID.
+    info!(
+        genesis = rustyblox::network::params().genesis,
+        "Network selected"
+    );
+
     // ========================================
     // STEP 2: Initialize Metrics
     // ========================================
@@ -800,8 +808,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tail_db = Arc::clone(&db_arc);
         let tail_blk_dir = blk_dir_path.clone();
         tokio::spawn(async move {
-            rustyblox::blk_tail::run_tail(tail_db, tail_blk_dir, rustyblox::blk_tail::PIVX_MAGIC)
-                .await;
+            rustyblox::blk_tail::run_tail(
+                tail_db,
+                tail_blk_dir,
+                rustyblox::blk_tail::network_magic(),
+            )
+            .await;
         });
     }
 
