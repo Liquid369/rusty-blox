@@ -17,6 +17,7 @@ import HudPanel from '../components/HudPanel.vue'
 import Stat from '../components/Stat.vue'
 import BudgetSimulator from '../components/BudgetSimulator.vue'
 import GovHistory from '../components/GovHistory.vue'
+import VoteLog from '../components/VoteLog.vue'
 
 const chain = useChainStore()
 const proposals = ref([])
@@ -33,7 +34,7 @@ const payoutsError = ref(null)
 /* Overview (read-only) vs Simulator (what-if sandbox). Tablist with roving
    focus + arrow keys, mirroring the nav-rail tab semantics. */
 const mode = ref('overview')
-const MODES = isMock ? ['overview', 'payouts', 'history', 'sim'] : ['overview', 'payouts', 'sim']
+const MODES = isMock ? ['overview', 'payouts', 'votelog', 'history', 'sim'] : ['overview', 'payouts', 'votelog', 'sim']
 const onTabKey = (e) => {
   if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
     e.preventDefault()
@@ -192,6 +193,12 @@ const allocOption = computed(() => {
         :tabindex="mode === 'payouts' ? 0 : -1"
         @click="mode = 'payouts'" @keydown="onTabKey"
       >PAYOUTS</button>
+      <button
+        id="tab-votelog" role="tab" type="button" class="modetab"
+        :class="{ on: mode === 'votelog' }" :aria-selected="mode === 'votelog'"
+        :tabindex="mode === 'votelog' ? 0 : -1"
+        @click="mode = 'votelog'" @keydown="onTabKey"
+      >VOTE LOG</button>
       <!-- History is mock-mode only until /api/v2/gov/ ships. -->
       <button
         v-if="isMock"
@@ -211,6 +218,11 @@ const allocOption = computed(() => {
     <!-- ================= HISTORY ================= -->
     <div v-if="mode === 'history'" role="tabpanel" aria-labelledby="tab-history">
       <GovHistory />
+    </div>
+
+    <!-- ================= VOTE LOG ================= -->
+    <div v-else-if="mode === 'votelog'" role="tabpanel" aria-labelledby="tab-votelog">
+      <VoteLog />
     </div>
 
     <!-- ================= PAYOUTS ================= -->

@@ -6,3 +6,4 @@ pub mod diff;
 pub mod live;
 pub mod poller;
 pub mod store;
+pub mod votematch;

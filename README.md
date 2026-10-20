@@ -113,6 +113,21 @@ Prometheus metrics: `/metrics` (block this path at the edge in production;
   up. If this store cannot be opened or written, the explorer keeps serving
   but governance history stops; check the log for "governance". A poll is
   skipped when the system clock is more than 2 h from the tip block time.
+- `target/release/rustyblox-govlog` is a sidecar for the pivxd host. It
+  follows `debug.log` with mnbudget logging on (`debug=mnbudget`, or
+  `pivx-cli logging '["mnbudget"]'` at runtime) and keeps budget votes the
+  RPC never shows: arrival time, rejected votes with their reason, and
+  proposals the node dropped. logrotate can cut the log within hours, so run
+  it continuously; it records coverage gaps it could not read. Unit file:
+  `ops/rustyblox-govlog.service` (run as the user owning `debug.log`).
+  `rustyblox-govlog report --db <path>` prints a summary while it runs.
+  Set `[governance] govlog_db_path` to the same store and the explorer serves
+  it as `/api/v2/govlog` and the Governance "Vote log" tab, tracing rejected
+  votes to masternodes from their vote hashes. The explorer reads it as a
+  RocksDB secondary (scratch dir `govlog-secondary` beside `gov.db`), so its
+  user needs read access to the sidecar's db directory (e.g. a shared group).
+  A store that fails to open at start is retried on each `/api/v2/govlog`
+  request, so the sidecar can start after the explorer.
 
 ## Repository layout
 
@@ -120,8 +135,8 @@ Prometheus metrics: `/metrics` (block this path at the edge in production;
 src/             backend (sync pipeline, parsers, API, analytics)
 frontend/        the shipped Vue 3 frontend
 frontend-legacy/ previous UI (kept, no longer the default)
-ops/             Prometheus/Grafana monitoring + nginx edge config
-tools/           diagnostics (e.g. reference-explorer comparison)
+ops/             Prometheus/Grafana monitoring, nginx edge config, sidecar unit
+tools/           diagnostics, maintenance, and the governance log sidecar
 ```
 
 ## License

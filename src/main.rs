@@ -257,6 +257,7 @@ async fn start_web_server(
     db_arc: Arc<DB>,
     mempool_state: Arc<MempoolState>,
     broadcaster: Arc<EventBroadcaster>,
+    gov_stores: rustyblox::api::GovStores,
 ) {
     let config = get_global_config();
 
@@ -350,6 +351,7 @@ async fn start_web_server(
         .route("/api/v2/budgetprojection", get(budget_projection_v2))
         .route("/api/v2/budgetvotecounts", get(budget_vote_counts_v2))
         .route("/api/v2/budgetpayouts", get(budget_payouts_v2))
+        .route("/api/v2/govlog", get(rustyblox::api::govlog_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))
@@ -445,7 +447,8 @@ async fn start_web_server(
         .layer(axum::extract::Extension(cache_manager))
         .layer(axum::extract::Extension(db_arc))
         .layer(axum::extract::Extension(mempool_state))
-        .layer(axum::extract::Extension(broadcaster));
+        .layer(axum::extract::Extension(broadcaster))
+        .layer(axum::extract::Extension(gov_stores));
 
     // Parse host IP
     let host_parts: Vec<u8> = server_host
@@ -772,9 +775,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An open failure disables history, not the explorer (ponytail: until the
     // poller has run in production for a while). The error line is the only
     // signal, so it names the path.
+    let mut gov_stores = rustyblox::api::GovStores::default();
     match rustyblox::gov::store::open(&gov_path) {
         Ok(gov) => {
             let gov = Arc::new(gov);
+            gov_stores.gov = Some(Arc::clone(&gov));
             let gov_main = Arc::clone(&db_arc);
             let secs = rustyblox::gov::poller::poll_secs();
             tokio::spawn(async move {
@@ -783,6 +788,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(e) => {
             error!(error = %e, path = %gov_path, "governance history DISABLED: gov.db failed to open")
+        }
+    }
+
+    // The vote-log sidecar's store, read as a RocksDB secondary: the sidecar
+    // holds the write lock. The secondary's scratch directory sits beside gov.db.
+    if let Ok(path) = config.get_string("governance.govlog_db_path") {
+        let secondary = std::path::Path::new(&gov_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("govlog-secondary");
+        gov_stores.govlog_path = Some((path.clone(), secondary.to_string_lossy().into_owned()));
+        // A failure here is retried on each /govlog request.
+        match gov_stores.govlog() {
+            Ok(_) => info!(path = %path, "vote log store (sidecar, read-only)"),
+            Err(e) => {
+                error!(error = %e, path = %path, "vote log unavailable: govlog.db failed to open")
+            }
         }
     }
 
@@ -917,7 +939,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // NOW start web server (data is ready)
     let api_mempool = Arc::clone(&mempool_state);
     let api_broadcaster = Arc::clone(&broadcaster);
-    start_web_server(api_db, api_mempool, api_broadcaster).await;
+    start_web_server(api_db, api_mempool, api_broadcaster, gov_stores).await;
 
     Ok(())
 }
