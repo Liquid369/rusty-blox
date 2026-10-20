@@ -65,6 +65,7 @@ pub mod crash_recovery;
 pub mod fee_calculation;
 pub mod forks;
 pub mod gov;
+pub mod govlog;
 pub mod height_resolver;
 pub mod leveldb_index;
 pub mod maturity;

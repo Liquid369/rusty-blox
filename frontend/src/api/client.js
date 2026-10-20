@@ -28,7 +28,13 @@ async function getJSON(path) {
     headers: { Accept: 'application/json' }
   })
   if (res.status === 503) {
-    const err = new Error('Address index is reindexing; please retry shortly')
+    // Callers branch on err.status; the body names which service is down.
+    let msg = 'Address index is reindexing; please retry shortly'
+    try {
+      const b = await res.json()
+      if (typeof b?.error === 'string') msg = b.detail ? `${b.error}: ${b.detail}` : b.error
+    } catch { /* non-JSON 503 from a proxy */ }
+    const err = new Error(msg)
     err.status = 503
     throw err
   }
@@ -177,6 +183,11 @@ export const getBudgetVoteCounts = () =>
 export const getBudgetPayouts = (sb) =>
   isMock ? Promise.resolve(mock.budgetPayouts(sb)) : getJSON(sb ? `/budgetpayouts?sb=${sb}` : '/budgetpayouts')
 
+// Budget votes from the node's debug.log via the sidecar; 503 when the
+// explorer has no sidecar store configured.
+export const getGovLog = (hours = 24) =>
+  isMock ? Promise.resolve(mock.govLog(hours)) : getJSON(`/govlog?hours=${hours}`)
+
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
 
@@ -229,7 +240,7 @@ export default {
   getAddress, getUtxo, getBalanceHistory, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
-  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getXpub, getSearch, getPrice,
+  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getGovLog, getXpub, getSearch, getPrice,
   nextSuperblock, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }

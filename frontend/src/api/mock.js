@@ -706,6 +706,33 @@ export function budgetPayouts(sb) {
   return { sb: at, scanned_to: at + 99, complete: true, unclassified: 0, total_paid_sats: total.toString(), payouts: rows }
 }
 
+// /govlog: one example of each masternode-resolution method.
+export function govLog(hours) {
+  const at = TIP_TIME
+  const p = BUDGET_PROPOSALS[0]
+  const op = (i) => `${fakeHash()}-${i}`
+  return {
+    as_of: at, hours, coverage_from: at - 30 * 3600, gaps: [], collaterals_known: 2120, hash_budget_left: 2800000,
+    totals: [
+      { class: 'Proposal', reason: 'accepted: new', count: 41 },
+      { class: 'Proposal', reason: 'under 1 h after the stored vote', count: 3 },
+      { class: 'Proposal', reason: 'signed over 1 h in the future', count: 1 },
+      { class: 'Proposal', reason: 'older than the stored vote', count: 2 },
+    ],
+    hourly: [0, 1, 2, 3].map((i) => ({ hour: at - (at % 3600) - i * 3600, counts: { accepted: 10 - i, 'under 1 h after the stored vote': i % 2 } })).reverse(),
+    rejections: [
+      { ts: at - 600, class: 'Proposal', reason: 'older than the stored vote', detail: null, vote: fakeHash(), seen: 1, object_kind: 'proposal', object: p.Hash, object_name: p.Name, mn_logged: null,
+        mn: { method: 'known', outpoint: op(20), object_kind: 'proposal', object: p.Hash, vote: 2, n_time: at - 40 * 86400, seen_at: at - 20 * 86400 } },
+      { ts: at - 1800, class: 'Proposal', reason: 'under 1 h after the stored vote', detail: 1200, vote: fakeHash(), seen: 2, object_kind: 'proposal', object: p.Hash, object_name: p.Name, mn_logged: null,
+        mn: { method: 'matched', outpoint: op(1), object_kind: 'proposal', object: p.Hash, vote: 1, n_time: at - 1800, signed: true } },
+      { ts: at - 3600, class: 'Proposal', reason: 'signed over 1 h in the future', detail: at + 86400, vote: fakeHash(), seen: 1, object_kind: 'proposal', object: null, object_name: null, mn_logged: null,
+        mn: { method: 'not_identifiable', reason: 'no known collateral and object produce this hash' } },
+    ],
+    others: [{ class: 'Proposal', text: 'bad-mvote-sig: signature from masternode COutPoint(72f5cd6f1d, 1) invalid', count: 4, last_ts: at - 900, mn: { method: 'prefix', outpoints: [op(1)] } }],
+    removals: [],
+  }
+}
+
 export function budgetVotes(name) {
   const p = BUDGET_PROPOSALS.find((x) => x.Name === name)
   if (!p) return []

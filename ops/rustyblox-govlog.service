@@ -1,0 +1,21 @@
+# Budget-vote log sidecar. Needs pivxd running with mnbudget logging, either
+# debug=mnbudget in pivx.conf (survives restarts) or at runtime:
+#   pivx-cli logging '["mnbudget"]'
+# debug.log is mode 0600 owned by the pivxd user, so run as that user. The
+# explorer reads --db as a RocksDB secondary: give its user group read on it.
+[Unit]
+Description=rusty-blox governance vote log sidecar
+After=network.target
+
+[Service]
+# Set User to the account that owns pivxd's datadir, and the binary,
+# log and db paths to this host's layout.
+User=pivx
+ExecStart=/opt/rusty-blox/target/release/rustyblox-govlog run \
+  --log /opt/coins/data/pivx/backend/debug.log \
+  --db /opt/rusty-blox/data/govlog.db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

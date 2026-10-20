@@ -190,3 +190,6 @@ delete_stub_txs = false
 # Seconds between governance polls (60 to 3599; anything else falls back to 600). Core allows a masternode one
 # vote change per hour of signed time; 600 catches normal changes.
 # poll_secs = 600
+# Store written by the rustyblox-govlog sidecar (ops/rustyblox-govlog.service).
+# Read-only here; enables /api/v2/govlog and the Governance "Vote log" tab.
+# govlog_db_path = "/opt/rusty-blox/data/govlog.db"

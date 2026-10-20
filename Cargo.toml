@@ -13,6 +13,11 @@ debug-address-index = []
 name = "rustyblox"
 path = "src/main.rs"
 
+# Budget-vote log sidecar for the pivxd host (ops/rustyblox-govlog.service)
+[[bin]]
+name = "rustyblox-govlog"
+path = "tools/sidecar/govlog.rs"
+
 # Essential diagnostic tools
 [[bin]]
 name = "check-db"
