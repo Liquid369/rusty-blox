@@ -22,9 +22,11 @@ use std::collections::HashMap;
 pub const SCHEMA: &[u8] = b"meta/schema";
 pub const SCHEMA_VERSION: u32 = 1;
 pub const CURSOR: &[u8] = b"meta/cursor";
-/// u64 BE unix time the sidecar first opened this DB. Votes before it were
-/// never watched, so coverage starts here, not at the first logged event.
+/// u64 BE unix time of the earliest debug.log line the sidecar has read (or
+/// its first open, before any line). Coverage starts here.
 pub const SINCE: &[u8] = b"meta/since";
+/// Mainnet genesis nTime (chainparams.cpp:243); older log timestamps are corrupt.
+const GENESIS_TIME: u64 = 1_454_124_731;
 
 pub type Hash = [u8; 32];
 
@@ -178,7 +180,23 @@ fn hash(s: &str) -> Option<Hash> {
 /// "2026-10-20T00:11:32Z" or with -logtimemicros "2026-10-20T00:11:32.123456Z".
 pub fn parse_ts(s: &str) -> Option<u64> {
     let b = s.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[10] != b'T' || !s.ends_with('Z') {
+    // Exact "YYYY-MM-DDTHH:MM:SS[.ffffff]Z" shape (-logtimemicros adds the
+    // fraction): i64::parse alone accepts "-1"/"+1".
+    let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    if b.len() < 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || !s.ends_with('Z')
+        || digits.iter().any(|&i| !b[i].is_ascii_digit())
+        || match b[19] {
+            b'Z' => b.len() != 20,
+            b'.' => b.len() < 22 || !b[20..b.len() - 1].iter().all(u8::is_ascii_digit),
+            _ => true,
+        }
+    {
         return None;
     }
     let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
@@ -405,6 +423,13 @@ pub fn open(path: &str) -> Result<DB, String> {
         db.put(SINCE, start.to_be_bytes())
             .map_err(|e| e.to_string())?;
     }
+    // A DB seeded with its open time before ingest lowered SINCE (first
+    // release) can hold events older than SINCE; they were read, so cover them.
+    if let (Some(s), Some(o)) = (get_since(&db)?, oldest_event(&db)?) {
+        if o < s {
+            db.put(SINCE, o.to_be_bytes()).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(db)
 }
 
@@ -458,15 +483,24 @@ fn scan<T: for<'de> Deserialize<'de>>(
 /// When this DB started watching: `SINCE`, else (DBs made before it) the
 /// oldest stored event.
 pub fn since(db: &DB) -> Result<Option<u64>, String> {
-    if let Some(v) = db.get(SINCE).map_err(|e| e.to_string())? {
-        return Ok(v.as_slice().try_into().ok().map(u64::from_be_bytes));
+    match get_since(db)? {
+        Some(t) => Ok(Some(t)),
+        None => oldest_event(db),
     }
-    oldest_event(db)
 }
 
+fn get_since(db: &DB) -> Result<Option<u64>, String> {
+    Ok(db
+        .get(SINCE)
+        .map_err(|e| e.to_string())?
+        .and_then(|v| v.as_slice().try_into().ok().map(u64::from_be_bytes)))
+}
+
+/// Oldest event at or after GENESIS_TIME; earlier keys hold corrupt stamps.
 fn oldest_event(db: &DB) -> Result<Option<u64>, String> {
+    let start = [b"e/".as_slice(), &GENESIS_TIME.to_be_bytes()].concat();
     match db
-        .iterator(IteratorMode::From(b"e/", Direction::Forward))
+        .iterator(IteratorMode::From(&start, Direction::Forward))
         .next()
     {
         Some(item) => {
@@ -535,6 +569,8 @@ pub fn prune(db: &DB, before: u64) -> Result<usize, String> {
 pub struct Staging {
     events: HashMap<Vec<u8>, Event>,
     others: HashMap<Vec<u8>, OtherReject>,
+    /// Lowered SINCE: the earliest line read, when older than the stored one.
+    since: Option<u64>,
 }
 
 impl Staging {
@@ -559,6 +595,9 @@ impl Staging {
         for (k, o) in self.others {
             batch.put(k, enc(&o)?);
         }
+        if let Some(t) = self.since {
+            batch.put(SINCE, t.to_be_bytes());
+        }
         Ok(())
     }
 }
@@ -573,8 +612,20 @@ pub fn ingest(
     staging: &mut Staging,
 ) -> Result<u64, String> {
     let mut last_ts = 0;
+    let mut first: Option<u64> = None;
     for l in lines {
-        match parse_line(l) {
+        let parsed = parse_line(l);
+        let ts = match &parsed {
+            Line::Event(e) => Some(e.ts),
+            Line::Other(o) => Some(o.ts),
+            Line::Plain(t) => *t,
+            Line::Continuation(_) => None,
+        };
+        // Per line: a corrupt pre-genesis stamp never enters the minimum.
+        if let Some(t) = ts.filter(|t| *t >= GENESIS_TIME) {
+            first = Some(first.map_or(t, |f| f.min(t)));
+        }
+        match parsed {
             Line::Event(e) => {
                 last_ts = last_ts.max(e.ts);
                 let rejected = e.outcome.as_ref().is_some_and(Outcome::is_reject);
@@ -636,6 +687,19 @@ pub fn ingest(
                 last_ts = last_ts.max(ts.unwrap_or(0));
                 *pending = None;
             }
+        }
+    }
+    // Coverage starts at the earliest line actually read: a first run reads
+    // the whole existing log, and a drain reads a rotated copy's older lines.
+    // Lower-only read-modify-write: safe because the sidecar is the DB's sole
+    // writer (RocksDB LOCK) and polls sequentially.
+    if let Some(f) = first {
+        let stored = match staging.since {
+            Some(t) => Some(t),
+            None => get_since(db)?,
+        };
+        if stored.is_none_or(|t| f < t) {
+            staging.since = Some(f);
         }
     }
     Ok(last_ts)
@@ -1532,11 +1596,73 @@ mod tests {
         {
             let db = open(&path).unwrap();
             db.delete(SINCE).unwrap();
-            db.put(event_key(1_000, &[1; 32]), b"x").unwrap();
+            db.put(event_key(GENESIS_TIME + 1_000, &[1; 32]), b"x")
+                .unwrap();
         }
         let db = open(&path).unwrap();
-        assert_eq!(since(&db).unwrap(), Some(1_000));
+        assert_eq!(since(&db).unwrap(), Some(GENESIS_TIME + 1_000));
         let fresh = tmp.path().join("h").to_string_lossy().into_owned();
-        assert!(since(&open(&fresh).unwrap()).unwrap().unwrap() > 1_000);
+        assert!(since(&open(&fresh).unwrap()).unwrap().unwrap() > GENESIS_TIME + 1_000);
+    }
+
+    #[test]
+    fn since_is_the_earliest_line_read() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("g").to_string_lossy().into_owned();
+        let db = open(&path).unwrap();
+        let old = parse_ts("2026-10-19T22:00:15Z").unwrap();
+        ingest_commit(
+            &db,
+            &["2026-10-19T22:00:15Z UpdateTip: new best=00"],
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(since(&db).unwrap(), Some(old));
+        ingest_commit(
+            &db,
+            &["2026-10-20T05:00:00Z UpdateTip: new best=01"],
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(
+            since(&db).unwrap(),
+            Some(old),
+            "a later line never raises it"
+        );
+        // First-release DB: SINCE at open time, events read before it.
+        db.put(SINCE, (old + 9_000).to_be_bytes()).unwrap();
+        db.put(event_key(old + 100, &[1; 32]), b"x").unwrap();
+        drop(db);
+        assert_eq!(since(&open(&path).unwrap()).unwrap(), Some(old + 100));
+    }
+
+    #[test]
+    fn corrupt_timestamps_never_lower_since() {
+        assert_eq!(parse_ts("2026-10-20T-1:00:00Z"), None);
+        assert_eq!(parse_ts("2026-10-20T05:+1:00Z"), None);
+        assert_eq!(parse_ts("2026-10-20 05:00:00Z"), None);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = open(&tmp.path().join("g").to_string_lossy()).unwrap();
+        assert_eq!(parse_ts("2026-10-20T05:00:00.garbageZ"), None);
+        assert_eq!(parse_ts("2026-10-20T05:00:00.Z"), None);
+        assert_eq!(parse_ts("2026-10-20T05:00:00ZjunkZ"), None);
+        let before = since(&db).unwrap();
+        ingest_commit(&db, &["1999-01-01T00:00:00Z UpdateTip: x"], &mut None).unwrap();
+        assert_eq!(since(&db).unwrap(), before);
+        // A corrupt line does not stop valid older lines in its batch.
+        let valid = "2026-10-19T22:00:15Z UpdateTip: y";
+        ingest_commit(
+            &db,
+            &["1999-01-01T00:00:00Z UpdateTip: x", valid],
+            &mut None,
+        )
+        .unwrap();
+        let old = parse_ts("2026-10-19T22:00:15Z");
+        assert_eq!(since(&db).unwrap(), old);
+        // A stored pre-genesis event is ignored on reopen.
+        let path = db.path().to_path_buf();
+        db.put(event_key(1, &[1; 32]), b"x").unwrap();
+        drop(db);
+        assert_eq!(since(&open(&path.to_string_lossy()).unwrap()).unwrap(), old);
     }
 }
