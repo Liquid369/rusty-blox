@@ -451,3 +451,206 @@ pub async fn govlog_v2(
             )
         })
 }
+
+/// Groups of masternodes casting the same choices on several proposals
+/// (gov::coord) over gov.db vote movement in the window.
+fn build_groups(
+    gov: &DB,
+    log: Result<Option<Arc<DB>>, String>,
+    hours: u64,
+    ctx: &Context,
+) -> Result<serde_json::Value, String> {
+    use crate::gov::coord::{groups, Vote, BATCH_GAP, MIN_GROUP};
+    use crate::gov::store::{get, MnCountPoint, VoteChange, LAST_MNCOUNT};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let from = now.saturating_sub(hours * 3600);
+    let mut since: HashMap<Hash, Option<u64>> = HashMap::new();
+    for (_, v) in scan(gov, b"p/")? {
+        let m: ProposalMeta = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+        since.insert(m.hash, m.votes_since);
+    }
+    // c/H/T/M. A row at or before its proposal's votes_since is a first
+    // sighting, not movement; T bounds n_time to within ~1 h (Core's future
+    // limit), so scan from an hour before the window.
+    let mut votes = Vec::new();
+    for (k, v) in scan(gov, b"c/")? {
+        let (Some(h), Some(t), Some(mn)) = (
+            k.get(2..34).and_then(|b| <Hash>::try_from(b).ok()),
+            k.get(34..42)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_be_bytes),
+            k.get(42..78).and_then(|b| <Outpoint>::try_from(b).ok()),
+        ) else {
+            continue;
+        };
+        let Some(Some(vs)) = since.get(&h) else {
+            continue;
+        };
+        if t <= *vs || t + 3600 < from {
+            continue;
+        }
+        let c: VoteChange = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+        let Some(to) = c.to else { continue };
+        // Signed time may run up to 1 h ahead; the window ends now.
+        if c.n_time < from as i64 || c.n_time > now as i64 {
+            continue;
+        }
+        votes.push(Vote {
+            proposal: h,
+            mn,
+            kind: c.kind,
+            from: c.from,
+            to,
+            n_time: c.n_time,
+            f_valid: c.f_valid,
+        });
+    }
+    let enabled = get::<MnCountPoint>(gov, LAST_MNCOUNT)?.map(|m| m.enabled);
+    // Node-side removals (sidecar), to show what a group's votes led to. A
+    // configured store that fails is reported, never read as "no removals".
+    let (log, removals_error) = match log {
+        Ok(l) => (l, None),
+        Err(e) => (None, Some(e)),
+    };
+    let removals: Vec<(u64, Hash, String)> = match &log {
+        Some(l) => govlog::events(l, from, u64::MAX)?
+            .into_iter()
+            .filter_map(|e| match e.outcome {
+                Some(Outcome::Removed(r)) => Some((e.ts, e.vote, r)),
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let found = groups(&votes, BATCH_GAP, MIN_GROUP);
+    let total = found.len();
+    let out: Vec<serde_json::Value> = found
+        .into_iter()
+        .take(GROUPS_MAX)
+        .map(|g| {
+            let choices: Vec<_> = g
+                .choices
+                .iter()
+                .take(CHOICES_MAX)
+                .map(|(h, c)| {
+                    let swing = g.swing.iter().find(|(s, _)| s == h).map_or(0, |s| s.1);
+                    let removed = removals
+                        .iter()
+                        .find(|(ts, p, _)| p == h && *ts as i64 >= g.first)
+                        .map(|(ts, _, r)| serde_json::json!({"ts": ts, "reason": r}));
+                    serde_json::json!({
+                        "proposal": hex::encode(h),
+                        "name": ctx.names.get(h),
+                        "choice": c,
+                        "swing": swing,
+                        "removed": removed,
+                    })
+                })
+                .collect();
+            let members: Vec<_> = g
+                .members
+                .iter()
+                .take(MEMBERS_MAX)
+                .map(|m| {
+                    let op = crate::gov::votematch::outpoint_str(m);
+                    let addr = ctx.addrs.get(&op).cloned();
+                    serde_json::json!({"outpoint": op, "addr": addr})
+                })
+                .collect();
+            serde_json::json!({
+                "size": g.members.len(),
+                "first": g.first,
+                "last": g.last,
+                "new": g.new,
+                "changed": g.changed,
+                "unknown_from": g.unknown_from,
+                "choices": choices,
+                "members": members,
+                "members_total": g.members.len(),
+                "choices_total": g.choices.len(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "as_of": now,
+        "hours": hours,
+        "enabled_masternodes": enabled,
+        "batch_gap_secs": crate::gov::coord::BATCH_GAP,
+        "min_group": crate::gov::coord::MIN_GROUP,
+        "groups": out,
+        "groups_total": total,
+        "removals_error": removals_error,
+    }))
+}
+
+/// 20 groups x 250 members x ~140 B stays near 0.7 MiB, under CacheManager's
+/// 2 MiB entry limit; 250 covers the largest group seen (213, 2026-10-20).
+/// A ballot lists at most one choice per live proposal (16 on 2026-10-21).
+const GROUPS_MAX: usize = 20;
+const MEMBERS_MAX: usize = 250;
+const CHOICES_MAX: usize = 50;
+
+/// GET /api/v2/govgroups?hours=24|168
+///
+/// **CACHED**: 60 second TTL
+pub async fn govgroups_v2(
+    Query(q): Query<GovLogQuery>,
+    Extension(stores): Extension<GovStores>,
+    Extension(cache): Extension<Arc<CacheManager>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let hours = q.hours.unwrap_or(24);
+    if !WINDOWS.contains(&hours) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "hours must be 24 or 168"})),
+        ));
+    }
+    let Some(gov) = stores.gov.clone() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "governance history unavailable"})),
+        ));
+    };
+    cache
+        .get_or_compute(
+            &format!("govgroups:{hours}"),
+            Duration::from_secs(60),
+            || async move {
+                let permit = build_permit()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // Same shape as govlog_v2: the spawned task holds the permit
+                // past a request timeout. The vote log is optional here.
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let ctx = context(Some(Arc::clone(&gov))).await?;
+                    tokio::task::spawn_blocking(move || {
+                        let log = match stores.govlog_path {
+                            None => Ok(None),
+                            Some(_) => stores.govlog().and_then(|l| {
+                                l.try_catch_up_with_primary().map_err(|e| e.to_string())?;
+                                Ok(Some(l))
+                            }),
+                        };
+                        build_groups(&gov, log, hours, &ctx)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                })
+                .await
+                .map_err(|e| e.to_string())?
+            },
+        )
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+        })
+}

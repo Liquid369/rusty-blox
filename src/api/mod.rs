@@ -31,7 +31,7 @@ pub use blockbook_status::*;
 pub use blockbook_ws::*;
 pub use blocks::*;
 pub use governance::*;
-pub use govlog::{govlog_v2, GovStores};
+pub use govlog::{govgroups_v2, govlog_v2, GovStores};
 pub use helpers::*;
 pub use masternodes::*;
 pub use network::*;

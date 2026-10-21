@@ -707,6 +707,20 @@ export function budgetPayouts(sb) {
 }
 
 // /govlog: one example of each masternode-resolution method.
+export function govGroups(hours) {
+  const at = TIP_TIME
+  const p = BUDGET_PROPOSALS
+  return {
+    as_of: at, hours, enabled_masternodes: 1971, batch_gap_secs: 120, min_group: 10, groups_total: 1, removals_error: null,
+    groups: [{
+      size: 213, first: at - 7200, last: at - 7112, new: 639, changed: 852, unknown_from: 0, members_total: 213,
+      choices: p.slice(0, 3).map((x, i) => ({ proposal: x.Hash, name: x.Name, choice: i === 0 ? 1 : 2, swing: i === 0 ? 213 : -426,
+        removed: i === 2 ? { ts: at - 6500, reason: 'Heavily Downvoted' } : null })),
+      members: Array.from({ length: 6 }, (_, i) => ({ outpoint: `${fakeHash()}-${i % 2}`, addr: i % 3 ? 'DDRCKcSRP7r6nqF1E78axNoAn3pHcMGTxn' : null })),
+    }],
+  }
+}
+
 export function govLog(hours) {
   const at = TIP_TIME
   const p = BUDGET_PROPOSALS[0]
