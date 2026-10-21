@@ -188,6 +188,9 @@ export const getBudgetPayouts = (sb) =>
 export const getGovLog = (hours = 24) =>
   isMock ? Promise.resolve(mock.govLog(hours)) : getJSON(`/govlog?hours=${hours}`)
 
+export const getGovGroups = (hours = 24) =>
+  isMock ? Promise.resolve(mock.govGroups(hours)) : getJSON(`/govgroups?hours=${hours}`)
+
 export const getBudgetVotes = (name) =>
   isMock ? Promise.resolve(mock.budgetVotes(name)) : getJSON(`/budgetvotes/${encodeURIComponent(name)}`)
 
@@ -240,7 +243,7 @@ export default {
   getAddress, getUtxo, getBalanceHistory, getSupply, getTransactions, getStaking, getNetwork,
   getRichlist, getWealthDistribution, getHodl, getColdstaking, getTreasury, getSnapshots,
   getMnCount, getMnList, getMempool,
-  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getGovLog, getXpub, getSearch, getPrice,
+  getBudgetInfo, getBudgetProjection, getFinalizedBudgets, getBudgetVotes, getBudgetVoteCounts, getBudgetPayouts, getGovLog, getGovGroups, getXpub, getSearch, getPrice,
   nextSuperblock, monthlyBudgetCap,
   setAddress503, isMock, API_BASE
 }

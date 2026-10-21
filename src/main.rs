@@ -352,6 +352,7 @@ async fn start_web_server(
         .route("/api/v2/budgetvotecounts", get(budget_vote_counts_v2))
         .route("/api/v2/budgetpayouts", get(budget_payouts_v2))
         .route("/api/v2/govlog", get(rustyblox::api::govlog_v2))
+        .route("/api/v2/govgroups", get(rustyblox::api::govgroups_v2))
         .route("/api/v2/finalizedbudgets", get(finalized_budgets_v2))
         .route("/api/v2/analytics/supply", get(supply_analytics))
         .route("/api/v2/analytics/transactions", get(transaction_analytics))

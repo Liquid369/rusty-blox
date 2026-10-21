@@ -5,7 +5,7 @@
    strengths of evidence and are never blended. */
 import { ref, computed, onMounted, h } from 'vue'
 import { RouterLink } from 'vue-router'
-import { getGovLog } from '../api/client.js'
+import { getGovLog, getGovGroups } from '../api/client.js'
 import { formatCount, formatDateTime, truncateHash } from '../lib/format.js'
 import { baseOption, palette } from '../lib/chart.js'
 import EChart from './EChart.vue'
@@ -18,10 +18,17 @@ const error = ref(null)
 const loading = ref(false)
 let req = 0
 
+/* Groups come from governance history, not the sidecar: either can fail alone. */
+const groups = ref(null)
 async function load() {
   const id = ++req
   loading.value = true
   error.value = null
+  // Cleared with the window, so a prior window's groups never show beside a new error.
+  groups.value = null
+  getGovGroups(hours.value)
+    .then((g) => { if (id === req) groups.value = g })
+    .catch(() => { if (id === req) groups.value = null })
   try {
     const d = await getGovLog(hours.value)
     if (id === req) data.value = d
@@ -31,6 +38,17 @@ async function load() {
     if (id === req) loading.value = false
   }
 }
+
+function span(secs) {
+  if (secs < 60) return `${secs} s`
+  if (secs < 3600) return `${Math.floor(secs / 60)} min ${secs % 60} s`
+  return `${Math.floor(secs / 3600)} h ${Math.floor((secs % 3600) / 60)} min`
+}
+const share = (n) => {
+  const e = groups.value?.enabled_masternodes
+  return e ? `${((100 * n) / e).toFixed(1)}% of ${formatCount(e)} enabled` : ''
+}
+const signed = (n) => (n > 0 ? `+${n}` : `${n}`)
 onMounted(load)
 const setHours = (h) => { hours.value = h; load() }
 
@@ -229,6 +247,53 @@ const chartOption = computed(() => {
         <EChart :option="chartOption" height="200px" aria-label="Votes per hour, accepted and rejected by reason" />
         <p v-if="!data.hourly.length" class="quiet">The node logged no budget votes in this window. Outside voting campaigns, votes arrive a few per hour at most.</p>
       </HudPanel>
+    </template>
+
+      <template v-if="groups && (groups.groups.length || groups.removals_error)">
+        <h2 class="section-title">Identical ballots</h2>
+        <p class="quiet lead">
+          Masternodes that cast the same choices on two or more proposals, each signing its choices with
+          no more than {{ groups.batch_gap_secs }} s between consecutive votes, in groups of {{ groups.min_group }} or more. Only votes the node counts are included.
+          A group is matching choices; the times show how closely they were signed. Nothing here links the collaterals to one owner.
+        </p>
+        <p v-if="groups.removals_error" class="quiet lead">Node removals could not be read: {{ groups.removals_error }}</p>
+        <HudPanel v-for="(g, i) in groups.groups" :key="i" :title="`${formatCount(g.size)} MASTERNODES`" :id="share(g.size)">
+          <p class="group-line">
+            Cast the same {{ g.choices_total ?? g.choices.length }} votes, signed between {{ shortTime(g.first) }} and {{ shortTime(g.last) }}
+            ({{ span(g.last - g.first) }}): {{ formatCount(g.changed) }} changed, {{ formatCount(g.new) }} new.
+            <template v-if="g.unknown_from">{{ formatCount(g.unknown_from) }} changed votes have no recorded prior choice and are left out of the net change.</template>
+          </p>
+          <div class="scroll">
+            <table class="dtable">
+              <thead><tr><th>Proposal</th><th>Voted</th><th class="num" title="Change in yeas minus nays from this group's votes">Net change</th><th>Afterwards</th></tr></thead>
+              <tbody>
+                <tr v-for="c in g.choices" :key="c.proposal">
+                  <td>
+                    <RouterLink v-if="c.name" :to="`/proposal/${encodeURIComponent(c.name)}`">{{ c.name }}</RouterLink>
+                    <span v-else class="mono dim">{{ truncateHash(c.proposal) }}</span>
+                  </td>
+                  <td><span class="tag" :class="c.choice === 1 ? 'cyan' : c.choice === 2 ? 'hot' : ''">{{ CHOICE[c.choice] }}</span></td>
+                  <td class="num mono" :class="c.swing < 0 ? 'neg' : c.swing > 0 ? 'pos' : 'dim'">{{ signed(c.swing) }}</td>
+                  <td>
+                    <span v-if="c.removed" class="tag hot">Removed by the node: {{ c.removed.reason }}, {{ shortTime(c.removed.ts) }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <details class="members">
+            <summary>{{ g.members_total > g.members.length ? `First ${g.members.length} of ${formatCount(g.members_total)} collaterals` : `${formatCount(g.members_total)} collaterals` }}</summary>
+            <ul>
+              <li v-for="m in g.members" :key="m.outpoint" class="mono">
+                <RouterLink :to="`/tx/${txid(m.outpoint)}`">{{ truncateHash(txid(m.outpoint)) }}</RouterLink><span class="dim">:{{ vout(m.outpoint) }}</span>
+                <RouterLink v-if="m.addr" :to="`/address/${m.addr}`" class="addr">{{ m.addr }}</RouterLink>
+              </li>
+            </ul>
+          </details>
+        </HudPanel>
+      </template>
+
+    <template v-if="data && !error">
 
       <template v-if="byMasternode.length">
         <h2 class="section-title">Masternodes with rejected votes</h2>
@@ -351,6 +416,7 @@ const chartOption = computed(() => {
         </HudPanel>
       </template>
     </template>
+
   </div>
 </template>
 
@@ -398,6 +464,16 @@ td .tag + .tag { margin-left: 6px; }
   line-height: 18px; padding-top: 0; padding-bottom: 0; font-family: var(--font-mono); }
 .key .tag.none { padding-left: 7px; border: 1px solid var(--hud-line); border-style: dotted; }
 
+.lead { margin: 0 0 var(--space-3); max-width: 78ch; }
+.group-line { margin: 0 0 var(--space-3); color: var(--text-muted); font-size: 12.5px; }
+.num.neg { color: var(--hot); }
+.num.pos { color: var(--cyan); }
+.members { margin-top: var(--space-3); font-size: 12px; }
+.members summary { cursor: pointer; color: var(--text-muted); }
+.members ul { list-style: none; margin: var(--space-2) 0 0; padding: 0; columns: 2 420px; column-gap: 28px; }
+.members li { padding: 3px 0; break-inside: avoid; }
+.members .addr { margin-left: 10px; }
+.panel + .panel { margin-top: var(--space-4); }
 .gaps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-muted); }
 .gaps li + li { margin-top: 4px; }
 

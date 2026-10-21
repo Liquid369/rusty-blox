@@ -128,6 +128,11 @@ Prometheus metrics: `/metrics` (block this path at the edge in production;
   user needs read access to the sidecar's db directory (e.g. a shared group).
   A store that fails to open at start is retried on each `/api/v2/govlog`
   request, so the sidecar can start after the explorer.
+- `/api/v2/govgroups?hours=24|168` reads `gov.db` only (no sidecar needed):
+  groups of 10 or more masternodes that cast identical choices on two or
+  more proposals (no more than 120 s between a member's consecutive votes), with each
+  proposal's net vote change and the span over which members signed. A group
+  is matching choices, not proof of a common owner.
 
 ## Repository layout
 
