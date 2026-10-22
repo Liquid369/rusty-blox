@@ -192,6 +192,8 @@ pub fn fetch(
     let mut out: HashMap<Hash, Option<RecoveredVote>> = HashMap::new();
     let mut buf: Vec<u8> = Vec::new();
     let mut sent = false;
+    // Commands the peer sent, so a handshake that never completes says why.
+    let mut seen: Vec<String> = Vec::new();
     let mut chunk = [0u8; 65536];
     while Instant::now() < deadline && out.len() < wanted.len() {
         match s.read(&mut chunk) {
@@ -225,6 +227,9 @@ pub fn fetch(
                 .collect();
             let payload: Vec<u8> = buf[24..24 + len].to_vec();
             buf.drain(..24 + len);
+            if !seen.contains(&cmd) {
+                seen.push(cmd.clone());
+            }
             match cmd.as_str() {
                 "version" => s
                     .write_all(&frame("verack", &[]))
@@ -275,6 +280,14 @@ pub fn fetch(
             }
         }
     }
+    // Core answers every getdata item with the vote or notfound, so an
+    // empty result here is not "none found": the request never went out.
+    if !sent {
+        return Err(format!(
+            "{addr}: handshake not completed in {timeout:?}; peer sent [{}]",
+            seen.join(", ")
+        ));
+    }
     Ok(out)
 }
 
@@ -311,5 +324,17 @@ mod tests {
             h
         );
         assert!(decode_vote(&payload[..60]).is_none());
+    }
+
+    /// A peer that accepts and never completes the handshake is an error,
+    /// not an empty "nothing found" (the sidecar would spend retries on it).
+    #[test]
+    fn silent_peer_is_an_error() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let hold = std::thread::spawn(move || l.accept().map(|(s, _)| s));
+        let err = fetch(&addr, &[[1u8; 32]], Duration::from_millis(800)).unwrap_err();
+        assert!(err.contains("handshake not completed"), "{err}");
+        drop(hold.join());
     }
 }
