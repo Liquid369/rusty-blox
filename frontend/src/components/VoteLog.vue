@@ -338,14 +338,14 @@ const chartOption = computed(() => {
                 <span v-if="c.choice != null" class="dim"> · {{ CHOICE[c.choice] }}</span>
               </span>
               <span class="tag" :class="evidenceOf(c.evidence).tone">{{ evidenceOf(c.evidence).label }}</span>
-              <span class="c-num mono"><b>{{ formatCount(c.count) }}</b> from {{ formatCount(c.masternodes) }} masternodes</span>
+              <span class="c-num mono"><b>{{ formatCount(c.count) }}</b><span class="c-sub">{{ c.masternodes ? `from ${formatCount(c.masternodes)} ${c.masternodes === 1 ? 'masternode' : 'masternodes'}` : `${c.count === 1 ? 'rejection' : 'rejections'}, masternode not known` }}</span></span>
               <span class="c-time dim">arrived {{ range(c.first, c.last) }}<template v-if="c.signed_from != null">; signed {{ range(c.signed_from, c.signed_to) }}</template></span>
             </summary>
             <ul v-if="c.funding.length" class="groups">
-              <li v-for="g in c.funding" :key="g.txid" class="mono">
+              <li v-for="g in c.funding" :key="g.txid" class="mono g-row">
                 <RouterLink :to="`/tx/${g.txid}`">{{ truncateHash(g.txid) }}</RouterLink>
-                <span class="strong"> {{ g.vouts.length }}</span>
-                <span class="dim"> {{ g.vouts.length > 1 ? 'collaterals' : 'collateral' }}: {{ g.vouts.map((v) => ':' + v).join(' ') }}</span>
+                <span class="g-count"><b>{{ g.vouts.length }}</b> {{ g.vouts.length > 1 ? 'collaterals' : 'collateral' }}</span>
+                <span class="dim g-vouts">{{ g.vouts.map((v) => ':' + v).join(' ') }}</span>
               </li>
               <li v-if="c.funding_total > c.funding.length || c.vouts_total > c.funding.reduce((n, g) => n + g.vouts.length, 0)" class="dim">List cut to fit: {{ formatCount(c.vouts_total) }} collaterals from {{ formatCount(c.funding_total) }} funding transactions in total.</li>
             </ul>
@@ -519,8 +519,17 @@ td .tag + .tag { margin-left: 6px; }
 .cluster > summary .tag { justify-self: start; }
 .c-num { color: var(--text-muted); }
 .c-num b { color: var(--text); }
+.c-sub { margin-left: 0.4em; }
 .c-time { font-size: 11.5px; }
-.groups { list-style: none; margin: 0; padding: 8px 12px 10px; font-size: 11.5px; display: grid; gap: 4px; }
+.groups { list-style: none; margin: 0; padding: 8px 12px 10px; font-size: 11.5px; display: grid; gap: 6px; }
+.g-row { display: grid; grid-template-columns: 170px 110px 1fr; gap: 12px; align-items: baseline; }
+.g-count { color: var(--text-muted); white-space: nowrap; }
+.g-count b { color: var(--text); }
+.g-vouts { line-height: 1.6; word-spacing: 2px; }
+@media (max-width: 700px) {
+  .g-row { grid-template-columns: 1fr auto; }
+  .g-vouts { grid-column: 1 / -1; }
+}
 .vouts summary, .latest > summary { cursor: pointer; color: var(--text-muted); font-size: 11.5px; }
 .vouts span { display: block; max-width: 60ch; white-space: normal; font-size: 11px; }
 .latest { margin-top: var(--space-4); }
