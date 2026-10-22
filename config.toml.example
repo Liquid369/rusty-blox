@@ -192,4 +192,6 @@ delete_stub_txs = false
 # poll_secs = 600
 # Store written by the rustyblox-govlog sidecar (ops/rustyblox-govlog.service).
 # Read-only here; enables /api/v2/govlog and the Governance "Vote log" tab.
+# Run the sidecar with --p2p <pivxd P2P address> to read back votes rejected as
+# older or too soon (README "Governance vote log").
 # govlog_db_path = "/opt/rusty-blox/data/govlog.db"

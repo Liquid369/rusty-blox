@@ -514,6 +514,67 @@ fn oldest_event(db: &DB) -> Result<Option<u64>, String> {
     }
 }
 
+/// A rejected vote read back from the node (gov::p2pvote), keyed x/ + the
+/// event's ts + vote hash so prune() drops it with its event. `vote` None:
+/// the node answered notfound (already dropped from its seen map).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Recovered {
+    pub fetched_at: u64,
+    pub vote: Option<crate::gov::p2pvote::RecoveredVote>,
+}
+
+pub fn recovered_key(ts: u64, vote: &Hash) -> Vec<u8> {
+    [b"x/".as_slice(), &ts.to_be_bytes(), vote].concat()
+}
+
+/// Proposal votes rejected as older or too soon since `from` with no x/ row.
+/// Only these are recoverable: the log names their hash and Core keeps them
+/// in mapSeenProposalVotes (future-dated, unknown-MN and not-enabled votes
+/// are rejected before AddSeenProposalVote, budgetmanager.cpp:1137-1152).
+/// ponytail: proposal votes only; finalized-budget votes use inv type 12 and
+/// a payload without nVote, add when such rejections show up.
+/// ponytail: one point get per reject event per pass (~6k every 10 s on the
+/// wallet after the 2026-10-21 resync, sub-millisecond each); keep a "checked
+/// up to ts" cursor if reject volume grows by orders of magnitude.
+pub fn unrecovered(db: &DB, from: u64) -> Result<Vec<(u64, Hash)>, String> {
+    let mut out = Vec::new();
+    for e in events(db, from, u64::MAX)? {
+        if e.class == Class::Proposal
+            && matches!(
+                e.outcome,
+                Some(Outcome::RejectOlder | Outcome::RejectTooSoon(_))
+            )
+            && db
+                .get(recovered_key(e.ts, &e.vote))
+                .map_err(|x| x.to_string())?
+                .is_none()
+        {
+            out.push((e.ts, e.vote));
+        }
+    }
+    Ok(out)
+}
+
+pub fn put_recovered(db: &DB, rows: &[(u64, Hash, Recovered)]) -> Result<(), String> {
+    let mut batch = WriteBatch::default();
+    for (ts, h, r) in rows {
+        batch.put(recovered_key(*ts, h), enc(r)?);
+    }
+    db.write(batch).map_err(|e| e.to_string())
+}
+
+/// Recovered rows for events in [from, to), by (event ts, vote hash).
+pub fn recovered(db: &DB, from: u64, to: u64) -> Result<HashMap<(u64, Hash), Recovered>, String> {
+    Ok(scan::<Recovered>(db, b"x/", from, to)?
+        .into_iter()
+        .filter_map(|(k, r)| {
+            let ts = u64::from_be_bytes(k.get(2..10)?.try_into().ok()?);
+            let h: Hash = k.get(10..42)?.try_into().ok()?;
+            Some(((ts, h), r))
+        })
+        .collect())
+}
+
 /// Events in [from, to), oldest first.
 pub fn events(db: &DB, from: u64, to: u64) -> Result<Vec<Event>, String> {
     Ok(scan(db, b"e/", from, to)?
@@ -548,7 +609,7 @@ pub fn gaps(db: &DB) -> Result<Vec<(u64, u64, Gap)>, String> {
 pub fn prune(db: &DB, before: u64) -> Result<usize, String> {
     let mut n = 0;
     let mut batch = WriteBatch::default();
-    for prefix in [b"e/".as_slice(), b"o/"] {
+    for prefix in [b"e/".as_slice(), b"o/", b"x/"] {
         let end = [prefix, &before.to_be_bytes()].concat();
         for item in db.iterator(IteratorMode::From(prefix, Direction::Forward)) {
             let (k, _) = item.map_err(|e| e.to_string())?;

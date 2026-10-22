@@ -27,6 +27,10 @@ Vue frontend with a full analytics suite.
   payout history, orphan rates, block sizes and intervals.
 - **Live**: WebSocket feeds for blocks, transactions and mempool; the monitor
   follows the chain tip via RPC after the initial file-based sync.
+- **Governance**: proposal vote history that survives the node's own pruning,
+  the funded set and payouts per superblock, and an optional vote log of
+  everything pivxd accepts and rejects, with rejected votes traced to their
+  masternode and grouped by funding transaction.
 
 ## Requirements
 
@@ -81,7 +85,8 @@ Blockbook v2 drop-in (`/api/v2/...`):
 | `mempool`, `mempool/{txid}` | unconfirmed transactions |
 | `estimatefee/{blocks}` | fee estimate |
 | `tickers`, `tickers-list`, `multi-tickers/` | fiat rates, sampled every 15 min (disable via `[price] fiat_sampler = false`) |
-| `mncount`, `mnlist`, `budgetinfo`, `budgetprojection`, `budgetvotes/{name}` | masternodes, governance |
+| `mncount`, `mnlist`, `budgetinfo`, `budgetprojection`, `budgetvotes/{name}`, `budgetvotecounts`, `budgetpayouts?sb=` | masternodes, governance |
+| `govlog?hours=24\|168`, `govgroups?hours=24\|168` | budget vote log and identical-ballot groups (PIVX extension; see Governance vote log below) |
 | `search/{query}` | height / hash / txid / address resolution |
 
 The full reference (params, cache TTLs, money units) is served by the explorer
@@ -113,26 +118,72 @@ Prometheus metrics: `/metrics` (block this path at the edge in production;
   up. If this store cannot be opened or written, the explorer keeps serving
   but governance history stops; check the log for "governance". A poll is
   skipped when the system clock is more than 2 h from the tip block time.
-- `target/release/rustyblox-govlog` is a sidecar for the pivxd host. It
-  follows `debug.log` with mnbudget logging on (`debug=mnbudget`, or
-  `pivx-cli logging '["mnbudget"]'` at runtime) and keeps budget votes the
-  RPC never shows: arrival time, rejected votes with their reason, and
-  proposals the node dropped. logrotate can cut the log within hours, so run
-  it continuously; it records coverage gaps it could not read. Unit file:
-  `ops/rustyblox-govlog.service` (run as the user owning `debug.log`).
-  `rustyblox-govlog report --db <path>` prints a summary while it runs.
-  Set `[governance] govlog_db_path` to the same store and the explorer serves
-  it as `/api/v2/govlog` and the Governance "Vote log" tab, tracing rejected
-  votes to masternodes from their vote hashes. The explorer reads it as a
-  RocksDB secondary (scratch dir `govlog-secondary` beside `gov.db`), so its
-  user needs read access to the sidecar's db directory (e.g. a shared group).
-  A store that fails to open at start is retried on each `/api/v2/govlog`
-  request, so the sidecar can start after the explorer.
-- `/api/v2/govgroups?hours=24|168` reads `gov.db` only (no sidecar needed):
-  groups of 10 or more masternodes that cast identical choices on two or
-  more proposals (no more than 120 s between a member's consecutive votes), with each
-  proposal's net vote change and the span over which members signed. A group
-  is matching choices, not proof of a common owner.
+
+### Governance vote log (optional)
+
+`target/release/rustyblox-govlog` runs on the pivxd host and records the
+budget votes pivxd logs but RPC never shows: arrival time, votes it rejected
+and why, and proposals it removed. The explorer shows them in the
+Governance "Vote log" tab and at `/api/v2/govlog`. Without it the tab answers
+503 and the rest of the explorer is unaffected; `/api/v2/govgroups`
+(identical ballots) needs only `gov.db` and works either way.
+
+1. Turn on budget logging in pivxd: `debug=mnbudget` in `pivx.conf` (kept
+   across restarts), or `pivx-cli logging '["mnbudget"]'` at runtime (lost on
+   restart).
+2. Install `ops/rustyblox-govlog.service`. Run it as the user that owns
+   `debug.log` (mode 0600). Set:
+   - `--log`: pivxd's `debug.log` (testnet: under the network subdirectory).
+   - `--db`: where the sidecar keeps its store, e.g. beside `gov.db`.
+   - `--p2p`: pivxd's P2P address, not RPC; find it with `ss -ltnp | grep
+     pivxd` (51472 by default, other ports on Blockbook layouts). Use an IP
+     literal. Optional: without it, votes rejected as older or too soon show
+     only their hash, which is all Core logs for them.
+3. Give the explorer's user read access to the `--db` directory (shared group
+   or the default 022 umask). The explorer opens it as a RocksDB secondary and
+   creates `govlog-secondary/` beside `gov.db`.
+4. Set `[governance] govlog_db_path` to the `--db` path and restart the
+   explorer. A store that is missing at start is retried on each request, so
+   start order does not matter. No reindex.
+5. Check: the sidecar journal shows `govlog sidecar started`, with
+   `recovered rejected votes` lines once `--p2p` reads votes back; the
+   explorer log shows `vote log store (sidecar, read-only)`;
+   `rustyblox-govlog report --db <path>` prints a summary;
+   `curl localhost:<port>/api/v2/govlog?hours=24` returns JSON.
+
+Upgrading: rebuild, copy the new `rustyblox-govlog` binary to where the unit
+runs it from, restart the unit. The sidecar and explorer restart
+independently.
+
+What the data can and cannot show:
+- Coverage starts at the earliest log line the sidecar read. Lines lost to
+  logrotate (copytruncate) while it was down are recorded as gaps.
+- With `--p2p`, a vote rejected as older or too soon is read back from
+  pivxd's seen-vote map within ~10 s and stored with its masternode,
+  proposal, choice and signed time. Read-back covers rejections from the
+  last 24 h; pivxd drops entries when it rebuilds that map, and older rows
+  stay hash-only.
+- Evidence levels: `signed` (signature verified, signed at or after the
+  stored vote within an hour), `seen` (these exact vote fields are already in
+  `gov.db`; the hash excludes the signature, so a resend and an identical
+  re-signing look the same), `older` (signature verified, signed before the
+  stored vote: resent or backdated, the data cannot tell), `claimed` (names a
+  collateral whose signature was never checked).
+- Rejected votes are grouped by reason, proposal, choice and evidence, and by
+  the transaction that funded each collateral. Collaterals funded by one
+  transaction were created together; identical-ballot groups report how many
+  funding transactions their members come from. Neither proves a common
+  owner.
+- Future-dated votes are refused before pivxd checks their signature, so
+  the collateral they name is a claim only.
+
+Troubleshooting:
+- `/api/v2/govlog` 503 `vote log unavailable`: `detail` names the cause
+  (path not set, store missing, permissions).
+- Sidecar `vote recovery: node unreachable over P2P`: wrong `--p2p` port or
+  pivxd down; it retries every 60 s and logs once per outage.
+- No vote lines at all: check that `mnbudget` logging is on (`pivx-cli
+  logging`); outside voting campaigns votes arrive a few per hour.
 
 ## Repository layout
 

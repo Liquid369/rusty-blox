@@ -5,6 +5,8 @@
 pub mod coord;
 pub mod diff;
 pub mod live;
+pub mod p2pvote;
 pub mod poller;
+pub mod rejects;
 pub mod store;
 pub mod votematch;
