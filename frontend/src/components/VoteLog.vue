@@ -67,7 +67,8 @@ const reasonOf = (r) => REASONS[r] || { short: r, tone: '' }
    so it never shares a colour with the rejection reasons. */
 const METHODS = {
   matched: { label: 'Exact match', tone: 'cyan', what: 'Signed by this masternode: the hash rebuilds and the node verified the signature.' },
-  known: { label: 'Replay', tone: 'rose', what: 'This masternode’s own earlier vote, resent by someone else.' },
+  recovered: { label: 'Recovered', tone: 'cyan', what: 'The node’s own copy of the rejected vote, read back from it: masternode, proposal, choice and signed time are exact.' },
+  known: { label: 'Seen before', tone: 'rose', what: 'These exact vote fields are already in this explorer’s history. The hash excludes the signature, so this cannot tell a resend from an identical re-signing.' },
   claimed: { label: 'Claimed only', tone: 'unverified', what: 'The vote names this collateral, but its signature was never checked.' },
   prefix: { label: 'Prefix match', tone: 'unverified', what: 'Only the first 10 characters of the collateral were logged.' },
   not_identifiable: { label: 'Not traced', tone: 'none', what: 'No known collateral rebuilds this hash.' },
@@ -75,7 +76,6 @@ const METHODS = {
 const methodOf = (r) => {
   if (r.mn.method === 'matched' && !r.mn.signed) return METHODS.claimed
   const m = METHODS[r.mn.method] || METHODS.not_identifiable
-  if (r.mn.method === 'known' && !r.reason.startsWith('older')) return { ...m, label: 'Known vote', tone: 'cyan' }
   return m
 }
 
@@ -95,15 +95,36 @@ const total = (pred) => (data.value?.totals || []).filter(pred).reduce((s, t) =>
 const accepted = computed(() => total((t) => t.reason.startsWith('accepted')))
 const rejected = computed(() => total((t) => !t.reason.startsWith('accepted') && !t.reason.startsWith('proposal removed')))
 const otherCount = computed(() => (data.value?.others || []).reduce((s, o) => s + o.count, 0))
-/* How strongly a row ties to its collateral. Only 'signed' says the
-   masternode's key made this vote; a replay is its old vote resent by anyone,
-   a claim is a collateral named in a vote whose signature was never checked. */
-function evidence(r) {
-  if (r.mn.method === 'matched') return r.mn.signed ? 'signed' : 'claimed'
-  if (r.mn.method === 'known') return r.reason.startsWith('older') ? 'replayed' : 'signed'
-  return null
+/* Rejections without a vote hash, one row per reason and collateral funding
+   transaction (a prefix that fits several collaterals stays on its own row). */
+const otherGroups = computed(() => {
+  const m = new Map()
+  for (const o of data.value?.others || []) {
+    const ops = o.mn?.outpoints || []
+    const tx = ops.length === 1 ? txid(ops[0]) : null
+    const reason = plainOther(o.text)
+    const key = tx ? `${reason}|${tx}` : `${reason}|${o.text}`
+    const g = m.get(key) || { key, reason, txid: tx, vouts: [], texts: [], count: 0, last: 0,
+      note: ops.length > 1 ? `prefix fits ${ops.length} collaterals` : (o.mn ? o.mn.reason : 'Not named in the log') }
+    if (tx && !g.vouts.includes(Number(vout(ops[0])))) g.vouts.push(Number(vout(ops[0])))
+    g.texts.push(o.text)
+    g.count += o.count
+    g.last = Math.max(g.last, o.last_ts)
+    m.set(key, g)
+  }
+  for (const g of m.values()) g.vouts.sort((a, b) => a - b)
+  return [...m.values()].sort((a, b) => b.count - a.count || b.last - a.last)
+})
+const traced = computed(() => (data.value?.rejections || []).filter((r) => r.evidence).length)
+/* Evidence comes from the server (api/govlog.rs evidence()); one definition. */
+const EVIDENCE = {
+  signed: { label: 'Signed', tone: 'cyan', what: 'Signature verified; signed at or after the stored vote, within an hour of it.' },
+  seen: { label: 'Seen before', tone: 'rose', what: 'These exact vote fields are already in this explorer’s history. The hash excludes the signature, so this cannot tell a resend from an identical re-signing.' },
+  older: { label: 'Older vote', tone: 'amber', what: 'Signature verified, but signed earlier than the stored vote: an old vote sent again, or a new one backdated. The data cannot tell which.' },
+  claimed: { label: 'Claimed only', tone: 'unverified', what: 'Names the collateral; the signature was never checked.' },
 }
-const traced = computed(() => (data.value?.rejections || []).filter((r) => evidence(r) === 'signed').length)
+const evidenceOf = (e) => EVIDENCE[e] || { label: 'Not traced', tone: 'none' }
+const range = (a, b) => (a == null ? '' : a === b || shortTime(a) === shortTime(b) ? shortTime(a) : `${shortTime(a)} to ${shortTime(b)}`)
 const windowStart = computed(() => (data.value ? data.value.as_of - data.value.hours * 3600 : 0))
 const coverage = computed(() => {
   const d = data.value
@@ -139,38 +160,6 @@ function detail(r) {
   if (r.reason.startsWith('signed over') && r.detail != null) return `signed for ${shortTime(r.detail)}`
   return ''
 }
-
-/* Rejections grouped by the collateral they trace to: the page's real question
-   is which masternodes keep sending votes the node refuses. */
-const blank = (op) => ({ op, signed: 0, replayed: 0, claimed: 0, reasons: {}, last: 0 })
-const byMasternode = computed(() => {
-  const groups = new Map()
-  for (const r of data.value?.rejections || []) {
-    const ops = r.mn.outpoint ? [r.mn.outpoint] : r.mn.outpoints || []
-    if (ops.length !== 1) continue
-    const op = ops[0]
-    const g = groups.get(op) || blank(op)
-    const n = r.seen || 1
-    g[evidence(r)] += n
-    const k = reasonOf(r.reason).short
-    g.reasons[k] = (g.reasons[k] || 0) + n
-    g.last = Math.max(g.last, r.ts)
-    groups.set(op, g)
-  }
-  for (const o of data.value?.others || []) {
-    if (o.mn?.outpoints?.length !== 1) continue
-    const op = o.mn.outpoints[0]
-    const g = groups.get(op) || blank(op)
-    // Signature failures and unknown or invalid masternodes: the node never
-    // verified that this collateral's key sent them.
-    g.claimed += o.count
-    const k = plainOther(o.text)
-    g.reasons[k] = (g.reasons[k] || 0) + o.count
-    g.last = Math.max(g.last, o.last_ts)
-    groups.set(op, g)
-  }
-  return [...groups.values()].sort((a, b) => b.signed - a.signed || b.replayed - a.replayed || b.claimed - a.claimed || b.last - a.last)
-})
 
 /* Continuous hourly axis: quiet hours are shown as zero, not skipped. */
 const chartOption = computed(() => {
@@ -231,6 +220,14 @@ const chartOption = computed(() => {
       <span v-if="loading" class="vl-meta">Loading…</span>
     </div>
 
+    <details class="about">
+      <summary>About this page</summary>
+      <p>Every masternode vote on a budget proposal reaches the network as a signed message. This page shows the ones this explorer’s node received: the votes it accepted, the votes it rejected and why, and proposals it removed. Voting itself happens on masternodes; nothing here changes a vote.</p>
+      <p>Common rejections: <b>too soon</b>, a masternode may change its vote at most once an hour; <b>older than stored</b>, the node already holds a newer vote from that masternode; <b>future-dated</b>, signed more than an hour ahead. Old votes are re-sent across the network all the time, especially after a proposal returns, so most rejections are routine.</p>
+      <p>Each rejection carries an evidence level that says how firmly it ties to a masternode, and rejections are grouped by the transaction that created each masternode’s collateral. Matching ballots or a shared funding transaction show what was observed, not who controls a masternode.</p>
+      <p>The data comes from one node’s log, so it reflects what that node saw. Times are your local time.</p>
+    </details>
+
     <div v-if="error" class="banner warn">
       {{ error }}. The vote log needs the rustyblox-govlog sidecar and <code>governance.govlog_db_path</code> set on this explorer.
     </div>
@@ -239,7 +236,7 @@ const chartOption = computed(() => {
       <div class="statgrid cols-4">
         <Stat k="ACCEPTED"><template #v>{{ formatCount(accepted) }}</template><template #s>votes the node took in</template></Stat>
         <Stat k="REJECTED" accent><template #v>{{ formatCount(rejected + otherCount) }}</template><template #s>{{ formatCount(rejected) }} with a vote hash, {{ formatCount(otherCount) }} without</template></Stat>
-        <Stat k="TRACED"><template #v>{{ traced }}<span class="unit">/ {{ data.rejections.length }}</span></template><template #s>rejected votes signed by a known masternode</template></Stat>
+        <Stat k="TRACED"><template #v>{{ formatCount(traced) }}<span class="unit"> of {{ formatCount(data.rejections.length) }}</span></template><template #s>latest rejected votes tied to a collateral</template></Stat>
         <Stat k="COVERAGE"><template #v>{{ coverage.v }}</template><template #s>{{ coverage.s }}</template></Stat>
       </div>
 
@@ -261,6 +258,7 @@ const chartOption = computed(() => {
           <p class="group-line">
             Cast the same {{ g.choices_total ?? g.choices.length }} votes, signed between {{ shortTime(g.first) }} and {{ shortTime(g.last) }}
             ({{ span(g.last - g.first) }}): {{ formatCount(g.changed) }} changed, {{ formatCount(g.new) }} new.
+            Collaterals from {{ formatCount(g.funding_txs) }} funding {{ g.funding_txs === 1 ? 'transaction' : 'transactions' }}.
             <template v-if="g.unknown_from">{{ formatCount(g.unknown_from) }} changed votes have no recorded prior choice and are left out of the net change.</template>
           </p>
           <div class="scroll">
@@ -295,23 +293,24 @@ const chartOption = computed(() => {
 
     <template v-if="data && !error">
 
-      <template v-if="byMasternode.length">
-        <h2 class="section-title">Masternodes with rejected votes</h2>
-        <HudPanel title="BY MASTERNODE" :id="`${byMasternode.length} collaterals`">
+      <template v-if="data.funding?.length">
+        <h2 class="section-title">Collateral funding transactions</h2>
+        <HudPanel title="BY FUNDING TRANSACTION" :id="data.funding_total > data.funding.length ? `top ${data.funding.length} of ${formatCount(data.funding_total)}` : `${formatCount(data.funding_total)} transactions`">
+          <p class="quiet lead">Rejected votes grouped by the transaction that created each masternode's collateral. Collaterals from one transaction were funded together.</p>
           <div class="scroll">
             <table class="dtable">
-              <thead><tr><th>Collateral</th><th>Rejected for</th><th class="num" title="Refused after the node verified this masternode's signature">Signed</th><th class="num" title="This masternode's earlier votes, resent by an unknown peer">Replayed</th><th class="num" title="Votes naming this collateral whose signature was never verified">Claimed</th><th class="num">Last</th></tr></thead>
+              <thead><tr><th>Funding transaction</th><th class="num">Collaterals</th><th v-for="(e, k) in EVIDENCE" :key="k" class="num" :title="e.what">{{ e.label }}</th><th class="num">Not traced</th><th class="num">Last</th></tr></thead>
               <tbody>
-                <tr v-for="g in byMasternode" :key="g.op">
+                <tr v-for="f in data.funding" :key="f.txid">
                   <td class="mono">
-                    <RouterLink :to="`/tx/${txid(g.op)}`">{{ truncateHash(txid(g.op)) }}</RouterLink><span class="dim">:{{ vout(g.op) }}</span>
-                    <div class="sub"><AddrOf :op="g.op" /></div>
+                    <RouterLink :to="`/tx/${f.txid}`">{{ truncateHash(f.txid) }}</RouterLink>
+                    <details v-if="f.vouts_total > 1" class="vouts"><summary>{{ f.vouts_total }} outputs</summary><span class="dim">{{ f.vouts.map((v) => ':' + v).join(' ') }}<template v-if="f.vouts.length < f.vouts_total"> and {{ f.vouts_total - f.vouts.length }} more</template></span></details>
+                    <span v-else class="dim">:{{ f.vouts[0] }}</span>
                   </td>
-                  <td><span v-for="(n, k) in g.reasons" :key="k" class="reason">{{ k }} <b>{{ n }}</b></span></td>
-                  <td class="num mono" :class="g.signed ? 'strong' : 'dim'">{{ formatCount(g.signed) }}</td>
-                  <td class="num mono" :class="g.replayed ? '' : 'dim'">{{ formatCount(g.replayed) }}</td>
-                  <td class="num mono" :class="g.claimed ? '' : 'dim'">{{ formatCount(g.claimed) }}</td>
-                  <td class="num mono dim">{{ shortTime(g.last) }}</td>
+                  <td class="num mono strong">{{ formatCount(f.vouts_total) }}</td>
+                  <td v-for="(e, k) in EVIDENCE" :key="k" class="num mono" :class="f[k] ? '' : 'dim'">{{ formatCount(f[k]) }}</td>
+                  <td class="num mono" :class="f.untraced ? '' : 'dim'">{{ formatCount(f.untraced) }}</td>
+                  <td class="num mono dim">{{ shortTime(f.last) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -320,11 +319,43 @@ const chartOption = computed(() => {
       </template>
 
       <h2 class="section-title">Rejected votes</h2>
-      <HudPanel title="REJECTED" :id="`latest ${data.rejections.length}`">
+      <HudPanel title="REJECTED" :id="data.clusters_total > data.clusters.length ? `top ${data.clusters.length} of ${data.clusters_total} groups` : `${data.clusters_total} groups`">
         <dl class="key" aria-label="Evidence, strongest first">
-          <div v-for="(m, k) in METHODS" :key="k" class="key-item"><dt><span class="tag" :class="m.tone">{{ m.label }}</span></dt><dd>{{ m.what }}</dd></div>
+          <div v-for="(m, k) in EVIDENCE" :key="k" class="key-item"><dt><span class="tag" :class="m.tone">{{ m.label }}</span></dt><dd>{{ m.what }}</dd></div>
+          <div class="key-item"><dt><span class="tag none">Not traced</span></dt><dd>No collateral is known for the vote.</dd></div>
         </dl>
-        <div class="scroll" v-if="data.rejections.length">
+        <p class="quiet lead">Every rejection in the window, grouped by reason, proposal, choice and evidence. Open a group for its collaterals by funding transaction.</p>
+        <div class="clusters">
+          <details v-for="(c, i) in data.clusters" :key="i" class="cluster">
+            <summary>
+              <span class="tag" :class="reasonOf(c.reason).tone">{{ reasonOf(c.reason).short }}</span>
+              <span class="c-prop">
+                <RouterLink v-if="c.object_name" :to="`/proposal/${encodeURIComponent(c.object_name)}`" @click.stop>{{ c.object_name }}</RouterLink>
+                <span v-else-if="c.object" class="mono dim">{{ truncateHash(c.object) }}</span>
+                <span v-else class="dim">Proposal not logged</span>
+                <span v-if="c.choice != null" class="dim"> · {{ CHOICE[c.choice] }}</span>
+              </span>
+              <span class="tag" :class="evidenceOf(c.evidence).tone">{{ evidenceOf(c.evidence).label }}</span>
+              <span class="c-num mono"><b>{{ formatCount(c.count) }}</b> from {{ formatCount(c.masternodes) }} masternodes</span>
+              <span class="c-time dim">arrived {{ range(c.first, c.last) }}<template v-if="c.signed_from != null">; signed {{ range(c.signed_from, c.signed_to) }}</template></span>
+            </summary>
+            <ul v-if="c.funding.length" class="groups">
+              <li v-for="g in c.funding" :key="g.txid" class="mono">
+                <RouterLink :to="`/tx/${g.txid}`">{{ truncateHash(g.txid) }}</RouterLink>
+                <span class="strong"> {{ g.vouts.length }}</span>
+                <span class="dim"> {{ g.vouts.length > 1 ? 'collaterals' : 'collateral' }}: {{ g.vouts.map((v) => ':' + v).join(' ') }}</span>
+              </li>
+              <li v-if="c.funding_total > c.funding.length || c.vouts_total > c.funding.reduce((n, g) => n + g.vouts.length, 0)" class="dim">List cut to fit: {{ formatCount(c.vouts_total) }} collaterals from {{ formatCount(c.funding_total) }} funding transactions in total.</li>
+            </ul>
+            <p v-else class="quiet">No collateral is known for these rejections.</p>
+          </details>
+        </div>
+        <details v-if="data.rejections.length" class="latest">
+          <summary>Latest {{ data.rejections.length }} individual rejections</summary>
+          <dl class="key" aria-label="How each masternode was found">
+            <div v-for="(m, k) in METHODS" :key="k" class="key-item"><dt><span class="tag" :class="m.tone">{{ m.label }}</span></dt><dd>{{ m.what }}</dd></div>
+          </dl>
+        <div class="scroll">
           <table class="dtable">
             <thead><tr><th>Time</th><th>Rejected as</th><th>Proposal</th><th>Masternode</th><th>Evidence</th></tr></thead>
             <tbody>
@@ -355,13 +386,15 @@ const chartOption = computed(() => {
                 <td>
                   <span class="tag" :class="methodOf(r).tone">{{ methodOf(r).label }}</span>
                   <div v-if="r.mn.seen_at" class="sub">first seen {{ shortTime(r.mn.seen_at) }}</div>
+                  <div v-else-if="r.mn.method === 'recovered'" class="sub">signed {{ shortTime(r.mn.n_time) }}<template v-if="!r.mn.canonical">, nonstandard vin</template></div>
                   <div v-else-if="r.mn.reason" class="sub">{{ r.mn.reason }}</div>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
-        <p v-else class="quiet">No rejected votes in this window.</p>
+        </details>
+        <p v-if="!data.rejections.length" class="quiet">No rejected votes in this window.</p>
       </HudPanel>
 
       <template v-if="data.others.length">
@@ -371,17 +404,18 @@ const chartOption = computed(() => {
             <table class="dtable">
               <thead><tr><th>Reason</th><th>Masternode</th><th class="num">Count</th><th class="num">Last</th></tr></thead>
               <tbody>
-                <tr v-for="o in data.others" :key="o.class + o.text">
-                  <td>{{ plainOther(o.text) }}<div class="sub mono">{{ o.text }}</div></td>
+                <tr v-for="g in otherGroups" :key="g.key">
+                  <td>{{ g.reason }}<div v-if="g.texts.length === 1" class="sub mono">{{ g.texts[0] }}</div></td>
                   <td class="mono">
-                    <template v-if="o.mn && o.mn.outpoints">
-                      <div v-for="x in o.mn.outpoints" :key="x"><RouterLink :to="`/tx/${txid(x)}`">{{ truncateHash(txid(x)) }}</RouterLink><span class="dim">:{{ vout(x) }}</span><div class="sub"><AddrOf :op="x" /></div></div>
-                      <div v-if="o.mn.outpoints.length > 1" class="sub">prefix fits {{ o.mn.outpoints.length }} collaterals</div>
+                    <template v-if="g.txid">
+                      <RouterLink :to="`/tx/${g.txid}`">{{ truncateHash(g.txid) }}</RouterLink>
+                      <details v-if="g.vouts.length > 1" class="vouts"><summary>{{ g.vouts.length }} outputs</summary><span class="dim">{{ g.vouts.map((v) => ':' + v).join(' ') }}</span></details>
+                      <span v-else class="dim">:{{ g.vouts[0] }}<div class="sub"><AddrOf :op="`${g.txid}-${g.vouts[0]}`" /></div></span>
                     </template>
-                    <span v-else class="dim">{{ o.mn ? o.mn.reason : 'Not named in the log' }}</span>
+                    <span v-else class="dim">{{ g.note }}</span>
                   </td>
-                  <td class="num mono strong">{{ formatCount(o.count) }}</td>
-                  <td class="num mono dim">{{ shortTime(o.last_ts) }}</td>
+                  <td class="num mono strong">{{ formatCount(g.count) }}</td>
+                  <td class="num mono dim">{{ shortTime(g.last) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -474,6 +508,28 @@ td .tag + .tag { margin-left: 6px; }
 .members li { padding: 3px 0; break-inside: avoid; }
 .members .addr { margin-left: 10px; }
 .panel + .panel { margin-top: var(--space-4); }
+.clusters { display: grid; gap: 6px; }
+.cluster { border: 1px solid var(--hud-line); border-radius: var(--radius-sm); background: rgba(10, 6, 20, 0.35); }
+.cluster > summary { display: grid; grid-template-columns: 130px minmax(160px, 1.4fr) 104px minmax(170px, 1fr) minmax(220px, 1.6fr);
+  align-items: center; gap: 12px; padding: 9px 12px; cursor: pointer; list-style: none; font-size: 12.5px; }
+.cluster > summary::-webkit-details-marker { display: none; }
+.cluster[open] > summary { border-bottom: 1px solid var(--hud-line); }
+.cluster > summary .tag { justify-self: start; }
+.c-num { color: var(--text-muted); }
+.c-num b { color: var(--text); }
+.c-time { font-size: 11.5px; }
+.groups { list-style: none; margin: 0; padding: 8px 12px 10px; font-size: 11.5px; display: grid; gap: 4px; }
+.vouts summary, .latest > summary { cursor: pointer; color: var(--text-muted); font-size: 11.5px; }
+.vouts span { display: block; max-width: 60ch; white-space: normal; font-size: 11px; }
+.latest { margin-top: var(--space-4); }
+.latest > summary { margin-bottom: var(--space-2); }
+@media (max-width: 900px) {
+  .cluster > summary { grid-template-columns: 1fr 1fr; }
+}
+.about { margin: 0 0 var(--space-4); max-width: 78ch; font-size: 12.5px; color: var(--text-muted); }
+.about > summary { cursor: pointer; color: var(--text-dim); }
+.about p { margin: var(--space-2) 0 0; line-height: 1.55; }
+.about b { color: var(--text); font-weight: 600; }
 .gaps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-muted); }
 .gaps li + li { margin-top: 4px; }
 

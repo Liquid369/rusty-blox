@@ -108,6 +108,19 @@ Additional ad-hoc diagnostics live in the nested `tools/diagnostics/` sub-crate
 
 ---
 
+## Governance vote log sidecar
+
+`rustyblox-govlog` is a long-running service for the pivxd host, not a one-off
+tool; its own `--db` store is separate from the explorer DB. Setup, flags and
+troubleshooting: README, "Governance vote log".
+
+| Command | Purpose |
+|---|---|
+| `rustyblox-govlog run --log <debug.log> --db <dir> [--p2p <pivxd P2P addr>] [--retention-days 90]` | follow `debug.log`, store vote events; with `--p2p`, read back votes rejected as older or too soon *(RW on its own store; read-only toward pivxd)* |
+| `rustyblox-govlog report --db <dir> [--hours 24] [--recent 20]` | summary of the store *(read-only, safe while `run` is live)* |
+
+---
+
 ## Migration & export
 
 ### `backfill-offsets` - backfill offset mappings from Core LevelDB *(RW, one-time)*

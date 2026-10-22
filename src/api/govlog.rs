@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::cache::CacheManager;
-use crate::gov::store::{parse_hash, scan, Hash, Outpoint, ProposalMeta};
+use crate::gov::rejects::{Evidence, Reject};
+use crate::gov::store::{parse_hash, parse_mn_id, scan, Hash, Outpoint, ProposalMeta};
 use crate::gov::votematch::{Attempt, Index, Resolution};
 use crate::govlog::{self, Class, Event, Outcome};
 
@@ -61,6 +62,15 @@ pub struct GovLogQuery {
 const HASH_BUDGET: u64 = 1_000_000;
 /// Rejections listed per response, newest first.
 const LIST_MAX: usize = 200;
+/// Cluster and funding-table caps. Vouts are capped per cluster and for the
+/// funding table, so the body holds at most 41 x 3,000 vouts x ~5 B plus
+/// 41 x 100 txids x ~70 B: about 0.9 MiB, under the 2 MiB cache cap.
+/// ponytail: the full sets are built before the cut; that memory is bounded
+/// by the window's rejections, not the response.
+const CLUSTERS_MAX: usize = 40;
+const CLUSTER_GROUPS_MAX: usize = 100;
+const FUNDING_MAX: usize = 100;
+const VOUTS_MAX: usize = 3_000;
 /// The windows the UI offers; anything else would be a fresh uncached build.
 const WINDOWS: [u64; 2] = [24, 168];
 /// gov.db scans and listmasternodes are reused this long across builds.
@@ -68,11 +78,21 @@ const INDEX_TTL: Duration = Duration::from_secs(60);
 /// ponytail: cleared wholesale past this, not LRU; a refill costs one budget.
 const RESOLVED_MAX: usize = 100_000;
 
-/// Positive resolutions never change, so they are kept for the process.
+/// Brute-force matches only (known() and read-back votes are checked first,
+/// as they can appear later): a hash's preimage never changes.
 fn resolved() -> &'static Mutex<HashMap<(Hash, i64), Resolution>> {
     static R: OnceLock<Mutex<HashMap<(Hash, i64), Resolution>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// Brute-force misses, retried after MISS_TTL so a new proposal or collateral
+/// can still match, and so the newest misses do not spend the hash budget on
+/// every build and starve older rejections.
+fn missed() -> &'static Mutex<HashMap<(Hash, i64), Instant>> {
+    static M: OnceLock<Mutex<HashMap<(Hash, i64), Instant>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+const MISS_TTL: Duration = Duration::from_secs(3600);
 
 /// Serializes builds across the two window keys (each key is already
 /// single-flight in CacheManager). Owned so the spawned build task can hold
@@ -122,6 +142,22 @@ async fn context(gov: Option<Arc<DB>>) -> Result<Ctx, String> {
     Ok(c)
 }
 
+/// Evidence strength of one resolved rejection (gov::rejects::Evidence). A
+/// read-back vote passed Core's signature check before the older/too-soon
+/// test (budgetmanager.cpp:1154-1162).
+fn evidence(mn: &Resolution, outcome: &Option<Outcome>) -> Option<Evidence> {
+    match mn {
+        Resolution::Known { .. } => Some(Evidence::Seen),
+        Resolution::Recovered { .. } if matches!(outcome, Some(Outcome::RejectOlder)) => {
+            Some(Evidence::Older)
+        }
+        Resolution::Recovered { .. } => Some(Evidence::Signed),
+        Resolution::Matched { signed: true, .. } => Some(Evidence::Signed),
+        Resolution::Matched { .. } | Resolution::Prefix { .. } => Some(Evidence::Claimed),
+        Resolution::NotIdentifiable { .. } => None,
+    }
+}
+
 #[derive(Serialize)]
 struct Rejection {
     ts: u64,
@@ -138,6 +174,7 @@ struct Rejection {
     /// As Core logged it, if it did.
     mn_logged: Option<String>,
     mn: Resolution,
+    evidence: Option<Evidence>,
 }
 
 #[derive(Serialize)]
@@ -195,23 +232,62 @@ fn names(gov: &DB) -> Result<HashMap<Hash, String>, String> {
     Ok(out)
 }
 
-fn resolve(e: &Event, idx: &Index, budget: &mut u64) -> Resolution {
+fn resolve(
+    e: &Event,
+    idx: &Index,
+    recovered: Option<&govlog::Recovered>,
+    budget: &mut u64,
+) -> Resolution {
     let key = (e.vote, e.ts as i64);
+    if let Some(r) = idx.known(&e.vote) {
+        return r;
+    }
+    let read_back = recovered
+        .and_then(|r| r.vote.as_ref())
+        .map(|v| Resolution::Recovered {
+            outpoint: crate::gov::votematch::outpoint_str(&v.outpoint()),
+            object: hex::encode(v.proposal),
+            vote: v.vote,
+            n_time: v.n_time,
+            canonical: v.canonical,
+        });
+    if let Some(r) = read_back {
+        return r;
+    }
     if let Some(r) = resolved().lock().ok().and_then(|m| m.get(&key).cloned()) {
         return r;
     }
-    let attempt = match idx.known(&e.vote) {
-        Some(r) => Attempt::Found(r),
-        None => match &e.outcome {
+    let recently_missed = missed()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&key).copied())
+        .is_some_and(|t| t.elapsed() < MISS_TTL);
+    // Only a miss that cost hashes is remembered; cheap misses (older votes
+    // without a read-back, finalized too-soon) would just crowd the cap.
+    let mut searched = false;
+    let attempt = if recently_missed {
+        Attempt::NotFound
+    } else {
+        match &e.outcome {
             Some(Outcome::RejectFuture(t)) => {
+                searched = true;
                 idx.match_time(&e.vote, e.class == Class::Finalized, *t, budget)
             }
             Some(Outcome::RejectTooSoon(g)) if e.class != Class::Finalized => {
+                searched = true;
                 idx.match_gap(&e.vote, *g, budget)
             }
             _ => Attempt::NotFound,
-        },
+        }
     };
+    if attempt == Attempt::NotFound && searched {
+        if let Ok(mut m) = missed().lock() {
+            if m.len() >= RESOLVED_MAX {
+                m.clear();
+            }
+            m.insert(key, Instant::now());
+        }
+    }
     let reason = match attempt {
         Attempt::Found(r) => {
             if let Ok(mut m) = resolved().lock() {
@@ -246,6 +322,7 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
         .unwrap_or(0);
     let from = now.saturating_sub(hours * 3600);
     let events = govlog::events(log, from, u64::MAX)?;
+    let recovered = govlog::recovered(log, from, u64::MAX)?;
     let others = govlog::others(log, from, u64::MAX)?;
     let gaps: Vec<_> = govlog::gaps(log)?
         .into_iter()
@@ -283,19 +360,32 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
         }
     }
 
+    // Every rejection in the window is resolved, newest first (the hash
+    // budget goes to recent ones); the list shows the latest LIST_MAX, the
+    // clusters and funding table cover all of them.
     let mut budget = HASH_BUDGET;
-    let rejections: Vec<Rejection> = events
+    let resolved_all: Vec<(&Event, Resolution)> = events
         .iter()
         .rev()
         .filter(|e| e.outcome.as_ref().is_some_and(Outcome::is_reject))
-        .take(LIST_MAX)
         .map(|e| {
+            (
+                e,
+                resolve(e, idx, recovered.get(&(e.ts, e.vote)), &mut budget),
+            )
+        })
+        .collect();
+    let rejections: Vec<Rejection> = resolved_all
+        .iter()
+        .take(LIST_MAX)
+        .map(|(e, mn)| {
             let (r, detail) = reason(&e.outcome);
-            let mn = resolve(e, idx, &mut budget);
+            let mn = mn.clone();
+            let evidence = evidence(&mn, &e.outcome);
             let object = match &mn {
-                Resolution::Known { object, .. } | Resolution::Matched { object, .. } => {
-                    Some(object.clone())
-                }
+                Resolution::Known { object, .. }
+                | Resolution::Matched { object, .. }
+                | Resolution::Recovered { object, .. } => Some(object.clone()),
                 _ => e.object.map(hex::encode),
             };
             let object_name = object
@@ -318,6 +408,56 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
                 object_name,
                 mn_logged: e.mn.clone(),
                 mn,
+                evidence,
+            }
+        })
+        .collect();
+    let reject_rows: Vec<Reject> = resolved_all
+        .iter()
+        .map(|(e, mn)| {
+            let (object, choice, n_time, outpoint) = match mn {
+                Resolution::Known {
+                    object,
+                    vote,
+                    n_time,
+                    outpoint,
+                    ..
+                }
+                | Resolution::Matched {
+                    object,
+                    vote,
+                    n_time,
+                    outpoint,
+                    ..
+                } => (
+                    parse_hash(object),
+                    vote.map(u32::from),
+                    Some(*n_time),
+                    Some(outpoint),
+                ),
+                Resolution::Recovered {
+                    object,
+                    vote,
+                    n_time,
+                    outpoint,
+                    ..
+                } => (
+                    parse_hash(object),
+                    Some(*vote),
+                    Some(*n_time),
+                    Some(outpoint),
+                ),
+                _ => (e.object, None, None, None),
+            };
+            Reject {
+                reason: reason(&e.outcome).0,
+                object,
+                choice,
+                evidence: evidence(mn, &e.outcome),
+                collaterals: outpoint.and_then(|o| parse_mn_id(o)).into_iter().collect(),
+                ts: e.ts,
+                n_time,
+                count: e.seen,
             }
         })
         .collect();
@@ -339,6 +479,50 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
     }
     // Capped like rejections: a body past CacheManager's 2 MiB limit is
     // never cached, so every request would rebuild it.
+    // Rejections without a vote hash (bad signature, unknown or invalid
+    // masternode) name a collateral prefix only: they feed the funding table
+    // as claimed, never the clusters.
+    let mut funding_rows = reject_rows.clone();
+    for o in grouped.values() {
+        // A prefix that fits several collaterals is not charged to any of them.
+        if let Some(Resolution::Prefix { outpoints }) =
+            o.mn.as_ref()
+                .filter(|m| matches!(m, Resolution::Prefix { outpoints } if outpoints.len() == 1))
+        {
+            funding_rows.push(Reject {
+                reason: o.text.clone(),
+                object: None,
+                choice: None,
+                evidence: Some(Evidence::Claimed),
+                collaterals: outpoints.iter().filter_map(|x| parse_mn_id(x)).collect(),
+                ts: o.last_ts,
+                n_time: None,
+                count: o.count,
+            });
+        }
+    }
+    let all_clusters = crate::gov::rejects::clusters(&reject_rows, CLUSTER_GROUPS_MAX, VOUTS_MAX);
+    let clusters_total = all_clusters.len();
+    let clusters: Vec<serde_json::Value> = all_clusters
+        .into_iter()
+        .take(CLUSTERS_MAX)
+        .map(|c| {
+            let name = c
+                .object
+                .as_deref()
+                .and_then(parse_hash)
+                .and_then(|h| names.get(&h));
+            let mut v = serde_json::to_value(&c).unwrap_or_default();
+            v["object_name"] = serde_json::json!(name);
+            v
+        })
+        .collect();
+    let funding_total = funding_rows
+        .iter()
+        .flat_map(|r| r.collaterals.iter().map(|c| &c[..32]))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let funding = crate::gov::rejects::funding(&funding_rows, FUNDING_MAX, VOUTS_MAX);
     let mut others: Vec<Other> = grouped.into_values().collect();
     others.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_ts.cmp(&a.last_ts)));
     let others_total = others.len();
@@ -355,9 +539,9 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
         .chain(others.iter().filter_map(|o| o.mn.as_ref()));
     for mn in named {
         let ops = match mn {
-            Resolution::Known { outpoint, .. } | Resolution::Matched { outpoint, .. } => {
-                std::slice::from_ref(outpoint)
-            }
+            Resolution::Known { outpoint, .. }
+            | Resolution::Matched { outpoint, .. }
+            | Resolution::Recovered { outpoint, .. } => std::slice::from_ref(outpoint),
             Resolution::Prefix { outpoints } => outpoints.as_slice(),
             Resolution::NotIdentifiable { .. } => &[],
         };
@@ -377,6 +561,10 @@ fn build(log: &DB, hours: u64, ctx: &Context) -> Result<serde_json::Value, Strin
         "hourly": hourly.iter().map(|(h, m)| serde_json::json!({"hour": h, "counts": m})).collect::<Vec<_>>(),
         "rejections": rejections,
         "others": others,
+        "clusters": clusters,
+        "clusters_total": clusters_total,
+        "funding": funding,
+        "funding_total": funding_total,
         "others_total": others_total,
         "removals": removals,
         "removals_total": removals_total,
@@ -570,6 +758,9 @@ fn build_groups(
                 "choices": choices,
                 "members": members,
                 "members_total": g.members.len(),
+                // Distinct collateral funding transactions: shared ones are an
+                // on-chain link between members; one per member is none.
+                "funding_txs": g.members.iter().map(|m| &m[..32]).collect::<std::collections::BTreeSet<_>>().len(),
                 "choices_total": g.choices.len(),
             })
         })

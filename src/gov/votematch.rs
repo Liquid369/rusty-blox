@@ -92,6 +92,15 @@ pub enum Resolution {
     Prefix {
         outpoints: Vec<String>,
     },
+    /// The node's own copy of the vote, read back by getdata
+    /// (gov::p2pvote). Exact; `canonical` false means a nonstandard vin.
+    Recovered {
+        outpoint: String,
+        object: String,
+        vote: u32,
+        n_time: i64,
+        canonical: bool,
+    },
     NotIdentifiable {
         reason: String,
     },

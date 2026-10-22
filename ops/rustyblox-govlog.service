@@ -9,11 +9,14 @@ After=network.target
 
 [Service]
 # Set User to the account that owns pivxd's datadir, and the binary,
-# log and db paths to this host's layout.
+# log and db paths to this host's layout. --p2p is pivxd's P2P port, not
+# RPC (check `ss -ltnp`); it reads rejected votes back read-only. Omit it
+# to log hashes only.
 User=pivx
 ExecStart=/opt/rusty-blox/target/release/rustyblox-govlog run \
   --log /opt/coins/data/pivx/backend/debug.log \
-  --db /opt/rusty-blox/data/govlog.db
+  --db /opt/rusty-blox/data/govlog.db \
+  --p2p 127.0.0.1:51472
 Restart=always
 RestartSec=5
 

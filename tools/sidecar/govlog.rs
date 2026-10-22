@@ -27,6 +27,11 @@ enum Cmd {
         retention_days: u64,
         #[arg(long, default_value_t = 1000)]
         poll_ms: u64,
+        /// pivxd's P2P address (not RPC), e.g. 127.0.0.1:51472. When set,
+        /// votes rejected as older or too soon are read back from the node
+        /// with getdata so their masternode and proposal are known.
+        #[arg(long)]
+        p2p: Option<String>,
     },
     /// Summarise stored events (secondary instance; safe while `run` is live).
     Report {
@@ -62,17 +67,103 @@ fn is_reject(o: &Option<Outcome>) -> bool {
     o.as_ref().is_some_and(Outcome::is_reject)
 }
 
-fn run(log: &str, db_path: &str, retention_days: u64, poll_ms: u64) -> Result<(), String> {
+/// Seconds between recovery passes, and the backoff after a failed connect.
+const RECOVER_EVERY: u64 = 10;
+const RECOVER_BACKOFF: u64 = 60;
+/// Rejections older than this are no longer asked for: Core's ReloadMapSeen
+/// has very likely dropped them, and asking again costs a connection.
+const RECOVER_WINDOW: u64 = 86_400;
+/// Core answers every miss with notfound (net_processing.cpp:1196), so a hash
+/// left unanswered means a cut-short read; after this many passes it is
+/// recorded as not found rather than asked for all day.
+const RECOVER_TRIES: u8 = 3;
+
+fn run(
+    log: &str,
+    db_path: &str,
+    retention_days: u64,
+    poll_ms: u64,
+    p2p: Option<&str>,
+) -> Result<(), String> {
     let db = govlog::open(db_path)?;
     let mut tail = govlog::Tail::new(&db, log)?;
-    tracing::info!(log, db = db_path, "govlog sidecar started");
+    tracing::info!(log, db = db_path, p2p, "govlog sidecar started");
     let mut last_prune = 0;
+    let mut next_recover = 0;
+    let mut failing = false;
+    let mut unanswered: std::collections::HashMap<govlog::Hash, u8> = Default::default();
     loop {
         // A storage or read error stops the sidecar loudly; systemd restarts
         // it and the gap logic records whatever the restart missed.
         let n = tail.poll(&db)?;
         if n > 0 {
             tracing::debug!(lines = n, "ingested");
+        }
+        if let Some(addr) = p2p.filter(|_| now() >= next_recover) {
+            next_recover = now() + RECOVER_EVERY;
+            let pending = govlog::unrecovered(&db, now().saturating_sub(RECOVER_WINDOW))?;
+            if !pending.is_empty() {
+                // One request and one retry count per distinct hash; the
+                // answer fans out to every event carrying it.
+                let mut hashes: Vec<govlog::Hash> = pending.iter().map(|(_, h)| *h).collect();
+                hashes.sort_unstable();
+                hashes.dedup();
+                match rustyblox::gov::p2pvote::fetch(addr, &hashes, Duration::from_secs(10)) {
+                    Ok(got) => {
+                        failing = false;
+                        let at = now();
+                        let mut settled: std::collections::HashMap<govlog::Hash, Option<_>> =
+                            Default::default();
+                        for h in &hashes {
+                            match got.get(h) {
+                                Some(v) => {
+                                    unanswered.remove(h);
+                                    settled.insert(*h, v.clone());
+                                }
+                                None => {
+                                    let n = unanswered.entry(*h).or_default();
+                                    *n += 1;
+                                    if *n >= RECOVER_TRIES {
+                                        unanswered.remove(h);
+                                        settled.insert(*h, None);
+                                    }
+                                }
+                            }
+                        }
+                        let rows: Vec<_> = pending
+                            .iter()
+                            .filter_map(|(ts, h)| {
+                                let vote = settled.get(h)?.clone();
+                                Some((
+                                    *ts,
+                                    *h,
+                                    govlog::Recovered {
+                                        fetched_at: at,
+                                        vote,
+                                    },
+                                ))
+                            })
+                            .collect();
+                        govlog::put_recovered(&db, &rows)?;
+                        let found = rows.iter().filter(|r| r.2.vote.is_some()).count();
+                        tracing::info!(
+                            asked = hashes.len(),
+                            found,
+                            notfound = rows.len() - found,
+                            "recovered rejected votes"
+                        );
+                    }
+                    Err(e) => {
+                        // Logged once per outage; the node being down must not
+                        // fill the journal every ten seconds.
+                        if !failing {
+                            tracing::warn!(error = %e, addr, "vote recovery: node unreachable over P2P");
+                        }
+                        failing = true;
+                        next_recover = now() + RECOVER_BACKOFF;
+                    }
+                }
+            }
         }
         if now().saturating_sub(last_prune) > 3600 {
             let pruned = govlog::prune(&db, now().saturating_sub(retention_days * 86_400))?;
@@ -193,7 +284,8 @@ fn main() {
             db,
             retention_days,
             poll_ms,
-        } => run(&log, &db, retention_days, poll_ms),
+            p2p,
+        } => run(&log, &db, retention_days, poll_ms, p2p.as_deref()),
         Cmd::Report { db, hours, recent } => report(&db, hours, recent),
     };
     if let Err(e) = res {
