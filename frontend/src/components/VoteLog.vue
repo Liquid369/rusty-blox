@@ -299,18 +299,20 @@ const chartOption = computed(() => {
           <p class="quiet lead">Rejected votes grouped by the transaction that created each masternode's collateral. Collaterals from one transaction were funded together.</p>
           <div class="scroll">
             <table class="dtable">
-              <thead><tr><th>Funding transaction</th><th class="num">Collaterals</th><th v-for="(e, k) in EVIDENCE" :key="k" class="num" :title="e.what">{{ e.label }}</th><th class="num">Not traced</th><th class="num">Last</th></tr></thead>
+              <thead><tr><th>Funding transaction</th><th class="num">Collaterals</th><th>Rejections</th><th class="num">Last</th></tr></thead>
               <tbody>
                 <tr v-for="f in data.funding" :key="f.txid">
-                  <td class="mono">
+                  <td class="mono funding-tx">
                     <RouterLink :to="`/tx/${f.txid}`">{{ truncateHash(f.txid) }}</RouterLink>
                     <details v-if="f.vouts_total > 1" class="vouts"><summary>{{ f.vouts_total }} outputs</summary><span class="dim">{{ f.vouts.map((v) => ':' + v).join(' ') }}<template v-if="f.vouts.length < f.vouts_total"> and {{ f.vouts_total - f.vouts.length }} more</template></span></details>
                     <span v-else class="dim">:{{ f.vouts[0] }}</span>
                   </td>
                   <td class="num mono strong">{{ formatCount(f.vouts_total) }}</td>
-                  <td v-for="(e, k) in EVIDENCE" :key="k" class="num mono" :class="f[k] ? '' : 'dim'">{{ formatCount(f[k]) }}</td>
-                  <td class="num mono" :class="f.untraced ? '' : 'dim'">{{ formatCount(f.untraced) }}</td>
-                  <td class="num mono dim">{{ shortTime(f.last) }}</td>
+                  <td class="ev-counts">
+                    <span v-for="(e, k) in EVIDENCE" v-show="f[k]" :key="k" class="tag" :class="e.tone" :title="e.what"><b>{{ formatCount(f[k]) }}</b> {{ e.label.toLowerCase() }}</span>
+                    <span v-if="f.untraced" class="tag none"><b>{{ formatCount(f.untraced) }}</b> not traced</span>
+                  </td>
+                  <td class="num mono dim when">{{ shortTime(f.last) }}</td>
                 </tr>
               </tbody>
             </table>
@@ -530,6 +532,11 @@ td .tag + .tag { margin-left: 6px; }
 .about > summary { cursor: pointer; color: var(--text-dim); }
 .about p { margin: var(--space-2) 0 0; line-height: 1.55; }
 .about b { color: var(--text); font-weight: 600; }
+.ev-counts { white-space: normal; }
+.funding-tx a, .funding-tx > .dim { white-space: nowrap; }
+td.when { white-space: nowrap; }
+.ev-counts .tag { margin: 2px 6px 2px 0; }
+.ev-counts .tag b { font-weight: 700; }
 .gaps { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-muted); }
 .gaps li + li { margin-top: 4px; }
 
